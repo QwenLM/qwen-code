@@ -5974,6 +5974,391 @@ exit 1
     expect(skill).toContain('Deferred non-Critical feedback');
   });
 
+  it('escalates to a maintainer-decision handoff when the diff keeps growing past budget (non-convergence)', () => {
+    // Critical-only only trims non-Criticals, so a Critical-driven diff keeps
+    // growing anyway. The divergence detector reads this window's prior
+    // per-round growth markers and, once the brake has been over budget for
+    // >= GROWTH_DIVERGENCE_ROUNDS rounds and the diff is still not shrinking,
+    // flags the round to STOP and hand off — not patch again.
+    expect(workflow).toContain(
+      "GROWTH_DIVERGENCE_ROUNDS: '${{ vars.QWEN_AUTOFIX_GROWTH_DIVERGENCE_ROUNDS || 2 }}'",
+    );
+    // Extract the divergence block and run it against fixture history.
+    const divBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ ! "\$\{GROWTH_DIVERGENCE_ROUNDS\}"[\s\S]*?GROWTH_DIVERGED='true'\n\s+fi\n\s+fi)/,
+    )?.[1];
+    expect(divBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-diverge-'));
+    // Markers carry round= (informational) and run= (GITHUB_RUN_ID) — deduped
+    // and ordered on run=, the per-workflow-run id: a retry re-posts one run's
+    // marker (same run → collapses) while distinct address runs have distinct,
+    // increasing run ids. round=/eval-watermark are NOT a safe identity — a
+    // state-triggered lane freezes both — so two distinct runs can share
+    // round= yet must still count twice. Each row also carries an author +
+    // created_at (the read filters to the bot and to post-base-update markers).
+    const marker = (
+      src,
+      test,
+      over,
+      round,
+      key = 'W1',
+      {
+        login = 'qwen-code-dev-bot',
+        at = '2026-01-01T00:00:00Z',
+        // Default run advances with the round so sort_by(.run) is
+        // deterministic; distinct runs that share round= override it.
+        run = 1000 + round,
+      } = {},
+    ) => ({
+      user: { login },
+      created_at: at,
+      body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} key=${key} -->`,
+    });
+    const diverge = ({
+      src,
+      test,
+      criticalOnlyGrowth = 'true',
+      history,
+      div = 2,
+      baseUpdAt = '',
+      // Distinct from every default fixture run id (1000+round), so existing
+      // cases see no self-exclusion; a case can set a fixture marker's run to
+      // this to prove the current run's own attempt is excluded.
+      currentRun = 9999,
+    }) => {
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(history));
+      // The printf result is the FINAL line; a malformed-div round also emits
+      // a `::warning::` annotation to stdout first, so take the last line.
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nLIVE_REARM_KEY=W1\nWORKDIR=${dir}\n` +
+            `NET_MEASURED=true\nCRITICAL_ONLY_GROWTH=${criticalOnlyGrowth}\n` +
+            `BASE_UPD_AT='${baseUpdAt}'\nGITHUB_RUN_ID=${currentRun}\n` +
+            `GROWTH_SRC=${src}\nGROWTH_TEST=${test}\nGROWTH_DIVERGENCE_ROUNDS=${div}\n` +
+            `${divBlock}\nprintf '\\n%s %s' "$GROWTH_DIVERGED" "$OVER_ROUNDS_PRIOR"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .pop();
+    };
+    const climbing = [
+      marker(300, 200, 'true', 1),
+      marker(400, 250, 'true', 2),
+      marker(500, 300, 'true', 3),
+    ];
+    // 3 prior over-budget rounds, still climbing → diverged.
+    expect(diverge({ src: 550, test: 300, history: climbing })).toBe('true 3');
+    // Same history but the diff SHRANK below the previous round's sum → not.
+    expect(diverge({ src: 100, test: 100, history: climbing })).toBe('false 3');
+    // EXACTLY at the threshold (2 prior rounds, div=2), still climbing → diverged.
+    expect(
+      diverge({
+        src: 500,
+        test: 300,
+        history: [marker(300, 200, 'true', 1), marker(400, 250, 'true', 2)],
+      }),
+    ).toBe('true 2');
+    // Current sum EQUAL to the previous round's sum (not shrinking) → diverged.
+    expect(diverge({ src: 500, test: 300, history: climbing })).toBe('true 3');
+    // A transient SPIKE does not raise the bar forever: after sums 350, 1150
+    // (spike), 400, a plateau at 400 is still >= the PREVIOUS round (400), so a
+    // real runaway escalates — the window-wide max (1150) would have suppressed
+    // it for the rest of the window.
+    expect(
+      diverge({
+        src: 250,
+        test: 150,
+        history: [
+          marker(200, 150, 'true', 1),
+          marker(700, 450, 'true', 2),
+          marker(250, 150, 'true', 3),
+        ],
+      }),
+    ).toBe('true 3');
+    // Only 1 prior over-budget round (< threshold) → not diverged yet.
+    expect(
+      diverge({ src: 999, test: 999, history: [marker(500, 300, 'true', 1)] }),
+    ).toBe('false 1');
+    // The CURRENT run's own markers (run == GITHUB_RUN_ID) are excluded: a
+    // re-run of a failed job keeps the run id and its failed attempt already
+    // posted a marker, which must not count as a PRIOR over-budget round. Here
+    // run 9999 is the current run; only the genuine prior (run 1001) counts.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        currentRun: 9999,
+        history: [
+          marker(500, 300, 'true', 1, 'W1', { run: 1001 }),
+          marker(600, 400, 'true', 1, 'W1', { run: 9999 }),
+        ],
+      }),
+    ).toBe('false 1');
+    // A retry-doubled marker (same run id) counts ONCE.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          marker(500, 300, 'true', 1, 'W1', { run: 1001 }),
+          marker(500, 300, 'true', 1, 'W1', { run: 1001 }),
+        ],
+      }),
+    ).toBe('false 1');
+    // When a run was re-run and posted two markers with DIFFERENT sums, the
+    // LATEST attempt (by created_at) wins, not jq's stale first: run 1002's
+    // fresh attempt (sum 300 @ T2) is PREV_SUM, so current 400 >= 300 →
+    // diverged. Keeping the stale first (sum 900) would read 400 >= 900 → not.
+    expect(
+      diverge({
+        src: 250,
+        test: 150,
+        history: [
+          marker(300, 200, 'true', 1, 'W1', { run: 1001 }),
+          marker(600, 300, 'true', 2, 'W1', {
+            run: 1002,
+            at: '2026-01-01T00:01:00Z',
+          }),
+          marker(150, 150, 'true', 2, 'W1', {
+            run: 1002,
+            at: '2026-01-01T00:02:00Z',
+          }),
+        ],
+      }),
+    ).toBe('true 2');
+    // Two DISTINCT runs that share round= AND a frozen eval watermark (the
+    // state-triggered conflict lane: a push stamps NEXT_ROUND, the following
+    // no-op re-stamps the same ROUND, neither NEWEST nor ROUND advances) are
+    // counted SEPARATELY by their distinct run ids — round=/wm alone (the
+    // pre-fix key) would have collapsed them and stalled the handoff forever.
+    expect(
+      diverge({
+        src: 500,
+        test: 300,
+        history: [
+          marker(300, 200, 'true', 2, 'W1', { run: 1001 }),
+          marker(400, 250, 'true', 2, 'W1', { run: 1002 }),
+          marker(500, 300, 'true', 2, 'W1', { run: 1003 }),
+        ],
+      }),
+    ).toBe('true 3');
+    // "Most recent" is the highest RUN id, not the max sum and not the first:
+    // prior over-budget sums 900 (run 1) then 500 (run 2, agent shrank), a
+    // partial regrow to 700 is >= the most-recent 500 → diverged. Comparing
+    // against the first/max (900) would wrongly suppress it (700 < 900).
+    expect(
+      diverge({
+        src: 400,
+        test: 300,
+        history: [
+          marker(600, 300, 'true', 1, 'W1', { run: 1001 }),
+          marker(300, 200, 'true', 2, 'W1', { run: 1002 }),
+        ],
+      }),
+    ).toBe('true 2');
+    // Not over budget THIS round → still counts (accurate trajectory) but no handoff.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        criticalOnlyGrowth: 'false',
+        history: climbing,
+      }),
+    ).toBe('false 3');
+    // Prior markers under a DIFFERENT window key don't count.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          marker(500, 300, 'true', 1, 'W2'),
+          marker(600, 400, 'true', 2, 'W2'),
+        ],
+      }),
+    ).toBe('false 0');
+    // Markers from a non-bot author don't count.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: climbing.map((m) => ({ ...m, user: { login: 'attacker' } })),
+      }),
+    ).toBe('false 0');
+    // Markers BEFORE a mid-window base update are excluded (re-anchoring makes
+    // pre-update sums incomparable) — only the post-update round remains.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        baseUpdAt: '2026-01-01T12:00:00Z',
+        history: [
+          marker(500, 300, 'true', 1, 'W1', { at: '2026-01-01T06:00:00Z' }),
+          marker(600, 400, 'true', 2, 'W1', { at: '2026-01-01T06:30:00Z' }),
+          marker(200, 100, 'true', 3, 'W1', { at: '2026-01-01T18:00:00Z' }),
+        ],
+      }),
+    ).toBe('false 1');
+    // A malformed GROWTH_DIVERGENCE_ROUNDS falls back to 2 (the sanitize guard
+    // at the top of the block) instead of crashing the `-ge` arithmetic: two
+    // prior over-budget rounds still climbing → diverged.
+    expect(
+      diverge({
+        src: 500,
+        test: 300,
+        div: 'abc',
+        history: [marker(300, 200, 'true', 1), marker(400, 250, 'true', 2)],
+      }),
+    ).toBe('true 2');
+    // over=false markers (rounds that pulled back under budget) count neither
+    // toward OVER_ROUNDS_PRIOR nor as PREV_SUM — a one-off overshoot that
+    // recovered must NOT escalate. Pins the `.over == "true"` filter.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          marker(500, 300, 'true', 1),
+          marker(100, 50, 'false', 2),
+          marker(90, 40, 'false', 3),
+        ],
+      }),
+    ).toBe('false 1');
+    // Writer→reader round-trip: expand EACH real writer echo through bash and
+    // feed the marker it produces back through the extracted reader, so a
+    // format drift between writer and reader (the marker is encoded four
+    // independent times — the reader regex + three writers) fails here instead
+    // of silently inerting the feature. Every writer path is covered, not just
+    // the push path (a drift in only the no-op or failure suffix would
+    // otherwise survive green).
+    const roundTrip = (roundVar) => {
+      const line = workflow.match(
+        new RegExp(
+          `echo "<!-- autofix-growth-now src=\\$\\{GROWTH_SRC:-0\\}[^\\n]*round=\\$\\{${roundVar}\\}[^\\n]*-->"`,
+        ),
+      )?.[0];
+      expect(line, `writer for round=${roundVar}`).toBeTruthy();
+      const produced = execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_SRC=500\nGROWTH_TEST=300\nCRITICAL_ONLY_GROWTH=true\n` +
+            `${roundVar}=2\nGITHUB_RUN_ID=1002\nGROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+      // Counted as 1 prior over-budget run — 0 is what a format mismatch or a
+      // dead key= (e.g. key=${WINDOW} after a re-arm) would yield.
+      return diverge({
+        src: 999,
+        test: 999,
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:00:00Z',
+            body: produced,
+          },
+        ],
+      });
+    };
+    expect(roundTrip('NEXT_ROUND')).toBe('false 1'); // push path
+    expect(roundTrip('ROUND')).toBe('false 1'); // no-op path
+    expect(roundTrip('MARK_ROUND')).toBe('false 1'); // failure/handoff path
+    rmSync(dir, { recursive: true, force: true });
+
+    // The report writes the per-round growth-now marker on ALL THREE report
+    // paths so the history is complete (a no-op round records its size, and a
+    // timeout/gate-rejection/abort round is not a gap either), each with a
+    // run= identity the reader dedupes on — push stamps NEXT_ROUND, no-op
+    // ROUND, the failure/handoff report MARK_ROUND.
+    expect(
+      workflow.match(/<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g) ?? [],
+    ).toHaveLength(3);
+    expect(workflow).toContain(
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} key=',
+    );
+    // The failure/handoff report step binds the three growth outputs so its
+    // marker is not inert-by-omission.
+    for (const bind of [
+      "GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'",
+      "GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'",
+      "CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'",
+      "GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'",
+    ]) {
+      expect(reviewAddressReportStep).toContain(bind);
+    }
+    // The six wiring lines (three prepare outputs + three report-env bindings)
+    // are pinned at BOTH ends: their writers fall back to :-0/:-false, so a
+    // deleted line would silently inert the feature with the suite green.
+    for (const wire of [
+      'echo "growth_src=${GROWTH_SRC}"',
+      'echo "growth_test=${GROWTH_TEST}"',
+      'echo "critical_only_growth=${CRITICAL_ONLY_GROWTH}"',
+    ]) {
+      expect(prepareBranchAndFeedbackStep).toContain(wire);
+    }
+    for (const bind of [
+      "GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'",
+      "GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'",
+      "CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'",
+    ]) {
+      expect(pushAndReportStep).toContain(bind);
+    }
+    expect(workflow).toContain(
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} key=',
+    );
+    expect(workflow).toContain(
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} key=',
+    );
+    // growth_diverged is NOT emitted as a step output — the handoff is
+    // enforced by the feedback.md text, so a dangling dead output would only
+    // mislead a future consumer.
+    expect(prepareBranchAndFeedbackStep).not.toContain('growth_diverged=');
+    // The trajectory + non-convergence blocks reach the agent via feedback.md,
+    // AND their render guards are executed both ways — a flipped guard (inject
+    // the handoff into converging rounds, or drop it from diverging ones) must
+    // fail here, not ship green.
+    const trajGuard = prepareBranchAndFeedbackStep.match(
+      /if \[\[ "\$\{NET_MEASURED\}" == 'true' \]\]; then\n\s+echo "## Diff growth this window"[\s\S]*?\n\s+fi/,
+    )?.[0];
+    const handoffGuard = prepareBranchAndFeedbackStep.match(
+      /if \[\[ "\$\{GROWTH_DIVERGED\}" == 'true' \]\]; then\n\s+echo "## Needs a maintainer's decision[\s\S]*?\n\s+fi/,
+    )?.[0];
+    expect(trajGuard).toBeTruthy();
+    expect(handoffGuard).toBeTruthy();
+    // DISTINCT src/test values so a transposed ${GROWTH_SRC}/${GROWTH_TEST} in
+    // either advisory body fails here (the numbers this feature feeds the
+    // agent must be the right way round).
+    const renderEnv =
+      'GROWTH_SRC=7\nGROWTH_TEST=9\nGROWTH_BUDGET_SRC_LINES=1\n' +
+      'GROWTH_BUDGET_TEST_LINES=1\nOVER_ROUNDS_PRIOR=2\n';
+    const runGuard = (block, vars) =>
+      execFileSync('bash', ['-c', `${vars}${block}`], { encoding: 'utf8' });
+    const trajOn = runGuard(trajGuard, `NET_MEASURED=true\n${renderEnv}`);
+    expect(trajOn).toContain('## Diff growth this window');
+    expect(trajOn).toContain('source 7 / test 9');
+    expect(
+      runGuard(trajGuard, `NET_MEASURED=false\n${renderEnv}`),
+    ).not.toContain('## Diff growth this window');
+    const handoffOn = runGuard(
+      handoffGuard,
+      `GROWTH_DIVERGED=true\n${renderEnv}`,
+    );
+    expect(handoffOn).toContain("## Needs a maintainer's decision");
+    expect(handoffOn).toContain('source 7 / test 9');
+    expect(
+      runGuard(handoffGuard, `GROWTH_DIVERGED=false\n${renderEnv}`),
+    ).not.toContain("## Needs a maintainer's decision");
+    expect(handoffGuard).toContain('defer-to-human');
+    // The agent-facing policy documents the handoff (a second guard).
+    const skill = readAutofixSkill();
+    expect(skill).toContain('this PR is not converging');
+    expect(skill).toContain('Diff-growth trajectory');
+  });
+
   it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
     // Budgets are repo-variable tunables with a sanitize fallback at the
     // read site, mirroring the scan budgets.
