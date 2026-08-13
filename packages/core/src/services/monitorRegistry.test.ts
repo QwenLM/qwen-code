@@ -673,18 +673,27 @@ describe('MonitorRegistry', () => {
     registry.setNotificationCallback(callback);
     registry.register(createEntry());
 
+    // BOTH halves of what the swap changed: the line now goes through
+    // stripDisplayControlChars, which removes C0-except-TAB and C1 as well
+    // as the bidi ranges. A fixture carrying only bidi leaves the C0/C1
+    // half unpinned, and TAB must survive — it is the one C0 the helper
+    // deliberately keeps.
     registry.emitEvent(
       'mon-1',
-      '/tmp/a\u202A\u202B\u202C\u202D\u202Eevil\u2066\u2067\u2068\u2069/out.log',
+      '/tmp/a\u202A\u202B\u202C\u202D\u202Eevil\u2066\u2067\u2068\u2069/out\u0007\u001b\u0085\u009b.log\tkept',
     );
 
     const [displayText, modelText] = callback.mock.calls[0] as [string, string];
-    expect(modelText).toContain('<result>/tmp/aevil/out.log</result>');
-    const bidi = '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069';
-    for (const ch of bidi) {
+    expect(modelText).toContain('<result>/tmp/aevil/out.log\tkept</result>');
+    const stripped =
+      '\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u0007\u001b\u0085\u009b';
+    for (const ch of stripped) {
       expect(modelText).not.toContain(ch);
       expect(displayText).not.toContain(ch);
     }
+    // ...and the text after every stripped run survives, so an
+    // over-stripping regression (truncate at the first marker) turns red.
+    expect(displayText).toContain('kept');
   });
 
   it('propagates toolUseId in notification XML and meta', () => {
