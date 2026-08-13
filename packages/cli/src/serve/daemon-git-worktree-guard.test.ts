@@ -744,6 +744,10 @@ it -C ${outsideRepo} reset --hard`,
     () => `xargs -I{} git -C ${outsideRepo} reset --hard`,
     () => `su -c 'git -C ${outsideRepo} reset --hard'`,
     () => `find . -exec git -C ${outsideRepo} reset --hard ;`,
+    // `PATH=`/`GIT_EXEC_PATH=` inside an unrecognized wrapper choose which git
+    // binary runs — the direct forms are denied, so the wrapper must be too.
+    () => `find . -exec sh -c 'PATH=/tmp/evil git reset --hard' ';'`,
+    () => `find . -exec sh -c 'GIT_EXEC_PATH=/tmp/evil git reset --hard' ';'`,
   ])(
     'fails closed when an unrecognized program may run a relocated Git command %#',
     async (buildCommand) => {
@@ -2096,6 +2100,12 @@ it -C ${outsideRepo} reset --hard`,
     // `unset A` drops the tracked variable, so `cd $A` is a bare `cd` to $HOME
     // in bash; the guard must not keep expanding the stale in-bounds value.
     () => `A=nested; unset A; cd $A; git reset --hard`,
+    // A function shadowing the `command`/`builtin` prefix word runs its own
+    // relocating body — the prefix is not a guaranteed bypass to the builtin.
+    () =>
+      `command() { git -C ${plainOutsidePath} reset --hard; }; command unset other`,
+    () =>
+      `builtin() { git -C ${plainOutsidePath} reset --hard; }; builtin unset other`,
   ])(
     'does not let a mis-modelled removal drop a live relocating shadow %#',
     async (build) => {

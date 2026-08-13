@@ -564,7 +564,11 @@ function hasGitRelocationMarker(tokens: GuardToken[]): boolean {
     const key = leadingEnvAssignmentKey(token.text);
     return (
       key !== null &&
-      (GIT_DIR_ENV_KEYS.has(key) || GIT_WORK_TREE_ENV_KEYS.has(key))
+      (GIT_DIR_ENV_KEYS.has(key) ||
+        GIT_WORK_TREE_ENV_KEYS.has(key) ||
+        // `PATH=`/`GIT_EXEC_PATH=` choose which git binary runs — a relocation
+        // the direct path already denies, so the wrapper backstop must too.
+        GIT_PROGRAM_ENV_KEYS.has(key))
     );
   });
 }
@@ -579,9 +583,9 @@ const GIT_WORD_PATTERN = /\bgit\b/i;
 // A `cd`/`pushd` inside such a payload relocates the git that follows it just
 // as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
 const TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN =
-  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)\+?=/;
+  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 const TEXT_RELOCATION_MARKER_PATTERN =
-  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)\+?=/;
+  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 
 // Assignments that decide WHICH git binary the run executes. The guard
 // classifies the program word `git` and then reasons about paths; if the
@@ -2254,6 +2258,10 @@ async function evaluateCommandWithCwd(
         (run[removalStart]!.text === 'command' ||
           run[removalStart]!.text === 'builtin')
       ) {
+        // Bash resolves a function before the `command`/`builtin` builtin, so
+        // a shadowed prefix word runs its own body — leave it for the shadow
+        // dispatch rather than treating it as a bypass to the real builtin.
+        if (definedBodies.has(run[removalStart]!.text)) break;
         hasCommandPrefix = true;
         removalStart++;
         while (
