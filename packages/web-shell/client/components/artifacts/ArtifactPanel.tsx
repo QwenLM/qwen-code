@@ -2459,18 +2459,20 @@ function ArtifactDetail({
                 className={styles.link}
                 href={safeUrl}
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
                 onClick={handleLocationClick}
               >
                 {safeUrl}
               </a>
-              <button
-                type="button"
+              <a
                 className={styles.openButton}
-                onClick={openExternal}
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={handleLocationClick}
               >
                 {t('artifact.openLink')}
-              </button>
+              </a>
             </div>
           ) : (
             <div className={styles.meta}>{location}</div>

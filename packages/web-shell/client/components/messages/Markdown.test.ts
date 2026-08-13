@@ -1629,7 +1629,7 @@ describe('external links in the desktop shell', () => {
       '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
     );
     clickLink(c);
-    expect(invoke).toHaveBeenCalledWith('open_external_url', {
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
       url: 'https://github.com/QwenLM/qwen-code/issues/9060',
     });
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();

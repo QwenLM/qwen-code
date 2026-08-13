@@ -676,16 +676,20 @@ describe('ArtifactPanel code review artifacts', () => {
     act(() => root.render(artifactPanel(linkArtifact())));
     await flush();
 
-    const button = Array.from(container.querySelectorAll('button')).find(
+    const button = Array.from(container.querySelectorAll('a')).find(
       (el) => el.textContent === 'Open link',
     );
     expect(button).toBeTruthy();
+    expect(button!.getAttribute('href')).toBe(
+      'https://github.com/QwenLM/qwen-code/issues/9059',
+    );
+    expect(button!.getAttribute('target')).toBe('_blank');
     act(() => {
       button!.dispatchEvent(
         new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
       );
     });
-    expect(invoke).toHaveBeenCalledWith('open_external_url', {
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
       url: 'https://github.com/QwenLM/qwen-code/issues/9059',
     });
     delete (window as { __TAURI__?: unknown }).__TAURI__;
@@ -706,7 +710,7 @@ describe('ArtifactPanel code review artifacts', () => {
     act(() => root.render(artifactPanel(linkArtifact())));
     await flush();
 
-    const button = Array.from(container.querySelectorAll('button')).find(
+    const button = Array.from(container.querySelectorAll('a')).find(
       (el) => el.textContent === 'Open link',
     );
     expect(button).toBeTruthy();

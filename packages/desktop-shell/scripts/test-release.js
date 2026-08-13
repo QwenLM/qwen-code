@@ -582,8 +582,8 @@ function testBootstrapBridgeConfiguration() {
   );
   assert.deepEqual(
     tauriConfig.app?.security?.capabilities,
-    ['bootstrap'],
-    'The Bootstrap UI capability must be enabled for the main window.',
+    ['bootstrap', 'web-shell-external-url'],
+    'The local bootstrap and remote Web Shell capabilities must be enabled.',
   );
   const capability = JSON.parse(
     fs.readFileSync(
@@ -600,6 +600,29 @@ function testBootstrapBridgeConfiguration() {
   assert.deepEqual(capability.permissions, [
     'core:event:allow-listen',
     'core:event:allow-unlisten',
+  ]);
+
+  const webShellCapability = JSON.parse(
+    fs.readFileSync(
+      path.join(
+        packageDir,
+        'src-tauri',
+        'capabilities',
+        'web-shell-external-url.json',
+      ),
+      'utf8',
+    ),
+  );
+  assert.equal(webShellCapability.local, false);
+  assert.deepEqual(webShellCapability.remote, {
+    urls: ['http://127.0.0.1:*'],
+  });
+  assert.deepEqual(webShellCapability.windows, ['main']);
+  assert.deepEqual(webShellCapability.permissions, [
+    {
+      identifier: 'opener:allow-open-url',
+      allow: [{ url: 'http://*' }, { url: 'https://*' }, { url: 'mailto:*' }],
+    },
   ]);
 }
 

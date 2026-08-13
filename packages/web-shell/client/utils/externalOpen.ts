@@ -2,11 +2,8 @@
  * External-URL opening helper shared by markdown links and `external_url`
  * link artifacts.
  *
- * Inside the packaged desktop shell the webview's implicit `target="_blank"`
- * / `window.open` handling cannot be relied upon (a failed new-window request
- * is silently dropped, which reads as a "styled but dead" link), so external
- * clicks are routed through the shell's `open_external_url` command instead.
- * In a plain browser the helper falls back to `window.open`.
+ * Inside the packaged desktop shell, external clicks use Tauri's opener
+ * plugin. Plain browsers keep native anchor behavior at the call sites.
  */
 
 type TauriInvoke = (
@@ -34,13 +31,6 @@ export function isDesktopShell(): boolean {
  */
 export async function openExternalUrl(url: string): Promise<void> {
   const invoke = tauriInvoke();
-  if (invoke) {
-    await invoke('open_external_url', { url });
-    return;
-  }
-  const win = window.open(url, '_blank', 'noopener,noreferrer');
-  if (!win) {
-    throw new Error('The browser blocked the new window.');
-  }
-  win.opener = null;
+  if (!invoke) throw new Error('The desktop URL opener is unavailable.');
+  await invoke('plugin:opener|open_url', { url });
 }

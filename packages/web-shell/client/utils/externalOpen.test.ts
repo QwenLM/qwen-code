@@ -18,11 +18,11 @@ describe('externalOpen', () => {
     expect(isDesktopShell()).toBe(true);
   });
 
-  it('routes opens through the open_external_url command in desktop', async () => {
+  it('routes opens through the Tauri opener plugin in desktop', async () => {
     const invoke = vi.fn().mockResolvedValue(undefined);
     (window as TauriWindow).__TAURI__ = { core: { invoke } };
     await openExternalUrl('https://github.com/QwenLM/qwen-code/issues/9060');
-    expect(invoke).toHaveBeenCalledWith('open_external_url', {
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
       url: 'https://github.com/QwenLM/qwen-code/issues/9060',
     });
   });
@@ -35,22 +35,9 @@ describe('externalOpen', () => {
     );
   });
 
-  it('falls back to window.open in a plain browser', async () => {
-    const win = { opener: 'self' as unknown };
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue(win as Window);
-    await openExternalUrl('https://example.com');
-    expect(openSpy).toHaveBeenCalledWith(
-      'https://example.com',
-      '_blank',
-      'noopener,noreferrer',
-    );
-    expect(win.opener).toBeNull();
-  });
-
-  it('rejects when the browser blocks the popup', async () => {
-    vi.spyOn(window, 'open').mockReturnValue(null);
+  it('leaves plain-browser opening to native anchors', async () => {
     await expect(openExternalUrl('https://example.com')).rejects.toThrow(
-      'blocked',
+      'desktop URL opener is unavailable',
     );
   });
 });

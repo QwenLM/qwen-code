@@ -3,9 +3,5 @@
   "identifier": "bootstrap",
   "description": "Allows the local bootstrap page to subscribe to desktop lifecycle events.",
   "windows": ["main", "local-control"],
-  "permissions": [
-    "core:event:allow-listen",
-    "core:event:allow-unlisten",
-    "allow-open-external-url"
-  ]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

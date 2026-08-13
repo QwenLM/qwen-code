@@ -115,7 +115,6 @@ fn main() {
             open_logs,
             restart_runtime,
             install_update,
-            open_external_url,
         ])
         .setup(setup_app);
 
@@ -475,24 +474,6 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
         .map_err(|error| format!("Failed to install update: {error}"))?;
     app.request_restart();
     Ok(())
-}
-
-/// Opens an external URL requested by the Web Shell (markdown links and
-/// `external_url` artifacts) in the OS default browser. The Web Shell runs
-/// inside this window but cannot rely on implicit `target="_blank"` handling,
-/// so it invokes this command explicitly; failures are returned to the caller
-/// so the UI can surface them instead of swallowing the click.
-#[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
-    let parsed = Url::parse(&url).map_err(|error| format!("Invalid URL: {error}"))?;
-    if !is_safe_external_url(&parsed) {
-        return Err(format!(
-            "Refusing to open unsupported URL scheme: {}",
-            parsed.scheme()
-        ));
-    }
-    open::that_detached(parsed.as_str())
-        .map_err(|error| format!("Failed to open external URL: {error}"))
 }
 
 fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bool) {
@@ -1116,18 +1097,6 @@ mod tests {
         let error = origin_of(&Url::parse("http://0.0.0.0:4170/").expect("url"))
             .expect_err("non-loopback origin");
         assert!(error.contains("non-loopback"));
-    }
-
-    #[test]
-    fn open_external_url_rejects_unsafe_schemes() {
-        let error = super::open_external_url("javascript:alert(1)".to_string())
-            .expect_err("javascript scheme");
-        assert!(error.contains("unsupported URL scheme"));
-        let error =
-            super::open_external_url("file:///etc/passwd".to_string()).expect_err("file scheme");
-        assert!(error.contains("unsupported URL scheme"));
-        let error = super::open_external_url("not a url".to_string()).expect_err("invalid url");
-        assert!(error.contains("Invalid URL"));
     }
 
     #[test]

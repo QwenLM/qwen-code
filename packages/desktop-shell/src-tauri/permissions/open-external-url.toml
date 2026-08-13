@@ -1,9 +1,0 @@
-[[permission]]
-identifier = "allow-open-external-url"
-description = "Allows opening safe external URLs in the OS default browser."
-commands.allow = ["open_external_url"]
-
-[[permission]]
-identifier = "deny-open-external-url"
-description = "Denies opening external URLs in the OS default browser."
-commands.deny = ["open_external_url"]
