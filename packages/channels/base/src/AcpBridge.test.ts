@@ -8,6 +8,8 @@ import {
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   type ChannelLoopToolHandler,
 } from './ChannelAgentBridge.js';
@@ -167,6 +169,27 @@ describe('AcpBridge', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('performs the private-parent capability handshake with the spawned child', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+
+    const spawnOptions = child.spawn.mock.calls[0]![2] as {
+      env?: Record<string, string | undefined>;
+    };
+    const capability = spawnOptions.env?.[ACP_PRIVATE_PARENT_CAPABILITY_ENV];
+    expect(typeof capability).toBe('string');
+    expect(capability!.length).toBeGreaterThan(0);
+    const initializeParams = child.connections[0]!.initialize.mock
+      .calls[0]![0] as { _meta?: Record<string, unknown> };
+    expect(
+      initializeParams._meta?.[ACP_PRIVATE_PARENT_CAPABILITY_META_KEY],
+    ).toBe(capability);
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {
@@ -438,6 +461,29 @@ describe('AcpBridge', () => {
       sessionId: 's-1',
       prompt: [{ type: 'text', text: 'question' }],
       _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('forwards the user-facing prompt projection to the daemon', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'hidden context\n\nhello', {
+      displayText: 'hello',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'hidden context\n\nhello' }],
+      _meta: {
+        [CHANNEL_PROMPT_META_KEY]: true,
+        'qwen.daemon.promptDisplayText': 'hello',
+      },
     });
   });
 

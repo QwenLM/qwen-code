@@ -148,27 +148,33 @@
       <section class="card" aria-live="polite">
         <header>
           <div>
-            <h1>Local Control</h1>
-            <p>Continue this session from your phone.</p>
+            <h1 data-i18n="heading">Local Control</h1>
+            <p data-i18n="subtitle">Continue this session from your phone.</p>
           </div>
-          <span id="badge" class="badge">Off</span>
+          <span id="badge" class="badge" data-i18n="off">Off</span>
         </header>
 
         <section id="inactive">
-          <p>Turn this on, then scan from a phone on the same trusted Wi-Fi.</p>
-          <div class="notice">
+          <p data-i18n="inactiveCopy">
+            Turn this on, then scan from a phone on the same trusted Wi-Fi.
+          </p>
+          <div class="notice" data-i18n="inactiveNotice">
             Uses unencrypted HTTP. Phone access stays closed until enabled.
           </div>
         </section>
 
         <section id="active" hidden>
-          <div id="qr" class="qr" aria-label="Local Control QR code"></div>
+          <div
+            id="qr"
+            class="qr"
+            aria-label="Local Control QR code"
+          ></div>
           <div id="url" class="url"></div>
           <div id="sleep" class="notice"></div>
         </section>
 
         <div id="error" class="error" hidden></div>
-        <button id="toggle">Turn on Local Control</button>
+        <button id="toggle" data-i18n="turnOn">Turn on Local Control</button>
       </section>
     </main>
     <script src="./local-control.js"></script>

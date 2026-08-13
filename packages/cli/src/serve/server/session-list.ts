@@ -86,11 +86,14 @@ export interface ListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
   /** Runtime root owned by the selected managed workspace. */
   runtimeBaseDir?: string;
+  /** Aborts this caller's wait without cancelling other shared waiters. */
+  signal?: AbortSignal;
 }
 
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
   runtimeBaseDir: string;
+  signal?: AbortSignal;
 }
 
 export interface InvalidateWorkspaceSessionListCacheOptions {
@@ -318,15 +321,24 @@ async function enrichWorktreeSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
   sessionService: SessionService,
   archiveState: SessionArchiveState = 'active',
+  signal?: AbortSignal,
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
     if (summary.worktree) continue;
-    const sidecar = await readWorktreeSession(
-      sessionService.getWorktreeSessionPathForArchiveState(
+    let sidecar: Awaited<ReturnType<typeof readWorktreeSession>>;
+    try {
+      const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
         sessionId,
         archiveState,
-      ),
-    ).catch(() => null);
+      );
+      sidecar = signal
+        ? await readWorktreeSession(sidecarPath, { signal })
+        : await readWorktreeSession(sidecarPath);
+    } catch {
+      signal?.throwIfAborted();
+      sidecar = null;
+    }
     if (sidecar) {
       bySessionId.set(sessionId, {
         ...summary,
@@ -409,8 +421,10 @@ function clonePersistedSummary(
 async function loadAllPersistedSummaries(
   sessionService: SessionService,
   archiveState: SessionArchiveState,
+  signal: AbortSignal,
 ): Promise<PersistedSessionListSnapshot> {
   const scanStartedAt = performance.now();
+  signal.throwIfAborted();
   // Organized view needs global pin/group ordering before pagination; v1 keeps
   // the storage API unchanged and performs that merge in memory.
   const sessions: BridgeSessionSummary[] = [];
@@ -423,7 +437,9 @@ async function loadAllPersistedSummaries(
       cursor,
       size: 10_000,
       archiveState,
+      signal,
     });
+    signal.throwIfAborted();
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
     sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
@@ -444,7 +460,13 @@ async function loadAllPersistedSummaries(
   const bySessionId = new Map(
     sessions.map((session) => [session.sessionId, session]),
   );
-  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+  await enrichWorktreeSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    signal,
+  );
+  signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
     truncated,
@@ -459,10 +481,13 @@ async function listAllPersistedSummaries(
   archiveState: SessionArchiveState,
   runtimeBaseDir: string,
   queryKind: 'organized' | 'metadata',
+  signal?: AbortSignal,
 ): Promise<PersistedSessionListSnapshot> {
   const lookup = persistedSessionListCache.lookup(
     { runtimeBaseDir, workspaceCwd, archiveState },
-    () => loadAllPersistedSummaries(sessionService, archiveState),
+    (loadSignal) =>
+      loadAllPersistedSummaries(sessionService, archiveState, loadSignal),
+    { signal },
   );
   addDaemonRequestAttribute(
     'qwen-code.daemon.session_list.cache_status',
@@ -484,6 +509,7 @@ async function listAllPersistedSummaries(
   }
 
   const snapshot = await lookup.promise;
+  signal?.throwIfAborted();
   addDaemonRequestAttribute(
     'qwen-code.daemon.session_list.persisted_sessions',
     snapshot.sessions.length,
@@ -496,7 +522,7 @@ async function listAllPersistedSummaries(
     'qwen-code.daemon.session_list.truncated',
     snapshot.truncated,
   );
-  if (lookup.status === 'scan') {
+  if (lookup.status !== 'cache_hit') {
     addDaemonRequestAttribute(
       'qwen-code.daemon.session_list.scan_duration_ms',
       snapshot.scanDurationMs,
@@ -593,7 +619,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const archiveState = options.archiveState ?? 'active';
   const sessionService = new SessionService(workspaceCwd);
   const organizationService = createSessionOrganizationService(workspaceCwd);
+  readOptions.signal?.throwIfAborted();
   const snapshot = await organizationService.readSnapshot();
+  readOptions.signal?.throwIfAborted();
   const knownGroupIds = new Set(snapshot.groups.map((group) => group.id));
   const group = options.group ?? 'all';
   if (
@@ -627,7 +655,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
     archiveState,
     readOptions.runtimeBaseDir,
     'organized',
+    readOptions.signal,
   );
+  readOptions.signal?.throwIfAborted();
   for (const session of persisted.sessions) {
     bySessionId.set(
       session.sessionId,
@@ -666,7 +696,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
           // `sessionExists` flipped to true, silently dropping the live
           // session from the response instead of merging it.
           !persisted.truncated ||
-          !(await sessionService.sessionExists(live.sessionId))
+          !(await (readOptions.signal
+            ? sessionService.sessionExists(live.sessionId, {
+                signal: readOptions.signal,
+              })
+            : sessionService.sessionExists(live.sessionId)))
         ) {
           bySessionId.set(
             live.sessionId,
@@ -684,6 +718,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
         }
       }
     } catch (error) {
+      readOptions.signal?.throwIfAborted();
       liveMergeFailed = true;
       writeStderrLine(
         `qwen serve: organized session list live merge failed; using persisted sessions only: ${
@@ -705,6 +740,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     // both fields even though the UI keeps them mutually exclusive).
     return session.color == null && session.groupId === group;
   });
+  readOptions.signal?.throwIfAborted();
   const activityTimeById = new Map(
     filtered.map((session) => [
       session.sessionId,
@@ -712,6 +748,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     ]),
   );
   filtered.sort((a, b) => compareOrganizedSessions(activityTimeById, a, b));
+  readOptions.signal?.throwIfAborted();
   const afterCursor =
     cursorKey === undefined
       ? filtered
@@ -762,7 +799,9 @@ async function listWorkspaceSessionsByMetadataForResponse(
     archiveState,
     readOptions.runtimeBaseDir,
     'metadata',
+    readOptions.signal,
   );
+  readOptions.signal?.throwIfAborted();
   for (const session of persisted.sessions) {
     bySessionId.set(session.sessionId, clonePersistedSummary(session));
   }
@@ -783,7 +822,11 @@ async function listWorkspaceSessionsByMetadataForResponse(
           // already covers every persisted session, so skip the racy
           // re-check when nothing was truncated.
           !persisted.truncated ||
-          !(await sessionService.sessionExists(live.sessionId))
+          !(await (readOptions.signal
+            ? sessionService.sessionExists(live.sessionId, {
+                signal: readOptions.signal,
+              })
+            : sessionService.sessionExists(live.sessionId)))
         ) {
           bySessionId.set(live.sessionId, {
             ...live,
@@ -795,6 +838,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
         }
       }
     } catch (error) {
+      readOptions.signal?.throwIfAborted();
       liveMergeFailed = true;
       writeStderrLine(
         `qwen serve: session metadata filter live merge failed; using persisted sessions only: ${
@@ -817,6 +861,7 @@ async function listWorkspaceSessionsByMetadataForResponse(
         getLiveSessionCursorKey(b),
       ),
     );
+  readOptions.signal?.throwIfAborted();
   const cursorKey =
     options.cursor !== undefined && options.cursor !== ''
       ? parseMetadataSessionCursor(options.cursor, {
@@ -857,18 +902,26 @@ export async function listWorkspaceSessionsForResponse(
   options?: ListWorkspaceSessionsOptions,
   readOptions: ListWorkspaceSessionsReadOptions = {},
 ): Promise<ListWorkspaceSessionsResult> {
+  readOptions.signal?.throwIfAborted();
   const runtimeBaseDir = new Storage(
     workspaceCwd,
     readOptions.runtimeBaseDir,
   ).getRuntimeBaseDir();
-  return Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, () =>
-    listWorkspaceSessionsForResponseInRuntime(bridge, workspaceCwd, options, {
-      ...(readOptions.mergeLive !== undefined
-        ? { mergeLive: readOptions.mergeLive }
-        : {}),
-      runtimeBaseDir,
-    }),
+  const result = await Storage.runWithResolvedRuntimeBaseDir(
+    runtimeBaseDir,
+    () =>
+      listWorkspaceSessionsForResponseInRuntime(bridge, workspaceCwd, options, {
+        ...(readOptions.mergeLive !== undefined
+          ? { mergeLive: readOptions.mergeLive }
+          : {}),
+        ...(readOptions.signal !== undefined
+          ? { signal: readOptions.signal }
+          : {}),
+        runtimeBaseDir,
+      }),
   );
+  readOptions.signal?.throwIfAborted();
+  return result;
 }
 
 async function listWorkspaceSessionsForResponseInRuntime(
@@ -877,6 +930,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
   options: ListWorkspaceSessionsOptions | undefined,
   readOptions: ResolvedListWorkspaceSessionsReadOptions,
 ): Promise<ListWorkspaceSessionsResult> {
+  readOptions.signal?.throwIfAborted();
   const rawSize = options?.size;
   const requestedSize =
     typeof rawSize === 'number' && Number.isSafeInteger(rawSize)
@@ -930,14 +984,22 @@ async function listWorkspaceSessionsForResponseInRuntime(
     cursor: numericCursor,
     size: pageSize,
     archiveState,
+    ...(readOptions.signal ? { signal: readOptions.signal } : {}),
   });
+  readOptions.signal?.throwIfAborted();
   const bySessionId = new Map<string, BridgeSessionSummary>();
 
   for (const item of persisted.items) {
     bySessionId.set(item.sessionId, toSummary(item));
   }
 
-  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+  await enrichWorktreeSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  readOptions.signal?.throwIfAborted();
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
@@ -961,7 +1023,11 @@ async function listWorkspaceSessionsForResponseInRuntime(
       // silently dropping the live session from the response instead of
       // merging it.
       (persisted.nextCursor == null ||
-        !(await sessionService.sessionExists(live.sessionId)))
+        !(await (readOptions.signal
+          ? sessionService.sessionExists(live.sessionId, {
+              signal: readOptions.signal,
+            })
+          : sessionService.sessionExists(live.sessionId))))
     ) {
       bySessionId.set(live.sessionId, {
         ...live,
@@ -978,6 +1044,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
     const bTime = Date.parse(b.updatedAt ?? b.createdAt);
     return bTime - aTime;
   });
+  readOptions.signal?.throwIfAborted();
 
   const nextCursor =
     persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
