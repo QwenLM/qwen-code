@@ -26,6 +26,8 @@ export interface DaemonCapabilitiesLimits {
   maxTotalSessions?: number | null;
   /** Server-side deadline for ACP session load/resume. */
   sessionRestoreTimeoutMs?: number;
+  /** Present when `workspace_file_upload` is advertised. */
+  maxWorkspaceFileUploadBytes?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -930,6 +932,10 @@ export interface DaemonSessionState {
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
   artifactWarnings?: string[];
+  /** True when persisted replay could only be reconstructed partially. */
+  partial?: true;
+  /** Diagnostic for a partial persisted replay. */
+  replayError?: string;
   /** Compacted events for completed turns (load only). */
   compactedReplay?: DaemonEvent[];
   /** Bounded replay events for the current incomplete turn (load only). */
@@ -1964,6 +1970,32 @@ export interface DaemonWorkspaceFileEditResult {
 }
 
 /**
+ * Binary file upload request. The bytes are sent as
+ * `application/octet-stream`; `path` is the target relative to the workspace
+ * root. Uploads never overwrite — an occupied name is auto-numbered by the
+ * daemon, and the returned `path` is the final server-confirmed name.
+ */
+export interface DaemonWorkspaceFileUploadRequest {
+  path: string;
+  data: ArrayBuffer | Uint8Array | Blob;
+  signal?: AbortSignal;
+  /** Omitted inherits the client's default; `0` disables the timeout. */
+  timeoutMs?: number;
+  /**
+   * Browser-only upload progress. Requesting progress where
+   * `XMLHttpRequest` is unavailable throws before sending.
+   */
+  onProgress?: (event: { loaded: number; total: number }) => void;
+}
+
+export interface DaemonWorkspaceFileUploadResult {
+  kind: 'file_upload';
+  path: string;
+  sizeBytes: number;
+  hash: DaemonContentHash;
+}
+
+/**
  * Subagent CRUD types. `agentType` on the wire is
  * the `name` field from the agent's frontmatter (case-insensitive);
  * `level` distinguishes project-/user-/builtin-/extension-level
@@ -2507,6 +2539,11 @@ export interface DaemonUsageDashboard {
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/config-option`. */
+export interface DaemonSessionConfigOptionResult {
+  configOptions: unknown[];
 }
 
 /** Returned from `POST /session/:id/language`. */
@@ -3945,7 +3982,8 @@ export type DaemonExtensionOriginSource =
   | 'QwenCode'
   | 'Claude'
   | 'Gemini'
-  | 'Qoder';
+  | 'Qoder'
+  | 'AgentPlugins';
 
 export interface DaemonExtensionCapabilities {
   mcpServerCount: number;

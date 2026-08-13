@@ -5226,20 +5226,29 @@ exit 1
       '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
     );
     const modeBlock = prepareBranchAndFeedbackStep.match(
-      /(CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
+      /(CRITICAL_ONLY='false'\n\s+CRITICAL_ONLY_ROUNDS='false'\n\s+CRITICAL_ONLY_GROWTH='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_ROUNDS='true'\n\s+fi\n\s+if \[\[ "\$\{GROWTH_SRC\}" -gt "\$\{GROWTH_BUDGET_SRC_LINES\}" \|\| "\$\{GROWTH_TEST\}" -gt "\$\{GROWTH_BUDGET_TEST_LINES\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_GROWTH='true'\n\s+fi)/,
     )?.[1];
     expect(modeBlock).toBeTruthy();
-    const modeAt = (round) =>
+    const modeAt = (round, growthSrc = 0, growthTest = 0) =>
       execFileSync(
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\n${modeBlock}\nprintf '%s %s %s' "$CRITICAL_ONLY" "$CRITICAL_ONLY_ROUNDS" "$CRITICAL_ONLY_GROWTH"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(4)).toBe('false');
-    expect(modeAt(5)).toBe('true');
+    expect(modeAt(4)).toBe('false false false');
+    expect(modeAt(5)).toBe('true true false');
+    // The growth brake trips the SAME mode before the round threshold. AT
+    // budget is within budget (exclusive boundary), either dimension alone
+    // trips, both causes can hold at once, and a shrinking window (negative
+    // growth) never engages.
+    expect(modeAt(0, 400, 400)).toBe('false false false');
+    expect(modeAt(0, 401, 0)).toBe('true false true');
+    expect(modeAt(0, 0, 401)).toBe('true false true');
+    expect(modeAt(5, 401, 0)).toBe('true true true');
+    expect(modeAt(0, -900, -900)).toBe('false false false');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and
@@ -5963,6 +5972,463 @@ exit 1
     expect(skill).toContain('Critical-only mode');
     expect(skill).toContain('do not modify code');
     expect(skill).toContain('Deferred non-Critical feedback');
+  });
+
+  it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
+    // Budgets are repo-variable tunables with a sanitize fallback at the
+    // read site, mirroring the scan budgets.
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'",
+    );
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'",
+    );
+    // The sanitize fallback is REPLAYED, not just pinned: it is the sole
+    // protection against a malformed repo variable reaching the octal-
+    // parsing [[ -gt ]] comparisons, in both failure directions.
+    const sanitizeBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ ! "\$\{GROWTH_BUDGET_SRC_LINES\}"[\s\S]*?GROWTH_BUDGET_TEST_LINES=400\n\s+fi)/,
+    )?.[1];
+    expect(sanitizeBlock).toBeTruthy();
+    // Last line only: the fallback path also emits its ::warning:: lines.
+    const sanitized = (src, test) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BUDGET_SRC_LINES='${src}'\nGROWTH_BUDGET_TEST_LINES='${test}'\n${sanitizeBlock}\nprintf '\\n%s %s' "$GROWTH_BUDGET_SRC_LINES" "$GROWTH_BUDGET_TEST_LINES"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .split('\n')
+        .pop();
+    // Plain counts (zero included) pass through untouched.
+    expect(sanitized('400', '0')).toBe('400 0');
+    // Garbage falls back…
+    expect(sanitized('400abc', 'twelve')).toBe('400 400');
+    // …and so do zero-padded values: bash [[ -gt ]] would read '0400' as
+    // octal 256 and raise on '0900', silently disabling the brake.
+    expect(sanitized('0400', '0900')).toBe('400 400');
+    // The 7-digit cap is load-bearing: past it bash integer literals wrap
+    // at 64 bits and comparisons go silently wrong.
+    expect(sanitized('9999999', '10000000')).toBe('9999999 400');
+
+    // Measurement: replay the real block against a real repo. Test lines are
+    // *.test.* / *.spec.* files, __snapshots__/, __tests__/, test-utils/, and
+    // integration-tests/ (by DIRECTORY, not file naming); binary files count
+    // as zero; deletions subtract; mechanical churn (root and nested
+    // lockfiles, the regenerated settings schema) never burns the budget —
+    // on EITHER side of the src/test split, even under a test directory.
+    const measureBlock = prepareBranchAndFeedbackStep.match(
+      /(# Binary files report[\s\S]*?NET_SRC=\$\(\( NET_TOTAL - NET_TEST \)\))/,
+    )?.[1];
+    expect(measureBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-growth-'));
+    try {
+      const git = (...args) =>
+        execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'test@test');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'src', 'app.ts'), 'a1\na2\na3\n');
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+      git('checkout', '-qb', 'pr');
+      mkdirSync(join(dir, 'src', '__snapshots__'));
+      mkdirSync(join(dir, 'src', 'test-utils'));
+      mkdirSync(join(dir, 'integration-tests'));
+      mkdirSync(join(dir, 'assets'));
+      // src: full rewrite, +7/-3 = net +4
+      writeFileSync(join(dir, 'src', 'app.ts'), 'b1\nb2\nb3\nb4\nb5\nb6\nb7\n');
+      // tests: +3 appended, +5 spec, +4 snapshot, +2 test-utils, +2
+      // integration-tests helper (a non-test filename proves the directory
+      // pathspec) plus +2 __tests__ setup below = net +18
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\nt3\nt4\nt5\n');
+      writeFileSync(join(dir, 'src', 'util.spec.ts'), 's1\ns2\ns3\ns4\ns5\n');
+      writeFileSync(
+        join(dir, 'src', '__snapshots__', 'app.snap'),
+        'n1\nn2\nn3\nn4\n',
+      );
+      writeFileSync(join(dir, 'src', 'test-utils', 'helper.ts'), 'h1\nh2\n');
+      writeFileSync(join(dir, 'integration-tests', 'helper.ts'), 'i1\ni2\n');
+      // __tests__/ helper without a .test./.spec. suffix is test code…
+      mkdirSync(join(dir, 'src', '__tests__'));
+      writeFileSync(join(dir, 'src', '__tests__', 'setup.ts'), 'u1\nu2\n');
+      // …and a lockfile under a test directory is mechanical churn on BOTH
+      // sides of the split, or NET_SRC would be corrupted by the subtraction.
+      writeFileSync(
+        join(dir, 'integration-tests', 'package-lock.json'),
+        'k1\nk2\nk3\nk4\nk5\nk6\n',
+      );
+      writeFileSync(
+        join(dir, 'assets', 'logo.bin'),
+        Buffer.from([0x00, 0x01, 0x02, 0x00]),
+      );
+      // Mechanical churn: a ROOT lockfile (proves '**/' glob-magic matches
+      // at depth zero), a nested one, and the exact generated-schema path —
+      // all excluded, so none of them shift the expected nets below.
+      writeFileSync(join(dir, 'package-lock.json'), 'l1\nl2\nl3\nl4\nl5\n');
+      mkdirSync(join(dir, 'packages', 'vscode-ide-companion', 'schemas'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(dir, 'packages', 'vscode-ide-companion', 'package-lock.json'),
+        'm1\nm2\nm3\n',
+      );
+      writeFileSync(
+        join(
+          dir,
+          'packages',
+          'vscode-ide-companion',
+          'schemas',
+          'settings.schema.json',
+        ),
+        'g1\ng2\ng3\ng4\n',
+      );
+      git('add', '-A');
+      git('commit', '-qm', 'pr');
+      // Advance main PAST the divergence before measuring: with main
+      // unmoved a two-dot regression produces identical numbers, so only a
+      // moved main pins the merge-base (three-dot) semantics.
+      git('checkout', '-q', 'main');
+      writeFileSync(join(dir, 'mainline.ts'), 'm1\nm2\nm3\nm4\nm5\n');
+      git('add', '-A');
+      git('commit', '-qm', 'main-moves');
+      git('checkout', '-q', 'pr');
+      git('update-ref', 'refs/remotes/origin/main', 'main');
+      const measured = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(measured).toBe('22 18 4');
+      // Fail-open: an orphan-history branch has no merge base, the three-dot
+      // diff exits 128, and under the workflow's real shell options the
+      // block must still complete with zero nets (brake skipped) instead of
+      // killing the prepare step every round.
+      git('update-ref', '-d', 'refs/remotes/origin/main');
+      const orphan = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphan).toBe('0 0 0');
+      // Unmeasured is a STATE: no bogus anchor may be written.
+      const orphanFlag = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s' "$NET_MEASURED"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphanFlag).toBe('false');
+      // A fork head literally named 'main' skips measurement out loud.
+      const forkMain = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\nBRANCH=main\n${measureBlock}\nprintf '\\n%s %s' "$NET_MEASURED" "$NET_TOTAL"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(forkMain.split('\n').pop()).toBe('false 0');
+      expect(measureBlock).toContain(
+        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // Baseline parse: bot-only, window-keyed, FIRST-wins — a duplicate
+    // marker in the same window cannot move an anchored baseline, a spoofed
+    // marker from another login is ignored, negative nets round-trip, and a
+    // window with no marker yields empty (this round anchors it).
+    const baselineJq = prepareBranchAndFeedbackStep.match(
+      /GROWTH_BASELINE="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg key "\$\{LIVE_REARM_KEY\}" --arg baseupd "\$\{BASE_UPD_AT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+    )?.[1];
+    expect(baselineJq).toBeTruthy();
+    const baselineComments = [
+      {
+        user: { login: 'mallory' },
+        created_at: '2026-01-01T00:00:00Z',
+        body: '<!-- autofix-growth-base src=1 test=1 key=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T01:00:00Z',
+        body: 'report\n\n<!-- autofix-eval ts=2026-01-01T00:59:00Z acted=true round=1 win=WIN0 -->\n<!-- autofix-growth-base src=7 test=8 key=WIN0 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T02:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=50 test=-60 key=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T03:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=100 test=200 key=WIN1 -->',
+      },
+    ];
+    const baselineFor = (key, baseupd = '') =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--arg',
+          'key',
+          key,
+          '--arg',
+          'baseupd',
+          baseupd,
+          baselineJq,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(baselineComments) },
+      ).trimEnd();
+    expect(baselineFor('WIN1')).toBe('50 -60');
+    expect(baselineFor('WIN2')).toBe('');
+    // A base update newer than an anchor invalidates it (the merge base it
+    // was measured against moved); a later anchor survives first-wins.
+    expect(baselineFor('WIN1', '2026-01-01T02:30:00Z')).toBe('100 200');
+    expect(baselineFor('WIN1', '2026-01-01T04:00:00Z')).toBe('');
+
+    // The baseline marker is written into this window's FIRST report only
+    // (pushed and no-op branches), rides the same comment as autofix-eval so
+    // every feedback filter already excludes it, and never touches the
+    // POSITIONAL autofix-eval parsers. Exactly one more occurrence exists:
+    // the prepare-side scan() parse.
+    expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
+    expect(
+      pushAndReportStep.split(
+        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
+      ).length - 1,
+    ).toBe(2);
+    expect(
+      pushAndReportStep.split(`if [[ "\${GROWTH_BASE_NEW}" == 'true' ]]; then`)
+        .length - 1,
+    ).toBe(2);
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_NEW: '${{ steps.prepare.outputs.growth_base_new }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_SRC: '${{ steps.prepare.outputs.growth_base_src }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'",
+    );
+    // The marker is written under the key the baseline was READ under
+    // (LIVE_REARM_KEY), not the matrix WINDOW: a supersede-exempt conflict
+    // round can report under a stale WINDOW after a re-arm, and a marker
+    // under that dead key would hide the round's pushed growth from every
+    // later read in the live window.
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'",
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_new=${GROWTH_BASE_NEW}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_src=${BASE_SRC}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_test=${BASE_TEST}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_win=${LIVE_REARM_KEY}',
+    );
+
+    // The deferred preamble names the actual cause — a maintainer reading
+    // "after five rounds" on a round-2 PR that tripped the growth budget
+    // would reasonably conclude the brake misfired.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Critical-only mode is active: ${CAUSE_EN}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '已进入仅处理 Critical 的模式：${CAUSE_ZH}',
+    );
+    // The cause construction is REPLAYED across the three engagement shapes,
+    // in both languages: a growth-only trip must never announce the round
+    // threshold, signs render naturally (no '+-120'), and EN/ZH always name
+    // the same cause.
+    const causeBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_CLAUSE_EN="the PR's diff grew[\s\S]*?CAUSE_ZH="\$\{ROUNDS_CLAUSE_ZH\}"\n\s+fi)/,
+    )?.[1];
+    expect(causeBlock).toBeTruthy();
+    const causeFor = (rounds, growth, growthSrc, growthTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const growthOnly = causeFor('false', 'true', -120, 500);
+    expect(growthOnly[0]).toContain('src -120 / test 500');
+    expect(growthOnly[0]).not.toContain('rounds are complete');
+    expect(growthOnly[0]).not.toContain('+-');
+    expect(growthOnly[1]).toContain('源码 -120 / 测试 500');
+    expect(growthOnly[1]).not.toContain('轮次');
+    const roundsOnly = causeFor('true', 'false', 0, 0);
+    expect(roundsOnly[0]).toBe('5 change-producing rounds are complete');
+    expect(roundsOnly[0]).not.toContain('diff grew');
+    expect(roundsOnly[1]).toContain('已完成 5 个产生改动的轮次');
+    const both = causeFor('true', 'true', 900, 20);
+    expect(both[0]).toContain('rounds are complete and');
+    expect(both[0]).toContain('src 900 / test 20');
+    expect(both[1]).toContain('轮次，且');
+
+    // The batch-budget sentence must describe the policy actually in force:
+    // the OVER_BUDGET census only builds spans in round-brake territory, so
+    // a growth-only engagement has no enforceable budget and must say so.
+    const budgetBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ "\$\{CRITICAL_ONLY_ROUNDS\}" == 'true' \]\]; then\n\s+BUDGET_EN=[\s\S]*?BUDGET_ZH="纯增长[\s\S]*?fi)/,
+    )?.[1];
+    expect(budgetBlock).toBeTruthy();
+    const budgetFor = (rounds) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_HUMAN_BATCHES=2\nCRITICAL_ONLY_AFTER_ROUND=5\n${budgetBlock}\nprintf '%s\\n%s' "$BUDGET_EN" "$BUDGET_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const roundsBudget = budgetFor('true');
+    expect(roundsBudget[0]).toContain('used 2 regular feedback batches');
+    expect(roundsBudget[1]).toContain('2 批常规反馈预算');
+    const growthBudget = budgetFor('false');
+    expect(growthBudget[0]).toContain('continues to flow unaffected');
+    expect(growthBudget[0]).not.toContain('named below');
+    expect(growthBudget[1]).toContain('照常流动');
+
+    // Baseline wiring: the BASH_REMATCH split, fresh-anchor fallback, and
+    // growth subtractions — the producer (measurement/jq) and consumer
+    // (mode block) are replayed elsewhere; this replays the middle.
+    const wiringBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_BASE_NEW='false'[\s\S]*?GROWTH_TEST=\$\(\( NET_TEST - BASE_TEST \)\))/,
+    )?.[1];
+    expect(wiringBlock).toBeTruthy();
+    const wire = (baseline, netSrc, netTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BASELINE='${baseline}'\nNET_MEASURED=true\nNET_SRC=${netSrc}\nNET_TEST=${netTest}\n${wiringBlock}\nprintf '%s %s %s %s %s' "$GROWTH_BASE_NEW" "$BASE_SRC" "$BASE_TEST" "$GROWTH_SRC" "$GROWTH_TEST"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    // Parseable baseline: growth = net − base, marker not re-written.
+    expect(wire('50 -60', 120, 40)).toBe('false 50 -60 70 100');
+    // Empty baseline: THIS round anchors — marker written, growth zero.
+    expect(wire('', 120, 40)).toBe('true 120 40 0 0');
+    // Malformed baseline falls to the fresh anchor too.
+    expect(wire('garbage', 120, 40)).toBe('true 120 40 0 0');
+
+    // Writer↔scanner round-trip: render the report step's ACTUAL marker
+    // template (negative src, explicit window key) and require the prepare
+    // step's scan() to parse it back — the two sides are otherwise pinned
+    // only separately, so format drift would ship green while the baseline
+    // never parses in production.
+    const markerTemplate = pushAndReportStep.match(
+      /echo "(<!-- autofix-growth-base src=[^"]+-->)"/,
+    )?.[1];
+    expect(markerTemplate).toBeTruthy();
+    const rendered = execFileSync(
+      'bash',
+      [
+        '-c',
+        `GROWTH_BASE_SRC=-5\nGROWTH_BASE_TEST=0\nGROWTH_BASE_WIN=WINX\necho "${markerTemplate}"`,
+      ],
+      { encoding: 'utf8' },
+    ).trim();
+    const roundTrip = execFileSync(
+      'jq',
+      [
+        '-r',
+        '--arg',
+        'ab',
+        'qwen-code-dev-bot',
+        '--arg',
+        'key',
+        'WINX',
+        '--arg',
+        'baseupd',
+        '',
+        baselineJq,
+      ],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:00:00Z',
+            body: `report\n\n${rendered}`,
+          },
+        ]),
+      },
+    ).trimEnd();
+    expect(roundTrip).toBe('-5 0');
+    // The marker's window field is `key=`, never `win=`: three censuses
+    // attribute comments to windows by the whole-body substring
+    // `win=<key> -->`, and this marker can carry a different window than
+    // its comment's autofix-eval marker.
+    expect(rendered).not.toContain('win=');
+
+    // The report-post retry loop carries the round's entire persisted
+    // state: replay it with a stubbed gh — a success posts exactly once;
+    // a full outage attempts exactly three times, ends with "giving up"
+    // (not a fourth "retrying"), and fails the step.
+    const retryBlock = pushAndReportStep.match(
+      /(REPORT_POSTED='false'[\s\S]*?\[\[ "\$\{REPORT_POSTED\}" == 'true' \]\] \|\| exit 1)/,
+    )?.[1];
+    expect(retryBlock).toBeTruthy();
+    const retry = (ghExit) => {
+      const calls = mkdtempSync(join(tmpdir(), 'autofix-retry-'));
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'PR=1 REPO=o/r WORKDIR=.',
+            'sleep() { :; }',
+            `gh() { echo x >> "$1/calls"; return ${ghExit}; }`.replace(
+              '$1',
+              calls,
+            ),
+            retryBlock,
+            'echo POSTED_OK',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+      const count = existsSync(join(calls, 'calls'))
+        ? readFileSync(join(calls, 'calls'), 'utf8').split('\n').filter(Boolean)
+            .length
+        : 0;
+      rmSync(calls, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, status: res.status, count };
+    };
+    const posted = retry(0);
+    expect(posted.count).toBe(1);
+    expect(posted.out).toContain('POSTED_OK');
+    const outage = retry(1);
+    expect(outage.count).toBe(3);
+    expect(outage.status).toBe(1);
+    expect(outage.out).toContain('giving up');
+    expect(outage.out.split('retrying').length - 1).toBe(2);
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
@@ -12161,7 +12627,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     restoreClash = false,
     hugeFail = false,
     noIdentity = false,
+    baselineNoIdentity = false,
     trackedDirt = false,
+    commFail = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -12243,6 +12711,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           // vite/esbuild shape: a red build with no tsc diagnostic at all.
           '        echo "error during build: something exploded"; exit 1',
           '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${BASELINE_NO_IDENTITY:-}" == "1" ]]; then',
+          // Same shape restricted to the baseline leg — the head keeps its
+          // tsc identity while the baseline loses its.
+          '        echo "error during build: something exploded"; exit 1',
+          '      fi',
           '      if [[ "$head" == "${BASELINE_SHA:-}" && "${TRACKED_DIRT:-}" == "1" ]]; then',
           // The build rewrites a TRACKED file (the settings-schema shape):
           // f.txt differs across refs, so an undiscarded rewrite makes the
@@ -12278,6 +12751,13 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         ].join('\n'),
       );
       chmodSync(join(bin, 'npm'), 0o755);
+      if (commFail) {
+        // Shadows the system comm via PATH precedence: the signature
+        // comparison itself fails (the SIGPIPE-under-pipefail class), so
+        // the gate takes its fail-closed retryable exit.
+        writeFileSync(join(bin, 'comm'), '#!/bin/bash\nexit 1\n');
+        chmodSync(join(bin, 'comm'), 0o755);
+      }
       const rt = join(dir, 'rt');
       mkdirSync(rt);
       writeFileSync(
@@ -12321,6 +12801,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
             EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
             RESTORE_CLASH: restoreClash ? '1' : '',
             NO_IDENTITY: noIdentity ? '1' : '',
+            BASELINE_NO_IDENTITY: baselineNoIdentity ? '1' : '',
             TRACKED_DIRT: trackedDirt ? '1' : '',
             SCHEMA_FAIL: schemaFail ? '1' : '',
             TYPECHECK_FAIL: typecheckFail ? '1' : '',
@@ -12375,6 +12856,11 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // The baseline leg's own transcript is the ONLY proof behind the
     // verdict — it must reach the rejection document.
     expect(r.rejection).toContain(`stub build FAILED at ${r.baselineSha}`);
+    // No repair runs for a pre-existing failure — the dist/ steering note
+    // is for the repair agent and stays out of this document.
+    expect(r.rejection).not.toContain(
+      'run npm run build before typecheck/tests',
+    );
     expect(r.headAfter).toBe('feature');
   });
 
@@ -12514,6 +13000,46 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     expect(r.outputs).toContain('retryable=true');
     expect(r.outputs).not.toContain('preexisting=true');
     expect(r.stdout).toContain('DIFFERENT reason');
+    // The same repair handoff as the green path — the dist/ warning must
+    // seed this rejection too.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+  });
+
+  it('charges the round when the baseline fails without a failure identity', () => {
+    // Mirror of the head-side noIdentity shape on the other leg: the
+    // baseline crashes vite/esbuild-style with no tsc diagnostic, so its
+    // signature is empty and identity cannot be established — fail
+    // closed and charge the round, with the same repair handoff (and
+    // dist/ note) as the sibling retryable exits.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineNoIdentity: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+  });
+
+  it('seeds the dist-rebuild warning when the signature comparison itself fails', () => {
+    // comm failing (SIGPIPE under pipefail, an infrastructure hiccup)
+    // takes the same retryable handoff as the green/different-signature
+    // exits — without the note the repair agent trusts baseline-built
+    // dist/ and chases phantom dist-consuming failures.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      commFail: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+    // Like its sibling exits, this one names its verdict — an oncall must
+    // distinguish "the comparison itself failed" from "baseline is green"
+    // without re-running the A/B.
+    expect(r.rejection).toContain('signature comparison failed');
+    expect(r.headAfter).toBe('feature');
   });
 
   it('keeps the green path intact', () => {

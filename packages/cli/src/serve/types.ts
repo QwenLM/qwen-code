@@ -155,11 +155,13 @@ export interface ServeOptions {
    */
   workspace?: string;
   /**
-   * Project-memory partitioning for every runtime owned by this daemon.
+   * Project-memory partitioning for every runtime owned by `runQwenServe`.
    * `workspace` keys memory by the exact registered workspace; `git-root`
    * preserves the legacy behavior that shares memory among workspaces
    * resolved to the same Git root. When omitted,
-   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment.
+   * `QWEN_CODE_MEMORY_PROJECT_SCOPE` is read from the environment before
+   * defaulting to `workspace`. Direct `createServeApp` callers must instead
+   * provide the scope through `deps.daemonEnv`.
    */
   memoryProjectScope?: MemoryProjectScope;
   /**
@@ -462,6 +464,8 @@ export interface CapabilitiesEnvelope {
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;
     sessionRestoreTimeoutMs?: number;
+    /** Present when `workspace_file_upload` is advertised. */
+    maxWorkspaceFileUploadBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.
