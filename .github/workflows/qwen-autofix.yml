@@ -1829,21 +1829,24 @@ jobs:
               # `/takeover stop` retries the removal — but must not disappear
               # silently either: masked, the ack reads "released" while the
               # loop keeps managing the PR.
-              # Track whether the takeover release actually LANDED: success
-              # or 404 (already gone) both mean the label is off. A 403/5xx/
-              # network failure means it is still on — in that case the
-              # needs-human removal below must NOT run, or the PR keeps the
-              # takeover label while losing its escalation label (and the
-              # release ack posted here would latch RELEASE_ACKED, blocking
-              # every automated path that could re-apply it). (R4-32)
-              REMOVED_OK=true
+              # REST for the same reason as the add above; the label name is a
+              # path segment and contains a slash, so it must be URI-encoded.
+              # The 404-tolerance block is pinned byte-identical to the other
+              # workflows' label DELETE (a contract test), so REMOVED_OK —
+              # whether the takeover release actually LANDED — is derived from
+              # REMOVE_ERR's content AFTER the idiom instead of reworking it:
+              # empty = landed, 404 = already off (landed), anything else =
+              # the release did NOT land, and the needs-human removal below
+              # must NOT run (R4-32) — or the PR keeps the takeover label
+              # while losing its escalation label, and the release ack posted
+              # here would latch RELEASE_ACKED, blocking every automated path
+              # that could re-apply it.
               if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
-                if [[ "${REMOVE_ERR}" == *404* ]]; then
-                  REMOVED_OK=true
-                else
-                  REMOVED_OK=false
-                  echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
-                fi
+                [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
+              fi
+              REMOVED_OK=true
+              if [[ -n "${REMOVE_ERR}" && "${REMOVE_ERR}" != *404* ]]; then
+                REMOVED_OK=false
               fi
               echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
               # Released means a human is driving — the escalation label is
