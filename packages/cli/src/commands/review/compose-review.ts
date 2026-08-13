@@ -56,6 +56,7 @@ import {
   type RosterPlan,
 } from './lib/roster.js';
 import { repositoryContextOf } from './lib/repository-context.js';
+import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
@@ -711,6 +712,11 @@ function composeReviewBody(
     gateDisclosed.push(...gate.disclosed);
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
     repositoryContextNotes.push(...repositoryContextGate(input.planPath));
+    // Modeled-executable-system diffs (declared by the manifest domain) owe
+    // per-layer reverse-audit coverage; an unwalked defect layer joins
+    // `unreviewedDimensions` and caps a would-be Approve, exactly like a
+    // dimension nobody reviewed. Inert on every diff the manifest does not mark.
+    unreviewed.push(...layerAuditGate(input.planPath, input.env).unreviewed);
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
