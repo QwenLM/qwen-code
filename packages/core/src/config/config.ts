@@ -1955,6 +1955,19 @@ export class Config {
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private goalRuntime: GoalRuntime | undefined;
   private goalRuntimeReady: Promise<GoalRuntime> | undefined;
+  /**
+   * A Goal restore held back because the session writer is not accepting
+   * writes yet. Settled by {@link startPendingGoalRestore} once the
+   * recorder has its lease, or by {@link settlePendingGoalRestore} when the
+   * writer never arrives.
+   */
+  private pendingGoalRestore:
+    | {
+        readonly runtime: GoalRuntime;
+        readonly resolve: (runtime: GoalRuntime) => void;
+        readonly reject: (error: unknown) => void;
+      }
+    | undefined;
   private goalTurnHost: GoalTurnHost | undefined;
   private goalTurnHostUnbind: (() => void) | undefined;
   private goalTurnHostGeneration = 0;
@@ -3194,6 +3207,11 @@ export class Config {
       recorder.activate(lease, authoritative, persistedTitleInfo);
       this.pendingSessionWriterLease = undefined;
       lease = undefined;
+      // The recorder can take writes now, so the restore the constructor
+      // held back can finally run — against `authoritative`, which is
+      // fresher than what the constructor had. Not awaited: activation
+      // latency is unchanged, and `getGoalRuntimeReady()` is what waits.
+      this.startPendingGoalRestore();
     } catch (error) {
       let failure: unknown = error;
       if (
@@ -3235,6 +3253,10 @@ export class Config {
           });
         }
       }
+      // The writer never became available, so the deferred restore can never
+      // run. Fail it with the activation error instead of leaving every
+      // `getGoalRuntimeReady()` caller pending forever.
+      this.settlePendingGoalRestore(failure);
       throw failure;
     }
   }
@@ -5096,6 +5118,13 @@ export class Config {
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.goalTurnHostUnbind?.();
         this.goalTurnHostUnbind = undefined;
+        // Shutting down before the writer arrived: nothing will ever run
+        // the deferred restore, so settle it rather than strand awaiters.
+        this.settlePendingGoalRestore(
+          new GoalPersistenceUnavailableError(
+            'Config shut down before the session writer became available',
+          ),
+        );
         this.goalRuntime?.dispose();
       }
 
@@ -7519,14 +7548,22 @@ export class Config {
   private initializeGoalRuntime(records?: readonly ChatRecord[]): void {
     this.goalTurnHostUnbind?.();
     this.goalTurnHostUnbind = undefined;
+    // A runtime built here supersedes any restore still waiting on the
+    // writer: its records belong to the outgoing session.
+    this.settlePendingGoalRestore(
+      new GoalPersistenceUnavailableError(
+        'Goal runtime was replaced before the session writer became available',
+      ),
+    );
     if (!this.chatRecordingService) {
       this.goalRuntime = undefined;
       this.goalRuntimeReady = undefined;
       return;
     }
+    const recorder = this.chatRecordingService;
     const runtime = createGoalRuntime({
-      journal: this.chatRecordingService,
-      evidenceSource: this.chatRecordingService,
+      journal: recorder,
+      evidenceSource: recorder,
       verifier: createGoalVerifier(this),
       checkpointVerifier: createGoalCheckpointVerifier(this),
     });
@@ -7534,8 +7571,66 @@ export class Config {
     if (this.goalTurnHost) {
       this.goalTurnHostUnbind = runtime.bindHost(this.goalTurnHost);
     }
-    this.goalRuntimeReady = runtime.restore(records ?? []).then(() => runtime);
+    // Under a session-writer lease the recorder starts `inactive` and
+    // rejects every write until `activateChatRecording()` hands it the
+    // lease. Restoring now would push the legacy-migration journal write
+    // straight into that guard, and `restore()` latches the resulting
+    // failure as `recoveryError` for the life of the runtime — the
+    // migrated goal is dropped and goal persistence is bricked for the
+    // whole resumed session. Wait for the writer instead.
+    if (this.sessionWriterLeaseEnabled && !recorder.hasWriteOwnership()) {
+      const ready = new Promise<GoalRuntime>((resolve, reject) => {
+        this.pendingGoalRestore = { runtime, resolve, reject };
+      });
+      this.goalRuntimeReady = ready;
+    } else {
+      this.goalRuntimeReady = runtime
+        .restore(records ?? [])
+        .then(() => runtime);
+    }
     void this.goalRuntimeReady.catch(() => undefined);
+  }
+
+  /**
+   * Run the restore that {@link initializeGoalRuntime} deferred because the
+   * session writer was not yet accepting writes.
+   *
+   * Called once `activateChatRecording()` has handed the recorder its lease.
+   * Deliberately re-reads the records from `sessionData`: activation
+   * replaces it with the authoritative transcript loaded under the lease, so
+   * the deferred restore sees newer records than the constructor did.
+   */
+  private startPendingGoalRestore(): void {
+    const pending = this.pendingGoalRestore;
+    if (!pending) return;
+    this.pendingGoalRestore = undefined;
+    if (pending.runtime !== this.goalRuntime) {
+      pending.reject(
+        new GoalPersistenceUnavailableError(
+          'Goal runtime was replaced before the session writer became available',
+        ),
+      );
+      return;
+    }
+    void pending.runtime
+      .restore(this.sessionData?.conversation.messages ?? [])
+      .then(
+        () => pending.resolve(pending.runtime),
+        (error: unknown) => pending.reject(error),
+      );
+  }
+
+  /**
+   * Fail a deferred restore that can never run — the writer never became
+   * available, or the runtime it belonged to was replaced. Without this the
+   * promise behind {@link getGoalRuntimeReady} would stay pending forever
+   * and every awaiting caller would hang rather than see the failure.
+   */
+  private settlePendingGoalRestore(error: unknown): void {
+    const pending = this.pendingGoalRestore;
+    if (!pending) return;
+    this.pendingGoalRestore = undefined;
+    pending.reject(error);
   }
 
   private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {

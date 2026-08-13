@@ -31,6 +31,7 @@ import type {
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionConfigOptionResult,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
@@ -564,6 +565,18 @@ export class DaemonSessionClient {
     return await this.client.setSessionModel(
       this.sessionId,
       modelId,
+      this.clientId,
+    );
+  }
+
+  async setConfigOption(
+    configId: 'reasoning_effort',
+    value: string,
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return await this.client.setSessionConfigOption(
+      this.sessionId,
+      configId,
+      value,
       this.clientId,
     );
   }
