@@ -311,6 +311,32 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(1);
     expect(data.memoryFiles[0].path).toBe(path.join('~', '.qwen', 'QWEN.md'));
   });
+
+  it('renders project-local markers as relative paths when workingDir != cwd', async () => {
+    // The resolve+format round-trip must anchor on the session working dir,
+    // not process.cwd(); a mutation that passes process.cwd() as the display
+    // anchor renders every project-local file as a ../.. chain.
+    const workingDir = path.join(os.tmpdir(), 'context-session-dir');
+    const memory =
+      `--- Context from: QWEN.md ---\n` +
+      `project rules\n` +
+      `--- End of Context from: QWEN.md ---\n` +
+      `--- Context from: docs/QWEN.md ---\n` +
+      `docs rules\n` +
+      `--- End of Context from: docs/QWEN.md ---`;
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(2);
+    expect(data.memoryFiles[0].path).toBe('QWEN.md');
+    expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+  });
 });
 
 describe('/context shows three-tier thresholds', () => {

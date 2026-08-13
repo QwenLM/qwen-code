@@ -14,8 +14,26 @@ import {
 } from '../../utils/commands.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { MessageType } from '../types.js';
 import { isWaylandSession, writeOsc52 } from './clipboardUtils.js';
 import { toCodePoints } from './textUtils.js';
+
+/** Shared prefix for the context-files announcement INFO item.
+ * Used by both the emission site and the rewind re-arm matcher so the
+ * pairing is enforced by construction, not by exact-spelling coupling. */
+export const CONTEXT_FILES_ANNOUNCEMENT_PREFIX = 'Read context files:';
+
+/** Whether a history item is the context-files announcement. */
+export function isContextFilesAnnouncement(item: {
+  type: MessageType;
+  text?: string;
+}): boolean {
+  return (
+    item.type === MessageType.INFO &&
+    typeof item.text === 'string' &&
+    item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX)
+  );
+}
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.

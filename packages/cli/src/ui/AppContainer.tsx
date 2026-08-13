@@ -169,8 +169,10 @@ import {
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   consumesContextAnnouncementLatch,
   isBtwCommand,
+  isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
 import {
@@ -2566,11 +2568,12 @@ export const AppContainer = (props: AppContainerProps) => {
       // (ESC, expansion errors) and built-in submit_prompt commands without
       // the modelInvocable flag are not re-armed here; consuming at the true
       // admission choke point is a deeper refactor deferred for this feature.
-      // Known gap: /cd (relocateWorkingDirectory) swaps the attached
-      // context-file set within the same session but does not re-arm the
-      // latch, so the new file set is never announced. A self-healing latch
-      // that watches the context-file set would cover /cd, /restore, and
-      // rewind centrally; deferred as a follow-up.
+      // Known gap: /cd, /directory add, and performMemoryRefresh swap the
+      // attached context-file set within the same session but do not re-arm
+      // the latch, so the new file set is never announced after the first
+      // prompt consumes it. A self-healing latch that watches the
+      // context-file set would cover these centrally; deferred as a
+      // follow-up.
       const trimmedPrompt = userPromptText.trim();
       if (
         !contextFilesAnnouncedRef.current &&
@@ -2581,14 +2584,15 @@ export const AppContainer = (props: AppContainerProps) => {
       ) {
         const contextFilePaths = config.getContextFilePaths();
         if (contextFilePaths.length > 0) {
-          // Consume the latch only when something was actually announced,
-          // so files attached later in the session (e.g. /directory add)
-          // still get their one-shot notice.
+          // Consume the latch only when something was actually announced;
+          // files attached before the first prompt still get their one-shot
+          // notice. Files attached after (e.g. /directory add,
+          // performMemoryRefresh) are a known gap — see above.
           contextFilesAnnouncedRef.current = true;
           historyManager.addItem(
             {
               type: MessageType.INFO,
-              text: `Read context files: ${contextFilePaths.join(', ')}`,
+              text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} ${contextFilePaths.join(', ')}`,
             },
             Date.now(),
           );
@@ -3735,10 +3739,7 @@ export const AppContainer = (props: AppContainerProps) => {
           // so the next prompt must re-announce; rewinding to a turn at/after
           // the announcement keeps the INFO and must not duplicate it.
           contextFilesAnnouncedRef.current = truncatedUi.some(
-            (item) =>
-              item.type === MessageType.INFO &&
-              typeof item.text === 'string' &&
-              item.text.startsWith('Read context files:'),
+            isContextFilesAnnouncement,
           );
 
           refreshStatic();

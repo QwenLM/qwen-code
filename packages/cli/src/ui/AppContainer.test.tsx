@@ -95,6 +95,10 @@ import {
   ToolCallStatus,
 } from './types.js';
 import { CommandKind } from './commands/types.js';
+import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  isContextFilesAnnouncement,
+} from './utils/commandUtils.js';
 import { ICON } from './constants.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
@@ -5958,7 +5962,8 @@ describe('AppContainer State Management', () => {
     it('re-arms the latch when rewinding past the context-file announcement', async () => {
       // Announcement sits after the rewind target, so it is filtered out of
       // truncatedUi; the latch re-arms and the next prompt re-announces the
-      // still-attached files.
+      // still-attached files. We submit once before rewinding to consume
+      // the latch, so the re-arm transition is actually exercised.
       const history: HistoryItem[] = [
         rewindUserItem(1, 'first prompt', 'prompt-1'),
         { id: 2, type: 'gemini', text: 'first response' },
@@ -5966,7 +5971,7 @@ describe('AppContainer State Management', () => {
         {
           id: 4,
           type: MessageType.INFO,
-          text: 'Read context files: QWEN.md',
+          text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} QWEN.md`,
         },
       ];
       const harness = renderRewindHarness({
@@ -5974,18 +5979,24 @@ describe('AppContainer State Management', () => {
         contextFilePaths: ['QWEN.md'],
       });
 
+      // Consume the latch so the rewind's re-arm is a real transition.
+      capturedUIActions.handleFinalSubmit('first', {
+        submittedPrompt: 'first',
+      });
+      const announcementsBefore = harness.addItem.mock.calls.filter(([item]) =>
+        isContextFilesAnnouncement(item),
+      );
+      expect(announcementsBefore).toHaveLength(1);
+
       await runRewind(harness.target, 'both');
 
       capturedUIActions.handleFinalSubmit('again', {
         submittedPrompt: 'again',
       });
-      const announcements = harness.addItem.mock.calls.filter(
-        ([item]) =>
-          item.type === MessageType.INFO &&
-          typeof item.text === 'string' &&
-          item.text.startsWith('Read context files:'),
+      const announcementsAfter = harness.addItem.mock.calls.filter(([item]) =>
+        isContextFilesAnnouncement(item),
       );
-      expect(announcements).toHaveLength(1);
+      expect(announcementsAfter).toHaveLength(2);
     });
 
     it('keeps the latch consumed when rewinding to a turn after the announcement', async () => {
@@ -5997,7 +6008,7 @@ describe('AppContainer State Management', () => {
         {
           id: 2,
           type: MessageType.INFO,
-          text: 'Read context files: QWEN.md',
+          text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} QWEN.md`,
         },
         rewindUserItem(3, 'second prompt', 'prompt-2'),
         { id: 4, type: 'gemini', text: 'second response' },
@@ -6012,11 +6023,8 @@ describe('AppContainer State Management', () => {
       capturedUIActions.handleFinalSubmit('again', {
         submittedPrompt: 'again',
       });
-      const announcements = harness.addItem.mock.calls.filter(
-        ([item]) =>
-          item.type === MessageType.INFO &&
-          typeof item.text === 'string' &&
-          item.text.startsWith('Read context files:'),
+      const announcements = harness.addItem.mock.calls.filter(([item]) =>
+        isContextFilesAnnouncement(item),
       );
       expect(announcements).toHaveLength(0);
     });
@@ -6343,12 +6351,7 @@ describe('AppContainer State Management', () => {
     };
 
     const announcementCalls = (addItem: ReturnType<typeof vi.fn>) =>
-      addItem.mock.calls.filter(
-        ([item]) =>
-          item.type === MessageType.INFO &&
-          typeof item.text === 'string' &&
-          item.text.startsWith('Read context files:'),
-      );
+      addItem.mock.calls.filter(([item]) => isContextFilesAnnouncement(item));
 
     it('announces loaded context files above the first real prompt, once', () => {
       const { addItem, enqueueMessage } = renderAnnouncementHarness([
@@ -6363,7 +6366,7 @@ describe('AppContainer State Management', () => {
       expect(addItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.INFO,
-          text: 'Read context files: QWEN.md, ~/.qwen/QWEN.md',
+          text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} QWEN.md, ~/.qwen/QWEN.md`,
         }),
         expect.any(Number),
       );
