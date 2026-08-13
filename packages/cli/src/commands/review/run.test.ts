@@ -466,6 +466,14 @@ describe('review run (handler)', () => {
         JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
         'utf8',
       );
+      // Strictly NEWER than this run's own verdict, written below: with the
+      // neighbour older, an unpinned newest-composed scan would land on the
+      // right file anyway and the regression would pass this test.
+      utimesSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-pr-9013-composed.json'),
+        Date.now() / 1000 + 60,
+        Date.now() / 1000 + 60,
+      );
       // The neighbour's saved report exists too — and is newer than this
       // run's own by the time the scan runs.
       mkdirSync(REVIEWS_DIR, { recursive: true });
@@ -552,6 +560,31 @@ describe('review run (handler)', () => {
 
     const result = JSON.parse(outs.join(''));
     expect(result.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('names the artifact it waited for when no verdict appears', async () => {
+    // The pin is an exact-filename contract with the skill's naming
+    // template. When the two drift, Step 9 has already swept `.qwen/tmp` by
+    // the time anyone investigates — so the expectation has to be in the
+    // failure report itself, in both output modes.
+    armChild(0);
+    await runHandler({ target: '9014', json: false });
+
+    expect(outs.join('')).toContain(
+      'no composed verdict was produced (expected',
+    );
+    expect(outs.join('')).toContain('qwen-review-pr-9014-composed.json');
+    expect(process.exitCode).toBe(1);
+
+    outs.length = 0;
+    armChild(0);
+    await runHandler({ target: '9014' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.expectedComposedName).toBe(
+      'qwen-review-pr-9014-composed.json',
+    );
   });
 
   it('closes the child stdin so piped input cannot defeat slash detection', async () => {

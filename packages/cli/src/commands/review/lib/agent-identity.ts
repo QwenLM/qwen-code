@@ -19,8 +19,15 @@
 // lines to the launches they write (measured: twelve finders shared one
 // PR-summary first line, and every disclosure rendered the same PR quote).
 
-/** A role that IS a chunk assignment — `chunk 3 of 7` — labels as its id. */
-const CHUNK_ROLE_RE = /^chunk (\d+) of \d+$/;
+/**
+ * A role that IS a chunk assignment — `chunk 3 of 7` — labels as its id.
+ * The shape matches coverage's `CHUNK_RE` (whitespace-tolerant,
+ * case-insensitive) so both readers resolve the same role the same way; a
+ * hand-edited `Chunk 3 of 7` used to resolve as a chunk owner in the posted
+ * body and a role agent in the ledger row. Anchored, because here the whole
+ * role slot is the candidate, not a substring of a prompt.
+ */
+const CHUNK_ROLE_RE = /^chunk\s+(\d+)\s+of\s+\d+$/i;
 
 const IDENTITY_LINE_RE = /^You are review agent `([^`\n]+)`(.*)$/;
 
