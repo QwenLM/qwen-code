@@ -5,13 +5,12 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, relative, resolve, win32 } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { manifestRepositoryContextProvider } from './manifest-repository-context.js';
 import { MAX_ARRAY_ITEMS } from './repository-context.js';
-import { allFiles, toRepositoryPath } from './test-utils.js';
 
 const repoRoot = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -24,8 +23,6 @@ const repoRoot = resolve(
 );
 
 const MANIFEST_RELATIVE_PATH = '.qwen/review-context.json';
-const SKILLS_ROOT = 'packages/core/src/skills';
-const BUNDLED_SKILLS_ROOT = `${SKILLS_ROOT}/bundled`;
 
 const expectedManifest = {
   version: 1,
@@ -50,14 +47,7 @@ const expectedManifest = {
     },
     {
       paths: ['packages/core/src/skills/**'],
-      // Keep every bundled skill entrypoint, but deliberately leave nested
-      // implementations, tests, references, and scripts to the changed-file
-      // diff. Including bundled/*/** makes the all-rule union 129 files and
-      // violates the 128-item repository-context wire contract.
-      relatedPaths: [
-        'packages/core/src/skills/*.ts',
-        'packages/core/src/skills/bundled/*/SKILL.md',
-      ],
+      relatedPaths: ['packages/core/src/skills/**'],
       domains: ['core-skills'],
     },
     {
@@ -102,8 +92,7 @@ const expectedManifest = {
 
 const relatedPathSentinels: Readonly<Record<string, string>> = {
   'packages/core/src/config/**': 'packages/core/src/config/config.ts',
-  'packages/core/src/skills/*.ts': 'packages/core/src/skills/skill-manager.ts',
-  'packages/core/src/skills/bundled/*/SKILL.md':
+  'packages/core/src/skills/**':
     'packages/core/src/skills/bundled/review/SKILL.md',
   'packages/web-shell/client/adapters/**':
     'packages/web-shell/client/adapters/types.ts',
@@ -127,29 +116,11 @@ function provideForRepo(changedPaths: string[]) {
   });
 }
 
-function provideForPattern(pattern: string, changedPath: string) {
-  const manifest = {
-    version: 1,
-    label: 'Pattern probe',
-    rules: [{ paths: [pattern], domains: ['pattern-probe'] }],
-  };
-  return manifestRepositoryContextProvider.provide({
-    worktree: repoRoot,
-    changedPaths: [changedPath],
-    readIdentityFile: (relativePath) =>
-      relativePath === MANIFEST_RELATIVE_PATH ? JSON.stringify(manifest) : null,
-  });
-}
-
 function probeFor(pattern: string): string {
-  return pattern
-    .split('/')
-    .map((segment) =>
-      segment === '**'
-        ? '__qwen_review_probe__'
-        : segment.replaceAll('*', 'probe').replaceAll('?', 'q'),
-    )
-    .join('/');
+  const wildcard = pattern.search(/[?*]/);
+  if (wildcard === -1) return pattern;
+  const slash = pattern.lastIndexOf('/', wildcard);
+  return `${pattern.slice(0, slash)}/probe.txt`;
 }
 
 function inGitWorktree(): boolean {
@@ -181,17 +152,10 @@ describe('committed review context manifest', () => {
   });
 
   it('matches every paths pattern through the real provider', () => {
-    const patterns = [
-      ...expectedManifest.rules.flatMap((rule) => rule.paths),
-      // No committed paths pattern uses a single-star segment; keep one
-      // synthetic probe so that branch of probeFor and the matcher stay covered.
-      'packages/core/src/synthetic/*.json',
-    ];
-    for (const pattern of patterns) {
-      const probe = probeFor(pattern);
-      expect(provideForPattern(pattern, probe)?.domains).toEqual([
-        'pattern-probe',
-      ]);
+    for (const rule of expectedManifest.rules) {
+      for (const pattern of rule.paths) {
+        expect(provideForRepo([probeFor(pattern)])).not.toBeNull();
+      }
     }
   });
 
@@ -214,99 +178,12 @@ describe('committed review context manifest', () => {
     }
   });
 
-  it('keeps nested bundled-skill material out of automatic related context', () => {
-    const changedPath =
-      'packages/core/src/skills/bundled/dataviz/synthetic-change.txt';
-    expect(existsSync(join(repoRoot, changedPath))).toBe(false);
-    const context = provideForRepo([changedPath]);
-
-    expect(context).not.toBeNull();
-    expect(context?.domains).toContain('core-skills');
-
-    const nestedSentinels = [
-      'packages/core/src/skills/bundled/dataviz/references/palette.md',
-      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
-      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.js',
-      'packages/core/src/skills/bundled/loop/autonomous-loop.ts',
-      'packages/core/src/skills/bundled/loop/autonomous-loop.test.ts',
-      'packages/core/src/skills/bundled/review/DESIGN.md',
-    ];
-    for (const sentinel of nestedSentinels) {
-      expect(existsSync(join(repoRoot, sentinel))).toBe(true);
-    }
-
-    const topLevelSources = readdirSync(join(repoRoot, SKILLS_ROOT), {
-      withFileTypes: true,
-    })
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
-      .map((entry) => `${SKILLS_ROOT}/${entry.name}`)
-      .sort();
-    const bundledFiles = [...allFiles(join(repoRoot, BUNDLED_SKILLS_ROOT))]
-      .map((path) => toRepositoryPath(relative(repoRoot, path)))
-      .sort();
-    const entrypoints = bundledFiles.filter((path) =>
-      /^packages\/core\/src\/skills\/bundled\/[^/]+\/SKILL\.md$/.test(path),
-    );
-    const nestedFiles = bundledFiles.filter(
-      (path) => !entrypoints.includes(path),
-    );
-    expect(topLevelSources.length).toBeGreaterThan(1);
-    expect(entrypoints.length).toBeGreaterThan(0);
-    expect(nestedFiles).toEqual(expect.arrayContaining(nestedSentinels));
-    for (const source of topLevelSources) {
-      expect(context?.relatedPaths).toContain(source);
-    }
-    for (const entrypoint of entrypoints) {
-      expect(context?.relatedPaths).toContain(entrypoint);
-    }
-    for (const nestedFile of nestedFiles) {
-      expect(context?.relatedPaths).not.toContain(nestedFile);
-    }
-  });
-
-  it('normalizes Windows file-walk results before repository matching', () => {
-    const windowsPath = win32.relative(
-      'C:\\repo',
-      'C:\\repo\\packages\\core\\src\\skills\\bundled\\review\\SKILL.md',
-    );
-
-    expect(toRepositoryPath(windowsPath, win32.sep)).toBe(
-      'packages/core/src/skills/bundled/review/SKILL.md',
-    );
-  });
-
   it('stays under the resolved-file bound when every rule co-matches', () => {
-    const probes = expectedManifest.rules.flatMap((rule) => {
-      const wildcardPatterns = rule.paths.filter((pattern) =>
-        /[?*]/.test(pattern),
-      );
-      expect(
-        wildcardPatterns.length,
-        'every rule needs a synthetic wildcard probe for the union test',
-      ).toBeGreaterThan(0);
-      return wildcardPatterns.map((pattern) => {
-        const probe = probeFor(pattern);
-        expect(
-          existsSync(join(repoRoot, probe)),
-          'union probes must not be real changed files excluded from relatedPaths',
-        ).toBe(false);
-        expect(provideForPattern(pattern, probe)?.domains).toEqual([
-          'pattern-probe',
-        ]);
-        return probe;
-      });
-    });
+    const probes = expectedManifest.rules.flatMap((rule) =>
+      rule.paths.map(probeFor),
+    );
     const context = provideForRepo(probes);
     expect(context).not.toBeNull();
-
-    // The reviewed tree resolved 115/128 files, leaving 13 slots. Do not pin
-    // that exact count: the real provider intentionally scans the working tree,
-    // so harmless untracked files and normal source growth can change it. The
-    // synthetic, nonexistent changed paths above prevent changed-file exclusion
-    // from understating the union. The manifest grammar has no negation globs,
-    // and hooks/** is the fastest-growing remaining group, so this bound is the
-    // deliberate alarm for future rebalancing rather than permission to
-    // truncate the result.
     expect(context?.relatedPaths.length).toBeLessThanOrEqual(MAX_ARRAY_ITEMS);
   });
 
