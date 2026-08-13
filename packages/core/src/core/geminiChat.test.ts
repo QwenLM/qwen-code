@@ -8473,6 +8473,45 @@ describe('GeminiChat', async () => {
         }
       });
 
+      it('rejects a placeholder formed by the delivered prefix and resumed remainder', async () => {
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('timeout)', 'STOP');
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Recovered response', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-placeholder',
+          );
+          await collectStreamWithFakeTimers(stream, 25_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'Recovered response' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('merges a whitespace-leading remainder identically in both layers', async () => {
         // R1-1: the record used to dedupe against `contentText`, which is
         // trimmed, while history merged the raw part. A cut landing on a token

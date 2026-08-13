@@ -4885,17 +4885,6 @@ export class GeminiChat {
       );
     }
 
-    if (
-      streamError === null &&
-      !hasToolCall &&
-      contentText === UPSTREAM_DEGRADED_PLACEHOLDER
-    ) {
-      throw new InvalidStreamError(
-        'Model response is an upstream fail-fast placeholder.',
-        'UPSTREAM_DEGRADED_RESPONSE',
-      );
-    }
-
     // Stream validation logic: A stream is considered successful if:
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
     // 2. There's a finish reason AND we have non-empty response text or thought text
@@ -5002,6 +4991,16 @@ export class GeminiChat {
         .map((part) => part.text)
         .join('')
         .trim();
+    }
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      contentText === UPSTREAM_DEGRADED_PLACEHOLDER
+    ) {
+      throw new InvalidStreamError(
+        'Model response is an upstream fail-fast placeholder.',
+        'UPSTREAM_DEGRADED_RESPONSE',
+      );
     }
     if (
       willPersistToHistory &&
