@@ -5,10 +5,15 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { context, ROOT_CONTEXT } from '@opentelemetry/api';
 import type { Application, RequestHandler } from 'express';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonLogContext, DaemonLogger } from '../daemon-logger.js';
 import { installAccessLogMiddleware } from './access-log.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function fakeLogger(): DaemonLogger {
   return {
@@ -182,6 +187,41 @@ describe('installAccessLogMiddleware', () => {
       statusOther: 0,
     });
     expect(h.logger.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('flushes aggregate summaries in root context before the current request', () => {
+    const withContext = vi.spyOn(context, 'with');
+    const h = harness();
+    for (let i = 0; i < 60; i += 1) {
+      h.begin({ path: `/burst/${i}` }).response.emit('finish');
+    }
+    h.begin({ path: '/suppressed' }).response.emit('finish');
+
+    h.setNow(2_000);
+    h.begin({ path: '/current' }).response.emit('finish');
+
+    expect(withContext).toHaveBeenCalledWith(
+      ROOT_CONTEXT,
+      expect.any(Function),
+    );
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      'access logs suppressed',
+      expect.objectContaining({ suppressed: 1 }),
+    );
+    expect(h.logger.info).toHaveBeenLastCalledWith(
+      'request completed',
+      expect.objectContaining({ route: 'GET /current' }),
+    );
+    expect(
+      vi.mocked(h.logger.warn).mock.invocationCallOrder.at(-1),
+    ).toBeLessThan(vi.mocked(h.logger.info).mock.invocationCallOrder.at(-1)!);
+  });
+
+  it('does not add access records for response close without finish', () => {
+    const h = harness();
+    h.begin({ path: '/aborted', status: 500 }).response.emit('close');
+    expect(h.logger.info).not.toHaveBeenCalled();
+    expect(h.logger.warn).not.toHaveBeenCalled();
   });
 
   it('does not move the token refill baseline backward with the clock', () => {
