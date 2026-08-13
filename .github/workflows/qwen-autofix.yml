@@ -2947,18 +2947,29 @@ jobs:
                 [ .[] | select((.user.login // "") == $ab)
                   | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
                   | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
-              # A release ack newer than the last re-arm means the most
-              # recent management action was a deliberate release (`takeover
-              # stop`), not a re-arm. The label POST below must NOT fire in
-              # that state: a released PR stays in the scan candidate set and
-              # keeps ROUND >= cap, so an unconditional POST would re-add the
-              # escalation label the release just removed — and ping-pong with
-              # the shepherd's cleanup lever every tick. A re-arm advances
-              # REARM_KEY past the release ack, re-enabling the label.
-              RELEASE_ACKED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
-                [ .[] | select((.user.login // "") == $ab)
-                  | select((.body // "") | contains("<!-- takeover-ack released -->"))
-                  | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+              # Release evidence = a takeover unlabeled EVENT newer than the
+              # window key. GitHub records it whenever the label comes off —
+              # `/takeover stop`, the ack job, or a manual UI removal —
+              # unlike the release-ack COMMENT, which both release paths
+              # tolerate losing (R4-1): the stop branch swallows a failed
+              # ack post, and the ack job's set -e aborts before it. A
+              # re-arm advances REARM_KEY past the event, re-enabling the
+              # label. Fail closed: an unreadable event history suppresses
+              # the re-label rather than risk the ping-pong.
+              if ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > "${WORKDIR}/ev.json"; then
+                RELEASE_ACKED='unreadable'
+              else
+                RELEASE_ACKED="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg rt "${NOTICE_RT}" '
+                  [ .[] | select((.event // "") == "unlabeled")
+                    | select((.label.name // "") == $tl)
+                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ev.json")"
+              fi
+              # A release only suppresses re-labeling for HUMAN-authored PRs.
+              # A bot-authored PR released from takeover returns to STANDARD
+              # management (its ack says so) — it is still managed, so at the
+              # strict cap it deserves the same notice + escalation label as
+              # any managed PR (R4-5).
+              IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
               if [[ "${DRY_RUN}" == "true" ]]; then
                 echo "🧪 DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL} on #${PR}"
               else
@@ -2981,7 +2992,7 @@ jobs:
                 fi
                 if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                   echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                elif [[ "${RELEASE_ACKED}" != "0" ]]; then
+                elif [[ "${RELEASE_ACKED}" != "0" && "${IS_BOT_AUTHOR}" != "true" ]]; then
                   echo "🧭 cap label/notice skipped: PR was released after its last re-arm (#${PR})"
                 else
                   # The escalation label rides EVERY cap detection, noticed

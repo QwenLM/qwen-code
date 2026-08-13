@@ -2688,15 +2688,16 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(14);
+    expect(workflow.split('--paginate').length - 1).toBe(15);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
-    // report COMMENTS_JSON fallback = nine normalized fetch sites. The
+    // report COMMENTS_JSON fallback + the cap-branch release-evidence events
+    // fetch (R4-1) = ten normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
     // so piping it through `jq -s 'add // []'` would wrap the id stream in an
     // array and break the tail-1 consumer.
-    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
+    expect(workflow.split("jq -s 'add // []'").length - 1).toBe(10);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
     // the PRIOR_HEADS consumer below iterates the result with .[], which
@@ -3181,20 +3182,77 @@ describe('qwen-autofix workflow', () => {
     );
     expect(consentRecheck).toBeGreaterThan(-1);
     expect(consentRecheck).toBeLessThan(labelPost);
-    // R3-1: a release ack newer than the window suppresses the every-scan
-    // label POST — a released bot PR stays in the scan candidate set with
-    // ROUND >= cap, so an unconditional POST would re-add the escalation
-    // label the release just removed and ping-pong with the shepherd's
-    // cleanup. The gate must sit BEFORE the label POST.
+    // R3-1/R4-1: a takeover `unlabeled` EVENT newer than the window
+    // suppresses the every-scan label POST — a released PR stays in the
+    // scan candidate set with ROUND >= cap, so an unconditional POST would
+    // re-add the escalation label the release just removed and ping-pong
+    // with the shepherd's cleanup. R4-5: the gate only fires for
+    // HUMAN-authored PRs (a bot PR released from takeover is still managed,
+    // so it keeps the label at the strict cap). The gate sits BEFORE the
+    // label POST.
     expect(reviewScanJob).toContain('RELEASE_ACKED=');
+    expect(reviewScanJob).toContain('IS_BOT_AUTHOR=');
     expect(reviewScanJob).toContain(
       'cap label/notice skipped: PR was released after its last re-arm',
     );
     const releaseGate = reviewScanJob.indexOf(
-      'elif [[ "${RELEASE_ACKED}" != "0" ]]; then',
+      'elif [[ "${RELEASE_ACKED}" != "0" && "${IS_BOT_AUTHOR}" != "true" ]]; then',
     );
     expect(releaseGate).toBeGreaterThan(-1);
     expect(releaseGate).toBeLessThan(labelPost);
+    // R4-15: the RELEASE_ACKED jq body (event marker + time direction) is
+    // replayed — a `> $rt` → `< $rt` flip must fail, not ship green.
+    const relAckJq = reviewScanJob.match(
+      /RELEASE_ACKED="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" --arg rt "\$\{NOTICE_RT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ev\.json"\)"/,
+    )?.[1];
+    expect(relAckJq).toBeTruthy();
+    const runRelAck = (events, rt) =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'tl', 'autofix/takeover', '--arg', 'rt', rt, relAckJq],
+        { encoding: 'utf8', input: JSON.stringify(events) },
+      ).trim();
+    expect(
+      runRelAck(
+        [
+          {
+            event: 'unlabeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-08-06T00:00:00Z',
+          },
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('1');
+    // ack older than the window → 0; no ack → 0.
+    expect(
+      runRelAck(
+        [
+          {
+            event: 'unlabeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-08-04T00:00:00Z',
+          },
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('0');
+    expect(runRelAck([{ event: 'labeled' }], '2026-08-05T00:00:00Z')).toBe('0');
+    // R4-24: the gate's control-flow nesting is replayed — the label POST
+    // must fire ONLY in the else arm (RELEASE_ACKED=0 or bot author), never
+    // in the released arm.
+    const gateBlock = reviewScanJob.match(
+      /if \[\[ "\$\{SCAN_BOT_ACTOR\}" != "\$\{AUTOFIX_BOT\}" \]\]; then[\s\S]*?cap label\/notice skipped[\s\S]*?\n {16}fi/,
+    )?.[0];
+    expect(gateBlock).toBeTruthy();
+    const releasedIdx = gateBlock.indexOf('cap label/notice skipped');
+    const elseIdx = gateBlock.indexOf('else', releasedIdx);
+    const postIdx = gateBlock.indexOf(
+      'gh api -X POST "repos/${REPO}/issues/${PR}/labels"',
+    );
+    expect(releasedIdx).toBeGreaterThan(-1);
+    expect(elseIdx).toBeGreaterThan(releasedIdx);
+    expect(postIdx).toBeGreaterThan(elseIdx);
     // The dry-run line covers both writes.
     expect(reviewScanJob).toContain(
       'DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL}',

@@ -711,27 +711,28 @@ exit 1`;
     // …a re-arm COMMAND comment is ALSO resume evidence, but only while
     // fresh and unsuperseded: the command's ack rides a queued job, so
     // counting only the ack would let a tick release a PR minutes after a
-    // human re-armed it. No author gate here — the route's permission check
-    // owns authorization; an ignored command simply expires unsuperseded.
-    const cmdJq = workflow.match(
-      /CMD_TS="\$\(jq -r '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+    // human re-armed it. R4-14: the commenter's permission is checked before
+    // a command counts — a renewing stream of stranger commands must not
+    // veto a release forever.
+    const cmdLineJq = workflow.match(
+      /CMD_LINE="\$\(jq -r '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
     )?.[1];
     const refusalJq = workflow.match(
       /REFUSAL_TS="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
     )?.[1];
-    expect(cmdJq).toBeTruthy();
+    expect(cmdLineJq).toBeTruthy();
     expect(refusalJq).toBeTruthy();
     const runCmd = (comments) =>
-      execFileSync('jq', ['-r', cmdJq], {
+      execFileSync('jq', ['-r', cmdLineJq], {
         encoding: 'utf8',
         input: JSON.stringify(comments),
       }).trim();
-    // Exact trimmed command match, any author.
+    // Exact trimmed command match → "ts<TAB>login", any author.
     expect(
       runCmd([human('2026-08-06T00:00:00Z', '  @qwen-code /takeover ')]),
-    ).toBe('2026-08-06T00:00:00Z');
+    ).toBe('2026-08-06T00:00:00Z\twenshao');
     expect(runCmd([human('2026-08-06T00:00:00Z', '@qwen-code /retry')])).toBe(
-      '2026-08-06T00:00:00Z',
+      '2026-08-06T00:00:00Z\twenshao',
     );
     // …but `/takeover stop` is a release, not a resume.
     expect(
@@ -756,7 +757,9 @@ exit 1`;
       ]),
     ).toBe('');
     // The full gate: command evidence counts only when it is newer than the
-    // marker evidence, newer than any refusal, AND inside the grace window.
+    // marker evidence, newer than any refusal, inside the grace window, AND
+    // the commenter holds write/maintain/admin (R4-14). Stub `gh` so the
+    // permission read returns a test-controlled value.
     const cmdGate = workflow.match(
       /(if \[\[ -n "\$\{CMD_TS\}" && "\$\{CMD_TS\}" > "\$\{RESUME_TS\}" \]\] \\[\s\S]*?\n {16}fi)/,
     )?.[1];
@@ -764,23 +767,38 @@ exit 1`;
     // The extracted block runs GNU `date -u -d`; on macOS hosts BSD date
     // lacks -d, so shim it through node (always present in this repo).
     const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
-    const gate = (env) =>
-      execFileSync(
-        'bash',
-        [
-          '-c',
-          `${gnuDateShim}\n${cmdGate.replace(/\n {16}/g, '\n')}\necho "RESUME_TS=$RESUME_TS"`,
-        ],
-        {
-          env: {
-            ...process.env,
-            NOW_EPOCH: '1786000000',
-            RESUME_COMMAND_GRACE_SEC: '7200',
-            ...env,
+    const gate = (env) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shep-gate-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          '#!/bin/bash\nif [[ "$1" == "api" ]]; then printf \'%s\' "${TEST_PERM}"; fi',
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `${gnuDateShim}\n${cmdGate.replace(/\n {16}/g, '\n')}\necho "RESUME_TS=$RESUME_TS"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              NOW_EPOCH: '1786000000',
+              RESUME_COMMAND_GRACE_SEC: '7200',
+              TEST_PERM: 'write',
+              CMD_AUTHOR: 'wenshao',
+              ...env,
+            },
+            encoding: 'utf8',
           },
-          encoding: 'utf8',
-        },
-      ).trim();
+        ).trim();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
     // fresh accepted-but-unacked command → counts (the R1 race fix).
     expect(
       gate({
@@ -817,6 +835,26 @@ exit 1`;
         NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
       }),
     ).toBe('RESUME_TS=2026-08-06T00:05:00Z');
+    // R4-14: a stranger's fresh command (read/no permission) does NOT count,
+    // even inside the grace window.
+    expect(
+      gate({
+        RESUME_TS: '',
+        CMD_TS: '2026-08-06T00:00:00Z',
+        REFUSAL_TS: '',
+        NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
+        TEST_PERM: 'read',
+      }),
+    ).toBe('RESUME_TS=');
+    expect(
+      gate({
+        RESUME_TS: '',
+        CMD_TS: '2026-08-06T00:00:00Z',
+        REFUSAL_TS: '',
+        NOW_EPOCH: String(Date.parse('2026-08-06T00:30:00Z') / 1000),
+        TEST_PERM: '',
+      }),
+    ).toBe('RESUME_TS=');
     // A fresh `labeled` event is resume evidence too (UI re-apply).
     const eventJq = workflow.match(
       /EVENT_TS="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
@@ -1134,7 +1172,7 @@ exit 1`;
     expect(autofix).toContain("TAKEOVER_COMMAND: '@qwen-code /takeover'");
     expect(autofix).toContain("RETRY_COMMAND: '@qwen-code /retry'");
     const cmdTs = workflow.match(
-      /CMD_TS="\$\(jq -r '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+      /CMD_LINE="\$\(jq -r '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
     )?.[1];
     expect(cmdTs).toBeTruthy();
     expect(cmdTs).toContain('"@qwen-code /takeover"');
@@ -1252,7 +1290,7 @@ exit 1`;
       /# Loop 1: managed takeover PRs[\s\S]*?done < <\(jq -c '\.\[\]' \/tmp\/takeover\.json\)/,
     )?.[0];
     expect(loop1).toBeTruthy();
-    expect(loop1).toContain('continue # loop 2 renders paused PRs');
+    expect(loop1).toContain('continue # loop 2 renders this paused PR');
     expect(loop1).toContain('pause evaluation unavailable this tick');
     // R2-16: the needs-human skip filter is byte-identical to the pinned
     // takeover filter (an inverted population ships red, not green). The
@@ -1337,7 +1375,37 @@ exit 1`;
       'paused (needs-human) — conflict stays unhandled until re-arm',
     );
     expect(workflow).toMatch(
-      /elif \[\[ "\$\(jq -r --arg l "\$\{NEEDS_HUMAN_LABEL\}" '\[\.labels\[\]\?\.name\] \| index\(\$l\) != null' <<< "\$\{LIVE_LABELS_JSON\}"\)" == "true" \]\]; then\n\s+#[\s\S]*?conflict stays unhandled until re-arm/,
+      /elif \[\[ "\$\(jq -r --arg l "\$\{NEEDS_HUMAN_LABEL\}" '\[\.labels\[\]\?\.name\] \| index\(\$l\) != null' <<< "\$\{LIVE_LABELS_JSON\}"\)" == "true" \]\] && conflict_paused "\$\{PR\}"; then\n\s+#[\s\S]*?conflict stays unhandled until re-arm/,
+    );
+    // R4-6: the marker-truth helper exists and fails closed (an unreadable
+    // comment history suppresses the dispatch, not wastes it).
+    expect(workflow).toContain('conflict_paused() {');
+    expect(workflow).toMatch(
+      /conflict_paused\(\) \{[\s\S]*?return 0[\s\S]*?return 1[\s\S]*?return 0/,
+    );
+    // R4-9: loop 1 defers a paused PR to loop 2 ONLY when it is actually in
+    // the needs-human window (membership), so a truncated PR still renders.
+    expect(workflow).toContain(
+      'HUMAN_IDS=",$(jq -r \'[.[].number | tostring] | join(",")\' /tmp/human.json),"',
+    );
+    expect(workflow).toContain('if [[ "${HUMAN_IDS}" == *",${PR},"* ]]; then');
+    // R4-10: loop 1's row escapes STATE (the ci-red detailsUrl) as well as
+    // NOTE — a `|` or `\c` in the URL must not break the printf '%b' table.
+    expect(workflow).toContain('SAFE_STATE="${STATE//\\\\/\\\\\\\\}"');
+    expect(workflow).toContain('${SAFE_STATE//|/\\\\|}');
+    // R4-13: the takeover-enum error row is finalized AFTER the needs-human
+    // result and branches on HM_OK — it must not claim evaluation proceeds
+    // when the needs-human feed also failed.
+    expect(workflow).toContain(
+      'paused rows NOT evaluated — needs-human enumeration also failed',
+    );
+    // R4-14: a command comment counts only after a write/maintain/admin
+    // permission read on its author.
+    expect(workflow).toContain(
+      'gh api "repos/${REPO}/collaborators/${CMD_AUTHOR}/permission"',
+    );
+    expect(workflow).toMatch(
+      /CMD_PERM}" == 'write' \|\| "\$\{CMD_PERM\}" == 'maintain' \|\| "\$\{CMD_PERM\}" == 'admin'/,
     );
     // R1-10: the CI-status classifiers are shared helpers, and NEITHER loop
     // inlines its own copy of the jq (a check-naming change must land once).
@@ -1352,5 +1420,43 @@ exit 1`;
     expect(workflow).not.toContain(
       'IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length\' <<< "${ROW}"',
     );
+    // R4-11: the two classifiers are replayed behaviorally (a polarity or
+    // arithmetic mutation of the jq body must fail, not ship green).
+    const pendingJq = workflow.match(
+      /pending_checks\(\) \{\n\s+jq -r '([^']+)'/,
+    )?.[1];
+    const failedJq = workflow.match(
+      /failed_test_url\(\) \{\n\s+jq -r '([^']+)'/,
+    )?.[1];
+    expect(pendingJq).toBeTruthy();
+    expect(failedJq).toBeTruthy();
+    const runClassifier = (prog, rollup) =>
+      execFileSync('jq', ['-r', prog], {
+        encoding: 'utf8',
+        input: JSON.stringify({ statusCheckRollup: rollup }),
+      }).trim();
+    expect(runClassifier(pendingJq, [])).toBe('0');
+    expect(
+      runClassifier(pendingJq, [
+        { status: 'QUEUED' },
+        { status: 'IN_PROGRESS' },
+        { status: 'COMPLETED' },
+      ]),
+    ).toBe('2');
+    expect(
+      runClassifier(failedJq, [
+        { conclusion: 'FAILURE', name: 'Test (x)', detailsUrl: 'u1' },
+      ]),
+    ).toBe('u1');
+    expect(
+      runClassifier(failedJq, [
+        { conclusion: 'SUCCESS', name: 'Test (x)', detailsUrl: 'u1' },
+      ]),
+    ).toBe('');
+    expect(
+      runClassifier(failedJq, [
+        { conclusion: 'FAILURE', name: 'Lint', detailsUrl: 'u1' },
+      ]),
+    ).toBe('');
   });
 });

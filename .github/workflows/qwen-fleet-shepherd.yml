@@ -356,6 +356,34 @@ jobs:
             echo "$(( (NOW_EPOCH - $(date -u -d "$1" +%s)) / 86400 ))"
           }
 
+          # Is this needs-human PR genuinely PAUSED (so the scan would refuse
+          # a conflict dispatch)? The label alone is only a proxy: an ARMED
+          # PR that kept a stale label (a resume-side removal failed) is NOT
+          # paused and the scan would accept the dispatch. Check marker truth
+          # — a re-arm/engage marker newer than the last cap notice means
+          # re-armed, not paused (R4-6). Fail closed toward "paused": an
+          # unreadable history suppresses the dispatch rather than waste it.
+          conflict_paused() {
+            local pr="$1"
+            if ! gh api "repos/${REPO}/issues/${pr}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/cf-ic.json; then
+              return 0
+            fi
+            local term resume
+            term="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                | .created_at ] | max // ""' /tmp/cf-ic.json)"
+            resume="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select(((.body // "") | contains("<!-- autofix-rearm -->"))
+                         or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
+                | .created_at ] | max // ""' /tmp/cf-ic.json)"
+            if [[ -n "${resume}" && ( -z "${term}" || "${resume}" > "${term}" ) ]]; then
+              return 1
+            fi
+            return 0
+          }
+
           # CI-status classifiers shared by BOTH dashboard loops, so a
           # check-naming or status-set change lands in one place and the two
           # tables can never classify the same PR differently.
@@ -455,12 +483,12 @@ jobs:
                 # Budget first: once it is exhausted no mutation is possible,
                 # so the PAT-backed live label read would be pure waste.
                 ACTION_NOTE="$(skip_note dispatch)"
-              elif [[ "$(jq -r --arg l "${NEEDS_HUMAN_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${LIVE_LABELS_JSON}")" == "true" ]]; then
-                # Check needs-human from the LIVE payload, not the tick-start
-                # snapshot: the autofix loop can apply the label after
-                # enumeration, and dispatching conflict work onto a now-paused
-                # PR would plant a dedup marker the paused scan never acts on.
-                # The conflict stays unhandled until a human re-arms.
+              elif [[ "$(jq -r --arg l "${NEEDS_HUMAN_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${LIVE_LABELS_JSON}")" == "true" ]] && conflict_paused "${PR}"; then
+                # needs-human from the LIVE payload (a label applied after
+                # enumeration is caught) AND marker-confirmed genuinely
+                # paused — an armed PR with a stale label falls through to
+                # the dispatch below (R4-6). The conflict stays unhandled
+                # until a human re-arms.
                 ACTION_NOTE='paused (needs-human) — conflict stays unhandled until re-arm'
               else
                 if act "#${PR}: dispatch autofix for conflict resolution" \
@@ -560,12 +588,11 @@ jobs:
             > /tmp/takeover-raw.json 2> /dev/null; then
             TK_OK=false
             echo "::warning::takeover enumeration failed; the takeover table shows an error row this tick"
-            # The release lever is fed by the needs-human enumeration (loop
-            # 2), NOT this display window — so a takeover-list failure does
-            # NOT stop pause evaluation. The row must say so, or the
-            # dashboard contradicts itself during the very outage it exists
-            # to clarify.
-            TAKEOVER_ROWS='| — | — | — | ⚠️ takeover pool unreadable this tick | paused rows below still evaluated (needs-human fed) |\n'
+            # The error-row wording is finalized AFTER the needs-human
+            # enumeration (R4-13): the release lever is fed by THAT window,
+            # and both reads share one PAT, so a correlated mid-tick outage
+            # can fail both — the row must not claim evaluation proceeds
+            # when the feed is unreadable too.
           else
             if [[ "$(jq length /tmp/takeover-raw.json)" -ge 100 ]]; then
               echo "::warning::takeover pool at the 100-PR enumeration limit — recently-active PRs (paused-but-discussed ones included) may be missing from this table"
@@ -594,6 +621,22 @@ jobs:
               /tmp/human-raw.json > /tmp/human.json
           fi
 
+          # Membership set of the needs-human enumeration (R4-9): loop 1 must
+          # only defer a paused PR to loop 2 when loop 2 will actually see it
+          # — a PR truncated out of the 100-window must still render here.
+          HUMAN_IDS=''
+          if [[ "${HM_OK}" == "true" ]]; then
+            HUMAN_IDS=",$(jq -r '[.[].number | tostring] | join(",")' /tmp/human.json),"
+          fi
+          # Finalize the takeover-enum error row now that HM_OK is known.
+          if [[ "${TK_OK}" == "false" ]]; then
+            if [[ "${HM_OK}" == "true" ]]; then
+              TAKEOVER_ROWS='| — | — | — | ⚠️ takeover pool unreadable this tick | paused rows below still evaluated (needs-human fed) |\n'
+            else
+              TAKEOVER_ROWS='| — | — | — | ⚠️ takeover pool unreadable this tick | paused rows NOT evaluated — needs-human enumeration also failed |\n'
+            fi
+          fi
+
           # Loop 1: managed takeover PRs that are NOT paused — cheap payload
           # states only. Paused ones are rendered by loop 2, which owns the
           # pause evaluation. (If the needs-human enumeration failed, render
@@ -614,11 +657,11 @@ jobs:
               STATE='managed · idle'
               NOTE='—'
               if [[ "${HAS_NH}" == "true" ]]; then
-                if [[ "${HM_OK}" == "true" ]]; then
-                  continue # loop 2 renders paused PRs
+                if [[ "${HUMAN_IDS}" == *",${PR},"* ]]; then
+                  continue # loop 2 renders this paused PR
                 fi
                 STATE='🛑 needs-human'
-                NOTE='pause evaluation unavailable this tick (enumeration unreadable)'
+                NOTE='pause evaluation unavailable this tick (truncated or unreadable needs-human window)'
               elif [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
                 STATE='conflicting'
                 NOTE='resolution owned by the autofix scan'
@@ -630,10 +673,13 @@ jobs:
               fi
 
               echo "🐑 #${PR} [takeover: ${STATE}] → ${NOTE}"
-              # NOTE/STATE carry no dynamic text on this path, but keep the
-              # table pipe-safe for the ci-red URL.
+              # STATE can carry the ci-red detailsUrl (check-run creator
+              # controlled) and NOTE the stop-reason headline — escape
+              # backslashes before printf '%b' and pipes before the table
+              # (R4-10).
+              SAFE_STATE="${STATE//\\/\\\\}"
               SAFE_NOTE="${NOTE//\\/\\\\}"
-              TAKEOVER_ROWS="${TAKEOVER_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${STATE} | ${SAFE_NOTE//|/\\|} |\n"
+              TAKEOVER_ROWS="${TAKEOVER_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${SAFE_STATE//|/\\|} | ${SAFE_NOTE//|/\\|} |\n"
             done < <(jq -c '.[]' /tmp/takeover.json)
           fi
 
@@ -691,10 +737,19 @@ jobs:
                     | select(((.body // "") | contains("<!-- autofix-rearm -->"))
                              or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
                     | .created_at ] | max // ""' /tmp/tk-ic.json)"
-                CMD_TS="$(jq -r '
+                # Latest re-arm command + its author. R4-14: a renewing
+                # stream of STRANGER commands must not veto the release
+                # forever — only a write/maintain/admin commenter's command
+                # counts (one permission read, only when a command is the
+                # sole evidence — bot markers and labeled events never need
+                # it).
+                CMD_LINE="$(jq -r '
                   [ .[] | select(((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /takeover"
                                  or ((.body // "") | gsub("^\\s+|\\s+$"; "")) == "@qwen-code /retry")
-                    | .created_at ] | max // ""' /tmp/tk-ic.json)"
+                    | {ts: (.created_at // ""), login: (.user.login // "")} ]
+                  | max_by(.ts) // empty | "\(.ts)\t\(.login)"' /tmp/tk-ic.json)"
+                CMD_TS="${CMD_LINE%%$'\t'*}"
+                CMD_AUTHOR="${CMD_LINE##*$'\t'}"
                 REFUSAL_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
                   [ .[] | select((.user.login // "") == $ab)
                     | select((.body // "") | test("<!-- takeover-ack (fork-refused|base-refused|skip-blocked) -->"))
@@ -702,8 +757,11 @@ jobs:
                 if [[ -n "${CMD_TS}" && "${CMD_TS}" > "${RESUME_TS}" ]] \
                   && [[ -z "${REFUSAL_TS}" || "${CMD_TS}" > "${REFUSAL_TS}" ]]; then
                   CMD_AGE=$(( NOW_EPOCH - $(date -u -d "${CMD_TS}" +%s) ))
-                  if [[ "${CMD_AGE}" -lt "${RESUME_COMMAND_GRACE_SEC}" ]]; then
-                    RESUME_TS="${CMD_TS}"
+                  if [[ "${CMD_AGE}" -lt "${RESUME_COMMAND_GRACE_SEC}" ]] && [[ -n "${CMD_AUTHOR}" ]]; then
+                    CMD_PERM="$(gh api "repos/${REPO}/collaborators/${CMD_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+                    if [[ "${CMD_PERM}" == 'write' || "${CMD_PERM}" == 'maintain' || "${CMD_PERM}" == 'admin' ]]; then
+                      RESUME_TS="${CMD_TS}"
+                    fi
                   fi
                 fi
                 EVENT_TS="$(jq -r --arg tl "${TAKEOVER_LABEL}" '
