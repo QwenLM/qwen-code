@@ -1980,6 +1980,13 @@ export class Session implements SessionContext {
   }
 
   async #drainGoalQueue(): Promise<void> {
+    if (this.goalQueue.length === 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainGoalQueueExclusive(),
+    );
+  }
+
+  async #drainGoalQueueExclusive(): Promise<void> {
     if (
       this.disposed ||
       this.closing ||
@@ -3675,7 +3682,10 @@ export class Session implements SessionContext {
     }
 
     const recording = this.config.getChatRecordingService();
-    const branchCheckpointCursor = recording?.getBranchCheckpointCursor();
+    const branchCheckpointCursor =
+      scheduledGoalTurn === undefined
+        ? recording?.getBranchCheckpointCursor()
+        : undefined;
 
     if (todoStopGuardPreparation.startsWorkChain) {
       this.#clearTodoStopGuardQueuedPromptWait();
@@ -3707,10 +3717,10 @@ export class Session implements SessionContext {
         goalTurn,
       );
       let branchPoint: BranchPoint | undefined;
-      if (recording) {
+      if (recording && branchCheckpointCursor) {
         try {
           branchPoint = await recording.recordBranchCheckpointTransaction({
-            cursor: branchCheckpointCursor!,
+            cursor: branchCheckpointCursor,
             stopReason: result.stopReason,
           });
         } catch (error) {

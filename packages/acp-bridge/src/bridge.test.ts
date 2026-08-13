@@ -718,6 +718,11 @@ describe('createAcpSessionBridge', () => {
       await expect(
         bridge.rewindSession(session.sessionId, { promptId: 'whatever' }),
       ).rejects.toThrow(/closing/);
+      await expect(
+        bridge.branchSession(session.sessionId, {
+          atRecordId: '11111111-1111-4111-8111-111111111111',
+        }),
+      ).rejects.toThrow(/closing/);
 
       closeResponse.resolve({ closed: true, holds: [] });
       await detached;
@@ -764,6 +769,66 @@ describe('createAcpSessionBridge', () => {
       closeResponse.resolve({ closed: true, holds: [] });
       await detached;
 
+      await bridge.shutdown();
+    });
+
+    it('rejects a queued branch when a conditional close starts before dispatch', async () => {
+      const firstBranchStarted = deferred<void>();
+      const releaseFirstBranch = deferred<void>();
+      const closeRequested = deferred<void>();
+      const closeResponse = deferred<Record<string, unknown>>();
+      let branchCalls = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            branchCalls += 1;
+            if (branchCalls > 1) {
+              throw new Error(
+                'queued branch must not reach the closing source',
+              );
+            }
+            firstBranchStarted.resolve();
+            await releaseFirstBranch.promise;
+            return { newSessionId: 'branch-1', title: 'Branch 1' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            closeRequested.resolve();
+            return closeResponse.promise;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      const firstBranch = bridge.branchSession(session.sessionId, {
+        atRecordId: '11111111-1111-4111-8111-111111111111',
+      });
+      await firstBranchStarted.promise;
+      const queuedBranch = bridge.branchSession(session.sessionId, {
+        atRecordId: '22222222-2222-4222-8222-222222222222',
+      });
+      const detached = bridge
+        .detachClient(session.sessionId, session.clientId)
+        .catch(() => undefined);
+      await closeRequested.promise;
+
+      releaseFirstBranch.resolve();
+      await expect(firstBranch).resolves.toMatchObject({
+        sessionId: 'branch-1',
+      });
+      await expect(queuedBranch).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(branchCalls).toBe(1);
+
+      closeResponse.resolve({ closed: true, holds: [] });
+      await detached;
       await bridge.shutdown();
     });
 

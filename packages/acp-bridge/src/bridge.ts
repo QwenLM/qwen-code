@@ -8056,7 +8056,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      if (entry.closing) {
+      if (isClosingOrAuthorizingClose(entry)) {
         throw new SessionNotFoundError(sessionId, 'The session is closing');
       }
       const source = parseSessionSource(req.sourceType, req.sourceId);
@@ -8081,7 +8081,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const branchResult = (
         concurrentSideTask ? Promise.resolve() : entry.promptQueue
       ).then(async () => {
-        if (entry.closing || byId.get(sessionId) !== entry) {
+        if (
+          isClosingOrAuthorizingClose(entry) ||
+          byId.get(sessionId) !== entry
+        ) {
           throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
 
