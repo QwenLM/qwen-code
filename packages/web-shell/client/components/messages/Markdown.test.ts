@@ -1606,16 +1606,16 @@ describe('external links in the desktop shell', () => {
     return container as HTMLDivElement;
   }
 
-  function clickLink(container: HTMLElement) {
-    act(() => {
-      container.querySelector('a')!.dispatchEvent(
-        new MouseEvent('click', {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-        }),
-      );
+  function clickLink(container: HTMLElement): MouseEvent {
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
     });
+    act(() => {
+      container.querySelector('a')!.dispatchEvent(event);
+    });
+    return event;
   }
 
   afterEach(() => {
@@ -1628,7 +1628,8 @@ describe('external links in the desktop shell', () => {
     const c = renderMd(
       '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
     );
-    clickLink(c);
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
     expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
       url: 'https://github.com/QwenLM/qwen-code/issues/9060',
     });
@@ -1646,7 +1647,8 @@ describe('external links in the desktop shell', () => {
     const c = renderMd(
       '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
     );
-    clickLink(c);
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -1666,7 +1668,8 @@ describe('external links in the desktop shell', () => {
     );
     const a = c.querySelector('a')!;
     expect(a.getAttribute('target')).toBe('_blank');
-    clickLink(c);
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(false);
     expect(openSpy).not.toHaveBeenCalled();
     openSpy.mockRestore();
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();

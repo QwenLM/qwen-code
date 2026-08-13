@@ -306,6 +306,7 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  delete (window as { __TAURI__?: unknown }).__TAURI__;
   for (const { root, container } of mounted) {
     act(() => root.unmount());
     container.remove();
@@ -692,7 +693,6 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
       url: 'https://github.com/QwenLM/qwen-code/issues/9059',
     });
-    delete (window as { __TAURI__?: unknown }).__TAURI__;
   });
 
   it('requests an error toast when opening a link artifact fails', async () => {
@@ -724,7 +724,6 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(toasts).toHaveLength(1);
     expect(toasts[0].tone).toBe('error');
     expect(toasts[0].message).toContain('no browser');
-    delete (window as { __TAURI__?: unknown }).__TAURI__;
   });
 
   it('keeps relative link artifacts on the native anchor path', async () => {
@@ -754,7 +753,6 @@ describe('ArtifactPanel code review artifacts', () => {
     });
     expect(event.defaultPrevented).toBe(false);
     expect(invoke).not.toHaveBeenCalled();
-    delete (window as { __TAURI__?: unknown }).__TAURI__;
   });
 
   it('still sends an ordinary JSON artifact to the generic editor', async () => {
