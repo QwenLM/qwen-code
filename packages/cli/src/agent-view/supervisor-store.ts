@@ -45,6 +45,7 @@ interface StoreOptions {
 
 const rosterMutationQueues = new Map<string, Promise<void>>();
 const stateMutationQueues = new Map<string, Promise<void>>();
+const activityMutationQueues = new Map<string, Promise<void>>();
 
 export function getAgentViewStorePaths(
   options: StoreOptions = {},
@@ -340,13 +341,49 @@ export async function writeAgentViewActivity(
   activity: AgentViewActivityFile,
   options: StoreOptions = {},
 ): Promise<void> {
-  const paths = getAgentViewSessionPaths(sessionId, options);
-  const existing = await readJsonRecordForWrite(paths.activityPath);
-  await writeJsonFile(paths.activityPath, {
-    ...existing,
-    ...activity,
-    schemaVersion: 1,
+  return mutateAgentViewActivity(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.activityPath);
+    await writeJsonFile(paths.activityPath, {
+      ...existing,
+      ...activity,
+      schemaVersion: 1,
+    });
   });
+}
+
+/**
+ * Applies a patch decided inside the per-session activity mutation queue,
+ * so the decision sees the latest persisted record (e.g. a queued-prompt
+ * marker a concurrent send just wrote) instead of a stale read.
+ */
+export async function patchAgentViewActivityIf(
+  sessionId: string,
+  decidePatch: (
+    existing: AgentViewActivityFile,
+  ) => Partial<AgentViewActivityFile> | undefined,
+  options: StoreOptions = {},
+): Promise<boolean> {
+  let applied = false;
+  await mutateAgentViewActivity(sessionId, options, async () => {
+    const paths = getAgentViewSessionPaths(sessionId, options);
+    const existing = await readJsonRecordForWrite(paths.activityPath);
+    const normalized = normalizeActivity(existing);
+    if (normalized === undefined) {
+      return;
+    }
+    const patch = decidePatch(normalized);
+    if (patch === undefined) {
+      return;
+    }
+    applied = true;
+    await writeJsonFile(paths.activityPath, {
+      ...existing,
+      ...patch,
+      schemaVersion: 1,
+    });
+  });
+  return applied;
 }
 
 export function digestAgentViewWorkerToken(token: string): string {
@@ -477,6 +514,34 @@ async function mutateAgentViewRoster<T>(
     release();
     if (rosterMutationQueues.get(rosterPath) === current) {
       rosterMutationQueues.delete(rosterPath);
+    }
+  }
+}
+
+async function mutateAgentViewActivity<T>(
+  sessionId: string,
+  options: StoreOptions,
+  action: () => Promise<T>,
+): Promise<T> {
+  const activityPath = getAgentViewSessionPaths(
+    sessionId,
+    options,
+  ).activityPath;
+  const previous =
+    activityMutationQueues.get(activityPath) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const current = previous.catch(() => {}).then(() => gate);
+  activityMutationQueues.set(activityPath, current);
+  await previous.catch(() => {});
+  try {
+    return await action();
+  } finally {
+    release();
+    if (activityMutationQueues.get(activityPath) === current) {
+      activityMutationQueues.delete(activityPath);
     }
   }
 }

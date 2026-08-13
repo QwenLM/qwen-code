@@ -38,6 +38,7 @@ import {
   isAgentViewSessionState,
   listAgentViewSessionSnapshots,
   listAgentViewSessionStates,
+  patchAgentViewActivityIf,
   patchAgentViewSessionState,
   patchAgentViewSessionStateIf,
   readAgentViewLaunch,
@@ -281,6 +282,7 @@ class AgentViewSupervisorProcessHandler
           snapshot.activity,
           store,
           this.hasPendingWorkerInputControl(snapshot.sessionId),
+          this.workers.has(snapshot.sessionId),
         );
       } catch {
         // Per-session healing is best-effort: one unreadable session
@@ -798,6 +800,7 @@ class AgentViewSupervisorProcessHandler
       storedActivity,
       store,
       this.hasPendingWorkerInputControl(sessionId),
+      this.workers.has(sessionId),
     );
     if (activity !== storedActivity) {
       this.notifyChanged();
@@ -1344,6 +1347,7 @@ class AgentViewSupervisorProcessHandler
       await readAgentViewActivity(sessionId, this.store),
       this.store,
       this.hasPendingWorkerInputControl(sessionId),
+      this.workers.has(sessionId),
     );
     if (
       hasPendingPrompt(activity) ||
@@ -1486,9 +1490,10 @@ class AgentViewSupervisorProcessHandler
         `Agent View session ${sessionId} is waiting for the previous response.`,
       );
     }
-    // Persist the queue marker before pushing the in-memory control: if
+    // Touch the activity record before pushing the in-memory control: if
     // this write fails the RPC rejects with no side effects, and a retry
-    // still passes the pending-answer checks.
+    // still passes the pending-answer checks. Queued answers are
+    // intentionally ephemeral — the in-memory control is their only record.
     await writeAgentViewActivity(
       sessionId,
       {
@@ -1888,17 +1893,11 @@ class WorkerRegistry {
     }
     let host: AgentViewPtyHostHandle | undefined;
     try {
-      const ready = this.waitForWorkerReadyIfNeeded(
-        sessionId,
-        resumeLaunch.activeCwd,
-      );
-      void ready.catch(() => {});
-      host = await this.launchPtyHostForSupervisor(resumeLaunch, this.store);
-      await ensureSessionStillLaunchable(sessionId, this.store, host, {
-        allowStopped: refreshedState.sessionState === 'stopped',
-        stoppedUpdatedAt: refreshedState.updatedAt,
-      });
-      this.set(sessionId, host);
+      // Persist the respawn bookkeeping before launch so any event the
+      // replacement worker emits right away authenticates against the
+      // rotated tokenDigest and passes the dead-worker guard (processState
+      // 'starting'); writing them after launch lets a fast ready die at
+      // the ready timeout.
       const latestState =
         (await readAgentViewSessionState(sessionId, this.store)) ?? state;
       await patchAgentViewSessionState(
@@ -1919,13 +1918,34 @@ class WorkerRegistry {
         sessionId,
         {
           schemaVersion: 1,
+          protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
+          platform: process.platform,
+          tokenDigest: digestAgentViewWorkerToken(token),
+          recentOutputBytes: 0,
+        },
+        this.store,
+      );
+      const ready = this.waitForWorkerReadyIfNeeded(
+        sessionId,
+        resumeLaunch.activeCwd,
+      );
+      void ready.catch(() => {});
+      host = await this.launchPtyHostForSupervisor(resumeLaunch, this.store);
+      await ensureSessionStillLaunchable(sessionId, this.store, host, {
+        allowStopped: refreshedState.sessionState === 'stopped',
+        stoppedUpdatedAt: refreshedState.updatedAt,
+      });
+      this.set(sessionId, host);
+      await writeAgentViewWorker(
+        sessionId,
+        {
+          schemaVersion: 1,
           hostPid: host.pid,
           workerPid: host.workerPid,
           ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
           ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
           protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
           platform: process.platform,
-          tokenDigest: digestAgentViewWorkerToken(token),
           recentOutputBytes: 0,
         },
         this.store,
@@ -2760,17 +2780,34 @@ async function applyWorkerEvent(
         ? event.sessionState
         : state.sessionState;
 
-  await patchAgentViewSessionState(
+  let statePatchApplied = false;
+  await patchAgentViewSessionStateIf(
     event.sessionId,
-    {
-      sessionState,
-      processState: 'alive',
-      activeCwd,
-      updatedAt: now,
-      ...(event.type === 'ready' ? { lastError: undefined } : {}),
+    (existing) => {
+      // Re-validate inside the queued mutation: an exit verdict enqueued
+      // after the guard read above must not be clobbered by this patch.
+      if (
+        (existing.sessionState === 'stopped' ||
+          existing.processState === 'exited' ||
+          existing.processState === 'hibernated') &&
+        (event.type === 'ready' || event.type === 'state')
+      ) {
+        return undefined;
+      }
+      statePatchApplied = true;
+      return {
+        sessionState,
+        processState: 'alive',
+        activeCwd,
+        updatedAt: now,
+        ...(event.type === 'ready' ? { lastError: undefined } : {}),
+      };
     },
     options,
   );
+  if (!statePatchApplied) {
+    return false;
+  }
 
   const existingActivity = await readAgentViewActivity(
     event.sessionId,
@@ -2963,6 +3000,7 @@ async function clearStalePendingPromptIfNeeded(
   activity: AgentViewActivityFile | undefined,
   store: { globalDir?: string },
   hasLiveInputControl: boolean,
+  hasLiveHost = false,
 ): Promise<AgentViewActivityFile | undefined> {
   if (!hasPendingPrompt(activity)) {
     return activity;
@@ -2974,12 +3012,16 @@ async function clearStalePendingPromptIfNeeded(
   }
   // A marker with no live input control on a session that is not in
   // flight is orphaned (e.g. the daemon restarted and lost its in-memory
-  // queue); leaving it would reject every subsequent send forever.
+  // queue); leaving it would reject every subsequent send forever. With a
+  // live host registered and an uninterrupted daemon, 'marker present,
+  // control absent' instead means the worker already drained the control
+  // — clearing here would let a retry deliver the same prompt twice.
   const orphaned =
-    state.sessionState === 'idle' ||
-    state.sessionState === 'completed' ||
-    state.sessionState === 'failed' ||
-    state.sessionState === 'stopped';
+    !hasLiveHost &&
+    (state.sessionState === 'idle' ||
+      state.sessionState === 'completed' ||
+      state.sessionState === 'failed' ||
+      state.sessionState === 'stopped');
   if (!orphaned && !shouldClearStalePendingPrompt(state, activity)) {
     return activity;
   }
@@ -3022,17 +3064,23 @@ async function clearPersistedPromptQueue(
   if (!activity || !hasPendingPrompt(activity)) {
     return false;
   }
-  await writeAgentViewActivity(
+  // Re-validate inside the queued mutation: a concurrent send may have
+  // replaced the marker after the read above, and erasing a fresh marker
+  // would drop the double-submit guard for the newly queued prompt.
+  const baselineMarker = activity.lastQueuedPromptAt;
+  return patchAgentViewActivityIf(
     sessionId,
-    {
-      schemaVersion: 1,
-      lastActivityAt: activity.lastActivityAt,
-      capabilities: activity.capabilities,
-      ...getDequeuedPromptActivityPatch(),
+    (latest) => {
+      if (
+        !hasPendingPrompt(latest) ||
+        latest.lastQueuedPromptAt !== baselineMarker
+      ) {
+        return undefined;
+      }
+      return getDequeuedPromptActivityPatch();
     },
     store,
   );
-  return true;
 }
 
 function shouldClearStalePendingPrompt(
