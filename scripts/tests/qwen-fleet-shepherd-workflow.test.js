@@ -116,7 +116,7 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('consent withdrawn, no %s');
     expect(workflow).toContain('fail closed, no %s');
     expect(workflow).toMatch(
-      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]*?elif live_skip "\$\{PR\}"; then[\s\S]*?paused \(needs-human\)/,
+      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]{0,200}elif live_skip "\$\{PR\}"; then[\s\S]{0,800}conflict_paused "\$\{PR\}"; then/,
     );
     expect(workflow).toMatch(
       /SYNCS\}" -ge "\$\{MAX_SYNCS_PER_TICK\}" \]\]; then[\s\S]{0,160}elif live_skip "\$\{PR\}"; then/,
@@ -609,6 +609,10 @@ exit 1`;
     )?.[0];
     expect(takeoverEnum).toBeTruthy();
     expect(takeoverEnum).not.toContain('isCrossRepository');
+    // R4-30: pin the stale-first sort on THIS enumeration (not just the
+    // needs-human one) — over the 100 cap, unsorted order drops exactly the
+    // stale tail the dashboard exists to surface.
+    expect(takeoverEnum).toContain("--search 'sort:updated-asc'");
     // Enumeration failures degrade to a loud error row and FALL THROUGH to
     // the dashboard write (which carries the liveness watermark) — they
     // must not exit the tick. The release lever's population comes from the
@@ -738,6 +742,14 @@ exit 1`;
     expect(
       runCmd([human('2026-08-06T00:00:00Z', '@qwen-code /takeover stop')]),
     ).toBe('');
+    // R4-31: two commands — the NEWEST wins (pins the `max` selection; a
+    // stale older command must not become CMD_TS).
+    expect(
+      runCmd([
+        human('2026-08-01T00:00:00Z', '@qwen-code /retry'),
+        human('2026-08-06T00:00:00Z', '@qwen-code /takeover'),
+      ]),
+    ).toBe('2026-08-06T00:00:00Z\twenshao');
     // A refusal ack (fork-refused / base-refused / skip-blocked) is what
     // supersedes a refused command — verify the variant set.
     const runRefusal = (comments) =>
@@ -855,6 +867,17 @@ exit 1`;
         TEST_PERM: '',
       }),
     ).toBe('RESUME_TS=');
+    // R4-29: a refusal OLDER than the fresh command must NOT supersede it
+    // (pins the `||` in the supersession check — an `&&` flip drops the
+    // command and reopens the R1 release race).
+    expect(
+      gate({
+        RESUME_TS: '',
+        CMD_TS: '2026-08-06T01:00:00Z',
+        REFUSAL_TS: '2026-08-06T00:01:00Z',
+        NOW_EPOCH: String(Date.parse('2026-08-06T01:30:00Z') / 1000),
+      }),
+    ).toBe('RESUME_TS=2026-08-06T01:00:00Z');
     // A fresh `labeled` event is resume evidence too (UI re-apply).
     const eventJq = workflow.match(
       /EVENT_TS="\$\(jq -r --arg tl "\$\{TAKEOVER_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
@@ -879,6 +902,21 @@ exit 1`;
         },
       ]),
     ).toBe('2026-08-06T00:00:00Z');
+    // R4-31: two takeover labeled events — the NEWEST wins (pins `max`).
+    expect(
+      runEvent([
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-01T00:00:00Z',
+        },
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-08T00:00:00Z',
+        },
+      ]),
+    ).toBe('2026-08-08T00:00:00Z');
     expect(runEvent([{ event: 'closed' }])).toBe('');
     // The event read fails closed, like the comment read.
     expect(workflow).toContain(
@@ -904,6 +942,20 @@ exit 1`;
         ),
       ]),
     ).toBe('');
+    // R4-31: two terminal headlines (a re-armed PR stopped twice) — the
+    // NEWEST is reported (pins `last`; a stale round-1 reason must not win).
+    expect(
+      run(reasonJq, [
+        bot(
+          '2026-08-01T00:00:00Z',
+          '🤖 AutoFix stopped after 3 consecutive rounds that failed to push anything …',
+        ),
+        bot(
+          '2026-08-04T00:00:00Z',
+          '🤖 AutoFix stopped: this counting window now contains 3 time-budget exhaustions …',
+        ),
+      ]),
+    ).toContain('time-budget exhaustions');
     // The re-arm guard: a resume NEWER than the latest cap notice means the
     // label is stale and the release must never fire. Replay the gate
     // VERBATIM so a dropped comparison fails the test.
@@ -948,6 +1000,51 @@ exit 1`;
     expect(workflow).toMatch(
       /SUMMARY_POSTED="\$\(jq[\s\S]{0,500}fleet-shepherd auto-release/,
     );
+    // R4-31: replay the dedup counter's aggregation — empty stream and a
+    // stale (pre-term) marker both yield "0", a fresh one yields "1" (pins
+    // `| length`; a `last` mutant would emit null and skip the summary).
+    const summaryJq = workflow.match(
+      /SUMMARY_POSTED="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg term "\$\{TERM_TS\}" '([\s\S]*?)' \/tmp\/tk-ic\.json\)"/,
+    )?.[1];
+    expect(summaryJq).toBeTruthy();
+    const runSummary = (comments, term) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--arg',
+          'term',
+          term,
+          summaryJq,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(comments) },
+      ).trim();
+    expect(runSummary([], '2026-08-05T00:00:00Z')).toBe('0');
+    expect(
+      runSummary(
+        [
+          bot(
+            '2026-08-04T00:00:00Z',
+            '🔓 … <!-- fleet-shepherd auto-release -->',
+          ),
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('0');
+    expect(
+      runSummary(
+        [
+          bot(
+            '2026-08-06T00:00:00Z',
+            '🔓 … <!-- fleet-shepherd auto-release -->',
+          ),
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('1');
     expect(workflow).toMatch(
       /if act "#\$\{PR\}: post auto-release summary"[\s\S]{0,1800}if act "#\$\{PR\}: auto-release takeover/,
     );
@@ -1079,6 +1176,52 @@ exit 1`;
           label: { name: 'autofix/takeover' },
           actor: { login: 'qwen-code-dev-bot' },
           created_at: '2026-08-05T00:00:00Z',
+        },
+      ]),
+    ).toBe('');
+    // R4-31: full two-cycle stream WITH cycle-1's labeled event (pins
+    // LATEST_LABEL_TS `max`; a `min` mutant would anchor to cycle 1 and let
+    // the stale human unlabel heal cycle 2) — still expects ''.
+    expect(
+      runUnlabel([
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-01T00:00:00Z',
+        },
+        {
+          event: 'unlabeled',
+          label: { name: 'autofix/takeover' },
+          actor: { login: 'wenshao' },
+          created_at: '2026-08-02T00:00:00Z',
+        },
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-03T00:00:00Z',
+        },
+        {
+          event: 'unlabeled',
+          label: { name: 'autofix/takeover' },
+          actor: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-08-05T00:00:00Z',
+        },
+      ]),
+    ).toBe('');
+    // R4-31: a human unlabel of an UNRELATED label must not count (pins the
+    // `.label.name == $tl` select).
+    expect(
+      runUnlabel([
+        {
+          event: 'labeled',
+          label: { name: 'autofix/takeover' },
+          created_at: '2026-08-01T00:00:00Z',
+        },
+        {
+          event: 'unlabeled',
+          label: { name: 'autofix/skip' },
+          actor: { login: 'wenshao' },
+          created_at: '2026-08-02T00:00:00Z',
         },
       ]),
     ).toBe('');
@@ -1325,11 +1468,14 @@ exit 1`;
     );
     // R2-29: both loop-2 evidence fetches paginate (paused PRs are the
     // high-comment population — page 1 alone misses the newest notice).
+    // R4-28: pin the page-MERGE program too — GitHub returns comments
+    // oldest-first, so `.[0] // []` would anchor TERM_TS to a stale page-1
+    // cycle while the current cycle's re-arm marker sits on page 2.
     expect(workflow).toMatch(
-      /issues\/\$\{PR\}\/events" --paginate[\s\S]{0,80}\/tmp\/tk-ev\.json/,
+      /issues\/\$\{PR\}\/events" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ev\.json/,
     );
     expect(workflow).toMatch(
-      /issues\/\$\{PR\}\/comments" --paginate[\s\S]{0,80}\/tmp\/tk-ic\.json/,
+      /issues\/\$\{PR\}\/comments" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ic\.json/,
     );
     // R2-19: the release scope check requires BOTH labels — the --arg
     // bindings are the load-bearing part. R3-12: the pin runs through the

@@ -3266,6 +3266,16 @@ describe('qwen-autofix workflow', () => {
         /gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}"/g,
       ) ?? [];
     expect(removals).toHaveLength(6);
+    // R4-17: the scan-side first-pickup DELETE must live in the engage-ack
+    // SUCCESS branch — moved to the ack-failure path it would clear
+    // needs-human when no engagement happened.
+    const firstPickup = reviewScanJob.match(
+      /if gh pr comment "\$\{PR\}" --repo "\$\{REPO\}" --body "\$\(printf '🤝 Takeover engaged[\s\S]*?; then([\s\S]*?)\n {16}else/,
+    )?.[1];
+    expect(firstPickup).toBeTruthy();
+    expect(firstPickup).toContain(
+      'gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}"',
+    );
     // Every removal tolerates the common 404 (never-paused PR).
     expect(
       workflow.match(/\$\{NEEDS_HUMAN_LABEL\} removal failed/g)?.length,
@@ -3537,6 +3547,13 @@ describe('qwen-autofix workflow', () => {
     // …and the engage arm clears any stale escalation label (R2-27: the
     // removal must live in THIS branch, not just anywhere in the file).
     expect(addAbsent.writes).toContain('labels/autofix%2Fneeds-human');
+    // R4-18: the loud takeover POST precedes the tolerant needs-human
+    // DELETE — a transient POST failure then aborts the step before the
+    // DELETE, keeping the paused PR visible (reversed order would drop the
+    // escalation label even though the engagement never landed).
+    expect(addAbsent.writes.indexOf('API api -X POST')).toBeLessThan(
+      addAbsent.writes.indexOf('labels/autofix%2Fneeds-human'),
+    );
     expect(addAbsent.writes).not.toContain('next scheduled scan');
     expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, takeover label untouched — the only API
@@ -5134,7 +5151,7 @@ exit 1
       .join('\n');
     expect(ackBlock).toBeTruthy();
 
-    const runAck = ({ ack, base = '', prViewOk = true }) => {
+    const runAck = ({ ack, base = '', prViewOk = true, labels = [] }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ack-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
@@ -5142,10 +5159,14 @@ exit 1
         join(bin, 'gh'),
         [
           '#!/usr/bin/env bash',
-          `if [[ "$1" == 'api' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
+          `echo "$@" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+          `if [[ "$1" == 'api' && "$2" == 'user' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
+          // Other api calls (the needs-human DELETE) succeed silently but are
+          // recorded above — the ack-job conditional removal is observable.
+          `if [[ "$1" == 'api' ]]; then exit 0; fi`,
           `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then : > ${JSON.stringify(join(dir, 'pr-view-called'))}; ${
             prViewOk
-              ? `printf '%s' '{"labels":[],"author":{"login":"wenshao"}}'; exit 0`
+              ? `printf '%s' '${JSON.stringify({ labels, author: { login: 'wenshao' } })}'; exit 0`
               : 'exit 1'
           }; fi`,
           `if [[ "$1" == 'pr' && "$2" == 'comment' ]]; then printf '%s' "$7" > ${JSON.stringify(join(dir, 'comment.md'))}; exit 0; fi`,
@@ -5163,6 +5184,7 @@ exit 1
           SKIP_LABEL: 'autofix/skip',
           TAKEOVER_LABEL: 'autofix/takeover',
           TAKEOVER_COMMAND: '@qwen-code /takeover',
+          NEEDS_HUMAN_LABEL: 'autofix/needs-human',
           ACK: ack,
           PR: '7368',
           ACK_BASE: base,
@@ -5170,9 +5192,11 @@ exit 1
         encoding: 'utf8',
       });
       const commentPath = join(dir, 'comment.md');
+      const callsPath = join(dir, 'calls.log');
       const result = {
         status: proc.status,
         body: existsSync(commentPath) ? readFileSync(commentPath, 'utf8') : '',
+        calls: existsSync(callsPath) ? readFileSync(callsPath, 'utf8') : '',
         readPr: existsSync(join(dir, 'pr-view-called')),
       };
       rmSync(dir, { recursive: true, force: true });
@@ -5211,6 +5235,30 @@ exit 1
     const broken = runAck({ ack: 'engaged', prViewOk: false });
     expect(broken.status).not.toBe(0);
     expect(broken.body).toBe('');
+    // R4-16: the conditional needs-human removal is observable per branch —
+    // engaged (no skip) and released perform exactly one DELETE of the
+    // encoded label; base-refused / engaged-with-skip perform none.
+    const nhDelete =
+      'api -X DELETE repos/QwenLM/qwen-code/issues/7368/labels/autofix%2Fneeds-human';
+    expect(
+      runAck({ ack: 'engaged' }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(1);
+    expect(runAck({ ack: 'engaged' }).calls).toContain(nhDelete);
+    expect(
+      runAck({ ack: 'released' }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(1);
+    expect(runAck({ ack: 'released' }).calls).toContain(nhDelete);
+    expect(
+      runAck({ ack: 'engaged', labels: [{ name: 'autofix/skip' }] }).calls,
+    ).not.toContain(nhDelete);
+    expect(
+      runAck({ ack: 'base-refused', base: 'release' }).calls,
+    ).not.toContain(nhDelete);
+    expect(
+      runAck({ ack: 'base-refused', base: 'release' }).calls.match(
+        /api -X DELETE/gm,
+      ) ?? [],
+    ).toHaveLength(0);
   });
 
   it('narrows the agent prompt after a timeout since the last successful round', () => {
@@ -9813,6 +9861,7 @@ exit 1
       apiFail = false,
       labels = '[]',
       viewFail = false,
+      deleteFail = '',
     } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
       try {
@@ -9824,11 +9873,21 @@ exit 1
             'if [[ "$1" == "api" && "$2" == "user" ]]; then',
             `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
             `  printf '%s' "${actor}"`,
+            'elif [[ "$1" == "api" && "$2" == "-X" ]]; then',
+            // R4-20: the DELETE can fail — non-404 surfaces the error text,
+            // 404 is the already-gone case.
+            `  if [[ -n "${deleteFail}" ]]; then echo "${deleteFail}" >&2; exit 1; fi`,
             'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
             `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
             'elif [[ "$1" == "pr" && "$2" == "view" ]]; then',
             `  if [[ "${viewFail}" == "true" ]]; then echo "GraphQL: Something went wrong" >&2; exit 1; fi`,
-            `  printf '%s' '{"labels":${labels}}'`,
+            // R4-22: only serve the labels payload when the caller actually
+            // asked for it — a field-selection drift must fail the guard.
+            '  if [[ "$*" == *"--json labels"* ]]; then',
+            `    printf '%s' '{"labels":${labels}}'`,
+            '  else',
+            `    printf '%s' '{"number":7354}'`,
+            '  fi',
             'fi',
           ].join('\n'),
         );
@@ -9878,16 +9937,47 @@ exit 1
       'api -X DELETE repos/QwenLM/qwen-code/issues/7354/labels/autofix%2Fneeds-human',
     );
     expect(ok.calls.match(/^api -X DELETE/gm) ?? []).toHaveLength(1);
+    // R4-23: …and it is the only label WRITE of any verb — the full api-call
+    // census is `api user` + the one DELETE (a stray label POST would make
+    // this 3).
+    expect(ok.calls.match(/^api /gm) ?? []).toHaveLength(2);
+    // R4-19: the marker comment posts BEFORE the cleanup DELETE — under
+    // `bash -eo pipefail` a comment failure then aborts before the DELETE,
+    // keeping the escalation label (the reverse order would drop the label
+    // without posting the re-arm marker).
+    expect(ok.calls.indexOf('pr comment')).toBeLessThan(
+      ok.calls.indexOf('api -X DELETE'),
+    );
     // No line may be indented 4+ spaces, or the marker renders as a code block
     // and the scanners' marker match silently fails.
     expect(ok.body).not.toMatch(/^ {4,}/m);
 
+    // R4-20: a non-404 DELETE failure surfaces `removal failed` but does not
+    // fail the step (the marker was already posted); a 404 stays silent.
+    const delFail = runRearm({
+      actor: BOT,
+      deleteFail: 'HTTP 502: Bad Gateway',
+    });
+    expect(delFail.status).toBe(0);
+    expect(delFail.calls).toContain('api -X DELETE');
+    expect(delFail.stdout).toContain('removal failed');
+    const del404 = runRearm({
+      actor: BOT,
+      deleteFail: 'HTTP 404: Not Found',
+    });
+    expect(del404.status).toBe(0);
+    expect(del404.stdout).not.toContain('removal failed');
+
     // R3-7: skip wins over re-arm — with autofix/skip present the stale-label
     // DELETE is skipped, so a frozen PR keeps its only filterable escalation
     // state (no scan manages it and the fresh window won't re-apply it).
+    // R4-25: the fixture uses the production multi-label shape (takeover +
+    // needs-human + skip) — a single-label payload would miss order-
+    // dependent guard mutants.
     const skipped = runRearm({
       actor: BOT,
-      labels: '[{"name":"autofix/skip"}]',
+      labels:
+        '[{"name":"autofix/takeover"},{"name":"autofix/needs-human"},{"name":"autofix/skip"}]',
     });
     expect(skipped.status).toBe(0);
     expect(skipped.calls).toContain('pr comment');
@@ -9910,6 +10000,9 @@ exit 1
     expect(mismatch.status).toBe(1);
     expect(mismatch.calls).toContain('api user');
     expect(mismatch.calls).not.toContain('pr comment');
+    // R4-21: the identity failure must also withhold the needs-human DELETE —
+    // a mis-scoped PAT must not strip the escalation label either.
+    expect(mismatch.calls).not.toContain('api -X DELETE');
     expect(mismatch.body).toBe('');
     expect(mismatch.stdout).toContain(`expected ${BOT}`);
 
@@ -9918,6 +10011,7 @@ exit 1
     const failed = runRearm({ apiFail: true });
     expect(failed.status).toBe(1);
     expect(failed.calls).not.toContain('pr comment');
+    expect(failed.calls).not.toContain('api -X DELETE');
     expect(failed.body).toBe('');
     expect(failed.stdout).toContain('Failed to verify CI_DEV_BOT_PAT identity');
     expect(failed.stdout).toContain('Bad credentials');
