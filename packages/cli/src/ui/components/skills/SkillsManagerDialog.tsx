@@ -75,6 +75,10 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
 };
 
 const NAME_COLUMN = 24;
+// Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
+// + search row(2) + list marginTop(1) + footer(2). The optional locked-skills
+// block adds 2 + N rows when present; not counted here.
+const SKILLS_DIALOG_FIXED_ROWS = 11;
 
 function lower(name: string): string {
   return name.trim().toLowerCase();
@@ -519,10 +523,25 @@ export function SkillsManagerDialog({
     { isActive: true },
   );
 
-  const maxItemsToShow = Math.max(
-    5,
-    Math.min(15, (availableTerminalHeight ?? 24) - 10),
-  );
+  const visibleLocked =
+    availableTerminalHeight === undefined
+      ? filteredLocked
+      : filteredLocked.slice(
+          0,
+          Math.max(0, availableTerminalHeight - SKILLS_DIALOG_FIXED_ROWS - 3),
+        );
+  // Locked block: marginTop(1) + header(1) + one row per visible skill.
+  const lockedRows = visibleLocked.length > 0 ? visibleLocked.length + 2 : 0;
+  const maxItemsToShow =
+    availableTerminalHeight === undefined
+      ? 15
+      : Math.max(
+          1,
+          Math.min(
+            15,
+            availableTerminalHeight - SKILLS_DIALOG_FIXED_ROWS - lockedRows,
+          ),
+        );
 
   // -- Render --
   if (loadError) {
@@ -647,12 +666,12 @@ export function SkillsManagerDialog({
         )}
       </Box>
 
-      {filteredLocked.length > 0 && (
+      {visibleLocked.length > 0 && (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.text.secondary}>
             {t('Locked by higher-scope settings (cannot toggle here):')}
           </Text>
-          {filteredLocked.map((s) => {
+          {visibleLocked.map((s) => {
             // Scope identifiers (System / User / SystemDefaults) stay as
             // untranslated technical labels — they refer to settings file
             // scopes by name and matching them exactly helps users locate

@@ -45,6 +45,7 @@ interface StatusLineDialogProps {
 
 const THEME_COLORS_KEY = 'theme-colors';
 const DESCRIPTION_COLUMN = 24;
+const STATUS_LINE_DIALOG_FIXED_ROWS = 15;
 
 function buildInitialSelectedKeys(settings: LoadedSettings): string[] {
   const preset =
@@ -151,15 +152,18 @@ export function StatusLineDialog({
     [],
   );
 
+  const terminalHeight = availableTerminalHeight ?? 18;
+  const hasFullLayout = terminalHeight >= STATUS_LINE_DIALOG_FIXED_ROWS + 1;
+
   const filteredOptions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) {
+    if (!hasFullLayout || !normalizedQuery) {
       return options;
     }
     return options.filter((option) =>
       getOptionSearchText(option).includes(normalizedQuery),
     );
-  }, [options, query]);
+  }, [hasFullLayout, options, query]);
 
   const presetConfig = useMemo(
     () => buildConfigFromKeys(selectedKeys),
@@ -206,7 +210,7 @@ export function StatusLineDialog({
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        if (query) {
+        if (hasFullLayout && query) {
           setQuery('');
           return;
         }
@@ -214,7 +218,10 @@ export function StatusLineDialog({
         return;
       }
 
-      if (key.name === 'backspace' || key.name === 'delete') {
+      if (
+        hasFullLayout &&
+        (key.name === 'backspace' || key.name === 'delete')
+      ) {
         setQuery((current) => current.slice(0, -1));
         return;
       }
@@ -230,6 +237,7 @@ export function StatusLineDialog({
       }
 
       if (
+        hasFullLayout &&
         !key.ctrl &&
         !key.meta &&
         key.sequence.length === 1 &&
@@ -243,30 +251,39 @@ export function StatusLineDialog({
   );
 
   const maxItemsToShow = Math.max(
-    5,
-    Math.min(10, (availableTerminalHeight ?? 18) - 8),
+    1,
+    Math.min(
+      10,
+      hasFullLayout
+        ? terminalHeight - STATUS_LINE_DIALOG_FIXED_ROWS
+        : terminalHeight,
+    ),
   );
 
   return (
     <Box
-      borderStyle="round"
+      borderStyle={hasFullLayout ? 'round' : undefined}
       borderColor={theme.border.default}
       flexDirection="column"
       paddingX={1}
-      paddingY={1}
+      paddingY={hasFullLayout ? 1 : 0}
       width="100%"
     >
-      <Text bold>Configure Status Line</Text>
-      <Text color={theme.text.secondary}>
-        Select which items to display in the status line.
-      </Text>
+      {hasFullLayout && (
+        <>
+          <Text bold>Configure Status Line</Text>
+          <Text color={theme.text.secondary}>
+            Select which items to display in the status line.
+          </Text>
 
-      <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.secondary}>Type to search</Text>
-        <Text>{query ? `> ${query}` : '>'}</Text>
-      </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.text.secondary}>Type to search</Text>
+            <Text>{query ? `> ${query}` : '>'}</Text>
+          </Box>
+        </>
+      )}
 
-      <Box marginTop={1} flexDirection="column">
+      <Box marginTop={hasFullLayout ? 1 : 0} flexDirection="column">
         {filteredOptions.length > 0 ? (
           <MultiSelect
             items={filteredOptions}
@@ -283,34 +300,38 @@ export function StatusLineDialog({
         )}
       </Box>
 
-      <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.secondary}>Preview</Text>
-        {previewLines.length > 0 ? (
-          previewLines.map((line, index) => (
-            <Text
-              key={`${line}-${index}`}
-              color={
-                presetConfig.useThemeColors ? theme.text.accent : undefined
-              }
-              dimColor={!presetConfig.useThemeColors}
-              wrap="truncate"
-            >
-              {line}
-            </Text>
-          ))
-        ) : (
-          <Text color={theme.text.secondary}>
-            Select at least one item to show a status line.
-          </Text>
-        )}
-      </Box>
+      {hasFullLayout && (
+        <>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.text.secondary}>Preview</Text>
+            {previewLines.length > 0 ? (
+              previewLines.map((line, index) => (
+                <Text
+                  key={`${line}-${index}`}
+                  color={
+                    presetConfig.useThemeColors ? theme.text.accent : undefined
+                  }
+                  dimColor={!presetConfig.useThemeColors}
+                  wrap="truncate"
+                >
+                  {line}
+                </Text>
+              ))
+            ) : (
+              <Text color={theme.text.secondary}>
+                Select at least one item to show a status line.
+              </Text>
+            )}
+          </Box>
 
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>
-          Use up/down to navigate, space to select, enter to confirm, esc to
-          cancel
-        </Text>
-      </Box>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              Use up/down to navigate, space to select, enter to confirm, esc to
+              cancel
+            </Text>
+          </Box>
+        </>
+      )}
     </Box>
   );
 }

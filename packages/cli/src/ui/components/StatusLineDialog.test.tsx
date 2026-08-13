@@ -81,7 +81,7 @@ describe('StatusLineDialog', () => {
           uiState={uiState}
           addItem={vi.fn()}
           onClose={vi.fn()}
-          availableTerminalHeight={18}
+          availableTerminalHeight={25}
         />
       </KeypressProvider>,
     );
@@ -375,5 +375,35 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()).toContain('> m');
     expect(lastFrame()).not.toContain('> mj');
     expect(lastFrame()).not.toContain('> mk');
+  });
+
+  it('keeps every option reachable in a one-line layout', async () => {
+    const settings = createSettings();
+    const { stdin, lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={settings}
+          config={config}
+          uiState={uiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={1}
+        />
+      </KeypressProvider>,
+    );
+
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(1);
+    expect(lastFrame()).not.toContain('Configure Status Line');
+
+    // 8 j presses: theme-colors -> (skip separator) -> ... -> current-dir.
+    for (let i = 0; i < 8; i++) {
+      act(() => {
+        stdin.write('j');
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(lastFrame()).toContain('current-dir');
+    // The active item must stay inside the visible window.
+    expect(lastFrame()).toMatch(/›.*current-dir/);
   });
 });
