@@ -2505,6 +2505,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Open the memory manager.',
+  'Detach the current Agent View session.':
+    'Detach the current Agent View session.',
   'Show current process memory diagnostics':
     'Show current process memory diagnostics',
   'Record a CPU profile for Chrome DevTools analysis':
