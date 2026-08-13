@@ -11,6 +11,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { buildOmniMediaGuidanceSection } from './media-guidance.js';
 import {
   OMNI_DISCLOSURE_TEXT_PREFIX,
+  OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
 } from './disclosure.js';
@@ -25,6 +26,7 @@ function stubConfig(overrides?: {
   omniEnabled?: boolean;
   cgc?: Record<string, unknown>;
   policyTools?: Record<string, unknown>;
+  recallMode?: 'active' | 'sideQuery';
 }): Config {
   return {
     isOmniEnabled: vi.fn().mockReturnValue(overrides?.omniEnabled ?? true),
@@ -33,6 +35,13 @@ function stubConfig(overrides?: {
       .fn()
       .mockReturnValue(overrides?.cgc ?? DASHSCOPE_CGC),
     getOmniPolicyToolsSettings: vi.fn().mockReturnValue(overrides?.policyTools),
+    getOmniMemoryConfig: vi
+      .fn()
+      .mockReturnValue(
+        overrides?.recallMode
+          ? { recall: { mode: overrides.recallMode } }
+          : undefined,
+      ),
   } as unknown as Config;
 }
 
@@ -105,5 +114,36 @@ describe('buildOmniMediaGuidanceSection', () => {
       }),
     )!;
     expect(section).toContain('No media tools are enabled');
+  });
+});
+
+describe('buildOmniMediaGuidanceSection — recall guidance', () => {
+  it('explains the handle marker and the recall-before-reprocessing contract in active mode', () => {
+    const section = buildOmniMediaGuidanceSection(
+      stubConfig({ recallMode: 'active' }),
+    )!;
+    // The annotation ships with every memory-known delivery, but the tool
+    // that consumes it is deferred — so without this the model sees the
+    // marker with no explanation and reprocesses what memory already holds.
+    expect(section).toContain(OMNI_RESOURCE_HANDLE_TEXT_PREFIX);
+    expect(section).toContain('omni_recall_media_memory');
+    expect(section).toMatch(/BEFORE reprocessing/);
+    // And it must say the handle is the only identity available.
+    expect(section).toMatch(/never be given its real path/);
+  });
+
+  it('says nothing about the recall tool in sideQuery mode', () => {
+    // D10: in sideQuery mode the harness injects recalled memory itself and
+    // the tool is not even registered — telling the model to call it would
+    // invite a guaranteed unknown-tool error.
+    const section = buildOmniMediaGuidanceSection(
+      stubConfig({ recallMode: 'sideQuery' }),
+    )!;
+    expect(section).not.toContain('omni_recall_media_memory');
+  });
+
+  it('says nothing about recall when memory is not configured', () => {
+    const section = buildOmniMediaGuidanceSection(stubConfig())!;
+    expect(section).not.toContain('omni_recall_media_memory');
   });
 });

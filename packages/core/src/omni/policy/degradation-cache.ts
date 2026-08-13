@@ -41,8 +41,15 @@ export const MAX_CACHED_DISCLOSURE_LENGTH = 2048;
 
 /** Io params are per-invocation plumbing, never policy identity: the same
  * policy applied to the same object must hit regardless of where the
- * source file sat or which staging dir the run used. */
-const FINGERPRINT_EXCLUDED_KEYS = new Set(['inputPath', 'outputDir']);
+ * source file sat or which staging dir the run used. `resourceId` joins
+ * them for gated model calls — the session handle names the same bytes the
+ * hash already keys, and it is freshly minted every session, so leaving it
+ * in would make every session re-derive identical work. */
+const FINGERPRINT_EXCLUDED_KEYS = new Set([
+  'inputPath',
+  'outputDir',
+  'resourceId',
+]);
 
 /** Deterministic JSON: objects serialized with sorted keys at every
  * depth, so `{a,b}` and `{b,a}` fingerprint identically. */

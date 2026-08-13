@@ -1758,6 +1758,8 @@ describe('handleAtCommand', () => {
         `[omission ${name}: ${reason}]`,
       formatDisclosureText: (name: string, disclosure: string) =>
         `[disclosure ${name}: ${disclosure}]`,
+      formatResourceHandleText: (name: string, resourceId: string) =>
+        `[handle ${name}: ${resourceId}]`,
       // Deterministic stand-in for the shared multi-output materializer:
       // one marker part per extra. The real builder's output shape is
       // covered by its core unit tests; these tests pin the wiring (that
@@ -1958,6 +1960,72 @@ describe('handleAtCommand', () => {
         name: 'Fetch Media URL',
         status: ToolCallStatus.Success,
         resultDisplay: 'Media omitted by the omni transport guard: clip.mp4',
+      });
+    });
+
+    it('leads the part group with the session resource handle (M §5.2)', async () => {
+      // A delivery mints a registry binding and writes memory records for
+      // the file. If the funnel never tells the model the handle, active
+      // recall rejects it as never-issued and the passive selector finds no
+      // handles to consult — the session can never recall media it just
+      // paid an upload to collect.
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        fileUri: 'oss://bucket/clip.mp4',
+        mimeType: 'video/mp4',
+        recognized: { modality: 'video', sizeBytes: 2 * 1024 * 1024 },
+        resourceId: 'media-3-9f2a',
+        disclosure: '原 1080p → 480p',
+      });
+
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 731,
+        signal: abortController.signal,
+      });
+
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const handleIdx = parts.findIndex(
+        (p) => p['text'] === '[handle clip.mp4: media-3-9f2a]',
+      );
+      expect(handleIdx).toBeGreaterThan(-1);
+      // Ahead of the disclosure, so the disclosure keeps its D8 adjacency
+      // to the media part it speaks for.
+      const disclosureIdx = parts.findIndex(
+        (p) => p['text'] === '[disclosure clip.mp4: 原 1080p → 480p]',
+      );
+      expect(disclosureIdx).toBe(handleIdx + 1);
+      expect(parts[disclosureIdx + 1]).toMatchObject({
+        fileData: { fileUri: 'oss://bucket/clip.mp4' },
+      });
+    });
+
+    it('still discloses the handle when the guard withholds the media', async () => {
+      // The withheld case is where recall matters MOST: the model cannot
+      // see the media, so a handle it can hand to omni_recall_media_memory
+      // (or a policy tool) is its only remaining route to the content.
+      omniMocks.processMediaForOmniDelivery.mockResolvedValue({
+        recognized: { modality: 'video', sizeBytes: 900 * 1024 * 1024 },
+        omission: { reason: 'video exceeds the transport limit' },
+        resourceId: 'media-4-c1d0',
+      });
+
+      const result = await handleAtCommand({
+        query: 'summarize @https://example.com/clip.mp4 please',
+        config: omniConfig(true),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 732,
+        signal: abortController.signal,
+      });
+
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const handleIdx = parts.findIndex(
+        (p) => p['text'] === '[handle clip.mp4: media-4-c1d0]',
+      );
+      expect(handleIdx).toBeGreaterThan(-1);
+      expect(parts[handleIdx + 1]).toEqual({
+        text: '[omission clip.mp4: video exceeds the transport limit]',
       });
     });
 

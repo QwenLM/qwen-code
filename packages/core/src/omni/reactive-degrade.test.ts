@@ -4,21 +4,65 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Content, Part } from '@google/genai';
+import type { Config } from '../config/config.js';
+import type { ToolCallRequestInfo } from '../core/turn.js';
+import type { MediaPolicyToolDescriptor } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { NormalizedFixedPolicy } from './policy/types.js';
+import {
+  DEFAULT_OMNI_MEMORY_CONFIG,
+  MediaMemoryService,
+} from '../services/media-memory/index.js';
+import { MEDIA_MEMORY_FILE_NAME } from '../services/media-memory/store.js';
+import type { MediaMemorySnapshot } from '../services/media-memory/types.js';
+import type { RecognizedMedia } from './recognition.js';
+import { OmniObjectStore } from './storage.js';
+import { OmniUploadCache } from './upload-cache.js';
+import type {
+  NormalizedFixedPolicy,
+  NormalizedOmniProcessingLimits,
+} from './policy/types.js';
 import {
   applyOssMediaReplacements,
   buildLadderPolicy,
   collectOssMediaRefs,
   contentsHaveOssMedia,
+  degradeOmniMediaAfterServerReject,
   getObservedServerInputLimit,
   recordObservedServerInputLimit,
   resetObservedServerInputLimitsForTests,
   type OssMediaReplacement,
 } from './reactive-degrade.js';
 import { OMNI_DISCLOSURE_TEXT_PREFIX } from './disclosure.js';
+
+// The ladder re-runs the REAL policy orchestrator (that wiring is what the
+// memory tests below are about), so only the two true externals are
+// stubbed: the tool process and the uploads endpoint.
+const executeToolCallMock = vi.hoisted(() => vi.fn());
+vi.mock('../core/nonInteractiveToolExecutor.js', () => ({
+  executeToolCall: executeToolCallMock,
+}));
+
+// Partial mock: recognizeMediaFile would need ffprobe; hashFileSha256 and
+// extensionForMime stay real (the store re-hashes for real).
+const recognizeMediaFileMock = vi.hoisted(() => vi.fn());
+vi.mock('./recognition.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./recognition.js')>()),
+  recognizeMediaFile: recognizeMediaFileMock,
+}));
+
+const uploadFileMock = vi.hoisted(() => vi.fn());
+vi.mock('./upload.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./upload.js')>()),
+  DashScopeUploader: class {
+    uploadFile = uploadFileMock;
+  },
+}));
 
 afterEach(() => {
   resetObservedServerInputLimitsForTests();
@@ -300,5 +344,252 @@ describe('observed server input limits', () => {
     recordObservedServerInputLimit('m', 0);
     recordObservedServerInputLimit('m', Number.NaN);
     expect(getObservedServerInputLimit('m')).toBeUndefined();
+  });
+});
+
+describe('degradeOmniMediaAfterServerReject memory wiring (S5)', () => {
+  const MODEL = 'qwen3-omni-plus';
+  const BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+  const API_KEY = 'test-key';
+  const SOURCE_BYTES = 'original-video-bytes';
+  const DEGRADED_BYTES = 'reactively-degraded-video-bytes';
+  const OSS_URL = 'oss://bucket/clip';
+
+  const SOURCE_RECOGNIZED: RecognizedMedia = {
+    modality: 'video',
+    detectedMimeType: 'video/mp4',
+    sizeBytes: SOURCE_BYTES.length,
+    metadata: { durationMs: 60_000, width: 1920, height: 1080 },
+  };
+  const DEGRADED_RECOGNIZED: RecognizedMedia = {
+    modality: 'video',
+    detectedMimeType: 'video/mp4',
+    sizeBytes: DEGRADED_BYTES.length,
+    metadata: { durationMs: 60_000, width: 640, height: 360 },
+  };
+  const VIDEO_DESCRIPTOR: MediaPolicyToolDescriptor = {
+    kind: 'media_policy',
+    inputMediaTypes: ['video'],
+    outputs: [
+      { kind: 'media', mimeTypes: ['video/mp4'], required: true, lossy: true },
+    ],
+  };
+  const LIMITS: NormalizedOmniProcessingLimits = {
+    maxConcurrentResources: 1,
+    reservedOutputTokens: 8192,
+    maxLineageDepth: 8,
+    maxPolicyRunsPerRoot: 64,
+    maxArtifactsPerRoot: 256,
+    maxDerivedBytesPerRoot: 1073741824,
+    maxTransportPasses: 3,
+  };
+
+  let tmpDir: string;
+  let store: OmniObjectStore;
+  let sourceSha256: string;
+  let objectPath: string;
+
+  function sha256Of(text: string): string {
+    return createHash('sha256').update(text).digest('hex');
+  }
+
+  function degradeConfig(): Config {
+    return {
+      isOmniEnabled: () => true,
+      isTrustedFolder: () => true,
+      getContentGeneratorConfig: () => ({ apiKey: API_KEY, baseUrl: BASE_URL }),
+      getModel: () => MODEL,
+      storage: { getQwenDir: () => path.join(tmpDir, '.qwen') },
+      getOmniProcessingConfig: () => ({
+        transportGuardPolicies: [videoGuardPolicy()],
+        limits: LIMITS,
+      }),
+      getOmniMemoryConfig: () => DEFAULT_OMNI_MEMORY_CONFIG,
+      getToolRegistry: () => ({
+        getTool: (name: string) =>
+          name === ToolNames.OMNI_DOWNSCALE_VIDEO
+            ? { mediaPolicyDescriptor: VIDEO_DESCRIPTOR }
+            : undefined,
+      }),
+      getOmniPolicyToolsSettings: () => undefined,
+    } as unknown as Config;
+  }
+
+  function rejectedContents(): Content[] {
+    return [
+      {
+        role: 'user',
+        parts: [
+          { text: 'summarize this' },
+          {
+            fileData: {
+              fileUri: OSS_URL,
+              mimeType: 'video/mp4',
+              displayName: 'movie.mkv',
+            },
+          },
+        ],
+      },
+    ];
+  }
+
+  async function readSnapshot(): Promise<MediaMemorySnapshot> {
+    return JSON.parse(
+      await fs.readFile(
+        path.join(store.getOmniRootDir(), MEDIA_MEMORY_FILE_NAME),
+        'utf8',
+      ),
+    ) as MediaMemorySnapshot;
+  }
+
+  /** Record a video file into memory the way the delivery pipeline does,
+   * returning the binding the ladder is supposed to rediscover by hash. */
+  async function recordInMemory(fileRef: string, sha256: string) {
+    const service = new MediaMemoryService(store.getOmniRootDir());
+    const binding = await service.recordFileRecognized({
+      fileRef,
+      sha256,
+      mediaType: 'video',
+      metadata: SOURCE_RECOGNIZED.metadata,
+      sizeBytes: SOURCE_RECOGNIZED.sizeBytes,
+      mimeType: 'video/mp4',
+      origin: 'user',
+      source: { protocol: 'local', locator: 'movie.mkv' },
+      recognition: {
+        ingestionConfigHash: '',
+        detectorVersion: 'omni-sniff-ffprobe/1',
+        probeStatus: 'complete',
+      },
+    });
+    return binding!;
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-reactive-'));
+    store = new OmniObjectStore(path.join(tmpDir, '.qwen'));
+    // The object the rejected oss:// URL maps back to, reachable through
+    // the upload cache's reverse lookup exactly as in production.
+    const stagedSource = path.join(tmpDir, 'movie.mkv');
+    await fs.writeFile(stagedSource, SOURCE_BYTES);
+    sourceSha256 = sha256Of(SOURCE_BYTES);
+    objectPath = (await store.putFile(stagedSource, sourceSha256, '.mp4'))
+      .objectPath;
+    const scope = createHash('sha256')
+      .update(`${BASE_URL}|${API_KEY}`)
+      .digest('hex')
+      .slice(0, 16);
+    await new OmniUploadCache(store.getOmniRootDir(), undefined, scope).put(
+      sourceSha256,
+      MODEL,
+      OSS_URL,
+    );
+
+    recognizeMediaFileMock.mockImplementation(async (filePath: string) =>
+      filePath === objectPath ? SOURCE_RECOGNIZED : DEGRADED_RECOGNIZED,
+    );
+    executeToolCallMock.mockImplementation(
+      async (_config: Config, request: ToolCallRequestInfo) => {
+        const outputDir = request.args['outputDir'] as string;
+        await fs.writeFile(path.join(outputDir, 'out.mp4'), DEGRADED_BYTES);
+        return {
+          callId: request.callId,
+          responseParts: [],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          policyArtifacts: {
+            toolName: request.name,
+            invocationId: request.callId,
+            executionOrigin: request.executionOrigin,
+            artifacts: [
+              {
+                kind: 'video',
+                storage: 'workspace',
+                title: 'out.mp4',
+                workspacePath: 'out.mp4',
+                mimeType: 'video/mp4',
+                metadata: { omniDisclosure: 'Downscaled to 360p/0.5fps.' },
+              },
+            ],
+          },
+        };
+      },
+    );
+    uploadFileMock.mockResolvedValue('oss://bucket/clip-rung-1');
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('commits the re-derivation onto the binding found by content hash', async () => {
+    // The ladder only ever holds an oss:// URL and the bytes behind it —
+    // never a memory identity. Losing the sha256 → binding lookup does not
+    // break the retry, so nothing goes red: the request is degraded, sent,
+    // and accepted, while the derivative silently becomes a rootless
+    // orphan. Recall would then report the user's video as never having
+    // been degraded, and the next rung would re-transcode from scratch.
+    const rootBinding = await recordInMemory(objectPath, sourceSha256);
+    const contents = rejectedContents();
+
+    const outcome = await degradeOmniMediaAfterServerReject(
+      degradeConfig(),
+      contents,
+      1,
+    );
+    expect(outcome).toEqual({ replacedParts: 1, degradedResources: 1 });
+
+    const snapshot = await readSnapshot();
+    const executions = Object.values(snapshot.executions);
+    expect(executions).toHaveLength(1);
+    expect(executions[0]).toMatchObject({
+      sourceVersionId: rootBinding.fileVersionId,
+      rootFileId: rootBinding.rootFileId,
+      toolName: ToolNames.OMNI_DOWNSCALE_VIDEO,
+      // The rung's escalated arguments are what actually ran, so they are
+      // what the record must carry — rung 1 of the video ladder.
+      finalArguments: { maxHeight: 360, fps: 0.5 },
+      executionOrigin: {
+        kind: 'fixed_policy',
+        policyId: 'video-downscale.reactive-1',
+        stage: 'transport_guard',
+      },
+    });
+
+    const derivedVersion = Object.values(snapshot.versions).find(
+      (version) => version.sha256 === sha256Of(DEGRADED_BYTES),
+    );
+    expect(derivedVersion).toBeDefined();
+    expect(derivedVersion!.parentVersionId).toBe(rootBinding.fileVersionId);
+    expect(snapshot.files[derivedVersion!.fileId].rootFileId).toBe(
+      rootBinding.rootFileId,
+    );
+  });
+
+  it('degrades normally when memory has never seen the bytes', async () => {
+    // Memory is best-effort here: a session that degraded media before
+    // memory was switched on (or after the store was wiped) still has to
+    // retry. And the commit must not fall back to SOME other binding —
+    // attaching this derivative to an unrelated lineage would be a
+    // fabricated provenance claim, which is worse than no record.
+    await recordInMemory(path.join(tmpDir, 'other.mkv'), sha256Of('unrelated'));
+    const contents = rejectedContents();
+
+    const outcome = await degradeOmniMediaAfterServerReject(
+      degradeConfig(),
+      contents,
+      1,
+    );
+    expect(outcome).toEqual({ replacedParts: 1, degradedResources: 1 });
+    expect(contents[0].parts![2].fileData?.fileUri).toBe(
+      'oss://bucket/clip-rung-1',
+    );
+
+    const snapshot = await readSnapshot();
+    expect(Object.values(snapshot.executions)).toEqual([]);
+    expect(
+      Object.values(snapshot.versions).map((version) => version.sha256),
+    ).toEqual([sha256Of('unrelated')]);
   });
 });

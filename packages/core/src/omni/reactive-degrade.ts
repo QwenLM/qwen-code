@@ -51,6 +51,7 @@ import {
 } from './recognition.js';
 import { runFixedPolicies } from './policy/orchestrator.js';
 import type { NormalizedFixedPolicy } from './policy/types.js';
+import { MediaMemoryService } from '../services/media-memory/index.js';
 import { formatDisclosureText } from './disclosure.js';
 import { isOmniDeliveryActive } from './delivery-gate.js';
 
@@ -358,6 +359,16 @@ export async function degradeOmniMediaAfterServerReject(
     config.getOmniUploadUrlTtlHours?.() ?? DEFAULT_UPLOAD_CACHE_TTL_HOURS,
     cacheScope,
   );
+  // Media-memory collection (S5): the ladder re-derives from a stored
+  // object whose memory identity — if any — is only reachable through
+  // its content hash. Best-effort like everything else here: an absent
+  // config, a missing binding, or a failed lookup simply skips memory.
+  const memoryConfig = config.getOmniMemoryConfig?.();
+  const memoryService = memoryConfig
+    ? new MediaMemoryService(store.getOmniRootDir(), {
+        maxInlineTextBytes: memoryConfig.collection.maxInlineTextBytes,
+      })
+    : undefined;
 
   // old fileUri → replacement delivery.
   const replacements = new Map<string, OssMediaReplacement>();
@@ -389,6 +400,9 @@ export async function degradeOmniMediaAfterServerReject(
         recognized.modality,
         attempt,
       );
+      const sourceBinding = memoryService
+        ? await memoryService.findBindingBySha256(sha256)
+        : undefined;
       const { deliveries } = await runFixedPolicies(
         config,
         {
@@ -396,12 +410,17 @@ export async function degradeOmniMediaAfterServerReject(
           recognized,
           displayName: ref.displayName,
           origin: 'user',
+          sha256,
         },
         {
           store,
           policies: [policy],
           signal,
           limits: processingConfig.limits,
+          memory:
+            memoryService && sourceBinding
+              ? { service: memoryService, sourceBinding }
+              : undefined,
         },
       );
       const delivery = deliveries[0];

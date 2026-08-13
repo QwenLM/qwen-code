@@ -9,6 +9,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
+import {
+  MediaMemoryService,
+  MediaResourceRegistry,
+} from '../services/media-memory/index.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { isOmniDeliveryActive } from './index.js';
 import { effectiveMaxDownloadFileBytes } from './index.js';
@@ -290,6 +294,72 @@ describe('readMediaViaOmniDelivery result shape', () => {
         displayName: 'pic.png',
       },
     });
+  });
+
+  it('leads with the session resource handle when memory is on', async () => {
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi
+        .fn()
+        .mockResolvedValue(
+          mockRecognized('image', { width: 1920, height: 1080 }),
+        ),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
+      extensionForMime: vi.fn().mockReturnValue('.png'),
+    }));
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        async putFile() {
+          return { objectPath: '/tmp/obj.png', deduped: false };
+        }
+        getOmniRootDir() {
+          return tmpDir;
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        async uploadFile() {
+          return 'oss://bucket/key';
+        }
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    const { readMediaViaOmniDelivery } = await import('./index.js');
+    const { MediaResourceRegistry } = await import(
+      '../services/media-memory/index.js'
+    );
+    const registry = new MediaResourceRegistry();
+
+    const result = await readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: {
+        ...deliveryConfig(),
+        getOmniMemoryConfig: () => ({
+          collection: { maxInlineTextBytes: 4096 },
+        }),
+        getOmniMediaResourceRegistry: () => registry,
+      } as unknown as Config,
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(3);
+    // Handle part FIRST — the hint/disclosure chain keeps its adjacency
+    // to the media part (D8), and the model learns the recall handle.
+    const handleText = parts[0]!['text'] as string;
+    expect(handleText).toContain('【媒体资源】pic.png：');
+    const resourceId = handleText.split('：')[1]!;
+    expect(registry.resolve(resourceId)).toMatchObject({
+      mediaType: 'image',
+    });
+    expect(parts[1]!['text']).toContain('zoom_image');
+    expect(parts[2]).toHaveProperty('fileData');
   });
 
   it('returns a bare fileData part for audio (no zoom hint)', async () => {
@@ -819,6 +889,9 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         }
         getObjectsDir() {
           return objectsDir;
+        }
+        objectPathFor(sha256: string, extension: string) {
+          return path.join(objectsDir, `${sha256}${extension}`);
         }
       },
     }));
@@ -1783,6 +1856,60 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(result.errorType).toBeUndefined();
   });
 
+  it('readMediaViaOmniDelivery keeps the recall handle on an omitted media', async () => {
+    // The omission branch is the one shape that puts NO media part in front
+    // of the model. Without the handle leading it, the withheld resource has
+    // no identity the model can name — it can neither recall what memory
+    // knows about it nor ask a policy tool to reprocess it into something
+    // deliverable, and paths are never surfaced (M §5.2).
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: path.join(tmpDir, 'objects', 'deadbeef.jpg'),
+          recognized: { ...DEGRADED_RECOGNIZED, sizeBytes: 900 },
+          sha256: 'b'.repeat(64),
+          degraded: true,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const { MediaResourceRegistry } = await import(
+      '../services/media-memory/index.js'
+    );
+    const registry = new MediaResourceRegistry();
+
+    const result = await mod.readMediaViaOmniDelivery({
+      filePath: await realFile('pic.png'),
+      config: {
+        ...policyConfig({ maxUploadFileBytes: 500 }),
+        getOmniMemoryConfig: () => ({
+          collection: { maxInlineTextBytes: 4096 },
+        }),
+        getOmniMediaResourceRegistry: () => registry,
+      } as unknown as Config,
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+
+    // With memory off this branch collapses to a bare notice string (test
+    // above); a bound handle must turn it into a part array led by the
+    // handle, with the notice standing in for the media behind it.
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    expect(parts).toHaveLength(2);
+    const handleText = parts[0]!['text'] as string;
+    expect(handleText).toContain('【媒体资源】pic.png：');
+    expect(registry.resolve(handleText.split('：')[1]!)).toMatchObject({
+      mediaType: 'image',
+    });
+    expect(parts[1]!['text']).toMatch(/^【媒体省略】pic\.png：/);
+    expect(result.returnDisplay).toBe(
+      'Media omitted by the omni transport guard: pic.png',
+    );
+  });
+
   it('threads the quarantine retention settings into startup recovery', async () => {
     const recoveryMock = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./recovery.js', () => ({
@@ -1824,5 +1951,157 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
         }),
       },
     );
+  });
+
+  it('anchors tool-result media to the object store, not its staging file', async () => {
+    // The tool-result funnel writes bytes to a staging `.part` and deletes
+    // it in `finally` the same turn, while this delivery promotes the same
+    // bytes into the content-addressed store. Recording the staging path
+    // as the persistent identity handed the model a handle resolving to a
+    // deleted file (ENOENT for any policy tool pointed at it) and made
+    // recall report `artifact_unavailable` for an artifact that persists.
+    const runMock = vi
+      .fn()
+      .mockResolvedValue({ deliveries: [], records: [], fileDeliveries: [] });
+    const { mod } = await armPipeline(runMock);
+    const registry = new MediaResourceRegistry();
+    const stagingPath = await realFile('tool-media.part');
+    const config = {
+      ...policyConfig({ policies: [] }),
+      getOmniMemoryConfig: () => ({ collection: { maxInlineTextBytes: 4096 } }),
+      getOmniMediaResourceRegistry: () => registry,
+    } as unknown as Config;
+
+    const delivery = await mod.processMediaForOmniDelivery(
+      stagingPath,
+      config,
+      { origin: 'tool' },
+    );
+
+    const binding = registry.resolve(delivery.resourceId!);
+    expect(binding).toBeDefined();
+    // Content-addressed location derived from the hash — survives the
+    // funnel's cleanup of the staging file.
+    expect(binding!.fileRef).toBe(
+      path.join(tmpDir, 'objects', `${'a'.repeat(64)}.jpg`),
+    );
+    expect(binding!.fileRef).not.toBe(stagingPath);
+    // A user file keeps its own path (its bytes stay in place, S §4).
+    const userRegistry = new MediaResourceRegistry();
+    const userDelivery = await mod.processMediaForOmniDelivery(
+      await realFile('photo.png'),
+      {
+        ...config,
+        getOmniMediaResourceRegistry: () => userRegistry,
+      } as unknown as Config,
+    );
+    expect(userRegistry.resolve(userDelivery.resourceId!)!.fileRef).toContain(
+      'photo.png',
+    );
+  });
+
+  it('anchors URL media to the object store and records the URL as its source', async () => {
+    // The URL funnel stages its download under an opaque temp name and
+    // deletes it in `finally` the same turn — the same lifetime as
+    // tool-result media, missed when C9 fixed that funnel. Binding the
+    // staging path handed the model a handle that resolves to ENOENT for
+    // the rest of the session, and made cross-session recall report
+    // `artifact_unavailable` for bytes the object store still holds.
+    const runMock = vi
+      .fn()
+      .mockResolvedValue({ deliveries: [], records: [], fileDeliveries: [] });
+    const { mod } = await armPipeline(runMock);
+    const registry = new MediaResourceRegistry();
+    const stagingPath = await realFile('dl-3f9a.part');
+    const config = {
+      ...policyConfig({ policies: [] }),
+      getOmniMemoryConfig: () => ({ collection: { maxInlineTextBytes: 4096 } }),
+      getOmniMediaResourceRegistry: () => registry,
+    } as unknown as Config;
+
+    const delivery = await mod.processMediaForOmniDelivery(
+      stagingPath,
+      config,
+      {
+        displayName: 'clip.mp4',
+        sourceUrl: 'https://example.com/media/clip.mp4',
+      },
+    );
+
+    const binding = registry.resolve(delivery.resourceId!);
+    expect(binding).toBeDefined();
+    expect(binding!.fileRef).toBe(
+      path.join(tmpDir, 'objects', `${'a'.repeat(64)}.jpg`),
+    );
+    expect(binding!.fileRef).not.toBe(stagingPath);
+    // The durable identity of URL media is the URL itself — recorded as
+    // the version's source so provenance names where the bytes came from.
+    const snapshot = JSON.parse(
+      await fs.readFile(path.join(tmpDir, 'memory.json'), 'utf8'),
+    );
+    const version = Object.values(
+      snapshot.versions as Record<string, { source: unknown }>,
+    ).find(
+      (v) =>
+        JSON.stringify(v.source) ===
+        JSON.stringify({
+          protocol: 'url',
+          locator: 'https://example.com/media/clip.mp4',
+        }),
+    );
+    expect(version).toBeDefined();
+  });
+
+  it('mounts memory-known deliveries into the session resource registry', async () => {
+    const degradedPath = path.join(tmpDir, 'objects', 'deadbeef.jpg');
+    const derivedBinding = {
+      fileId: 'f-derived',
+      fileVersionId: 'v-derived',
+      rootFileId: 'f-root',
+    };
+    const runMock = vi.fn().mockResolvedValue({
+      deliveries: [
+        {
+          filePath: degradedPath,
+          recognized: DEGRADED_RECOGNIZED,
+          sha256: 'b'.repeat(64),
+          degraded: true,
+          memoryBinding: derivedBinding,
+        },
+      ],
+      records: [],
+      fileDeliveries: [],
+    });
+    const { mod } = await armPipeline(runMock);
+    const registry = new MediaResourceRegistry();
+    const filePath = await realFile('pic.png');
+    const config = {
+      ...policyConfig(),
+      getOmniMemoryConfig: () => ({ collection: { maxInlineTextBytes: 4096 } }),
+      getOmniMediaResourceRegistry: () => registry,
+    } as unknown as Config;
+
+    const delivery = await mod.processMediaForOmniDelivery(filePath, config);
+
+    // The derivative the model actually received is session-addressable,
+    // resolving back to its harness-side locator and memory identity.
+    const derived = registry.resolveVersion('v-derived');
+    expect(derived).toMatchObject({
+      ...derivedBinding,
+      fileRef: degradedPath,
+      mediaType: 'image',
+    });
+    expect(registry.resolve(derived!.resourceId)).toBe(derived);
+    // The original source stays addressable too, under the version the
+    // collection pass recorded for its content hash.
+    const memory = new MediaMemoryService(tmpDir);
+    const sourceBinding = await memory.findBindingBySha256('a'.repeat(64));
+    expect(sourceBinding).toBeDefined();
+    const source = registry.resolveVersion(sourceBinding!.fileVersionId);
+    expect(source?.fileRef).toBe(filePath);
+    expect(source?.mediaType).toBe('image');
+    // The delivery discloses the SOURCE handle (M §5.2): the model's way
+    // into recall is the source identity, not the derivative's.
+    expect(delivery.resourceId).toBe(source!.resourceId);
   });
 });

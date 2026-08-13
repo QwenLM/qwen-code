@@ -115,7 +115,7 @@ describe('OmniDownscaleVideoTool', () => {
       'video',
       signal,
     );
-    const outputPath = path.join(outputDir, 'downscaled.mp4');
+    const outputPath = path.join(outputDir, 'clip-downscaled.mp4');
     expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
     expect(mocks.runFfmpeg).toHaveBeenCalledWith(
       [
@@ -143,7 +143,7 @@ describe('OmniDownscaleVideoTool', () => {
         kind: 'video',
         storage: 'workspace',
         title: 'Downscaled video',
-        workspacePath: 'downscaled.mp4',
+        workspacePath: 'clip-downscaled.mp4',
         mimeType: 'video/mp4',
         sizeBytes: OUTPUT_SIZE,
         metadata: {
@@ -176,9 +176,9 @@ describe('OmniDownscaleVideoTool', () => {
     // Height drops, frame rate does not.
     probe({ height: 720, frameRate: 8 });
     const heightOnly = await run();
-    expect(
-      heightOnly.result.artifacts?.[0]?.metadata?.['omniDisclosure'],
-    ).toBe('原 720p8/2MB → 480p10/300KB，分辨率下降，细节受损');
+    expect(heightOnly.result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+      '原 720p8/2MB → 480p10/300KB，分辨率下降，细节受损',
+    );
 
     // Frame rate drops, height does not.
     probe({ height: 360, frameRate: 30 });

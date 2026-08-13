@@ -7,6 +7,7 @@
 import type { FunctionDeclaration } from '@google/genai';
 import type { ToolExecutionOrigin } from '../../core/turn.js';
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
+import type { OmniMediaRegistryView } from '../../services/media-memory/registry.js';
 import { isPlainRecord } from './types.js';
 import type {
   MediaPolicyToolConfigView,
@@ -195,19 +196,23 @@ export type MediaPolicyCallGateResult =
  *   orchestrator already resolved its own `arguments`; modelAccess does
  *   not apply to fixed calls);
  * - a model/client-origin call of a media-policy tool requires
- *   `modelAccess.enabled`, must not name any lockedArguments key
- *   explicitly, and gets defaults + lockedArguments merged in;
+ *   `modelAccess.enabled`, may reference its input by opaque session
+ *   `resourceId` INSTEAD of `inputPath` (resolved here to the real
+ *   locator — memory design M §5.2; the model never learns the path),
+ *   must not name any lockedArguments key explicitly, and gets
+ *   defaults + lockedArguments merged in;
  * - everything else passes untouched.
  *
  * A missing origin fails closed as `{ kind: 'model' }`.
  */
 export function evaluateMediaPolicyToolCall(params: {
-  config: MediaPolicyConfigView;
+  config: MediaPolicyConfigView & OmniMediaRegistryView;
   tool: { name: string; mediaPolicyDescriptor?: MediaPolicyToolDescriptor };
   args: Record<string, unknown>;
   executionOrigin: ToolExecutionOrigin | undefined;
 }): MediaPolicyCallGateResult {
-  const { config, tool, args } = params;
+  const { config, tool } = params;
+  let args = params.args;
   const origin = params.executionOrigin ?? { kind: 'model' };
 
   if (origin.kind === 'fixed_policy') {
@@ -237,6 +242,57 @@ export function evaluateMediaPolicyToolCall(params: {
         `fixed-policy orchestration. Direct calls require ` +
         `"omni.processing.policyTools.${tool.name}.modelAccess.enabled": true.`,
     };
+  }
+
+  // Session-handle input (M §5.2): a gated caller may name its source by
+  // the opaque resourceId minted at delivery/recall instead of a real
+  // path. Resolution happens BEFORE the lockedArguments check so a
+  // handle-resolved inputPath cannot sidestep an operator-pinned input.
+  if (typeof args['resourceId'] === 'string') {
+    if (args['inputPath'] !== undefined) {
+      return {
+        outcome: 'reject',
+        reason: 'invalid_params',
+        message:
+          `Invalid parameters for tool "${tool.name}": provide exactly ` +
+          `one of "inputPath" or "resourceId", not both.`,
+      };
+    }
+    const binding = config
+      .getOmniMediaResourceRegistry?.()
+      ?.resolve(args['resourceId']);
+    if (!binding) {
+      // Unknown = never issued in this session (fabricated or stale
+      // cross-session handle) — reject, never guess (M §9.2 stance).
+      return {
+        outcome: 'reject',
+        reason: 'invalid_params',
+        message:
+          `Invalid parameters for tool "${tool.name}": resourceId ` +
+          `"${args['resourceId']}" was not issued in this session. Use a ` +
+          `handle from a 【媒体资源】 annotation or a recall result.`,
+      };
+    }
+    // The handle's modality must be one this tool declares consuming. The
+    // fixed-policy path validates this at startup; a gated caller holds
+    // only opaque handles, so mixing two up is easy — and without this the
+    // mistake becomes a spawned ffmpeg that burns the tool timeout and
+    // returns an opaque stderr tail, instead of an instant parameter error
+    // the caller can correct.
+    const accepted = tool.mediaPolicyDescriptor.inputMediaTypes;
+    if (accepted !== undefined && !accepted.includes(binding.mediaType)) {
+      return {
+        outcome: 'reject',
+        reason: 'invalid_params',
+        message:
+          `Invalid parameters for tool "${tool.name}": resourceId ` +
+          `"${args['resourceId']}" names ${binding.mediaType} media, but ` +
+          `this tool accepts ${accepted.join(', ')}. Pass a handle whose ` +
+          `media type matches.`,
+      };
+    }
+    const { resourceId: _resourceId, ...rest } = args;
+    args = { ...rest, inputPath: binding.fileRef };
   }
 
   const lockedKeys = Object.keys(access.lockedArguments);

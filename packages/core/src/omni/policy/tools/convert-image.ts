@@ -22,6 +22,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   sharpTimeoutSeconds,
   type MediaPolicyIoParams,
@@ -38,7 +39,8 @@ export const CONVERT_IMAGE_DEFAULTS = {
 } as const;
 
 interface OutputFormat {
-  fileName: string;
+  /** Output extension, with the leading dot. */
+  extension: string;
   mimeType: string;
   label: string;
   /** The disclosure's loss clause for this target format, given the
@@ -54,7 +56,7 @@ const ALPHA_CAPABLE_CODECS = new Set(['png', 'webp', 'gif', 'tiff']);
 
 const OUTPUT_FORMATS: Record<string, OutputFormat> = {
   jpeg: {
-    fileName: 'converted.jpg',
+    extension: '.jpg',
     mimeType: 'image/jpeg',
     label: 'JPEG',
     lossNote: (codec) =>
@@ -66,14 +68,14 @@ const OUTPUT_FORMATS: Record<string, OutputFormat> = {
     encode: (p, quality) => p.jpeg({ quality }),
   },
   png: {
-    fileName: 'converted.png',
+    extension: '.png',
     mimeType: 'image/png',
     label: 'PNG',
     lossNote: () => '元数据丢弃',
     encode: (p) => p.png(),
   },
   webp: {
-    fileName: 'converted.webp',
+    extension: '.webp',
     mimeType: 'image/webp',
     label: 'WEBP',
     lossNote: () => '元数据丢弃',
@@ -194,7 +196,12 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
         );
       }
 
-      const outputPath = path.join(this.params.outputDir, output.fileName);
+      const outputFileName = policyOutputFileName({
+        inputPath: this.params.inputPath,
+        operation: 'converted',
+        extension: output.extension,
+      });
+      const outputPath = path.join(this.params.outputDir, outputFileName);
       // `rotate()` bakes in the EXIF orientation — the orientation tag is
       // part of the metadata this conversion strips, so the pixels must
       // carry it instead.
@@ -218,7 +225,7 @@ class ConvertImageInvocation extends BaseMediaPolicyToolInvocation<ConvertImageP
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: output.fileName,
+        outputFileName,
         artifactKind: 'image',
         title: 'Converted image',
         mimeType: output.mimeType,
@@ -249,7 +256,7 @@ export class OmniConvertImageTool extends BaseMediaPolicyTool<ConvertImageParams
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['inputPath', 'outputDir'],
+        required: ['outputDir'],
         additionalProperties: false,
       },
       config,

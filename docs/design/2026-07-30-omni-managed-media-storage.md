@@ -140,30 +140,41 @@
 
 ## 6. 生命周期与垃圾回收
 
-### 6.1 启动恢复
+### 6.1 启动恢复（已实现，`omni/recovery.ts`）
 
-每次启动（或首次触碰 Omni 链路时）执行一次恢复扫描：
+每次启动（或首次触碰 Omni 链路时）执行一次恢复扫描。实现相对初稿的修正——
+多进程共存迫使"删除所有 staging"退化为宽限期语义：
 
-1. 删除 `staging/` 下所有目录——它们属于未完成的 invocation，对应的
-   `OmniPolicySucceeded` 必然未提交（提交成功即已删除 staging），Memory 中不
-   存在引用；
-2. 删除超过保留期的 `downloads/*.part`（续传窗口内的保留）；
-3. 按预算清理 `quarantine/`；
-4. 校验 `objects/` 中随机抽样对象的文件名与实际 hash 一致（廉价的损坏探测，
-   不做全库校验）。
+1. 删除 `staging/` 下**超过宽限期（1h）**的目录——宽限期必须长于策略工具
+   最长超时（配置校验强制 `runtime.timeoutMs` 低于宽限期），否则第二个 CLI
+   进程的恢复扫描会把另一个进程正在转码的工作目录删掉。晋升半成品 `.tmp`
+   同理（1h 宽限）；
+2. 删除超过保留窗口（48h）的 `downloads/*.part`；无续传逻辑，窗口纯为事后
+   检查中断下载留的调试期；
+3. 按保留天数与容量预算清理 `quarantine/`（超预算最旧优先）；
+4. 抽样校验 `objects/` 对象名与实际 hash 一致（每次至多 3 个、单个 ≤64MB，
+   避免在首次投递前的内联扫描里 hash 多 GB 视频）；发现损坏对象删除时**级联
+   清理降质缓存**（`policy-cache.json` 中以它为源或产物的条目），防止缓存
+   命中一个永远无法投递的对象。
 
-### 6.2 mark-and-sweep GC
+### 6.2 mark-and-sweep GC（S6 落点）
 
-- **根集合**：Memory store 中全部 active 记录引用的 managedId（含历史版本仍
-  被 provenance 引用的对象）+ 当前运行 session 的 MediaResourceRegistry 正在
-  使用的对象；
-- **清扫对象**：不在根集合中、且自晋升起超过 `retentionDays` 的对象；宽限期
-  保证"晋升成功但 Memory 提交失败"的孤儿和跨进程 race 不被立刻误删；
+- **根集合**：Memory store 中全部记录引用的 managedId——`entries[].artifactRef.managedId`
+  与 `versions[].source.locator`（`protocol: 'managed'`，tool/URL 来源媒体的
+  身份锚，见 Memory 设计 §11.2.1 实现注记）两处都算，含仅被 provenance 引用的
+  历史版本对象——加上当前进程 MediaResourceRegistry 正在使用的对象；
+- **清扫对象**：不在根集合中、且自晋升起超过 `retentionDays` 的对象；保留期
+  兼作宽限期，保证"晋升成功但 Memory 提交失败"的孤儿和跨进程 race 不被立刻
+  误删；
 - **触发时机**：启动恢复后异步执行；超过 `maxTotalBytes` 时提前触发，仍超限
   则从最旧的无引用对象继续删除；**有引用对象永不删除**，即使超预算——此时
-  告警并停止新的衍生物产生（等价于 Policy 设计 §8.4 的预算停止语义）；
-- GC 与 Memory 的一致性：先从 Memory 确认无引用，再删除文件；不存在"先删
-  文件再改记录"的窗口。
+  告警并置"停止新衍生物"标志，由 orchestrator 消费（等价于 Policy 设计 §8.4
+  的预算停止语义）；
+- **级联**：对象删除联动清理其 `upload-cache.json` 条目与降质缓存条目
+  （复用恢复扫描已实现的级联，见 §6.1 第 4 条）；反向不成立；
+- GC 与 Memory 的一致性：先从 Memory 快照确认无引用，再删除文件；不存在
+  "先删文件再改记录"的窗口。快照读取失败时 GC 整体跳过（fail-closed：
+  读不到根集合就不删任何东西）。
 
 ## 7. 配置
 

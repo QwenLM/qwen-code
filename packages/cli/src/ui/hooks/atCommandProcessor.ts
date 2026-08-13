@@ -284,6 +284,13 @@ export async function resolveAtCommandQuery({
   // store) after it. Only active when omni delivery is on; otherwise URL
   // tokens keep today's fall-through behavior (left as text).
   const urlMediaRefs: Array<{ originalAtPath: string; url: string }> = [];
+  /** `@`-referenced media whose bytes are gone but whose memory survives:
+   * re-anchored to a session handle so recall stays reachable. */
+  const rememberedMediaRefs: Array<{
+    originalAtPath: string;
+    pathName: string;
+    annotation: string;
+  }> = [];
 
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
@@ -473,9 +480,43 @@ export async function resolveAtCommandQuery({
       }
     }
     if (!resolvedSuccessfully && sawNotFound) {
-      onDebugMessage(
-        `Path ${pathName} not found. Path ${pathName} will be skipped.`,
-      );
+      // The bytes are gone, but media memory may still hold everything
+      // that was ever derived from them (transcripts, keyframes, the
+      // processing history). A handle is normally minted only at delivery,
+      // which needs the bytes — so that knowledge used to be unreachable
+      // for good. The user's own `@`-reference is the same authorization a
+      // delivery carries, so re-anchor from the recorded identity and hand
+      // the model a handle it can recall with (design M §9.2.1).
+      let reanchored = false;
+      if (config.isOmniEnabled?.()) {
+        const { reanchorRememberedMedia } = await import(
+          '@qwen-code/qwen-code-core/omni'
+        );
+        for (const dir of config.getWorkspaceContext().getDirectories()) {
+          const anchor = await reanchorRememberedMedia(
+            config,
+            path.resolve(dir, pathName),
+          );
+          if (!anchor) continue;
+          rememberedMediaRefs.push({
+            originalAtPath,
+            pathName,
+            annotation: anchor.annotation,
+          });
+          atPathToResolvedSpecMap.set(originalAtPath, pathName);
+          onDebugMessage(
+            `Path ${pathName} is gone but remembered; re-anchored as ` +
+              `${anchor.resourceId} (bytes unavailable).`,
+          );
+          reanchored = true;
+          break;
+        }
+      }
+      if (!reanchored) {
+        onDebugMessage(
+          `Path ${pathName} not found. Path ${pathName} will be skipped.`,
+        );
+      }
     }
   }
 
@@ -620,8 +661,12 @@ export async function resolveAtCommandQuery({
           downloaded.partPath,
           config,
           // displayName: guard/error messages must name the URL's file, not
-          // the opaque staging path the download landed under.
-          { signal, displayName: urlBase },
+          // the opaque staging path the download landed under. sourceUrl:
+          // the staging path is deleted in the finally below, so memory
+          // must anchor this media's identity to the object store and
+          // record the URL as its source — a handle bound to the staging
+          // path would resolve to ENOENT for the rest of the session.
+          { signal, displayName: urlBase, sourceUrl: ref.url },
         );
         // §6.2/D8 ordering contract documented on buildTranscriptParts.
         const transcriptParts = core.buildTranscriptParts(
@@ -634,11 +679,30 @@ export async function resolveAtCommandQuery({
           urlBase,
           delivery.additionalMedia,
         );
+        // Session resource handle (memory design M §5.2): leads the part
+        // group in every branch below, exactly as readMediaViaOmniDelivery
+        // does it. Without this, URL-delivered media accrues memory records
+        // and an issued registry binding that the model is never told about
+        // — active recall rejects the unknown handle and the passive
+        // selector finds no handles to consult, so the session can never
+        // recall what it just spent an upload collecting. Placed FIRST so
+        // the disclosure keeps its D8 adjacency to the media part.
+        const handleParts = delivery.resourceId
+          ? [
+              {
+                text: core.formatResourceHandleText(
+                  urlBase,
+                  delivery.resourceId,
+                ),
+              },
+            ]
+          : [];
         if (delivery.omission) {
           // Explicit omission (policy design §10.2): the media is withheld
           // and the omission notice text stands in its place — mirroring
           // readMediaViaOmniDelivery. Not an error: the fetch succeeded;
           // the transport guard's verdict is the content.
+          urlMediaParts.push(...handleParts);
           urlMediaParts.push({
             text: core.formatOmissionText(urlBase, delivery.omission.reason),
           });
@@ -661,6 +725,7 @@ export async function resolveAtCommandQuery({
           // for the primary (additional deliverables, if any, still are).
           // The primary disclosure (chained prior lossy steps, decision
           // D8) still renders: the transcript was derived through them.
+          urlMediaParts.push(...handleParts);
           if (delivery.disclosure) {
             urlMediaParts.push({
               text: core.formatDisclosureText(urlBase, delivery.disclosure),
@@ -679,6 +744,7 @@ export async function resolveAtCommandQuery({
           });
           continue;
         }
+        urlMediaParts.push(...handleParts);
         // Disclosure IMMEDIATELY before its media part (decision D8):
         // provider converters that relocate media move the pair together.
         if (delivery.disclosure) {
@@ -1116,18 +1182,30 @@ export async function resolveAtCommandQuery({
   // its content block via the "--- Content from ... ---" delimiter labels (and
   // the verbatim `@server:uri` / `@path` left in the prompt text), not by
   // positional alignment, so grouping is safe.
+  // Re-anchored media: a handle annotation plus an explicit note that the
+  // bytes are gone, so the model recalls instead of trying to read.
+  const rememberedMediaParts: Part[] = rememberedMediaRefs.flatMap((ref) => [
+    { text: ref.annotation },
+    {
+      text:
+        `【媒体缺失】${ref.pathName}：文件已不在磁盘上，无法投递画面/音频。` +
+        `其处理记忆仍可用——用上面的句柄调用 omni_recall_media_memory 取回。`,
+    },
+  ]);
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
     ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,
     ...urlMediaParts,
+    ...rememberedMediaParts,
   ];
   const allLabels = [
     ...scopedMentionLabels,
     ...contentLabelsForDisplay,
     ...resourceLabels,
     ...urlMediaLabels,
+    ...rememberedMediaRefs.map((ref) => `${ref.pathName} (记忆)`),
   ];
 
   return {

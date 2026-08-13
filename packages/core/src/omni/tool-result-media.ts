@@ -16,7 +16,11 @@ import {
   isOmniDeliveryActive,
   processMediaForOmniDelivery,
 } from './index.js';
-import { formatDisclosureText, formatOmissionText } from './disclosure.js';
+import {
+  formatDisclosureText,
+  formatOmissionText,
+  formatResourceHandleText,
+} from './disclosure.js';
 import { OmniTransportGuardError } from './guard.js';
 import { OmniObjectStore, prepareOmniDownloadsDir } from './storage.js';
 import { sniffMediaType } from './recognition.js';
@@ -100,6 +104,9 @@ export async function processToolResultOmniMedia(
     // which would report a tool that succeeded as failed.
     const store = new OmniObjectStore(config.storage.getQwenDir());
     let tempPath: string | undefined;
+    // Hoisted out of the try: the guard-rejection path below names the part
+    // in the handle annotation it emits.
+    const displayName = inline.displayName ?? `tool-media.${top}`;
     try {
       // Symlink-guarded (fail closed → this part stays inline): a link
       // planted at downloads/ would redirect the write outside the store.
@@ -111,7 +118,6 @@ export async function processToolResultOmniMedia(
         `${randomBytes(8).toString('hex')}.part`,
       );
       await fs.writeFile(tempPath, bytes, { mode: 0o600 });
-      const displayName = inline.displayName ?? `tool-media.${top}`;
       const delivery = await processMediaForOmniDelivery(tempPath, config, {
         expectedModality: sniffed.modality,
         signal,
@@ -135,6 +141,16 @@ export async function processToolResultOmniMedia(
       );
       uploadsRemaining -=
         delivery.additionalMedia?.filter((e) => !e.omission).length ?? 0;
+      // Session resource handle (M §5.2): leads the replacement group in
+      // every branch, keeping the disclosure's D8 adjacency to the media
+      // part intact.
+      const handleParts: Part[] = delivery.resourceId
+        ? [
+            {
+              text: formatResourceHandleText(displayName, delivery.resourceId),
+            },
+          ]
+        : [];
       if (delivery.omission) {
         // Explicit omission (policy design §10.2): the transport guard
         // could not bring the part within limits even after the guard
@@ -143,6 +159,7 @@ export async function processToolResultOmniMedia(
         // were already charged above).
         changed = true;
         return [
+          ...handleParts,
           { text: formatOmissionText(displayName, delivery.omission.reason) },
           ...additionalParts,
           ...transcriptParts,
@@ -157,11 +174,12 @@ export async function processToolResultOmniMedia(
         changed = true;
         return delivery.disclosure
           ? [
+              ...handleParts,
               { text: formatDisclosureText(displayName, delivery.disclosure) },
               ...additionalParts,
               ...transcriptParts,
             ]
-          : [...additionalParts, ...transcriptParts];
+          : [...handleParts, ...additionalParts, ...transcriptParts];
       }
       changed = true;
       uploadsRemaining--;
@@ -175,12 +193,18 @@ export async function processToolResultOmniMedia(
       };
       return delivery.disclosure
         ? [
+            ...handleParts,
             { text: formatDisclosureText(displayName, delivery.disclosure) },
             fileDataPart,
             ...additionalParts,
             ...transcriptParts,
           ]
-        : [fileDataPart, ...additionalParts, ...transcriptParts];
+        : [
+            ...handleParts,
+            fileDataPart,
+            ...additionalParts,
+            ...transcriptParts,
+          ];
     } catch (err) {
       if (signal.aborted) throw err;
       if (err instanceof OmniTransportGuardError) {
@@ -191,7 +215,21 @@ export async function processToolResultOmniMedia(
         // rationale ("produced locally, already in memory") covers only
         // failures of the *transfer*.
         changed = true;
+        // The source was bound before the guard ruled, and the omission
+        // branch with the identical "over-limit, withheld" verdict does
+        // disclose its handle — so withholding it here would be the one
+        // path that strands a resource the session already recorded.
         return [
+          ...(err.sessionResourceId
+            ? [
+                {
+                  text: formatResourceHandleText(
+                    displayName,
+                    err.sessionResourceId,
+                  ),
+                },
+              ]
+            : []),
           {
             text: `[Tool media part withheld by the omni transport guard: ${err.message}]`,
           },

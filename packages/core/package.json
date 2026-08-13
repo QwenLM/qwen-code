@@ -17,6 +17,10 @@
       "types": "./dist/src/omni/index.d.ts",
       "import": "./dist/src/omni/index.js"
     },
+    "./omniPolicyCollection": {
+      "types": "./dist/src/omni/policy/model-call-collection.d.ts",
+      "import": "./dist/src/omni/policy/model-call-collection.js"
+    },
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"

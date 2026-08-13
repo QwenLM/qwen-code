@@ -261,14 +261,14 @@ describe('OmniTranscribeAudioTool', () => {
         kind: 'file',
         storage: 'workspace',
         title: 'Audio transcript',
-        workspacePath: 'transcript.txt',
+        workspacePath: 'speech-transcript.txt',
         mimeType: 'text/plain',
         sizeBytes: Buffer.byteLength('你好，世界', 'utf-8'),
         metadata: { omniDisclosure: disclosure, omniRole: 'transcript' },
       },
     ]);
     await expect(
-      fs.readFile(path.join(outputDir, 'transcript.txt'), 'utf-8'),
+      fs.readFile(path.join(outputDir, 'speech-transcript.txt'), 'utf-8'),
     ).resolves.toBe('你好，世界');
   });
 
@@ -390,7 +390,7 @@ describe('OmniTranscribeAudioTool', () => {
 
     expect(result.error).toBeUndefined();
     await expect(
-      fs.readFile(path.join(outputDir, 'transcript.txt'), 'utf-8'),
+      fs.readFile(path.join(outputDir, 'speech-transcript.txt'), 'utf-8'),
     ).resolves.toBe('你好。再见！');
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
       '原 63s 音频 → 转写文本 6 字，检测到重复退化已截断，语气/音色/非语音信息丢失，识别可能有误',
@@ -469,7 +469,7 @@ describe('OmniTranscribeAudioTool', () => {
 
       expect(result.error).toBeUndefined();
       await expect(
-        fs.readFile(path.join(outputDir, 'transcript.txt'), 'utf-8'),
+        fs.readFile(path.join(outputDir, 'speech-transcript.txt'), 'utf-8'),
       ).resolves.toBe(
         '[00:00-02:13] 片段@0.000\n' +
           '[02:13-04:27] 片段@133.333\n' +
@@ -480,7 +480,9 @@ describe('OmniTranscribeAudioTool', () => {
       expect(disclosure).not.toContain('段失败');
 
       // Temporary chunk cuts are cleaned up; only the transcript remains.
-      await expect(fs.readdir(outputDir)).resolves.toEqual(['transcript.txt']);
+      await expect(fs.readdir(outputDir)).resolves.toEqual([
+        'speech-transcript.txt',
+      ]);
     });
 
     it('uses H:MM:SS ranges for audio of an hour or longer', async () => {
@@ -490,7 +492,7 @@ describe('OmniTranscribeAudioTool', () => {
 
       expect(result.error).toBeUndefined();
       const transcript = await fs.readFile(
-        path.join(outputDir, 'transcript.txt'),
+        path.join(outputDir, 'speech-transcript.txt'),
         'utf-8',
       );
       expect(transcript).toContain('[0:00:00-0:02:54] 对白');
@@ -524,7 +526,7 @@ describe('OmniTranscribeAudioTool', () => {
 
       expect(result.error).toBeUndefined();
       const transcript = await fs.readFile(
-        path.join(outputDir, 'transcript.txt'),
+        path.join(outputDir, 'speech-transcript.txt'),
         'utf-8',
       );
       expect(transcript).toContain('[02:13-04:27] （该段转写失败：HTTP 500）');
@@ -552,7 +554,7 @@ describe('OmniTranscribeAudioTool', () => {
 
       expect(result.error).toBeUndefined();
       const transcript = await fs.readFile(
-        path.join(outputDir, 'transcript.txt'),
+        path.join(outputDir, 'speech-transcript.txt'),
         'utf-8',
       );
       expect(transcript).toContain('大家好。再见！');
@@ -584,7 +586,7 @@ describe('OmniTranscribeAudioTool', () => {
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(3);
       expect(result.error).toBeUndefined();
       const transcript = await fs.readFile(
-        path.join(outputDir, 'transcript.txt'),
+        path.join(outputDir, 'speech-transcript.txt'),
         'utf-8',
       );
       expect(transcript).toContain(
@@ -607,7 +609,7 @@ describe('OmniTranscribeAudioTool', () => {
 
       expect(result.error).toBeUndefined();
       const transcript = await fs.readFile(
-        path.join(outputDir, 'transcript.txt'),
+        path.join(outputDir, 'speech-transcript.txt'),
         'utf-8',
       );
       expect(transcript).toContain(

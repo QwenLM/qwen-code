@@ -47,6 +47,18 @@ function inlinePart(mimeType: string, bytes: Buffer): Part {
   return { inlineData: { mimeType, data: bytes.toString('base64') } };
 }
 
+/** Role each replacement Part plays in the group, so one assertion can pin
+ * the whole group's order. */
+function tagPart(part: Part): string {
+  if (part.fileData) return 'media';
+  const text = part.text ?? '';
+  if (text.startsWith('【媒体资源】')) return 'handle';
+  if (text.startsWith('【媒体省略】')) return 'omission';
+  if (text.startsWith('【媒体降质】')) return 'disclosure';
+  if (text.startsWith('【媒体转写】')) return 'transcript';
+  return 'text';
+}
+
 // Per-run isolated qwen dir: a shared hardcoded path would leak staging
 // files across runs and collide between concurrent test invocations.
 let testQwenDir: string;
@@ -199,6 +211,29 @@ describe('processToolResultOmniMedia', () => {
     expect(result[1]!.fileData?.fileUri).toBe('oss://bucket/key3');
   });
 
+  it('keeps the recall handle on a guard-rejected part', async () => {
+    // The bind happens before the guard rules, so the session already has a
+    // record of this media. Withholding the handle too would make the
+    // rejection the one path that strands a recorded resource: the model
+    // cannot see the bytes AND cannot ask memory about them — while the
+    // omission branch, whose verdict is identical, does hand the handle over.
+    const { OmniTransportGuardError } = await import('./guard.js');
+    const rejection = new OmniTransportGuardError(
+      'x.png exceeds the omni upload limit',
+    );
+    rejection.sessionResourceId = 'media-6-ab12';
+    deliverMock.mockRejectedValueOnce(rejection);
+
+    const result = await processToolResultOmniMedia(
+      [inlinePart('image/png', PNG_BYTES)],
+      cfg({ image: true }),
+      signal,
+    );
+
+    expect(result[0]!.text).toContain('media-6-ab12');
+    expect(result[1]!.text).toMatch(/withheld by the omni transport guard/);
+  });
+
   it('withholds the part when guard-stage PROCESSING fails (never inline the rejected bytes)', async () => {
     // A guard-policy execution failure arrives as OmniTransportGuardError
     // with the underlying error as `cause` (see processMediaForOmniDelivery's
@@ -250,6 +285,75 @@ describe('processToolResultOmniMedia', () => {
       text: '【媒体省略】tool-media.image：still 900 bytes over the upload limit',
     });
   });
+
+  // Session resource handle (M §5.2): the only identity the model ever gets
+  // for tool-produced media. A branch that drops it hands the model media it
+  // can never name again — no recall, no follow-up omni tool call, and no
+  // path to fall back on. The handle must LEAD the group so the disclosure
+  // keeps its D8 adjacency to the media part.
+  const RESOURCE_ID = 'media-3-c0ffee01';
+  const HANDLE_TEXT = `【媒体资源】tool-media.image：${RESOURCE_ID}`;
+  const HANDLE_DELIVERY = {
+    mimeType: 'image/png',
+    sha256: 'a'.repeat(64),
+    recognized: { modality: 'image' },
+    tokenEstimate: {
+      estimatedTokenCount: 1,
+      method: 'raw-resource-v1',
+      status: 'ok',
+    },
+    deduped: false,
+    resourceId: RESOURCE_ID,
+  };
+
+  it.each([
+    {
+      branch: 'plain upload',
+      delivery: { fileUri: 'oss://bucket/key' },
+      tags: ['handle', 'media'],
+    },
+    {
+      branch: 'degraded upload',
+      delivery: {
+        fileUri: 'oss://bucket/degraded',
+        disclosure: 'downsampled to 1568px',
+        degraded: true,
+      },
+      tags: ['handle', 'disclosure', 'media'],
+    },
+    {
+      branch: 'omitted media',
+      delivery: { fileUri: '', omission: { reason: 'still over the limit' } },
+      tags: ['handle', 'omission'],
+    },
+    {
+      branch: 'pure transcript',
+      delivery: { fileUri: '', transcripts: [{ text: '你好，世界' }] },
+      tags: ['handle', 'transcript'],
+    },
+    {
+      branch: 'degraded pure transcript',
+      delivery: {
+        fileUri: '',
+        transcripts: [{ text: '你好，世界' }],
+        disclosure: 'transcribed after downsampling',
+        degraded: true,
+      },
+      tags: ['handle', 'disclosure', 'transcript'],
+    },
+  ])(
+    'leads the $branch replacement group with the resource handle',
+    async ({ delivery, tags }) => {
+      deliverMock.mockResolvedValueOnce({ ...HANDLE_DELIVERY, ...delivery });
+      const result = await processToolResultOmniMedia(
+        [inlinePart('image/png', PNG_BYTES)],
+        cfg({ image: true }),
+        signal,
+      );
+      expect(result.map(tagPart)).toEqual(tags);
+      expect(result[0]!.text).toBe(HANDLE_TEXT);
+    },
+  );
 
   it('charges uploaded additionalMedia extras against the upload-count budget', async () => {
     // One part whose delivery carries 7 uploaded extras uses 1 + 7 = 8

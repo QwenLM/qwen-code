@@ -12,6 +12,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../config/config.js';
 import type { ToolCallRequestInfo } from '../../core/turn.js';
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
+import type { MediaMemoryService } from '../../services/media-memory/index.js';
+import { MEDIA_MEMORY_FILE_NAME } from '../../services/media-memory/store.js';
+import type { MediaMemorySnapshot } from '../../services/media-memory/types.js';
 import type { RecognizedMedia } from '../recognition.js';
 import { OmniObjectStore } from '../storage.js';
 import {
@@ -1442,6 +1445,52 @@ describe('runFixedPolicies', () => {
       config = makeConfig({ omni_transcribe_stub: TRANSCRIPT_DESCRIPTOR });
     });
 
+    it('reuses a TEXT product on the second run without re-running the tool', async () => {
+      // Text products carry no derived version node, so their object path
+      // must be reconstructed from the content hash. A real-run probe caught
+      // this: audio/keyframe reuse hit while the transcript re-ran the entire
+      // ASR pass — the single most expensive thing #8189 exists to avoid.
+      const { MediaMemoryService } = await import(
+        '../../services/media-memory/index.js'
+      );
+      const service = new MediaMemoryService(store.getOmniRootDir());
+      const sha256 = createHash('sha256')
+        .update(await fs.readFile(sourcePath))
+        .digest('hex');
+      const sourceBinding = await service.recordFileRecognized({
+        fileRef: sourcePath,
+        sha256,
+        mediaType: 'image',
+        metadata: recognizedImage().metadata,
+        sizeBytes: recognizedImage().sizeBytes,
+        mimeType: 'image/png',
+        origin: 'user',
+        source: { protocol: 'local', locator: 'photo.png' },
+        recognition: {
+          ingestionConfigHash: '',
+          detectorVersion: 'omni-sniff-ffprobe/1',
+          probeStatus: 'complete',
+        },
+      });
+      const options = {
+        store,
+        policies: [transcriptPolicy()],
+        memory: { service, sourceBinding },
+      };
+
+      mockFileArtifact();
+      const first = await runFixedPolicies(config, source, options);
+      expect(first.fileDeliveries[0]?.text).toBe(TRANSCRIPT_TEXT);
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+
+      const second = await runFixedPolicies(config, source, options);
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+      // Full text comes back from the promoted object, not from the
+      // entry's truncated inlineText copy.
+      expect(second.fileDeliveries[0]?.text).toBe(TRANSCRIPT_TEXT);
+      expect(second.fileDeliveries[0]?.disclosure).toBe(TRANSCRIPT_DISCLOSURE);
+    });
+
     it('validates and promotes the transcript into fileDeliveries with text + disclosure', async () => {
       mockFileArtifact();
       const { deliveries, fileDeliveries, records } = await runFixedPolicies(
@@ -1800,6 +1849,297 @@ describe('runFixedPolicies', () => {
       // The waiter (or any later run) must still get the slot.
       const { records } = await runFixedPolicies(config, second, options);
       expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+    });
+  });
+  describe('memory reuse skips execution (#8189)', () => {
+    it('reuses recorded outputs on the second run without calling the tool', async () => {
+      const { MediaMemoryService } = await import(
+        '../../services/media-memory/index.js'
+      );
+      const service = new MediaMemoryService(store.getOmniRootDir());
+      const sha256 = createHash('sha256')
+        .update(await fs.readFile(sourcePath))
+        .digest('hex');
+      const sourceBinding = await service.recordFileRecognized({
+        fileRef: sourcePath,
+        sha256,
+        mediaType: 'image',
+        metadata: recognizedImage().metadata,
+        sizeBytes: recognizedImage().sizeBytes,
+        mimeType: 'image/png',
+        origin: 'user',
+        source: { protocol: 'local', locator: 'source.png' },
+        recognition: {
+          ingestionConfigHash: '',
+          detectorVersion: 'omni-sniff-ffprobe/1',
+          probeStatus: 'complete',
+        },
+      });
+      const options = {
+        store,
+        policies: [makePolicy({})],
+        memory: { service, sourceBinding },
+      };
+
+      mockToolSuccess();
+      const first = await runFixedPolicies(config, source, options);
+      expect(first.records[0]).toMatchObject({ outcome: 'succeeded' });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+
+      // Second delivery of the same bytes under the same configuration:
+      // the tool must NOT run again, and the derivative must be the very
+      // same content-addressed object.
+      const second = await runFixedPolicies(config, source, options);
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+      expect(second.records[0]).toMatchObject({ outcome: 'succeeded' });
+      expect(second.deliveries[0]!.sha256).toBe(first.deliveries[0]!.sha256);
+      expect(second.deliveries[0]!.filePath).toBe(
+        first.deliveries[0]!.filePath,
+      );
+      expect(second.deliveries[0]!.disclosure).toBe(
+        first.deliveries[0]!.disclosure,
+      );
+    });
+  });
+
+  describe('memory collection commits (S5)', () => {
+    let service: MediaMemoryService;
+
+    /** Record the source bytes as a user file, the way the delivery
+     * pipeline does before it hands the root to the orchestrator. */
+    async function recordSource(service: MediaMemoryService) {
+      const sha256 = createHash('sha256')
+        .update(await fs.readFile(sourcePath))
+        .digest('hex');
+      const binding = await service.recordFileRecognized({
+        fileRef: sourcePath,
+        sha256,
+        mediaType: 'image',
+        metadata: recognizedImage().metadata,
+        sizeBytes: recognizedImage().sizeBytes,
+        mimeType: 'image/png',
+        origin: 'user',
+        source: { protocol: 'local', locator: 'photo.png' },
+        recognition: {
+          ingestionConfigHash: '',
+          detectorVersion: 'omni-sniff-ffprobe/1',
+          probeStatus: 'complete',
+        },
+      });
+      return binding!;
+    }
+
+    async function readSnapshot(): Promise<MediaMemorySnapshot> {
+      return JSON.parse(
+        await fs.readFile(
+          path.join(store.getOmniRootDir(), MEDIA_MEMORY_FILE_NAME),
+          'utf8',
+        ),
+      ) as MediaMemorySnapshot;
+    }
+
+    beforeEach(async () => {
+      const { MediaMemoryService: Service } = await import(
+        '../../services/media-memory/index.js'
+      );
+      service = new Service(store.getOmniRootDir());
+    });
+
+    it('commits the execution and threads the derived binding onto the delivery', async () => {
+      // Everything memory can later recall about a policy derivative —
+      // reuse (#8189), recall payloads, the honesty of the lineage graph —
+      // hangs off this one commit at the orchestrator's success point. If
+      // it stops firing, delivery still looks perfectly healthy: the
+      // derivative ships, and memory quietly stays empty forever.
+      const sourceBinding = await recordSource(service);
+      mockToolSuccess();
+      const { deliveries, records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy()],
+        memory: { service, sourceBinding },
+      });
+      expect(records[0]).toMatchObject({ outcome: 'succeeded' });
+
+      const snapshot = await readSnapshot();
+      const executions = Object.values(snapshot.executions);
+      expect(executions).toHaveLength(1);
+      const execution = executions[0];
+      expect(execution).toMatchObject({
+        // EXECUTED_ON: the version the tool actually ran against, not
+        // whatever the root of the tree happens to be.
+        sourceVersionId: sourceBinding.fileVersionId,
+        rootFileId: sourceBinding.rootFileId,
+        executionOrigin: {
+          kind: 'fixed_policy',
+          policyId: 'img-downsample',
+          stage: 'preprocessing',
+        },
+        toolName: 'omni_downsample_image',
+        // Effective arguments AND the fingerprint they hash to: this pair
+        // is the content-identity reuse key, so a commit that recorded
+        // either loosely would hand later runs a false reuse hit.
+        finalArguments: { maxDimension: 1568 },
+        omniConfigHash: computePolicyFingerprint(
+          'omni_downsample_image',
+          { maxDimension: 1568 },
+          undefined,
+        ),
+      });
+      expect(execution.outputRefs).toHaveLength(1);
+      // Recall reports "processed at" from these two fields, so both must
+      // be real ISO instants in the right order — a missing or reversed
+      // window turns into a nonsense duration in the payload.
+      expect(
+        Date.parse(execution.completedAt) - Date.parse(execution.startedAt),
+      ).toBeGreaterThanOrEqual(0);
+
+      const degradedSha = sha256Of(DEGRADED_BYTES);
+      const derivedVersion = Object.values(snapshot.versions).find(
+        (version) => version.sha256 === degradedSha,
+      );
+      expect(derivedVersion).toBeDefined();
+      // DERIVED_FROM / PRODUCED_BY: without both edges the derivative is
+      // an orphan node and recall can never reach it from the user's file.
+      expect(derivedVersion!.parentVersionId).toBe(sourceBinding.fileVersionId);
+      expect(derivedVersion!.producedByExecutionId).toBe(execution.executionId);
+      expect(snapshot.files[derivedVersion!.fileId].rootFileId).toBe(
+        sourceBinding.rootFileId,
+      );
+
+      // The binding rides out on the delivery: the transport guard and the
+      // reactive ladder commit their own passes onto it, so a delivery that
+      // ships without it silently starts a second, disconnected lineage.
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0].memoryBinding).toEqual({
+        fileId: derivedVersion!.fileId,
+        fileVersionId: derivedVersion!.fileVersionId,
+        rootFileId: sourceBinding.rootFileId,
+      });
+    });
+
+    it('threads each derived binding into the next pass as its own source', async () => {
+      // Two-stage lineage: the second policy runs on the FIRST policy's
+      // derivative. Committing that pass against the root binding instead
+      // of the derivative's own would flatten the chain into two siblings
+      // of the root — the graph would then claim the 800px image was
+      // produced from the original PNG, which is a lie about provenance
+      // and breaks reuse for the intermediate.
+      const sourceBinding = await recordSource(service);
+      // Distinct bytes per rung so each stage has its own content identity.
+      executeToolCallMock.mockImplementation(
+        async (_config: Config, request: ToolCallRequestInfo) => {
+          const outputDir = request.args['outputDir'] as string;
+          const bytes = `degraded-${request.args['maxDimension']}`;
+          await fs.writeFile(path.join(outputDir, 'out.jpg'), bytes);
+          return {
+            callId: request.callId,
+            responseParts: [],
+            resultDisplay: undefined,
+            error: undefined,
+            errorType: undefined,
+            policyArtifacts: {
+              toolName: request.name,
+              invocationId: request.callId,
+              executionOrigin: request.executionOrigin,
+              artifacts: [
+                {
+                  kind: 'image',
+                  storage: 'workspace',
+                  title: 'out.jpg',
+                  workspacePath: 'out.jpg',
+                  mimeType: 'image/jpeg',
+                  metadata: { omniDisclosure: 'Downsampled.' },
+                },
+              ],
+            },
+          };
+        },
+      );
+
+      const { deliveries } = await runFixedPolicies(config, source, {
+        store,
+        policies: [
+          makePolicy({
+            id: 'stage-1',
+            output: {
+              reprocessMedia: true,
+              source: 'omit',
+              artifacts: { '*': 'include' },
+            },
+          }),
+          makePolicy({
+            id: 'stage-2',
+            origins: ['policy'],
+            arguments: { maxDimension: 800 },
+          }),
+        ],
+        memory: { service, sourceBinding },
+      });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(2);
+
+      const snapshot = await readSnapshot();
+      const versionBySha = (sha: string) =>
+        Object.values(snapshot.versions).find((v) => v.sha256 === sha)!;
+      const stage1Version = versionBySha(sha256Of('degraded-1568'));
+      const stage2Version = versionBySha(sha256Of('degraded-800'));
+      const stage2Execution = Object.values(snapshot.executions).find(
+        (e) =>
+          e.executionOrigin.kind === 'fixed_policy' &&
+          e.executionOrigin.policyId === 'stage-2',
+      )!;
+      expect(stage2Execution.sourceVersionId).toBe(stage1Version.fileVersionId);
+      expect(stage2Version.parentVersionId).toBe(stage1Version.fileVersionId);
+      // Depth grows, but every node stays inside the ONE root's tree —
+      // that root bounds every recall traversal.
+      expect(snapshot.files[stage2Version.fileId].rootFileId).toBe(
+        sourceBinding.rootFileId,
+      );
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0].memoryBinding).toMatchObject({
+        fileVersionId: stage2Version.fileVersionId,
+      });
+    });
+
+    it('commits a degradation-cache hit onto the same lineage', async () => {
+      // The degradation cache is a workspace file that outlives a wiped
+      // memory.json (or predates memory being switched on at all). On that
+      // replay the tool never runs, so the post-promotion commit above
+      // never fires — without the cache-hit commit the delivered
+      // derivative would carry no binding, and every later pass in the
+      // pipeline would derive from nothing.
+      mockToolSuccess();
+      const seeded = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy()],
+      });
+      expect(seeded.records[0]).toMatchObject({ outcome: 'succeeded' });
+
+      const sourceBinding = await recordSource(service);
+      const { deliveries, records } = await runFixedPolicies(config, source, {
+        store,
+        policies: [makePolicy()],
+        memory: { service, sourceBinding },
+      });
+      expect(records[0]).toMatchObject({ outcome: 'cache_hit' });
+      expect(executeToolCallMock).toHaveBeenCalledTimes(1);
+
+      const snapshot = await readSnapshot();
+      const executions = Object.values(snapshot.executions);
+      expect(executions).toHaveLength(1);
+      expect(executions[0]).toMatchObject({
+        invocationId: 'cache-hit',
+        sourceVersionId: sourceBinding.fileVersionId,
+        toolName: 'omni_downsample_image',
+      });
+      const derivedVersion = Object.values(snapshot.versions).find(
+        (version) => version.sha256 === sha256Of(DEGRADED_BYTES),
+      );
+      expect(derivedVersion).toBeDefined();
+      expect(deliveries[0].memoryBinding).toEqual({
+        fileId: derivedVersion!.fileId,
+        fileVersionId: derivedVersion!.fileVersionId,
+        rootFileId: sourceBinding.rootFileId,
+      });
     });
   });
 });

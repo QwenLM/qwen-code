@@ -18,6 +18,7 @@ import {
 } from './estimation.js';
 import {
   assertWithinByteLimit,
+  assertWithinDurationLimit,
   assertWithinTokenLimit,
   effectiveMaxUploadFileBytes,
   OmniTransportGuardError,
@@ -40,6 +41,7 @@ import { OmniDegradationCache } from './policy/degradation-cache.js';
 import {
   formatDisclosureText,
   formatOmissionText,
+  formatResourceHandleText,
   formatTranscriptText,
 } from './disclosure.js';
 import {
@@ -49,6 +51,14 @@ import {
 } from './policy/orchestrator.js';
 import { buildSessionConditionNamespace } from './policy/session-context.js';
 import type { OmniProcessingConfigView } from './policy/types.js';
+import {
+  MediaMemoryService,
+  MEDIA_DETECTOR_VERSION,
+  type MediaMemoryBinding,
+  type MediaResourceRegistry,
+  type OmniMediaRegistryView,
+  type OmniMemoryConfigView,
+} from '../services/media-memory/index.js';
 
 export {
   assertOmniRuntimeDependencies,
@@ -74,6 +84,7 @@ export {
 export {
   OmniTransportGuardError,
   DEFAULT_OMNI_MAX_UPLOAD_FILE_BYTES,
+  assertWithinDurationLimit,
 } from './guard.js';
 export {
   downloadMediaUrl,
@@ -99,6 +110,7 @@ export {
   OMNI_TRANSCRIPT_TEXT_PREFIX,
   formatDisclosureText,
   formatOmissionText,
+  formatResourceHandleText,
   formatTranscriptText,
   isDisclosureText,
 } from './disclosure.js';
@@ -196,6 +208,11 @@ export interface OmniMediaDelivery {
    * entry as [disclosure?, fileData] (or the omission notice) after the
    * primary media Part and before any transcripts. */
   additionalMedia?: OmniAdditionalMediaDelivery[];
+  /** Opaque session handle for the SOURCE media (M §5.2), present iff
+   * media memory recorded it. Consumers disclose it next to the delivered
+   * content so the model can reference the resource in recall requests —
+   * the handle stands in for the path the model must never see. */
+  resourceId?: string;
 }
 
 /** One extra media deliverable of a multi-output fixed policy. */
@@ -294,6 +311,10 @@ function evaluateTransportLimits(
 ): { estimate: OmniTokenEstimate; violation?: string } {
   try {
     assertWithinByteLimit(config, recognized.sizeBytes, displayName);
+    // Duration is a transport limit too: downscaling can bring a long
+    // file under the byte ceiling but never under a duration cap, so the
+    // guard must reject it here instead of letting the provider do it.
+    assertWithinDurationLimit(config, recognized, displayName);
     return {
       estimate: assertWithinTokenLimit(config, recognized, displayName),
     };
@@ -344,6 +365,14 @@ export async function processMediaForOmniDelivery(
     /** Provenance for fixed-policy origin matching. Defaults to 'user';
      * the tool-result funnel passes 'tool'. */
     origin?: 'user' | 'tool';
+    /**
+     * The URL this media was downloaded from. Set by the URL funnel, whose
+     * `filePath` is a staging download it deletes in its `finally` THIS
+     * turn — so, exactly like tool-result media, its memory identity must
+     * anchor to the content-addressed object store, never to the staging
+     * path. The URL itself is recorded as the version's source locator.
+     */
+    sourceUrl?: string;
   },
 ): Promise<OmniMediaDelivery> {
   const { expectedModality, signal } = options ?? {};
@@ -437,7 +466,124 @@ export async function processMediaForOmniDelivery(
         ),
       }
     : undefined;
-  let final: PolicyDeliveryResource = { filePath, recognized };
+  // Media-memory collection (S5, design M §6). Same structural-view
+  // pattern as the processing config; absent accessor or config = off.
+  // Recording FileRecognized needs the source's content hash NOW, so the
+  // hash is paid upfront and seeded through the pipeline (source →
+  // WorkItem → final) — uploadResource's lazy hash never re-pays it. A
+  // memory failure (hash or store) never blocks delivery: collection is
+  // skipped and the pipeline continues exactly as without memory.
+  const memoryConfig = (config as OmniMemoryConfigView).getOmniMemoryConfig?.();
+  const memoryService = memoryConfig
+    ? new MediaMemoryService(store.getOmniRootDir(), {
+        maxInlineTextBytes: memoryConfig.collection.maxInlineTextBytes,
+      })
+    : undefined;
+  // Session resource registry (M §5.2): every memory-known resource this
+  // delivery puts in front of the model gets an opaque session handle,
+  // making it addressable by recall without ever exposing a path.
+  const registry = memoryService
+    ? (config as OmniMediaRegistryView).getOmniMediaResourceRegistry?.()
+    : undefined;
+  const bindSessionResource = (
+    item: PolicyDeliveryResource,
+    /** Overrides the locator the handle resolves to — used for the source
+     * of tool-result media, whose `filePath` is an ephemeral staging file
+     * while its persistent bytes live in the object store. */
+    fileRefOverride?: string,
+  ): ReturnType<MediaResourceRegistry['bind']> | undefined =>
+    registry && item.memoryBinding
+      ? registry.bind({
+          ...item.memoryBinding,
+          fileRef: fileRefOverride ?? item.filePath,
+          mediaType: item.recognized.modality,
+        })
+      : undefined;
+  let sourceSha256: string | undefined;
+  let sourceBinding: MediaMemoryBinding | undefined;
+  let sourceFileRef = filePath;
+  if (memoryService) {
+    try {
+      sourceSha256 = await hashFileSha256(filePath, signal);
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      debugLogger.debug(
+        `omni memory: hashing ${displayName} failed, skipping collection: ` +
+          `${sanitizeErrorMessage(err, [filePath])}`,
+      );
+    }
+    if (sourceSha256) {
+      // Persistent identity of the SOURCE. A user file's bytes stay in
+      // place, so its own path is the identity (S §4). A tool-result
+      // file's path is a staging `.part` the funnel deletes in its
+      // `finally` THIS turn — recording it would hand out a handle that
+      // resolves to a deleted path (ENOENT for any policy tool the model
+      // points at it) and make recall report `artifact_unavailable` for
+      // an artifact that actually persists. Its bytes are promoted into
+      // the content-addressed object store by this same delivery, and
+      // that location is derivable from the hash — so name it directly.
+      // If promotion never happens (the transport guard omitted the
+      // media), the ref dangles and recall says `artifact_unavailable`:
+      // honest, because the bytes were genuinely not retained.
+      const origin = options?.origin ?? 'user';
+      // URL media shares the tool-result lifetime: its local file is a
+      // staging download deleted this turn, so it anchors the same way.
+      const ephemeralSource =
+        origin === 'tool' || options?.sourceUrl !== undefined;
+      sourceFileRef = ephemeralSource
+        ? store.objectPathFor(
+            sourceSha256,
+            extensionForMime(recognized.detectedMimeType),
+          )
+        : filePath;
+      sourceBinding = await memoryService.recordFileRecognized({
+        fileRef: sourceFileRef,
+        sha256: sourceSha256,
+        mediaType: recognized.modality,
+        metadata: recognized.metadata,
+        sizeBytes: recognized.sizeBytes,
+        mimeType: recognized.detectedMimeType,
+        origin,
+        source:
+          options?.sourceUrl !== undefined
+            ? { protocol: 'url', locator: options.sourceUrl }
+            : origin === 'tool'
+              ? { protocol: 'managed', locator: `sha256/${sourceSha256}` }
+              : { protocol: 'local', locator: displayName },
+        recognition: {
+          ingestionConfigHash: '',
+          detectorVersion: MEDIA_DETECTOR_VERSION,
+          probeStatus: 'complete',
+        },
+      });
+    }
+  }
+  let final: PolicyDeliveryResource = {
+    filePath,
+    recognized,
+    sha256: sourceSha256,
+    memoryBinding: sourceBinding,
+  };
+  // The source is always addressable by recall, even when preprocessing
+  // later replaces the delivered bytes with a derivative. Its handle is
+  // the one disclosed to the model (M §5.2): recall requests and future
+  // evidence-gathering tool calls reference the SOURCE, never a path.
+  const sessionResourceId = bindSessionResource(
+    final,
+    sourceFileRef,
+  )?.resourceId;
+  /** A guard verdict that carries the source handle with it, so a caller
+   * withholding the bytes can still tell the model what to recall. */
+  const guardRejection = (
+    message: string,
+    options?: { cause?: unknown },
+  ): OmniTransportGuardError => {
+    const err = new OmniTransportGuardError(message, options);
+    if (sessionResourceId !== undefined) {
+      err.sessionResourceId = sessionResourceId;
+    }
+    return err;
+  };
   /** Media deliverables beyond the primary (multi-output fixed policies). */
   let extraDeliveries: PolicyDeliveryResource[] = [];
   // Transcript-protocol text deliverables (upstream P §6.2) accumulated
@@ -470,6 +616,7 @@ export async function processMediaForOmniDelivery(
     uploadCacheHit: false,
     degraded: true,
     transcripts,
+    resourceId: sessionResourceId,
     ...extras,
   });
   const policies = processingConfig?.fixedPolicies ?? [];
@@ -484,6 +631,7 @@ export async function processMediaForOmniDelivery(
           recognized,
           displayName,
           origin: options?.origin ?? 'user',
+          sha256: sourceSha256,
         },
         {
           store,
@@ -491,6 +639,9 @@ export async function processMediaForOmniDelivery(
           signal,
           limits: processingConfig?.limits,
           conditionContext,
+          memory: memoryService
+            ? { service: memoryService, sourceBinding }
+            : undefined,
         },
       ));
     } catch (err) {
@@ -525,6 +676,10 @@ export async function processMediaForOmniDelivery(
     }
     final = deliveries[0];
     extraDeliveries = deliveries.slice(1);
+    // Every delivered derivative becomes session-addressable (bind is
+    // idempotent — the source keeps its already-issued handle if a no_op
+    // policy passed it through unchanged).
+    for (const delivery of deliveries) bindSessionResource(delivery);
   }
 
   // Hash → upload-cache lookup → store promotion → upload. Shared by the
@@ -702,6 +857,7 @@ export async function processMediaForOmniDelivery(
             recognized: final.recognized,
             displayName,
             origin: options?.origin ?? 'user',
+            sha256: final.sha256,
           },
           {
             store,
@@ -709,6 +865,12 @@ export async function processMediaForOmniDelivery(
             signal,
             limits: processingConfig.limits,
             conditionContext,
+            // The guard pass derives FROM the current final resource, so
+            // its memory lineage hangs off that resource's own binding
+            // (a derivative's version when preprocessing degraded it).
+            memory: memoryService
+              ? { service: memoryService, sourceBinding: final.memoryBinding }
+              : undefined,
           },
         ));
       } catch (err) {
@@ -720,7 +882,7 @@ export async function processMediaForOmniDelivery(
         // over the limit" already stands, so consumers with an inline
         // fallback (the tool-result funnel) must withhold the bytes, not
         // fall back to delivering exactly what the guard rejected.
-        throw new OmniTransportGuardError(
+        throw guardRejection(
           `Transport-guard processing failed for ${displayName}: ` +
             `${sanitizeErrorMessage(err, [final.filePath, store.getOmniRootDir()])}`,
           { cause: err },
@@ -743,7 +905,7 @@ export async function processMediaForOmniDelivery(
       if (deliveries.length !== 1) {
         // Same guard-error class as the pass failure above: the violation
         // verdict stands, so inline fallbacks must withhold.
-        throw new OmniTransportGuardError(
+        throw guardRejection(
           `Transport-guard policies produced ${deliveries.length} media deliverables for ${displayName}; exactly one is supported.`,
         );
       }
@@ -766,12 +928,13 @@ export async function processMediaForOmniDelivery(
       } else if (priorDisclosure) {
         final = { ...final, disclosure: priorDisclosure };
       }
+      bindSessionResource(final);
       guard = evaluateTransportLimits(config, final.recognized, displayName);
     }
   }
   if (guard.violation) {
     if (!processingConfig) {
-      throw new OmniTransportGuardError(guard.violation);
+      throw guardRejection(guard.violation);
     }
     debugLogger.debug(
       `omni ${final.recognized.modality} explicitly omitted (transport guard): ${guard.violation}`,
@@ -789,6 +952,7 @@ export async function processMediaForOmniDelivery(
       omission: { reason: guard.violation },
       transcripts: transcripts.length > 0 ? transcripts : undefined,
       additionalMedia: await processAdditionalMedia(),
+      resourceId: sessionResourceId,
     };
   }
   const tokenEstimate = guard.estimate;
@@ -805,6 +969,7 @@ export async function processMediaForOmniDelivery(
     degraded: final.degraded,
     transcripts: transcripts.length > 0 ? transcripts : undefined,
     additionalMedia: await processAdditionalMedia(),
+    resourceId: sessionResourceId,
   };
 }
 
@@ -871,6 +1036,13 @@ export async function readMediaViaOmniDelivery(params: {
       displayName,
       delivery.additionalMedia,
     );
+    // Session resource handle (M §5.2): leads the part group in every
+    // branch — even an omitted/transcript-only delivery leaves the model
+    // a handle to recall or reprocess the source. Placed FIRST so the
+    // disclosure keeps its D8 adjacency to the media part.
+    const handleParts = delivery.resourceId
+      ? [{ text: formatResourceHandleText(displayName, delivery.resourceId) }]
+      : [];
     if (delivery.omission) {
       // Explicit omission (policy design §10.2): the media is withheld and
       // the omission notice text stands in its place. Not an error — the
@@ -880,8 +1052,15 @@ export async function readMediaViaOmniDelivery(params: {
       };
       return {
         llmContent:
-          transcriptParts.length > 0 || additionalParts.length > 0
-            ? [omissionPart, ...additionalParts, ...transcriptParts]
+          transcriptParts.length > 0 ||
+          additionalParts.length > 0 ||
+          handleParts.length > 0
+            ? [
+                ...handleParts,
+                omissionPart,
+                ...additionalParts,
+                ...transcriptParts,
+              ]
             : omissionPart.text,
         returnDisplay: `Media omitted by the omni transport guard: ${relativePathForDisplay}`,
         tokenEstimate: delivery.tokenEstimate,
@@ -898,6 +1077,7 @@ export async function readMediaViaOmniDelivery(params: {
         : [];
       return {
         llmContent: [
+          ...handleParts,
           ...disclosureParts,
           ...additionalParts,
           ...transcriptParts,
@@ -913,7 +1093,9 @@ export async function readMediaViaOmniDelivery(params: {
         displayName,
       },
     };
-    const parts: Array<{ text: string } | typeof fileDataPart> = [];
+    const parts: Array<{ text: string } | typeof fileDataPart> = [
+      ...handleParts,
+    ];
     const { width, height } = delivery.recognized.metadata;
     if (
       delivery.recognized.modality === 'image' &&
@@ -984,3 +1166,11 @@ export function effectiveMaxDownloadFileBytes(config: Config): number {
   }
   return uploadCap;
 }
+
+// Re-anchoring is reached from the CLI's `@`-reference funnel, which already
+// loads this module dynamically for every other omni call it makes. Kept off
+// the ROOT barrel deliberately: that barrel is statically imported across the
+// CLI, and every module added to its graph regroups esbuild's chunks — which
+// is how the ACP agent's static closure acquired iconv-lite's 550 KB of
+// encoding tables (scripts/check-serve-fast-path-bundle.js caught it).
+export { reanchorRememberedMedia } from './memory-recall.js';

@@ -77,7 +77,10 @@ describe('OmniClipVideoTool', () => {
     expect(tool.name).toBe(OMNI_CLIP_VIDEO_TOOL_NAME);
     expect(tool.mediaPolicyDescriptor).toEqual({
       kind: 'media_policy',
-      version: '1',
+      // Bumped with the `omniRole: 'clip'` annotation so pre-role cache
+      // entries and recorded executions cannot converge onto this
+      // fingerprint and keep reporting an excerpt as complete coverage.
+      version: '2',
       inputMediaTypes: ['video'],
       outputs: [
         {
@@ -106,7 +109,7 @@ describe('OmniClipVideoTool', () => {
       'video',
       signal,
     );
-    const outputPath = path.join(outputDir, 'clip.mp4');
+    const outputPath = path.join(outputDir, 'clip-clip-10s+15s.mp4');
     expect(mocks.runFfmpeg).toHaveBeenCalledWith(
       [
         '-y',
@@ -141,11 +144,12 @@ describe('OmniClipVideoTool', () => {
         kind: 'video',
         storage: 'workspace',
         title: 'Clipped video',
-        workspacePath: 'clip.mp4',
+        workspacePath: 'clip-clip-10s+15s.mp4',
         mimeType: 'video/mp4',
         sizeBytes: OUTPUT_SIZE,
         metadata: {
           omniDisclosure: '原 63s → 片段 [10s–25s] 15s，片段外内容全部丢弃',
+          omniRole: 'clip',
         },
       },
     ]);

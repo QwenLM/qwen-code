@@ -17,6 +17,7 @@ import {
   DEFAULT_POLICY_TOOL_TIMEOUT_MS,
   formatBytesShort,
   resolvePolicyToolTimeoutMs,
+  policyOutputFileName,
   validateMediaPolicyIoParams,
   type MediaPolicyToolConfigView,
 } from './media-policy-tool.js';
@@ -120,6 +121,77 @@ describe('validateMediaPolicyIoParams', () => {
       pattern,
     );
   });
+
+  it('asks for inputPath or resourceId when neither was supplied', () => {
+    // Schema-level `required` deliberately omits inputPath (the gated
+    // model surface passes resourceId, resolved before validation) — so
+    // the neither-provided case must fail HERE with an actionable hint.
+    expect(
+      validateMediaPolicyIoParams({
+        outputDir: '/b/staging',
+      } as unknown as Parameters<typeof validateMediaPolicyIoParams>[0]),
+    ).toMatch(/inputPath.*or resourceId/);
+  });
+});
+
+describe('policyOutputFileName', () => {
+  it('keeps two spans of one source from colliding', () => {
+    const a = policyOutputFileName({
+      inputPath: '/films/robot-dreams.mkv',
+      operation: 'clip',
+      variant: '90s+75s',
+      extension: '.mp4',
+    });
+    const b = policyOutputFileName({
+      inputPath: '/films/robot-dreams.mkv',
+      operation: 'clip',
+      variant: '2458s+75s',
+      extension: '.mp4',
+    });
+    expect(a).toBe('robot-dreams-clip-90s+75s.mp4');
+    expect(b).toBe('robot-dreams-clip-2458s+75s.mp4');
+    expect(a).not.toBe(b);
+  });
+
+  it('keeps two sources from colliding on the same operation', () => {
+    const opts = { operation: 'audio', extension: '.wav' } as const;
+    expect(
+      policyOutputFileName({ inputPath: '/a/movie.mkv', ...opts }),
+    ).not.toBe(policyOutputFileName({ inputPath: '/b/other.mkv', ...opts }));
+  });
+
+  it('re-running one operation resolves to the same name (idempotent)', () => {
+    const opts = {
+      inputPath: '/a/movie.mkv',
+      operation: 'clip',
+      variant: '0s+30s',
+      extension: '.mp4',
+    } as const;
+    expect(policyOutputFileName(opts)).toBe(policyOutputFileName(opts));
+  });
+
+  it('sanitizes a hostile or non-ASCII stem into a portable component', () => {
+    const name = policyOutputFileName({
+      inputPath: '/tmp/《机器人之梦》 v2; rm -rf.mkv',
+      operation: 'keyframe',
+      variant: '0001',
+      extension: '.jpg',
+    });
+    expect(name).toMatch(/^[A-Za-z0-9._+-]+$/);
+    expect(name.endsWith('-keyframe-0001.jpg')).toBe(true);
+    expect(name).not.toContain('/');
+    expect(name).not.toContain(';');
+  });
+
+  it('falls back to a placeholder when nothing portable survives', () => {
+    expect(
+      policyOutputFileName({
+        inputPath: '/tmp/《》.mkv',
+        operation: 'audio',
+        extension: '.wav',
+      }),
+    ).toBe('media-audio.wav');
+  });
 });
 
 describe('assertMediaPolicyIo', () => {
@@ -146,9 +218,16 @@ describe('assertMediaPolicyIo', () => {
   it('rejects a missing input file', async () => {
     const outputDir = path.join(root, 'staging');
     await fs.mkdir(outputDir);
-    await expect(
-      assertMediaPolicyIo({ inputPath: path.join(root, 'nope'), outputDir }),
-    ).rejects.toThrow(/input file not found/);
+    const error = await assertMediaPolicyIo({
+      inputPath: path.join(root, 'nope'),
+      outputDir,
+    }).catch((err: Error) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/input file not found/);
+    // Basename only: this message reaches the model, and a resourceId-
+    // resolved call must never leak the locator the handle stands in for
+    // (M §5.2). A full-path message satisfies the matcher above too.
+    expect((error as Error).message).not.toContain(root);
   });
 
   it('rejects a symlinked input (never reads through a link)', async () => {

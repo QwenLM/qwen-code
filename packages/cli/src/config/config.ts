@@ -47,6 +47,7 @@ import { hooksCommand } from '../commands/hooks.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
+import { getSettingsSchema } from './settingsSchema.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -1476,6 +1477,44 @@ export function buildDisabledSkillNamesProvider(
   return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
+/**
+ * Reject unknown keys directly under `omni`.
+ *
+ * The generic settings loader only scans TOP-LEVEL keys, and only writes a
+ * debug line — so a nested typo is caught by nothing: `omni.memoryy` or
+ * `omni.processingg` leaves `settings.omni?.memory` / `?.processing`
+ * undefined, every downstream normalizer sees "not configured" and returns
+ * defaults, and the session silently runs with the operator's entire
+ * configuration discarded (probe: `omni.memoryy.recall.mode = sideQuery`
+ * still registered the active-mode recall tool). The omni namespace's
+ * declared stance is that a misconfiguration must fail loud, so this
+ * mirrors the nested checks its own normalizers already perform.
+ *
+ * The allowed set is derived from the settings schema rather than
+ * hardcoded, so it cannot drift as the namespace grows.
+ */
+function assertKnownOmniSettingKeys(settings: Settings): void {
+  const omni = settings.omni;
+  if (omni === undefined || omni === null || typeof omni !== 'object') return;
+  const schemaOmni = getSettingsSchema()['omni'] as
+    | { properties?: Record<string, unknown> }
+    | undefined;
+  const allowed = new Set(Object.keys(schemaOmni?.properties ?? {}));
+  // No schema properties resolved (unexpected): stay silent rather than
+  // rejecting every valid key.
+  if (allowed.size === 0) return;
+  const unknown = Object.keys(omni).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Invalid settings: unknown key(s) under "omni": ` +
+        `${unknown.map((k) => `"${k}"`).join(', ')}. ` +
+        `Allowed: ${[...allowed].sort().join(', ')}. ` +
+        `An unrecognized omni section would be silently ignored, leaving ` +
+        `the session running with defaults instead of your configuration.`,
+    );
+  }
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -1521,6 +1560,7 @@ export async function loadCliConfig(
    */
   settingsWatcher?: { stopWatching(): void },
 ): Promise<Config> {
+  assertKnownOmniSettingKeys(settings);
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
@@ -2197,6 +2237,8 @@ export async function loadCliConfig(
       settings.omni?.processing?.transportGuard?.maxUploadFileBytes,
     omniMaxEstimatedTokens:
       settings.omni?.processing?.transportGuard?.maxEstimatedTokens,
+    omniMaxDurationSeconds:
+      settings.omni?.processing?.transportGuard?.maxDurationSeconds,
     omniUrlDownloadMaxFileBytes:
       settings.omni?.ingestion?.localization?.url?.maxFileBytes,
     omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
@@ -2214,6 +2256,7 @@ export async function loadCliConfig(
     omniQuarantineRetentionDays:
       settings.omni?.storage?.quarantine?.retentionDays,
     omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
+    omniMemory: settings.omni?.memory as Record<string, unknown> | undefined,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.

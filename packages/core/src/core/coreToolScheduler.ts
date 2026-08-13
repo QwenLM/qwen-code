@@ -4849,6 +4849,37 @@ export class CoreToolScheduler {
                 artifacts: toolResult.artifacts,
               }
             : undefined;
+        // Model/client-origin successes enter the SAME OmniPolicySucceeded
+        // boundary the fixed-policy orchestrator uses (memory design M
+        // §7.1/§17): without this, an evidence-gathering call the advisor
+        // suggested succeeds but is never recorded, so the next recall
+        // reports the identical gap and the work is re-paid every session.
+        // Awaited (the commit must not race the next turn's recall) and
+        // internally never-throwing — collection failure cannot affect the
+        // tool result (D12).
+        if (
+          policyArtifacts &&
+          policyArtifacts.executionOrigin.kind !== 'fixed_policy' &&
+          scheduledCall.tool.mediaPolicyDescriptor
+        ) {
+          const { collectModelPolicyCall } = await import(
+            '../omni/policy/model-call-collection.js'
+          );
+          await collectModelPolicyCall({
+            config: this.config,
+            batch: policyArtifacts,
+            descriptor: scheduledCall.tool.mediaPolicyDescriptor,
+            args: scheduledCall.invocation.params as Record<string, unknown>,
+            // The REAL execution window (approval wait excluded). Without
+            // it the record would hold the collection window instead, and
+            // a 98-minute audio extraction reads as 0.6s.
+            ...('executionStartTime' in scheduledCall &&
+            typeof scheduledCall.executionStartTime === 'number'
+              ? { startedAt: scheduledCall.executionStartTime }
+              : {}),
+            signal,
+          });
+        }
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,

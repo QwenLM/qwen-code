@@ -32,6 +32,8 @@ import type {
   NormalizedOmniProcessingConfig,
   OmniPolicyToolsSettings,
 } from '../omni/policy/types.js';
+import type { NormalizedOmniMemoryConfig } from '../services/media-memory/config.js';
+import { MediaResourceRegistry } from '../services/media-memory/registry.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 import type { TeamManager } from '../agents/team/TeamManager.js';
@@ -1110,6 +1112,7 @@ export interface ConfigParameters {
   omniMaxUploadFileBytes?: number;
   /** Estimated-token ceiling for omni media (0/unset = guard disabled). */
   omniMaxEstimatedTokens?: number;
+  omniMaxDurationSeconds?: number;
   /** Byte ceiling for omni URL downloads (unset = follow upload cap). */
   omniUrlDownloadMaxFileBytes?: number;
   /** Upload URL TTL in hours (0 disables the cache; default 47). */
@@ -1128,6 +1131,9 @@ export interface ConfigParameters {
   omniQuarantineRetentionDays?: number;
   /** `omni.storage.quarantine.maxBytes` (default 5 GiB). */
   omniQuarantineMaxBytes?: number;
+  /** Raw `omni.memory` settings (collection/recall). Normalized at
+   * startup; invalid configuration aborts startup. */
+  omniMemory?: Record<string, unknown>;
   /** Image generation model selected through `/model --image`. */
   imageModel?: string;
   /**
@@ -1956,6 +1962,7 @@ export class Config {
   private readonly omniEnabled: boolean = false;
   private readonly omniMaxUploadFileBytes?: number;
   private readonly omniMaxEstimatedTokens?: number;
+  private readonly omniMaxDurationSeconds?: number;
   private readonly omniUrlDownloadMaxFileBytes?: number;
   private readonly omniUploadUrlTtlHours?: number;
   private readonly omniPolicyTools?: OmniPolicyToolsSettings;
@@ -1964,9 +1971,17 @@ export class Config {
   private readonly omniProcessingLimits?: Record<string, unknown>;
   private readonly omniQuarantineRetentionDays?: number;
   private readonly omniQuarantineMaxBytes?: number;
+  private readonly omniMemory?: Record<string, unknown>;
   /** Normalized `omni.processing` view; set once during initialize()
    * (after the tool registry exists) when omni is enabled. */
   private omniProcessingConfig?: NormalizedOmniProcessingConfig;
+  /** Normalized `omni.memory` view; set once during initialize() when
+   * omni is enabled. */
+  private omniMemoryConfig?: NormalizedOmniMemoryConfig;
+  /** Session-lifetime binder between persistent media-memory identities
+   * and the opaque resource handles the model sees (M §5.2); created
+   * lazily on first use, never persisted. */
+  private omniMediaResourceRegistry?: MediaResourceRegistry;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly computerUseEnabled: boolean = true;
@@ -2245,6 +2260,7 @@ export class Config {
     this.omniEnabled = params.omniEnabled ?? false;
     this.omniMaxUploadFileBytes = params.omniMaxUploadFileBytes;
     this.omniMaxEstimatedTokens = params.omniMaxEstimatedTokens;
+    this.omniMaxDurationSeconds = params.omniMaxDurationSeconds;
     this.omniUrlDownloadMaxFileBytes = params.omniUrlDownloadMaxFileBytes;
     this.omniUploadUrlTtlHours = params.omniUploadUrlTtlHours;
     this.omniPolicyTools = params.omniPolicyTools;
@@ -2253,6 +2269,7 @@ export class Config {
     this.omniProcessingLimits = params.omniProcessingLimits;
     this.omniQuarantineRetentionDays = params.omniQuarantineRetentionDays;
     this.omniQuarantineMaxBytes = params.omniQuarantineMaxBytes;
+    this.omniMemory = params.omniMemory;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
@@ -3006,6 +3023,13 @@ export class Config {
         },
         this.toolRegistry,
       );
+
+      // Same stance for `omni.memory`: normalized once (idempotent —
+      // createToolRegistry already ran it to gate the recall tool's
+      // registration on `recall.mode`); an invalid memory configuration
+      // (bad budgets, unknown recall mode) throws OmniMemoryConfigError
+      // and aborts startup.
+      await this.ensureOmniMemoryConfig();
     }
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
@@ -6449,6 +6473,10 @@ export class Config {
     return this.omniMaxEstimatedTokens;
   }
 
+  getOmniMaxDurationSeconds(): number | undefined {
+    return this.omniMaxDurationSeconds;
+  }
+
   getOmniUrlDownloadMaxFileBytes(): number | undefined {
     return this.omniUrlDownloadMaxFileBytes;
   }
@@ -6465,6 +6493,37 @@ export class Config {
    * completes (or when omni is disabled). */
   getOmniProcessingConfig(): NormalizedOmniProcessingConfig | undefined {
     return this.omniProcessingConfig;
+  }
+
+  /** Normalized `omni.memory` view. Undefined until initialize()
+   * completes (or when omni is disabled). */
+  getOmniMemoryConfig(): NormalizedOmniMemoryConfig | undefined {
+    return this.omniMemoryConfig;
+  }
+
+  /** Normalize `omni.memory` on first use (idempotent). Called from
+   * createToolRegistry — which runs BEFORE initialize()'s omni
+   * normalization block and needs `recall.mode` to gate the recall
+   * tool's registration (D10) — and again from initialize() as a
+   * no-op backstop. Invalid settings throw OmniMemoryConfigError:
+   * startup-fatal on both paths. */
+  private async ensureOmniMemoryConfig(): Promise<NormalizedOmniMemoryConfig> {
+    if (!this.omniMemoryConfig) {
+      const { normalizeOmniMemoryConfig } = await import(
+        '../services/media-memory/config.js'
+      );
+      this.omniMemoryConfig = normalizeOmniMemoryConfig(this.omniMemory);
+    }
+    return this.omniMemoryConfig;
+  }
+
+  /** Session registry binding persistent media-memory identities to the
+   * opaque `resourceId` handles the model references (M §5.2). One
+   * instance per session; a handle is only meaningful in the session
+   * that minted it. */
+  getOmniMediaResourceRegistry(): MediaResourceRegistry {
+    this.omniMediaResourceRegistry ??= new MediaResourceRegistry();
+    return this.omniMediaResourceRegistry;
   }
 
   getOmniQuarantineRetentionDays(): number {
@@ -8198,6 +8257,23 @@ export class Config {
       ];
       for (const [name, factory] of omniPolicyToolFactories) {
         await registerLazy(name, factory);
+      }
+
+      // Active-mode memory recall (M §9, D10 mutual exclusion): the
+      // normalized `omni.memory` config decides at REGISTRATION time
+      // whether the tool exists at all — in sideQuery mode the passive
+      // selector runs instead and this tool must never be exposed.
+      // Normalized on demand because createToolRegistry runs before
+      // initialize()'s omni normalization block; invalid settings are
+      // startup-fatal on this path too.
+      const memoryConfig = await this.ensureOmniMemoryConfig();
+      if (memoryConfig.recall.mode === 'active') {
+        await registerLazy(ToolNames.OMNI_RECALL_MEDIA_MEMORY, async () => {
+          const { OmniRecallMediaMemoryTool } = await import(
+            '../omni/recall-media-memory-tool.js'
+          );
+          return new OmniRecallMediaMemoryTool(this);
+        });
       }
     }
 

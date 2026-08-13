@@ -24,6 +24,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   createPolicyToolTimeoutBudget,
   type MediaPolicyIoParams,
@@ -39,8 +40,6 @@ export const DOWNSCALE_VIDEO_DEFAULTS = {
   crf: 28,
   preset: 'veryfast',
 } as const;
-
-const OUTPUT_FILE_NAME = 'downscaled.mp4';
 
 /** x264 presets accepted by the `preset` tunable. */
 const X264_PRESETS = [
@@ -158,7 +157,14 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
         2,
         Math.floor(Math.min(maxHeight, probe.height) / 2) * 2,
       );
-      const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
+      const outputPath = path.join(
+        this.params.outputDir,
+        policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'downscaled',
+          extension: '.mp4',
+        }),
+      );
       const argsFor = (audio: string[]): string[] => [
         '-y',
         '-i',
@@ -218,14 +224,16 @@ class DownscaleVideoInvocation extends BaseMediaPolicyToolInvocation<DownscaleVi
           : []),
       ];
       const lossClause =
-        drops.length === 2
-          ? '分辨率与帧率下降'
-          : (drops[0] ?? '重新编码压缩');
+        drops.length === 2 ? '分辨率与帧率下降' : (drops[0] ?? '重新编码压缩');
       const disclosure = `原 ${probe.height}p${originalRate}/${formatBytesShort(inputSizeBytes)} → ${targetHeight}p${fps}/${formatBytesShort(outputSizeBytes)}，${lossClause}，细节受损`;
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: OUTPUT_FILE_NAME,
+        outputFileName: policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'downscaled',
+          extension: '.mp4',
+        }),
         artifactKind: 'video',
         title: 'Downscaled video',
         mimeType: 'video/mp4',
@@ -256,7 +264,7 @@ export class OmniDownscaleVideoTool extends BaseMediaPolicyTool<DownscaleVideoPa
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['inputPath', 'outputDir'],
+        required: ['outputDir'],
         additionalProperties: false,
       },
       config,

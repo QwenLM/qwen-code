@@ -108,7 +108,7 @@ describe('OmniExtractAudioTool', () => {
       'video',
       signal,
     );
-    const outputPath = path.join(outputDir, 'extracted.wav');
+    const outputPath = path.join(outputDir, 'clip-audio.wav');
     expect(mocks.runFfmpeg).toHaveBeenCalledWith(
       [
         '-y',
@@ -132,7 +132,7 @@ describe('OmniExtractAudioTool', () => {
         kind: 'audio',
         storage: 'workspace',
         title: 'Extracted audio track',
-        workspacePath: 'extracted.wav',
+        workspacePath: 'clip-audio.wav',
         mimeType: 'audio/wav',
         sizeBytes: OUTPUT_SIZE,
         metadata: {
@@ -149,7 +149,7 @@ describe('OmniExtractAudioTool', () => {
     const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
     expect(args.join(' ')).toContain('-c:a libmp3lame -b:a 128k');
     expect(result.artifacts?.[0]).toMatchObject({
-      workspacePath: 'extracted.mp3',
+      workspacePath: 'clip-audio.mp3',
       mimeType: 'audio/mpeg',
     });
     expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
@@ -163,7 +163,7 @@ describe('OmniExtractAudioTool', () => {
     const args = mocks.runFfmpeg.mock.calls[0][0] as string[];
     expect(args.join(' ')).toContain('-c:a aac -b:a 64k');
     expect(result.artifacts?.[0]).toMatchObject({
-      workspacePath: 'extracted.m4a',
+      workspacePath: 'clip-audio.m4a',
       mimeType: 'audio/mp4',
     });
   });

@@ -2673,6 +2673,7 @@ const ZH: Messages = {
   'toolName.omni_clip_video': '剪辑视频',
   'toolName.omni_convert_image': '转换图像',
   'toolName.omni_transcribe_audio': '转写音频',
+  'toolName.omni_recall_media_memory': '召回媒体记忆',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
   'toolName.bash': '运行命令',
   'toolName.shell': 'Shell 命令',

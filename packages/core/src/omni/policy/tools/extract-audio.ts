@@ -25,6 +25,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
@@ -42,7 +43,8 @@ export const EXTRACT_AUDIO_DEFAULTS = {
 } as const;
 
 interface OutputFormat {
-  fileName: string;
+  /** Output extension, with the leading dot. */
+  extension: string;
   mimeType: string;
   label: string;
   /** Codec args; lossy formats consume the bit rate. */
@@ -51,19 +53,19 @@ interface OutputFormat {
 
 const OUTPUT_FORMATS: Record<string, OutputFormat> = {
   wav: {
-    fileName: 'extracted.wav',
+    extension: '.wav',
     mimeType: 'audio/wav',
     label: 'WAV',
     codecArgs: () => ['-c:a', 'pcm_s16le'],
   },
   mp3: {
-    fileName: 'extracted.mp3',
+    extension: '.mp3',
     mimeType: 'audio/mpeg',
     label: 'MP3',
     codecArgs: (kbps) => ['-c:a', 'libmp3lame', '-b:a', `${kbps}k`],
   },
   m4a: {
-    fileName: 'extracted.m4a',
+    extension: '.m4a',
     mimeType: 'audio/mp4',
     label: 'M4A',
     codecArgs: (kbps) => ['-c:a', 'aac', '-b:a', `${kbps}k`],
@@ -158,7 +160,12 @@ class ExtractAudioInvocation extends BaseMediaPolicyToolInvocation<ExtractAudioP
         signal,
       );
 
-      const outputPath = path.join(this.params.outputDir, output.fileName);
+      const outputFileName = policyOutputFileName({
+        inputPath: this.params.inputPath,
+        operation: 'audio',
+        extension: output.extension,
+      });
+      const outputPath = path.join(this.params.outputDir, outputFileName);
       const run = await runFfmpeg(
         [
           '-y',
@@ -197,7 +204,7 @@ class ExtractAudioInvocation extends BaseMediaPolicyToolInvocation<ExtractAudioP
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: output.fileName,
+        outputFileName,
         artifactKind: 'audio',
         title: 'Extracted audio track',
         mimeType: output.mimeType,
@@ -230,7 +237,7 @@ export class OmniExtractAudioTool extends BaseMediaPolicyTool<ExtractAudioParams
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['inputPath', 'outputDir'],
+        required: ['outputDir'],
         additionalProperties: false,
       },
       config,

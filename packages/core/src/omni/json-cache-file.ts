@@ -13,10 +13,15 @@ import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
  * per use site, and safe-tool batches run deliveries concurrently in one
  * process — unserialized load-modify-save would drop entries. Module
  * scope is deliberate: two instances on the same file must share the
- * chain. Cross-process writes remain last-writer-wins (documented). */
+ * chain. Cross-process writes remain last-writer-wins (documented).
+ * Exported for other omni-owned JSON documents with the same
+ * load-modify-save discipline (media-memory store). */
 const fileOps = new Map<string, Promise<unknown>>();
 
-function serialize<T>(key: string, fn: () => Promise<T>): Promise<T> {
+export function serializeFileOperation<T>(
+  key: string,
+  fn: () => Promise<T>,
+): Promise<T> {
   const prev = fileOps.get(key) ?? Promise.resolve();
   const run = prev.then(fn, fn);
   const settled = run.then(
@@ -82,7 +87,7 @@ export class OmniJsonCacheFile<TEntry> {
       | { result: R; changed?: boolean }
       | Promise<{ result: R; changed?: boolean }>,
   ): Promise<R> {
-    return serialize(this.filePath, async () => {
+    return serializeFileOperation(this.filePath, async () => {
       const data = await this.load();
       if (!data) return unreadableResult;
       const { result, changed } = await fn(data.entries);

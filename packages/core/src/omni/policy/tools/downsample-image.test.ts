@@ -140,7 +140,7 @@ describe('OmniDownsampleImageTool', () => {
     });
     expect(jpeg).toHaveBeenCalledWith({ quality: 75 });
     expect(toFile).toHaveBeenCalledWith(
-      path.join(outputDir, 'downsampled.jpg'),
+      path.join(outputDir, 'photo-downsampled.jpg'),
     );
 
     expect(result.error).toBeUndefined();
@@ -149,7 +149,7 @@ describe('OmniDownsampleImageTool', () => {
         kind: 'image',
         storage: 'workspace',
         title: 'Downsampled image',
-        workspacePath: 'downsampled.jpg',
+        workspacePath: 'photo-downsampled.jpg',
         mimeType: 'image/jpeg',
         sizeBytes: OUTPUT_SIZE,
         metadata: {

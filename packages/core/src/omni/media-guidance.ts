@@ -32,6 +32,7 @@ import { isOmniDeliveryActive } from './delivery-gate.js';
 import { resolveMediaPolicyModelAccess } from './policy/model-access.js';
 import {
   OMNI_DISCLOSURE_TEXT_PREFIX,
+  OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
   OMNI_OMISSION_TEXT_PREFIX,
   OMNI_TRANSCRIPT_TEXT_PREFIX,
 } from './disclosure.js';
@@ -86,6 +87,22 @@ export function buildOmniMediaGuidanceSection(config: Config): string | null {
     ([name]) => resolveMediaPolicyModelAccess(config, name).enabled,
   );
 
+  // Active-mode recall guidance. The handle annotation is emitted with
+  // every memory-known delivery, but the tool that consumes it is deferred
+  // (it surfaces via ToolSearch), so without this the model can receive
+  // 【媒体资源】 markers with no explanation anywhere in context — and the
+  // rest of this section actively tells it to gather evidence with the
+  // policy tools, i.e. to reprocess from scratch what memory already holds.
+  // Only stated when recall.mode is 'active': in sideQuery mode the harness
+  // injects recalled memory itself and the model must not call the tool.
+  const recallGuidance =
+    config.getOmniMemoryConfig?.()?.recall.mode === 'active'
+      ? `
+- ${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}<file>: an opaque session handle for that media. It is the ONLY identity you can use to reference the file — you will never be given its real path.
+- BEFORE reprocessing media (extracting frames, transcribing, clipping), call \`${ToolNames.OMNI_RECALL_MEDIA_MEMORY}\` with that handle: earlier sessions may already have produced the transcript, keyframes or excerpt you need, and it returns instantly. It also reports honest gaps — which channels were never processed — and can suggest which tool closes them.
+- Handles also work as the \`resourceId\` argument of the media tools below, in place of a path.`
+      : '';
+
   const toolGuidance =
     enabledTools.length > 0
       ? `- When the task needs evidence beyond what was delivered — later time ranges, finer visual detail, more frames, a fuller transcript — do not stop at the delivered subset: fetch the evidence yourself with the media tools below, then read the produced file(s) to bring them into context. Work in targeted excerpts (a specific time range or region at a time) so each request stays within limits, and iterate until you have seen enough to complete the task.
@@ -100,6 +117,8 @@ Media files in this session reach you through a preprocessing pipeline that must
 - ${OMNI_DISCLOSURE_TEXT_PREFIX}<file>: the adjacent media is a degraded derivative (clipped, downscaled, resampled, or keyframes); the marker states exactly what was reduced.
 - ${OMNI_OMISSION_TEXT_PREFIX}<file>: the media could not be delivered at all; the notice stands in its place.
 - ${OMNI_TRANSCRIPT_TEXT_PREFIX}<file>: text derived from the media (e.g. a speech transcript), possibly delivered instead of the media itself.
+
+${recallGuidance}
 
 Interpret delivered media under this contract:
 

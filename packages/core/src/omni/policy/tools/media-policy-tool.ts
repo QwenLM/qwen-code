@@ -36,7 +36,10 @@ export const DEFAULT_POLICY_TOOL_TIMEOUT_MS = 600_000;
 
 /** Parameters every media-policy degradation tool shares: one input file,
  * one harness-injected output directory (the invocation's staging dir —
- * the tool's ONLY permitted output location). */
+ * the tool's ONLY permitted output location). `inputPath` is guaranteed
+ * present by the time an invocation is built: fixed-policy calls always
+ * carry it, and gated model/client calls that passed `resourceId` instead
+ * had it resolved by the call gate (model-access.ts) before validation. */
 export interface MediaPolicyIoParams {
   /** Absolute path of the source media file. */
   inputPath: string;
@@ -44,11 +47,24 @@ export interface MediaPolicyIoParams {
   outputDir: string;
 }
 
-/** JSON-schema fragments for the shared io parameters. */
+/** JSON-schema fragments for the shared io parameters. `resourceId` is
+ * the model-facing alternative to `inputPath` (memory design M §5.2):
+ * the model references delivered media by its opaque session handle and
+ * the call gate resolves the handle to the real locator — it never
+ * appears in the arguments an invocation is built with. */
 export const MEDIA_POLICY_IO_SCHEMA_PROPERTIES = {
   inputPath: {
     type: 'string',
-    description: 'Absolute path of the source media file.',
+    description:
+      'Absolute path of the source media file. Provide exactly one of ' +
+      'inputPath or resourceId.',
+  },
+  resourceId: {
+    type: 'string',
+    description:
+      'Opaque session media handle (from a 【媒体资源】 annotation or a ' +
+      'recall result) naming the source media. Provide exactly one of ' +
+      'inputPath or resourceId.',
   },
   outputDir: {
     type: 'string',
@@ -236,11 +252,77 @@ export abstract class BaseMediaPolicyTool<
   }
 }
 
+/** Longest source stem kept in a generated output name: long enough to
+ * stay recognizable, short enough that a deep outputDir plus a variant
+ * suffix cannot approach the filesystem's per-component limit. */
+const MAX_OUTPUT_STEM_LENGTH = 48;
+
+/**
+ * Build a self-describing output filename for a policy artifact.
+ *
+ * These tools used to write fixed names (`clip.mp4`, `downsampled.jpg`,
+ * `transcript.txt`). Under fixed-policy orchestration that is safe: every
+ * invocation gets its own staging directory. But `modelAccess` lets a
+ * caller pick a PERSISTENT `outputDir`, and there two calls collide — the
+ * second silently destroys the first artifact. Observed in a real
+ * multi-session run: a clip cut on day one was overwritten by a different
+ * clip on day three, and the commentary written against the first clip
+ * silently began describing the wrong footage.
+ *
+ * The name carries the two axes that actually distinguish artifacts: the
+ * SOURCE it came from, and — where the operation has one — a natural
+ * VARIANT (a clip's time range, a frame's index). Same source and same
+ * variant deliberately resolve to the same name: re-running one operation
+ * replaces its own output with identical bytes, which is idempotent
+ * rather than destructive.
+ *
+ * Residual case, documented rather than defended against: one operation
+ * run twice on one source with DIFFERENT tuning and no natural variant —
+ * two downscales at different heights — still resolves to one name and
+ * the later result supersedes. That is an operation superseding itself,
+ * not one artifact destroying an unrelated one.
+ */
+export function policyOutputFileName(params: {
+  /** Source the artifact was derived from. */
+  inputPath: string;
+  /** Operation label, e.g. 'clip', 'audio', 'keyframe'. */
+  operation: string;
+  /** Distinguishing detail within the operation, e.g. '90s+75s', '0007'. */
+  variant?: string;
+  /** Extension WITH the leading dot, e.g. '.mp4'. */
+  extension: string;
+}): string {
+  const raw = path.basename(params.inputPath, path.extname(params.inputPath));
+  // Collapse anything outside a conservative portable set (`+` is kept:
+  // it is portable everywhere and appears in this scheme's own variants,
+  // e.g. a clip's `123s+40s`, so derived artifacts of a clip keep a stem
+  // that still round-trips). The stem comes
+  // from user-supplied media names (spaces, quotes, CJK, shell
+  // metacharacters) and is about to become a real path component.
+  const stem =
+    raw
+      .replace(/[^A-Za-z0-9._+-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, MAX_OUTPUT_STEM_LENGTH) || 'media';
+  const variant = params.variant ? `-${params.variant}` : '';
+  return `${stem}-${params.operation}${variant}${params.extension}`;
+}
+
 /** Shared structural validation for the io params (schema has already
- * checked types/required-ness). Returns an error message or null. */
+ * checked types/required-ness). Returns an error message or null.
+ * `inputPath` is checked for presence here rather than in the schema's
+ * `required` list: the model-facing alternative is `resourceId`, which
+ * the call gate resolves into `inputPath` BEFORE validation — so a
+ * missing inputPath at this point means the caller supplied neither. */
 export function validateMediaPolicyIoParams(
   params: MediaPolicyIoParams,
 ): string | null {
+  if ((params.inputPath as string | undefined) === undefined) {
+    return (
+      'provide exactly one of inputPath (absolute path) or resourceId ' +
+      '(opaque session media handle)'
+    );
+  }
   if (!path.isAbsolute(params.inputPath)) {
     return `inputPath must be an absolute path (got ${JSON.stringify(params.inputPath)})`;
   }
@@ -256,6 +338,12 @@ export function validateMediaPolicyIoParams(
  * REGULAR file (lstat — a symlink is refused, the tool must never read
  * through a link planted in its input position) and the output directory
  * an existing real directory. Returns the input size in bytes.
+ *
+ * Input errors name only the file's basename: these messages reach the
+ * model, and a resourceId-resolved call must not leak the real locator
+ * the handle stands in for (M §5.2) — the basename matches the
+ * displayName the model already saw at delivery. `outputDir` errors keep
+ * the full path (the caller chose it).
  */
 export async function assertMediaPolicyIo(
   params: MediaPolicyIoParams,
@@ -264,10 +352,12 @@ export async function assertMediaPolicyIo(
   try {
     inputStat = await fs.lstat(params.inputPath);
   } catch {
-    throw new Error(`input file not found: ${params.inputPath}`);
+    throw new Error(`input file not found: ${path.basename(params.inputPath)}`);
   }
   if (!inputStat.isFile()) {
-    throw new Error(`input is not a regular file: ${params.inputPath}`);
+    throw new Error(
+      `input is not a regular file: ${path.basename(params.inputPath)}`,
+    );
   }
   let outStat;
   try {

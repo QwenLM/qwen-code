@@ -66,6 +66,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   omni_clip_video: 'ClipVideo',
   omni_convert_image: 'ConvertImage',
   omni_transcribe_audio: 'TranscribeAudio',
+  omni_recall_media_memory: 'RecallMediaMemory',
   bash: 'Shell',
   shell: 'Shell Command',
   read: 'ReadFile',

@@ -8,16 +8,24 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   assertWithinByteLimit,
+  assertWithinDurationLimit,
   assertWithinTokenLimit,
   effectiveMaxUploadFileBytes,
   OmniTransportGuardError,
 } from './guard.js';
 import type { RecognizedMedia } from './recognition.js';
 
-function cfg(overrides: { maxBytes?: number; maxTokens?: number }): Config {
+function cfg(overrides: {
+  maxBytes?: number;
+  maxTokens?: number;
+  maxDurationSeconds?: number;
+}): Config {
   return {
     getOmniMaxUploadFileBytes: vi.fn().mockReturnValue(overrides.maxBytes),
     getOmniMaxEstimatedTokens: vi.fn().mockReturnValue(overrides.maxTokens),
+    getOmniMaxDurationSeconds: vi
+      .fn()
+      .mockReturnValue(overrides.maxDurationSeconds),
   } as unknown as Config;
 }
 
@@ -104,5 +112,77 @@ describe('token guard', () => {
       'tone.mp3',
     );
     expect(est.status).toBe('unavailable');
+  });
+});
+
+describe('duration guard', () => {
+  const FILM_98MIN: RecognizedMedia = {
+    modality: 'video',
+    detectedMimeType: 'video/mp4',
+    sizeBytes: 474_864_706,
+    metadata: { width: 1920, height: 1040, durationMs: 5_895_767 },
+  };
+
+  it('is disabled when unset or non-positive', () => {
+    for (const c of [cfg({}), cfg({ maxDurationSeconds: 0 })]) {
+      expect(() =>
+        assertWithinDurationLimit(c, FILM_98MIN, 'film'),
+      ).not.toThrow();
+    }
+  });
+
+  it('rejects a file that clears the byte limit but is still too long', () => {
+    // The real failure this guard exists for: 2.44 GB downscaled to 474 MB
+    // passes a 1 GiB byte ceiling, uploads, and is then refused by the
+    // provider for duration — after paying for the transcode.
+    const config = cfg({ maxDurationSeconds: 3600 });
+    expect(() =>
+      assertWithinByteLimit(config, FILM_98MIN.sizeBytes, 'film'),
+    ).not.toThrow();
+    expect(() => assertWithinDurationLimit(config, FILM_98MIN, 'film')).toThrow(
+      OmniTransportGuardError,
+    );
+  });
+
+  it('names duration as the reason and says downscaling will not help', () => {
+    try {
+      assertWithinDurationLimit(
+        cfg({ maxDurationSeconds: 3600 }),
+        FILM_98MIN,
+        'film',
+      );
+      throw new Error('expected a guard rejection');
+    } catch (err) {
+      const message = (err as Error).message;
+      expect(message).toContain('duration limit');
+      expect(message).toContain('5896s > 3600s');
+      expect(message).toMatch(/Clip a shorter span/);
+    }
+  });
+
+  it('accepts media within the limit', () => {
+    expect(() =>
+      assertWithinDurationLimit(
+        cfg({ maxDurationSeconds: 3600 }),
+        VIDEO_8MIN,
+        'clip',
+      ),
+    ).not.toThrow();
+  });
+
+  it('never rejects when the probe reported no duration', () => {
+    const noDuration: RecognizedMedia = {
+      modality: 'video',
+      detectedMimeType: 'video/mp4',
+      sizeBytes: 10,
+      metadata: {},
+    };
+    expect(() =>
+      assertWithinDurationLimit(
+        cfg({ maxDurationSeconds: 1 }),
+        noDuration,
+        'x',
+      ),
+    ).not.toThrow();
   });
 });

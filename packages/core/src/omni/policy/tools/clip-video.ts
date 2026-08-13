@@ -23,6 +23,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   mediaPolicyToolSuccess,
+  policyOutputFileName,
   resolvePolicyToolTimeoutMs,
   type MediaPolicyIoParams,
   type MediaPolicyToolConfigView,
@@ -38,8 +39,6 @@ export const CLIP_VIDEO_DEFAULTS = {
   preset: 'veryfast',
   audioBitrateKbps: 128,
 } as const;
-
-const OUTPUT_FILE_NAME = 'clip.mp4';
 
 export interface ClipVideoParams extends MediaPolicyIoParams {
   /** Clip start in seconds (default 0). */
@@ -63,7 +62,12 @@ const TUNABLE_SCHEMA_PROPERTIES = {
 
 const DESCRIPTOR: MediaPolicyToolDescriptor = {
   kind: 'media_policy',
-  version: '1',
+  // '2': outputs now carry `metadata.omniRole: 'clip'`, which memory maps
+  // to `partial` coverage. Pre-'2' cache entries and recorded executions
+  // hold role-less outputs whose coverage was derived as `complete`;
+  // sharing a version would let them converge onto the same fingerprint
+  // and keep reporting a temporal excerpt as complete footage.
+  version: '2',
   inputMediaTypes: ['video'],
   outputs: [
     {
@@ -137,7 +141,18 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
         );
       }
 
-      const outputPath = path.join(this.params.outputDir, OUTPUT_FILE_NAME);
+      // Self-describing name: two different spans of one source coexist
+      // instead of the later clip destroying the earlier one.
+      const outputFileName = policyOutputFileName({
+        inputPath: this.params.inputPath,
+        operation: 'clip',
+        variant:
+          durationSec !== undefined
+            ? `${Math.round(startSec)}s+${Math.round(durationSec)}s`
+            : `${Math.round(startSec)}s-end`,
+        extension: '.mp4',
+      });
+      const outputPath = path.join(this.params.outputDir, outputFileName);
       // Input-side -ss/-t plus a full re-encode: frame-accurate cuts
       // regardless of keyframe placement (`-c copy` snaps to keyframes).
       // The scale filter only forces even dimensions (libx264 hard
@@ -193,12 +208,15 @@ class ClipVideoInvocation extends BaseMediaPolicyToolInvocation<ClipVideoParams>
 
       return mediaPolicyToolSuccess({
         outputDir: this.params.outputDir,
-        outputFileName: OUTPUT_FILE_NAME,
+        outputFileName,
         artifactKind: 'video',
         title: 'Clipped video',
         mimeType: 'video/mp4',
         sizeBytes: outputSizeBytes,
         disclosure,
+        // Marks the artifact as a temporal excerpt for downstream role
+        // consumers (output routing selectors, memory coverage).
+        role: 'clip',
       });
     } catch (error) {
       return mediaPolicyToolFailure(error);
@@ -225,7 +243,7 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
           ...MEDIA_POLICY_IO_SCHEMA_PROPERTIES,
           ...TUNABLE_SCHEMA_PROPERTIES,
         },
-        required: ['inputPath', 'outputDir'],
+        required: ['outputDir'],
         additionalProperties: false,
       },
       config,

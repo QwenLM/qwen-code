@@ -8191,6 +8191,45 @@ export class Session implements SessionContext {
               ? 'error'
               : 'success';
           const succeeded = status === 'success';
+          // ACP runs its own tool executor, so it must capture the policy
+          // artifact batch itself and call the SAME core memory boundary
+          // the scheduler and the fixed-policy orchestrator use (memory
+          // design M §17). Captured from the tool's OWN result, before any
+          // PostToolUse hook artifacts are merged below — hook artifacts
+          // must never impersonate policy outputs. Never throws; a
+          // collection failure cannot affect the tool result (D12).
+          if (
+            succeeded &&
+            tool.mediaPolicyDescriptor &&
+            toolResult.artifacts &&
+            toolResult.artifacts.length > 0
+          ) {
+            // Deep subpath, not the root or `omni` barrel: both are
+            // statically imported across the CLI, so re-exporting this
+            // through either drags the whole policy graph — and, via
+            // iconvHelper's top-level iconv-lite import, its ~550 KB of
+            // encoding tables — into the ACP agent's static closure
+            // (scripts/check-serve-fast-path-bundle.js enforces that).
+            const { collectModelPolicyCall } = await import(
+              '@qwen-code/qwen-code-core/omniPolicyCollection'
+            );
+            await collectModelPolicyCall({
+              config: this.config,
+              batch: {
+                toolName,
+                invocationId: callId,
+                // Same pin as the modelAccess gate above: every
+                // ACP-originated call is a model call. Recording 'client'
+                // here made the PolicyExecution provenance contradict the
+                // gate that admitted the very same call.
+                executionOrigin: { kind: 'model' },
+                artifacts: toolResult.artifacts,
+              },
+              descriptor: tool.mediaPolicyDescriptor,
+              args,
+              signal: activeToolAbortSignal ?? abortSignal,
+            });
+          }
           const responseError = toolResult.error
             ? new Error(toolResult.error.message)
             : aborted
