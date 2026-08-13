@@ -165,8 +165,12 @@ type FetchPrResult = PlanReport & {
    * up-to-date anchor (a model change, `--comment`) run a full review.
    * `effective: false` carries the reason the anchor was refused — a rebase
    * or force-push (`not-an-ancestor`), a sha this history has never seen
-   * (`unknown-commit`), or a delta capture that failed (`capture-failed`) —
-   * and the diff and plan are the full range.
+   * (`unknown-commit`), an anchor older than the merge base that would
+   * scope WIDER than the PR's diff (`behind-merge-base`), a delta capture
+   * or partition that failed (`capture-failed`), or an up-to-date anchor
+   * whose full-range capture failed or never ran
+   * (`full-range-unavailable` — the one refusal where NO diff or plan
+   * exists; every other refusal falls back to the full range).
    */
   incremental?: IncrementalDecision;
 };
@@ -175,7 +179,12 @@ export interface IncrementalDecision {
   since: string;
   effective: boolean;
   upToDate?: boolean;
-  reason?: 'unknown-commit' | 'not-an-ancestor' | 'capture-failed';
+  reason?:
+    | 'unknown-commit'
+    | 'not-an-ancestor'
+    | 'behind-merge-base'
+    | 'capture-failed'
+    | 'full-range-unavailable';
   /**
    * The scoped range's left side as a FULL sha, present exactly when the
    * report's diff is the delta (`effective` and not `upToDate`). Downstream
@@ -207,11 +216,22 @@ export interface AnchorProbe {
  *
  * `diffBase` is the full sha to scope the diff from, null when the diff must
  * stay full-range (anchor refused, or already at the head).
+ *
+ * `mergeBaseSha`, when available, is the clamp: an anchor that is an
+ * ancestor of the head but OLDER than the merge base would scope a range
+ * strictly WIDER than the PR's own diff (`anchor..head` = the PR plus a
+ * slice of base history) — re-reviewing already-landed hunks whose comments
+ * fall outside every hunk of GitHub's PR diff, where a single one 422s the
+ * whole Create Review call. Reachable non-adversarially: commits from the
+ * PR branch landing in the base between rounds move the merge base past the
+ * cached anchor. A null merge base skips the clamp, consistent with the
+ * capture path's base-free design.
  */
 export function resolveIncrementalAnchor(
   since: string,
   fetchedSha: string,
   probe: AnchorProbe,
+  mergeBaseSha: string | null = null,
 ): { incremental: IncrementalDecision; diffBase: string | null } {
   if (!/^[0-9a-f]{7,64}$/i.test(since) || !probe.commitExists(since)) {
     return {
@@ -237,6 +257,12 @@ export function resolveIncrementalAnchor(
   if (resolved === fetchedSha) {
     return {
       incremental: { since, effective: true, upToDate: true },
+      diffBase: null,
+    };
+  }
+  if (mergeBaseSha !== null && !probe.isAncestor(mergeBaseSha, resolved)) {
+    return {
+      incremental: { since, effective: false, reason: 'behind-merge-base' },
       diffBase: null,
     };
   }
@@ -378,7 +404,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // Every knob user config could turn is pinned in `lib/diff-flags.ts`,
   // shared with `capture-local` so the two capture paths cannot drift into
   // producing diffs that parse differently. Null on a failed capture — the
-  // callers distinguish "captured empty" from "could not capture".
+  // callers distinguish "captured empty" from "could not capture". The
+  // capture returns TEXT ONLY: publishing `diffPath` is the ACCEPTING
+  // caller's decision, because `isEmptyDiff`'s invariant is that `diffPath`
+  // is set only on a successful capture of the diff being judged — a
+  // producer that published on every success leaked an empty delta's path
+  // into the full-range judgment and recommended a live PR for closure on
+  // an infrastructure state.
   const captureRange = (left: string): string | null => {
     try {
       const buf = gitRaw(
@@ -388,8 +420,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `${left}..${fetchedSha}`,
       );
       writeFileSync(diffRel, buf);
-      diffPath = diffRel;
-      diffPathAbsolute = resolve(diffRel);
       diffSha256 = createHash('sha256').update(buf).digest('hex');
       return buf.toString('utf8');
     } catch (err) {
@@ -397,24 +427,36 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       return null;
     }
   };
+  const acceptCapture = (text: string): void => {
+    diffText = text;
+    diffPath = diffRel;
+    diffPathAbsolute = resolve(diffRel);
+  };
 
   // The incremental anchor rules first: an effective anchor scopes the diff
-  // to `since..head` and the merge base is not consulted for the capture at
-  // all (the range needs no base, so a failed base fetch does not cost the
-  // incremental path). Every refusal falls back to the full range with its
-  // reason in the report — never silently.
+  // to `since..head` and the merge base is not consulted for the CAPTURE
+  // (the range needs no base, so a failed base fetch does not cost the
+  // incremental path) — but it IS consulted for the ruling, as the clamp
+  // that keeps an anchor from scoping WIDER than the PR's own diff. Every
+  // refusal falls back to the full range with its reason in the report —
+  // never silently.
   let anchor: {
     incremental: IncrementalDecision;
     diffBase: string | null;
   } | null = null;
   if (args.since !== undefined) {
-    anchor = resolveIncrementalAnchor(args.since, fetchedSha, {
-      commitExists: (sha) =>
-        gitOpt('cat-file', '-e', `${sha}^{commit}`) !== null,
-      isAncestor: (a, b) =>
-        gitOpt('merge-base', '--is-ancestor', a, b) !== null,
-      resolveCommit: (sha) => gitOpt('rev-parse', `${sha}^{commit}`),
-    });
+    anchor = resolveIncrementalAnchor(
+      args.since,
+      fetchedSha,
+      {
+        commitExists: (sha) =>
+          gitOpt('cat-file', '-e', `${sha}^{commit}`) !== null,
+        isAncestor: (a, b) =>
+          gitOpt('merge-base', '--is-ancestor', a, b) !== null,
+        resolveCommit: (sha) => gitOpt('rev-parse', `${sha}^{commit}`),
+      },
+      mergeBaseSha,
+    );
   }
   /** True when the FINAL captured diff is the incremental delta. */
   let scopedDelta = false;
@@ -434,22 +476,19 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // for the flows that continue anyway (a model change, --comment).
       anchor.incremental.upToDate = true;
     } else {
-      diffText = delta;
+      acceptCapture(delta);
       scopedDelta = true;
+      // The scoped range's left side, full-sha, for downstream consumers
+      // that recompute their own diffs (Agent 7's test-efficacy probe welds
+      // --base into its brief) — without it they would probe the full
+      // merge-base range on a delta-scoped round.
+      anchor.incremental.diffBase = anchor.diffBase;
     }
   }
   if (!scopedDelta) {
-    // The delta branch may have SUCCESSFULLY captured an empty delta, which
-    // set `diffPath` to that file. `isEmptyDiff`'s invariant is that
-    // `diffPath` is set only on a successful capture OF THE DIFF BEING
-    // JUDGED, and the full-range capture below can fail or never run (no
-    // merge base) — a leaked delta path would then read as "captured the
-    // full range, and it is empty": a live PR recommended for closure on an
-    // infrastructure state. Reset; `captureRange` re-sets both on success.
-    diffPath = null;
-    diffPathAbsolute = null;
     if (mergeBaseSha) {
-      diffText = captureRange(mergeBaseSha) ?? '';
+      const full = captureRange(mergeBaseSha);
+      if (full !== null) acceptCapture(full);
     } else {
       writeStderrLine(
         `Could not resolve merge-base of ${meta.baseRefName} and ${ref}; ` +
@@ -459,30 +498,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // `upToDate` promises the report carries the FULL-range diff and plan
     // (the flows that continue past it — a model change, --comment — run
     // full). A full-range capture that failed or never ran breaks that
-    // promise, so the ruling is demoted rather than left overclaiming.
+    // promise, so the ruling is demoted rather than left overclaiming — and
+    // under its own reason: `capture-failed` names a DELTA capture failure,
+    // and the degraded state here is a different fact (no plan exists at
+    // all, not a fallback to a full one).
     if (anchor?.incremental.upToDate && diffPath === null) {
       anchor.incremental = {
         since: anchor.incremental.since,
         effective: false,
-        reason: 'capture-failed',
+        reason: 'full-range-unavailable',
       };
     }
-  } else if (anchor?.diffBase) {
-    // The scoped range's left side, full-sha, for downstream consumers that
-    // recompute their own diffs (Agent 7's test-efficacy probe welds
-    // --base into its brief) — without it they would probe the full
-    // merge-base range on a delta-scoped round.
-    anchor.incremental.diffBase = anchor.diffBase;
-  }
-  if (anchor) {
-    const inc = anchor.incremental;
-    writeStderrLine(
-      inc.upToDate
-        ? `Incremental: anchor ${inc.since.slice(0, 10)} is up to date with the head — nothing new to review.`
-        : scopedDelta
-          ? `Incremental: scoped to ${inc.since.slice(0, 10)}..${fetchedSha.slice(0, 10)}.`
-          : `Incremental anchor ${inc.since.slice(0, 10)} refused (${inc.reason}); reviewing the full diff.`,
-    );
   }
   // `buildDiffPlan` throws when the chunks do not tile the diff — a coverage
   // hole. That must be loud, but it must not take the whole review with it: the
@@ -501,6 +527,38 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute = null;
     diffSha256 = null;
     plan = buildDiffPlan('', args.maxChunkLines);
+    // A partition failure on a delta-scoped capture must demote the ruling
+    // too: the report is about to publish a diff-less, zero-chunk plan, and
+    // an `incremental: {effective: true}` over it would send Agent 7 to a
+    // delta base while every other reader falls back to the merge base —
+    // one round, two scopes.
+    // `scopedDelta` stays true: the text that failed to partition IS the
+    // delta, and re-enabling the full-range flags over it would fire the
+    // collapse ratio against GitHub's full-PR stat.
+    if (scopedDelta && anchor) {
+      anchor.incremental = {
+        since: anchor.incremental.since,
+        effective: false,
+        reason: 'capture-failed',
+      };
+    }
+  }
+  // The incremental status line is emitted AFTER planning, so it describes
+  // the state the report actually publishes — a demotion above must not be
+  // narrated as a scoped round.
+  if (anchor) {
+    const inc = anchor.incremental;
+    writeStderrLine(
+      inc.upToDate
+        ? `Incremental: anchor ${inc.since.slice(0, 10)} is up to date with the head — nothing new to review.`
+        : inc.effective
+          ? `Incremental: scoped to ${inc.since.slice(0, 10)}..${fetchedSha.slice(0, 10)}.`
+          : `Incremental anchor ${inc.since.slice(0, 10)} refused (${inc.reason}); ${
+              diffPath !== null
+                ? 'reviewing the full diff.'
+                : 'no diff could be captured — coverage will be partial.'
+            }`,
+    );
   }
 
   // 6. Emit the report. The window opening survives drift restarts: this

@@ -2393,6 +2393,45 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toContain('write a **probe**');
   });
 
+  it("scopes Agent 7's probe base to the delta on an incremental round", () => {
+    // On a delta-scoped round test-efficacy recomputes base..HEAD from the
+    // welded --base; handed the merge base it would spend the probe budget
+    // reversing already-reviewed hunks and report survivors outside this
+    // round's diff. Mutation-measured on the review: reverting this
+    // selection to mergeBaseSha left the whole suite green — these cases
+    // are what kill that mutant.
+    const planPath = resolve('/tmp/plan.json');
+    const scoped = buildRoleBrief(
+      {
+        ...PR_PLAN,
+        incremental: {
+          since: 'a'.repeat(40),
+          effective: true,
+          diffBase: 'de17aba5e',
+        },
+      },
+      '7',
+      { planPath },
+    );
+    expect(scoped).toContain('--base de17aba5e');
+    expect(scoped).not.toContain('--base abc123');
+    // upToDate keeps the FULL range — the flows that continue past it run a
+    // full review, and the report's plan is full-range too.
+    const upToDate = buildRoleBrief(
+      {
+        ...PR_PLAN,
+        incremental: {
+          since: 'a'.repeat(40),
+          effective: true,
+          upToDate: true,
+        },
+      },
+      '7',
+      { planPath },
+    );
+    expect(upToDate).toContain('--base abc123');
+  });
+
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
     // It runs the build. Requiring it to open the diff would be requiring a thing
     // its job does not involve, and reporting it "blind" for not doing so would

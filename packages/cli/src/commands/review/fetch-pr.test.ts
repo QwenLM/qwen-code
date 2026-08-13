@@ -230,6 +230,10 @@ const producerMocks = vi.hoisted(() => ({
       baseFetchFailed: false,
     }),
   ),
+  // Defaults to the REAL implementation (captured by the module mock below);
+  // a test overrides it only to force the partition-failure path.
+  buildDiffPlan: vi.fn(),
+  actualBuildDiffPlan: undefined as unknown as (...a: unknown[]) => unknown,
   writeStderrLine: vi.fn(),
 }));
 
@@ -295,6 +299,13 @@ vi.mock('./lib/merge-base.js', () => ({
 vi.mock('./lib/run-ledger.js', () => ({
   appendRunSession: vi.fn(),
 }));
+vi.mock('./lib/diff-plan.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/diff-plan.js')>();
+  producerMocks.actualBuildDiffPlan = actual.buildDiffPlan as (
+    ...a: unknown[]
+  ) => unknown;
+  return { ...actual, buildDiffPlan: producerMocks.buildDiffPlan };
+});
 
 describe('fetch-pr report assembly', () => {
   beforeEach(() => {
@@ -316,6 +327,9 @@ describe('fetch-pr report assembly', () => {
       sha: null,
       baseFetchFailed: false,
     }));
+    producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
+      producerMocks.actualBuildDiffPlan(...a),
+    );
     producerMocks.gh.mockReturnValue(
       JSON.stringify({
         headRefName: 'feat/x',
@@ -477,6 +491,115 @@ describe('fetch-pr report assembly', () => {
     expect(report.diffPath).not.toBeNull();
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
+    // The probe wiring, pinned by invocation shape: a transposed
+    // --is-ancestor operand pair would refuse every valid anchor while every
+    // content-agnostic mock stayed green (measured by the review's mutant).
+    const gitOptCalls = producerMocks.gitOpt.mock.calls;
+    expect(gitOptCalls).toContainEqual([
+      'cat-file',
+      '-e',
+      `${ANCHOR}^{commit}`,
+    ]);
+    expect(gitOptCalls).toContainEqual([
+      'merge-base',
+      '--is-ancestor',
+      ANCHOR,
+      'f00df00df00d',
+    ]);
+    expect(gitOptCalls).toContainEqual(['rev-parse', `${ANCHOR}^{commit}`]);
+    // ...and the merge-base clamp: anchor at or after the base.
+    expect(gitOptCalls).toContainEqual([
+      'merge-base',
+      '--is-ancestor',
+      BASE,
+      ANCHOR,
+    ]);
+  });
+
+  it('refuses a rebased-away anchor end to end, on a full-range plan', async () => {
+    producerMocks.gitOpt.mockImplementation(
+      (...args: string[]) =>
+        args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null, // every merge-base probe fails → not an ancestor
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${BASE}..f00df00df00d`)
+        ? Buffer.from(DELTA_DIFF)
+        : Buffer.from(''),
+    );
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'not-an-ancestor',
+    });
+    expect(report.diffPath).not.toBeNull();
+    expect(report.diffLines).toBeGreaterThan(0);
+  });
+
+  it('refuses an anchor OLDER than the merge base — scoping wider than the PR is not incremental', async () => {
+    // Reachable non-adversarially: PR commits landing in the base between
+    // rounds move the merge base past the cached anchor; anchor..head would
+    // then re-review base history, and a comment anchored there 422s the
+    // whole Create Review call.
+    producerMocks.gitOpt.mockImplementation(
+      (...args: string[]) =>
+        args[0] === 'cat-file'
+          ? ''
+          : args[0] === 'rev-parse'
+            ? ANCHOR
+            : args[0] === 'merge-base' && args[2] === ANCHOR
+              ? '' // anchor IS behind the head…
+              : null, // …but the base is NOT behind the anchor
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${BASE}..f00df00df00d`)
+        ? Buffer.from(DELTA_DIFF)
+        : Buffer.from(''),
+    );
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'behind-merge-base',
+    });
+    expect(report.diffPath).not.toBeNull();
+  });
+
+  it('demotes a delta whose partition failed — no incremental claim over a planless report', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${ANCHOR}..f00df00df00d`)
+        ? Buffer.from(DELTA_DIFF)
+        : Buffer.from(''),
+    );
+    producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
+      if (typeof text === 'string' && text.trim() !== '') {
+        throw new Error('chunks do not tile the diff');
+      }
+      return producerMocks.actualBuildDiffPlan(text, 400);
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.diffPath).toBeNull();
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'capture-failed',
+    });
+    // The demoted state must not resurrect the full-range flags over the
+    // delta text either.
+    expect(report.collapsedFromUpstream).toBeUndefined();
   });
 
   it('demotes to capture-failed when the delta capture throws', async () => {
@@ -527,12 +650,19 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
     expect(report.emptyDiff).toBeUndefined();
     expect(report.diffPath).toBeNull();
-    // upToDate without the full-range plan would overclaim; it demotes.
+    // upToDate without the full-range plan would overclaim; it demotes —
+    // under its own reason, because unlike every other refusal there is NO
+    // diff or plan to fall back to, and the stderr line must not claim one.
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'capture-failed',
+      reason: 'full-range-unavailable',
     });
+    const refusedLine = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.includes('refused'));
+    expect(refusedLine).toContain('no diff could be captured');
+    expect(refusedLine).not.toContain('reviewing the full diff');
   });
 
   it('stays silent on ENOENT (a genuine first attempt)', async () => {
@@ -658,6 +788,31 @@ describe('resolveIncrementalAnchor', () => {
       reason: 'not-an-ancestor',
     });
     expect(r.diffBase).toBeNull();
+  });
+
+  it('clamps an anchor older than the merge base — wider than the PR is not incremental', () => {
+    const MERGE_BASE = 'c'.repeat(40);
+    // The anchor is behind the head, but the merge base is NOT behind the
+    // anchor: scoping anchor..head would include base history the PR's own
+    // diff does not contain.
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({
+        isAncestor: (a) => a !== MERGE_BASE,
+      }),
+      MERGE_BASE,
+    );
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'behind-merge-base',
+    });
+    expect(r.diffBase).toBeNull();
+    // With the base behind the anchor the clamp passes and the scope stands.
+    expect(
+      resolveIncrementalAnchor(ANCHOR, HEAD, probe(), MERGE_BASE).diffBase,
+    ).toBe(ANCHOR);
   });
 
   it('never hands a flag-shaped or non-hex anchor to git', () => {
