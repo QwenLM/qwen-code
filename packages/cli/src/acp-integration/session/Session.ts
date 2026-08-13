@@ -1610,6 +1610,7 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
@@ -1639,6 +1640,7 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -2952,6 +2954,13 @@ export class Session implements SessionContext {
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
     }
+    const shellActive =
+      this.config.getBackgroundShellRegistry().hasRunningEntries() ||
+      this.notificationQueue.some((item) => item.kind === 'shell') ||
+      this.currentShellNotificationActive;
+    if (shellActive) {
+      holds.push({ category: 'shell', id: 'background-shells' });
+    }
     return holds;
   }
 
@@ -3107,7 +3116,12 @@ export class Session implements SessionContext {
       this.#statusChangeCallback = undefined;
     }
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
-    this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    shellRegistry.setNotificationCallback(undefined);
+    if (this.#shellStatusChangeCallback) {
+      shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
+      this.#shellStatusChangeCallback = undefined;
+    }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
@@ -7163,6 +7177,10 @@ export class Session implements SessionContext {
     });
 
     const shellRegistry = this.config.getBackgroundShellRegistry();
+    this.#shellStatusChangeCallback = () => {
+      this.#activeWorkChanged();
+    };
+    shellRegistry.setStatusChangeCallback(this.#shellStatusChangeCallback);
     shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
       this.#enqueueBackgroundNotification({
         displayText,
@@ -7382,6 +7400,7 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
           await runWithInvocationContext(undefined, () =>
@@ -7391,6 +7410,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }
       }

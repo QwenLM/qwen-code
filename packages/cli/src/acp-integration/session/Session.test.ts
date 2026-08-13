@@ -436,6 +436,9 @@ describe('Session', () => {
   };
   let mockBackgroundShellRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
+    setStatusChangeCallback: ReturnType<typeof vi.fn>;
+    clearStatusChangeCallback: ReturnType<typeof vi.fn>;
+    hasRunningEntries: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
   };
   let mockToolRegistry: {
@@ -627,6 +630,9 @@ describe('Session', () => {
     };
     mockBackgroundShellRegistry = {
       setNotificationCallback: vi.fn(),
+      setStatusChangeCallback: vi.fn(),
+      clearStatusChangeCallback: vi.fn(),
+      hasRunningEntries: vi.fn().mockReturnValue(false),
       getAll: vi.fn().mockReturnValue([]),
     };
     mockWorkflowRunRegistry = {
@@ -924,7 +930,7 @@ describe('Session', () => {
       );
     }
 
-    function holdIds(category: 'agent' | 'notification'): string[] {
+    function holdIds(category: 'agent' | 'notification' | 'shell'): string[] {
       return session
         .collectActiveWorkHolds()
         .filter((hold) => hold.category === category)
@@ -973,6 +979,80 @@ describe('Session', () => {
       expect(
         mockBackgroundTaskRegistry.setStatusChangeCallback,
       ).not.toHaveBeenCalledWith(undefined);
+    });
+
+    it('represents any number of running shells with one aggregate hold', () => {
+      createReportingSession();
+      mockBackgroundShellRegistry.hasRunningEntries.mockImplementation(() =>
+        (
+          mockBackgroundShellRegistry.getAll() as Array<{ status: string }>
+        ).some((entry) => entry.status === 'running'),
+      );
+      mockBackgroundShellRegistry.getAll.mockReturnValue(
+        Array.from({ length: 2_000 }, (_unused, index) => ({
+          id: `shell-${index}`,
+          status: 'running',
+        })),
+      );
+
+      expect(holdIds('shell')).toEqual(['background-shells']);
+      expect(session.collectActiveWorkHolds()).toHaveLength(1);
+      expect(session.isIdle()).toBe(false);
+
+      mockBackgroundShellRegistry.getAll.mockReturnValue([]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('tracks shell status changes and retracts only its callback', () => {
+      createReportingSession();
+      const statusChanged =
+        mockBackgroundShellRegistry.setStatusChangeCallback.mock.calls.at(
+          -1,
+        )?.[0] as (() => void) | undefined;
+      const before = changes;
+      statusChanged?.();
+      expect(changes).toBe(before + 1);
+
+      session.dispose();
+      expect(
+        mockBackgroundShellRegistry.clearStatusChangeCallback,
+      ).toHaveBeenCalledWith(statusChanged);
+      expect(
+        mockBackgroundShellRegistry.setStatusChangeCallback,
+      ).not.toHaveBeenCalledWith(undefined);
+    });
+
+    it('holds a queued shell notification before its continuation can start', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      const releaseCloseGate = session.beginClose();
+      const notify =
+        mockBackgroundShellRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { shellId: string; status: string },
+        ) => void;
+
+      notify('Shell completed.', '<task-notification />', {
+        shellId: 'shell-queued',
+        status: 'completed',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(holdIds('shell')).toEqual(['background-shells']);
+      expect(session.isIdle()).toBe(false);
+
+      releaseCloseGate();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      session.dispose();
     });
 
     it('holds an Agent terminal notification from persistence to continuation', async () => {
@@ -1091,6 +1171,129 @@ describe('Session', () => {
         expect(session.collectActiveWorkHolds()).toEqual([]),
       );
       expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('keeps a shell hold across queue-to-continuation handoff', async () => {
+      let releaseNotification!: () => void;
+      const notificationGate = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      async function* notificationStream() {
+        yield {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            candidates: [{ content: { parts: [{ text: 'working' }] } }],
+          },
+        };
+        await notificationGate;
+      }
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(notificationStream());
+      createReportingSession();
+      const notify =
+        mockBackgroundShellRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { shellId: string; status: string },
+        ) => void;
+
+      notify('Shell completed.', '<task-notification />', {
+        shellId: 'shell-1',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(holdIds('shell')).toEqual(['background-shells']),
+      );
+      expect(session.isIdle()).toBe(false);
+
+      releaseNotification();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('releases the shell hold after a continuation failure', async () => {
+      let rejectNotification!: (reason: Error) => void;
+      mockChat.sendMessageStream = vi.fn().mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectNotification = reject;
+        }),
+      );
+      createReportingSession();
+      const notify =
+        mockBackgroundShellRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { shellId: string; status: string },
+        ) => void;
+
+      notify('Shell failed.', '<task-notification />', {
+        shellId: 'shell-1',
+        status: 'failed',
+      });
+      await vi.waitFor(() =>
+        expect(holdIds('shell')).toEqual(['background-shells']),
+      );
+
+      rejectNotification(new Error('continuation failed'));
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
+      session.dispose();
+    });
+
+    it('releases the shell hold after a cancelled continuation exits', async () => {
+      let releaseNotification!: () => void;
+      const notificationGate = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      async function* notificationStream() {
+        yield {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            candidates: [{ content: { parts: [{ text: 'working' }] } }],
+          },
+        };
+        await notificationGate;
+      }
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(notificationStream());
+      createReportingSession();
+      const notify =
+        mockBackgroundShellRegistry.setNotificationCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { shellId: string; status: string },
+        ) => void;
+
+      notify('Shell completed.', '<task-notification />', {
+        shellId: 'shell-1',
+        status: 'completed',
+      });
+      await vi.waitFor(() =>
+        expect(holdIds('shell')).toEqual(['background-shells']),
+      );
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+      );
+
+      await session.cancelPendingPrompt();
+      expect(holdIds('shell')).toEqual(['background-shells']);
+      releaseNotification();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
       session.dispose();
     });
   });
