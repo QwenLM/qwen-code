@@ -62,9 +62,16 @@ impl DesktopRuntime {
             .env("QWEN_CODE_DESKTOP", "1")
             .env("QWEN_SERVER_TOKEN", &token);
 
-        let mut child = command
-            .group_spawn()
-            .map_err(|error| format!("Failed to start bundled Qwen Code runtime: {error}"))?;
+        let mut child = {
+            let mut builder = command.group();
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                builder.creation_flags(CREATE_NO_WINDOW);
+            }
+            builder.spawn()
+        }
+        .map_err(|error| format!("Failed to start bundled Qwen Code runtime: {error}"))?;
         let Some(stdout) = child.inner().stdout.take() else {
             stop_runtime_child(&mut child);
             return Err("Bundled runtime stdout was not captured.".to_string());
