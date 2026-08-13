@@ -48,6 +48,18 @@ export type MountedDialog =
   | { dialog: 'effort' }
   | { dialog: 'memory' }
   | { dialog: 'statusline' }
+  | { dialog: 'editor' }
+  | { dialog: 'auth' }
+  | { dialog: 'trust' }
+  | { dialog: 'delete' }
+  | { dialog: 'resume' }
+  | { dialog: 'branch' }
+  | { dialog: 'hooks' }
+  | { dialog: 'rewind' }
+  | { dialog: 'diff' }
+  | { dialog: 'arena' }
+  | { dialog: 'subagent_create' }
+  | { dialog: 'subagent_list' }
   | {
       dialog: 'model';
       mode: ModelDialogMode;
@@ -145,21 +157,29 @@ export function resolveDialogRequest(
         },
       };
     case 'editor':
+      return { kind: 'mount', dialog: { dialog: 'editor' } };
     case 'auth':
+      return { kind: 'mount', dialog: { dialog: 'auth' } };
     case 'trust':
+      return { kind: 'mount', dialog: { dialog: 'trust' } };
     case 'delete':
+      return { kind: 'mount', dialog: { dialog: 'delete' } };
     case 'resume':
+      return { kind: 'mount', dialog: { dialog: 'resume' } };
     case 'branch':
+      return { kind: 'mount', dialog: { dialog: 'branch' } };
     case 'hooks':
+      return { kind: 'mount', dialog: { dialog: 'hooks' } };
     case 'rewind':
+      return { kind: 'mount', dialog: { dialog: 'rewind' } };
     case 'diff':
+      return { kind: 'mount', dialog: { dialog: 'diff' } };
     case 'arena':
+      return { kind: 'mount', dialog: { dialog: 'arena' } };
     case 'subagent_create':
+      return { kind: 'mount', dialog: { dialog: 'subagent_create' } };
     case 'subagent_list':
-      return {
-        kind: 'unsupported',
-        message: `The '${request.dialog}' dialog is not yet available in the OpenTUI renderer.`,
-      };
+      return { kind: 'mount', dialog: { dialog: 'subagent_list' } };
     default: {
       const unhandled: never = request;
       throw new Error(

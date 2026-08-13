@@ -94,8 +94,8 @@ describe('resolveDialogRequest', () => {
     });
   });
 
-  it('represents unsupported dialog kinds explicitly', () => {
-    const unsupported: OpenTuiDialogRequest[] = [
+  it('mounts every long-tail dialog natively (unsupported list empty)', () => {
+    const nowMounted: OpenTuiDialogRequest[] = [
       { dialog: 'editor' },
       { dialog: 'auth' },
       { dialog: 'trust' },
@@ -109,14 +109,8 @@ describe('resolveDialogRequest', () => {
       { dialog: 'subagent_create' },
       { dialog: 'subagent_list' },
     ];
-    expect(unsupported.length).toBeGreaterThan(0);
-    for (const request of unsupported) {
-      const resolution = resolveDialogRequest(request);
-      expect(resolution.kind).toBe('unsupported');
-      if (resolution.kind === 'unsupported') {
-        expect(resolution.message).toContain(request.dialog);
-        expect(resolution.message).toContain('not yet available');
-      }
+    for (const request of nowMounted) {
+      expect(resolveDialogRequest(request).kind).toBe('mount');
     }
   });
 });
@@ -151,7 +145,7 @@ describe('resolveDispatchOutcome', () => {
     });
     expect(auth.kind).toBe('dialog');
     if (auth.kind === 'dialog') {
-      expect(auth.resolution.kind).toBe('unsupported');
+      expect(auth.resolution.kind).toBe('mount');
     }
   });
 

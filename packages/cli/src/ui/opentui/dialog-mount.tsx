@@ -56,6 +56,20 @@ import {
   OpenTuiStatusLineDialog,
 } from './dialogs-memory-status.js';
 import {
+  OpenTuiEditorDialog,
+  OpenTuiAuthDialog,
+  OpenTuiTrustDialog,
+  OpenTuiDeleteDialog,
+  OpenTuiResumeDialog,
+  OpenTuiBranchDialog,
+  OpenTuiHooksDialog,
+  OpenTuiRewindDialog,
+  OpenTuiDiffDialog,
+  OpenTuiArenaDialog,
+  OpenTuiSubagentCreateDialog,
+  OpenTuiSubagentListDialog,
+} from './dialogs-misc.js';
+import {
   addPermissionRule,
   applyModelSelection,
   applyThemeSelection,
@@ -390,6 +404,90 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       )}
       {dialog.dialog === 'statusline' && (
         <OpenTuiStatusLineDialog settings={settings} onClose={onClose} />
+      )}
+      {dialog.dialog === 'editor' && (
+        <OpenTuiEditorDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'auth' && (
+        <OpenTuiAuthDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'trust' && (
+        <OpenTuiTrustDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'delete' && (
+        <OpenTuiDeleteDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'resume' && (
+        <OpenTuiResumeDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'branch' && (
+        <OpenTuiBranchDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'hooks' && (
+        <OpenTuiHooksDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'rewind' && (
+        <OpenTuiRewindDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'diff' && (
+        <OpenTuiDiffDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'arena' && (
+        <OpenTuiArenaDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'subagent_create' && (
+        <OpenTuiSubagentCreateDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
+      )}
+      {dialog.dialog === 'subagent_list' && (
+        <OpenTuiSubagentListDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+        />
       )}
     </box>
   );
