@@ -6,7 +6,13 @@ The daemon keeps a bounded in-memory live journal for an unfinished turn. Consec
 
 The marker previously had no prompt ownership, the SDK rendered a generic message, and WebUI either hid the marker behind history pagination or left the retained tail permanently visible. This design keeps the existing resource limits and eviction policy while making the loss precise and repairing the visible tail without another model request.
 
+Web Shell renders the parent transcript in summary mode and discards nested subagent updates, but those updates previously still consumed the parent live-journal limits. A long-running subagent could therefore evict the visible root Agent status and leave the summary UI with only the truncation marker.
+
 ## Protocol and SDK
+
+The compaction engine maintains independently bounded `full` and `summary` live journals. Both share the completed-turn compaction and event high-water mark. The full journal retains every update. The summary journal excludes `session_update` frames carrying a non-empty `_meta.parentToolCallId`, while retaining root updates and all non-session events.
+
+`session/load` accepts optional `liveReplayMode: 'full' | 'summary'`. Omission means `full`, preserving SDK, `/acp`, and other daemon consumers. WebUI requests `summary` only when its existing `subagentTranscriptMode` is summary; Web Shell already selects that mode for the main transcript. Persisted transcript pagination remains complete and unchanged.
 
 For a live-journal marker returned by `session/load`, the bridge copies the session's authoritative `activePromptId` to the marker envelope as optional `promptId`. The persisted event and event schema version do not change. An older daemon without this field is repairable only when the retained live events have exactly one prompt ID.
 
@@ -37,7 +43,9 @@ The checkpoint inherits the current transcript store's effective `maxBlocks`, wh
 - New clients accept old payloads and safely decline ambiguous automatic repair.
 - Default `reloadSession` behavior remains configured replay; only the internal repair path requests memory replay.
 - Daemon persistence, transcript APIs, journal limits, and oldest-first eviction are unchanged.
+- Existing load callers and `/acp` continue to receive full live replay by default.
+- Summary and full journals track truncation independently, so full-journal pressure does not create a summary marker.
 
 ## Verification
 
-Unit coverage exercises marker ownership, post-terminal compaction, payload validation, precise status text, prompt matching, replay validation, atomic suffix replacement, duplicate-side-effect suppression, history preservation, failure fallback, and reload-source propagation. Daemon integration tests use a deterministic mock ACP agent and a three-event journal to observe the live marker from a second client, verify the complete compacted turn after terminal, and mount the real WebUI provider to prove that recovery adds one load and no model request.
+Unit coverage exercises marker ownership, post-terminal compaction, independent full/summary limits, default-full compatibility, request validation and propagation, precise status text, prompt matching, replay validation, atomic suffix replacement, duplicate-side-effect suppression, history preservation, failure fallback, and reload-source propagation. Daemon integration tests use a deterministic mock ACP agent and a three-event journal to observe the live marker from a second client, verify the complete compacted turn after terminal, and mount the real WebUI provider to prove that recovery adds one load and no model request.

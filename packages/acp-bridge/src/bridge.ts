@@ -2998,6 +2998,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     action: 'load' | 'resume';
     historyReplay: 'stream' | 'response';
     historyPageSize?: number;
+    liveReplayMode: 'full' | 'summary';
     hideInheritedHistory: boolean;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
@@ -5287,6 +5288,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       | 'activePromptId'
     >,
     action: 'load' | 'resume',
+    liveReplayMode: 'full' | 'summary' = 'full',
   ): Pick<
     BridgeRestoredSession,
     | 'compactedReplay'
@@ -5311,7 +5313,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // token must travel with it so a daemon restart between this response
     // and the first subscribe is detected (stale cursor + dead epoch).
     const eventEpoch = entry.events.epoch;
-    const snapshot = entry.events.snapshotReplay();
+    const snapshot = entry.events.snapshotReplay(liveReplayMode);
     if (!snapshot) {
       return {
         lastEventId: entry.events.lastEventId,
@@ -5429,6 +5431,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
+    liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -5493,7 +5496,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         break;
       }
     }
-    return replayFieldsFor(entry, 'load');
+    return replayFieldsFor(entry, 'load', liveReplayMode);
   }
 
   /**
@@ -5609,6 +5612,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action === 'load' && historyReplay === 'response'
         ? req.historyPageSize
         : undefined;
+    const requestedLiveReplayMode = req.liveReplayMode;
+    if (
+      requestedLiveReplayMode !== undefined &&
+      requestedLiveReplayMode !== 'full' &&
+      requestedLiveReplayMode !== 'summary'
+    ) {
+      throw new Error(
+        `Invalid liveReplayMode: ${JSON.stringify(requestedLiveReplayMode)}`,
+      );
+    }
+    const liveReplayMode =
+      action === 'load' ? (requestedLiveReplayMode ?? 'full') : 'full';
     if (
       historyPageSize !== undefined &&
       (!Number.isSafeInteger(historyPageSize) ||
@@ -5627,8 +5642,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       assertAttachableSessionEntry(req.sessionId, existing);
       const replayFields =
         historyPageSize !== undefined
-          ? await refreshedReplayFieldsFor(existing, historyPageSize)
-          : replayFieldsFor(existing, action);
+          ? await refreshedReplayFieldsFor(
+              existing,
+              historyPageSize,
+              liveReplayMode,
+            )
+          : replayFieldsFor(existing, action, liveReplayMode);
       // Backfill a pagination anchor when the snapshot's truncation
       // marker carries no recordId (live session, in-flight turn capped
       // the journal before any turn boundary). Best-effort; omitted on
@@ -5698,6 +5717,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action !== inFlight.action ||
         historyReplay !== inFlight.historyReplay ||
         historyPageSize !== inFlight.historyPageSize ||
+        liveReplayMode !== inFlight.liveReplayMode ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         // An abandoned restore is fenced until the real ACP request and its
@@ -6224,7 +6244,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : {}),
           state: racedEntry.restoreState ?? {},
           hasActivePrompt: racedEntry.promptActive,
-          ...replayFieldsFor(racedEntry, action),
+          ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
       }
 
@@ -6321,7 +6341,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
         hasActivePrompt: entry.promptActive,
-        ...replayFieldsFor(entry, action),
+        ...replayFieldsFor(entry, action, liveReplayMode),
       };
     })().finally(async () => {
       if (restoreLifecycle.phase === 'abandoned') return;
@@ -6397,6 +6417,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action,
       historyReplay,
       ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+      liveReplayMode,
       hideInheritedHistory,
       publicPromise: promise,
       settlementPromise,

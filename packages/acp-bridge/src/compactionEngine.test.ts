@@ -1129,6 +1129,51 @@ describe('TurnBoundaryCompactionEngine', () => {
     const markerOf = (snap: { liveJournal: BridgeEvent[] }) =>
       snap.liveJournal.find((e) => e.type === 'history_truncated');
 
+    it('keeps an independent summary journal without nested subagent updates', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+        maxJournalBytes: 512,
+      });
+      engine.ingest(makeToolCall(1, 'agent-1', 'running'));
+      for (let i = 2; i <= 100; i++) {
+        engine.ingest(
+          makeTextChunkWithParent(i, `nested-${i}`, 'agent-1'),
+          1024 * 1024,
+        );
+      }
+      engine.ingest(makeToolCallUpdate(101, 'agent-1', 'completed'));
+
+      const full = engine.snapshot();
+      expect(markerOf(full)).toBeDefined();
+      expect(full.lastEventId).toBe(101);
+
+      const summary = engine.snapshot('summary');
+      expect(markerOf(summary)).toBeUndefined();
+      expect(summary.liveJournal.map((event) => event.id)).toEqual([1, 101]);
+      expect(summary.lastEventId).toBe(101);
+
+      engine.ingest(makeTurnComplete(102));
+      expect(extractTexts(engine.snapshot().compactedTurns).join('')).toBe(
+        Array.from({ length: 99 }, (_, index) => `nested-${index + 2}`).join(
+          '',
+        ),
+      );
+    });
+
+    it('retains nested usage frames in the summary journal', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const usage = makeTextChunkWithParent(1, '', 'agent-1');
+      (
+        usage.data as { update: { _meta: Record<string, unknown> } }
+      ).update._meta['usage'] = { inputTokens: 10, outputTokens: 2 };
+      engine.ingest(usage);
+      engine.ingest(makeTextChunkWithParent(2, 'nested detail', 'agent-1'));
+
+      expect(
+        engine.snapshot('summary').liveJournal.map((event) => event.id),
+      ).toEqual([1]);
+    });
+
     it('keeps a long compatible text stream below the event cap', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 3,
@@ -1287,6 +1332,64 @@ describe('TurnBoundaryCompactionEngine', () => {
         recordId: 'record-anchor',
       });
     });
+
+    it('summary marker ignores recordIds from excluded nested events', () => {
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+      });
+      const root = makeTextChunk(1, 'root');
+      (root.data as { update: Record<string, unknown> }).update['_meta'] = {
+        'qwen.session.recordId': 'root-record',
+      };
+      const nested = makeTextChunkWithParent(2, 'nested', 'agent-1');
+      (
+        nested.data as { update: { _meta: Record<string, unknown> } }
+      ).update._meta['qwen.session.recordId'] = 'nested-record';
+      engine.ingest(root);
+      engine.ingest(nested);
+      engine.ingest(makeUserMessage(3, 'a'));
+      engine.ingest(makeUserMessage(4, 'b'));
+
+      expect(markerOf(engine.snapshot())?.data).toMatchObject({
+        recordId: 'nested-record',
+      });
+      expect(markerOf(engine.snapshot('summary'))?.data).toMatchObject({
+        recordId: 'root-record',
+      });
+    });
+
+    it.each(['seed', 'seedReplayEvents'] as const)(
+      '%s derives the summary marker anchor from root events',
+      (method) => {
+        const engine = new TurnBoundaryCompactionEngine({
+          maxJournalEvents: 2,
+        });
+        const root = makeTextChunk(1, 'root');
+        (root.data as { update: Record<string, unknown> }).update['_meta'] = {
+          'qwen.session.recordId': 'root-record',
+        };
+        const nested = makeTextChunkWithParent(2, 'nested', 'agent-1');
+        (
+          nested.data as { update: { _meta: Record<string, unknown> } }
+        ).update._meta['qwen.session.recordId'] = 'nested-record';
+
+        if (method === 'seed') {
+          engine.seed({ compactedTurns: [root, nested], lastEventId: 2 });
+        } else {
+          engine.seedReplayEvents([root, nested]);
+        }
+        engine.ingest(makeUserMessage(3, 'a'));
+        engine.ingest(makeUserMessage(4, 'b'));
+        engine.ingest(makeUserMessage(5, 'c'));
+
+        expect(markerOf(engine.snapshot())?.data).toMatchObject({
+          recordId: 'nested-record',
+        });
+        expect(markerOf(engine.snapshot('summary'))?.data).toMatchObject({
+          recordId: 'root-record',
+        });
+      },
+    );
 
     it('seeded engine stamps marker with recordId observed on post-seed ingest', () => {
       // A seed resets activeRecordId; subsequent ingest must rebuild it.

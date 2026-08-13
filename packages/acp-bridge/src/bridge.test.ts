@@ -5037,6 +5037,78 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('selects summary live replay without changing the default full replay', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'in_progress',
+      },
+    });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'nested detail' },
+        _meta: { parentToolCallId: 'agent-1' },
+      },
+    });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'completed',
+      },
+    });
+
+    const full = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+    expect(full.liveJournal).toContainEqual(
+      expect.objectContaining({
+        type: 'session_update',
+        data: expect.objectContaining({
+          update: expect.objectContaining({
+            _meta: { parentToolCallId: 'agent-1' },
+          }),
+        }),
+      }),
+    );
+
+    const summary = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+      liveReplayMode: 'summary',
+    });
+    expect(summary.liveJournal).not.toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          update: expect.objectContaining({
+            _meta: { parentToolCallId: 'agent-1' },
+          }),
+        }),
+      }),
+    );
+    expect(summary.liveJournal).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(summary.liveJournal?.map((event) => event.id)).toEqual([1, 3]);
+
+    await bridge.shutdown();
+  });
+
   it('backfills historyAnchorRecordId from the transcript when the truncation marker carries no recordId', async () => {
     // Live-session regression: recordId is only stamped during replay of
     // the persisted transcript, never on the live stream. A seeded replay
@@ -5610,6 +5682,69 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('preserves summary replay when a restore loses the registration race', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => load.promise,
+      newSessionImpl: () => ({ sessionId: 'raced-summary' }),
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      maxJournalEvents: 2,
+      channelFactory: async () => handle.channel,
+    });
+
+    const restoring = bridge.loadSession({
+      sessionId: 'raced-summary',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      liveReplayMode: 'summary',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+    await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'raced-summary',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'in_progress',
+      },
+    });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'raced-summary',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'nested detail' },
+        _meta: { parentToolCallId: 'agent-1' },
+      },
+    });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: 'raced-summary',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'completed',
+      },
+    });
+
+    load.resolve({});
+    const restored = await restoring;
+
+    expect(restored.attached).toBe(true);
+    expect(restored.liveJournal).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(restored.liveJournal?.map((event) => event.id)).toEqual([1, 3]);
+
+    await bridge.shutdown();
+  });
+
   it('coalesces response restores with the same history page', async () => {
     const load = deferred<LoadSessionResponse>();
     const handle = makeChannel({ loadSessionImpl: () => load.promise });
@@ -5672,6 +5807,46 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     },
   );
+
+  it.each(['sumary', null, 0, false])(
+    'rejects invalid live replay mode %j before restore',
+    async (liveReplayMode) => {
+      const handle = makeChannel();
+      const channelFactory = vi.fn(async () => handle.channel);
+      const bridge = makeBridge({ channelFactory });
+
+      await expect(
+        bridge.loadSession({
+          sessionId: 'invalid-live-replay-mode',
+          workspaceCwd: WS_A,
+          liveReplayMode,
+        } as unknown as Parameters<typeof bridge.loadSession>[0]),
+      ).rejects.toThrow('Invalid liveReplayMode');
+      expect(channelFactory).not.toHaveBeenCalled();
+      expect(handle.agent.loadSessionCalls).toHaveLength(0);
+      expect(() =>
+        bridge.getSessionSummary('invalid-live-replay-mode'),
+      ).toThrow(SessionNotFoundError);
+
+      await bridge.shutdown();
+    },
+  );
+
+  it('rejects an invalid live replay mode on resume', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.resumeSession({
+        sessionId: 'invalid-resume-live-replay-mode',
+        workspaceCwd: WS_A,
+        liveReplayMode: 'sumary',
+      } as unknown as Parameters<typeof bridge.resumeSession>[0]),
+    ).rejects.toThrow('Invalid liveReplayMode');
+    expect(handle.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
 
   it.each([
     ['a different explicit page', 500],
@@ -5838,6 +6013,35 @@ describe('createAcpSessionBridge', () => {
     ).rejects.toBeInstanceOf(RestoreInProgressError);
 
     releaseLoad!({});
+    await first;
+    await bridge.shutdown();
+  });
+
+  it('rejects coalescing load requests with different live replay modes', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({ loadSessionImpl: () => load.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-live-replay-mode',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      liveReplayMode: 'full',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'coalesce-live-replay-mode',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+      }),
+    ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+    load.resolve({});
     await first;
     await bridge.shutdown();
   });

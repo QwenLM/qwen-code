@@ -2751,13 +2751,17 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const session = await client.loadSession('s-1', {
         workspaceCwd: '/work/a',
+        liveReplayMode: 'summary',
         timeoutMs: 0,
       });
 
       expect(session.state).toEqual({ configOptions: [] });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/load');
       expect(calls[0]?.method).toBe('POST');
-      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/a',
+        liveReplayMode: 'summary',
+      });
       expect(calls[0]?.signal).toBeNull();
     });
 

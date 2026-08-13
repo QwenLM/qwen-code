@@ -34,6 +34,8 @@ export interface SessionReplaySnapshot {
   degraded?: true;
 }
 
+export type LiveReplayMode = 'full' | 'summary';
+
 export interface CompactionEngine {
   /**
    * `byteLength` is the serialized size the bus already computed for the
@@ -43,7 +45,7 @@ export interface CompactionEngine {
    */
   ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
-  snapshot(): SessionReplaySnapshot;
+  snapshot(liveReplayMode?: LiveReplayMode): SessionReplaySnapshot;
   close(): void;
 }
 
@@ -388,8 +390,10 @@ export class EventBus {
     this.onCompactionError = opts.onCompactionError;
   }
 
-  snapshotReplay(): SessionReplaySnapshot | undefined {
-    const snapshot = this.compactionEngine?.snapshot();
+  snapshotReplay(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): SessionReplaySnapshot | undefined {
+    const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
     if (snapshot && this.compactionDegraded) {
       return { ...snapshot, degraded: true };
     }
