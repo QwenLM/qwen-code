@@ -183,6 +183,10 @@ describe('target-pinned artifact patterns', () => {
       kind: 'file',
       base: 'foo.ts',
     });
+    // A tab-completed trailing separator must not produce an empty basename
+    // (an empty base pins `qwen-review--composed.json`, which no child
+    // artifact can carry — every such run would report "no verdict").
+    expect(classifyRunTarget('src/')).toEqual({ kind: 'file', base: 'src' });
     expect(classifyRunTarget(undefined)).toEqual({ kind: 'local' });
   });
 
@@ -227,6 +231,15 @@ describe('target-pinned artifact patterns', () => {
     const local = reportPatternFor({ kind: 'local' });
     expect(local.test('review.md')).toBe(true);
     expect(local.test('2026-08-13-1622-pr-9045.md')).toBe(false);
+
+    // File reports carry the filename in the report stem's trailing slot.
+    const file = reportPatternFor({ kind: 'file', base: 'foo.ts' });
+    expect(file.test('2026-08-13-101010-foo.ts.md')).toBe(true);
+    expect(file.test('2026-08-13-101010-bar.ts.md')).toBe(false);
+    // A file literally named `pr-1234.md` claims its OWN report — the shape
+    // the local branch's PR exclusion would self-reject (`.md` not doubled).
+    const prNamed = reportPatternFor({ kind: 'file', base: 'pr-1234.md' });
+    expect(prNamed.test('2026-08-13-101010-pr-1234.md')).toBe(true);
   });
 });
 

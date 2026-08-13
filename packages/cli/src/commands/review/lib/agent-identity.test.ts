@@ -39,6 +39,28 @@ describe('labelFromIdentityLine', () => {
         'You are review agent `chunk 3 of 7` — the territory agent for lines 120-260 of the diff.',
       ),
     ).toBe('chunk 3');
+    // Both suffixes on one line (agent-prompt emits them independently):
+    // round wins — losing it folds two rounds of the same owned file into
+    // one cost-ledger row, the exact fold the round suffix prevents.
+    expect(
+      labelFromIdentityLine(
+        'You are review agent `invariant-a` — Whole-file invariants (round 2). Your file: `packages/cli/src/a.ts`.',
+      ),
+    ).toBe('agent invariant-a (round 2)');
+  });
+
+  it('tolerates a trailing carriage return — CRLF prompts must still parse', () => {
+    // Callers split on `\n` alone (cost-ledger slices at the first `\n`), so
+    // a CRLF-recorded prompt hands this parser a `\r`-terminated line; a
+    // parse that fails there falls back to first-line prose for EVERY agent.
+    expect(
+      labelFromIdentityLine('You are review agent `security` — inspect auth\r'),
+    ).toBe('agent security');
+    expect(
+      labelFromLaunchPrompt(
+        'context line\r\nYou are review agent `6c` — Undirected audit.\r\nbody\r\n',
+      ),
+    ).toBe('agent 6c');
   });
 
   it('returns null for anything that is not an identity line', () => {

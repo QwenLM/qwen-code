@@ -104,8 +104,12 @@ export function classifyRunTarget(target?: string): RunTargetClass {
   if (t.type === 'file') {
     // The skill's `{target}` token for a file review is the file's basename
     // (`--target <filename>` in the capture step), so that is the identity
-    // the child's artifact names carry.
-    return { kind: 'file', base: t.path.split(/[\\/]/).pop() ?? t.path };
+    // the child's artifact names carry. Trailing separators are stripped
+    // first: a tab-completed `src/` classifies as a file target and reviews
+    // the directory, and a bare `.pop()` would return `''` — a pin
+    // (`qwen-review--composed.json`) no child artifact can ever carry.
+    const trimmed = t.path.replace(/[\\/]+$/, '');
+    return { kind: 'file', base: trimmed.split(/[\\/]/).pop() || trimmed };
   }
   return { kind: 'local' };
 }
@@ -125,13 +129,20 @@ const escapeRe = (s: string): string =>
  * OTHER run's verdict the moment it appeared (measured: two of three
  * parallel PR reviews republished a neighbour's `composedPath`).
  *
- * Known residual race, accepted: the pin separates target IDENTITIES, not
- * runs. Two concurrent runs of the SAME target (two bare runs, or the same
- * PR twice) write the same filename, and whichever child composes last wins
- * on disk for both parents — only a per-run nonce in the child's artifact
- * names could key that apart, and the bundled skill, not this command,
- * would have to mint it. Same-target collisions predate the pin; do not
- * diagnose them as a pin failure.
+ * Known residual races, accepted — the pin separates composed FILENAMES,
+ * which is as much identity as the child's naming carries; do not diagnose
+ * any of these as a pin failure:
+ *
+ *  - same target twice (two bare runs, or the same PR twice) — the same
+ *    filename, so whichever child composes last wins for both parents;
+ *  - two FILE targets with different paths but one basename (a monorepo's
+ *    two `index.ts`) — the child names by basename, so their filenames
+ *    collide the same way;
+ *  - a FILE target whose basename is literally `local` or `pr-<digits>` —
+ *    its filename is byte-identical to the local/PR pin.
+ *
+ * Only a per-run nonce in the child's artifact names could key these
+ * apart, and the bundled skill, not this command, would have to mint it.
  */
 export function composedPatternFor(cls: RunTargetClass): RegExp {
   switch (cls.kind) {
@@ -147,16 +158,31 @@ export function composedPatternFor(cls: RunTargetClass): RegExp {
 
 /**
  * The saved report under `.qwen/reviews/`, pinned as far as its naming
- * allows. PR reports reliably end `-pr-<n>.md`; local/file report stems are
- * model-chosen (three formats observed in one day), so those runs claim any
- * report EXCEPT a PR-suffixed one — non-PR runs can still pool each other's
- * reports in a concurrent window. The report is informational; the verdict
- * (`composedPatternFor`) is what carries the exit code, and it is exact.
+ * allows. PR reports reliably end `-pr-<n>.md`, and file reports carry the
+ * filename in the same slot (`<date>-<time>-<filename>.md`, the `.md` not
+ * doubled) — so a file target named `pr-1234.md` claims its OWN report
+ * instead of tripping the local branch's PR exclusion. Local report stems
+ * are model-chosen (three date formats observed in one day), so a bare run
+ * claims any report EXCEPT a PR-suffixed one — concurrent local runs can
+ * still pool reports, and a PR run cannot be told from a file run whose
+ * basename is `pr-<n>.md` by name alone. The report is informational; the
+ * verdict (`composedPatternFor`) is what carries the exit code, and it is
+ * exact.
  */
 export function reportPatternFor(cls: RunTargetClass): RegExp {
-  return cls.kind === 'pr'
-    ? new RegExp(`-pr-${cls.number}\\.md$`)
-    : /^(?!.*-pr-\d+\.md$).*\.md$/;
+  switch (cls.kind) {
+    case 'pr':
+      return new RegExp(`-pr-${cls.number}\\.md$`);
+    case 'file':
+      return new RegExp(
+        cls.base.toLowerCase().endsWith('.md')
+          ? `-${escapeRe(cls.base)}$`
+          : `-${escapeRe(cls.base)}\\.md$`,
+      );
+    case 'local':
+    default:
+      return /^(?!.*-pr-\d+\.md$).*\.md$/;
+  }
 }
 
 // How often to poll for the composed verdict while the child runs. The verdict

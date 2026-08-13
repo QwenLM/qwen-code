@@ -34,7 +34,12 @@ const IDENTITY_LINE_RE = /^You are review agent `([^`\n]+)`(.*)$/;
  * the same order cost-ledger's rows always used.
  */
 export function labelFromIdentityLine(line: string): string | null {
-  const m = IDENTITY_LINE_RE.exec(line);
+  // CRLF tolerance: callers hand over lines split on `\n` alone (and
+  // cost-ledger slices at the first `\n`), so a prompt recorded with CRLF
+  // endings leaves a trailing `\r` that `$` will not anchor past — every
+  // parse would fail and every label fall back to first-line prose, the
+  // exact defect the parser exists to end.
+  const m = IDENTITY_LINE_RE.exec(line.replace(/\r$/, ''));
   if (!m) return null;
   const [, role, rest] = m;
   const chunk = CHUNK_ROLE_RE.exec(role);
@@ -53,9 +58,9 @@ export function labelFromIdentityLine(line: string): string | null {
  * and never matches, so the agent's own line is still the first hit.
  */
 export function labelFromLaunchPrompt(prompt: string): string | null {
-  for (const line of prompt.split('\n')) {
-    const label = labelFromIdentityLine(line);
-    if (label !== null) return label;
-  }
-  return null;
+  // One multiline scan, not a split: this runs for every agent record of
+  // every coverage pass, and launcher-built prompts carry a diff-sized tail
+  // that a line-array materializes for nothing.
+  const m = /^You are review agent `[^`\n]+`[^\n]*/m.exec(prompt);
+  return m ? labelFromIdentityLine(m[0]) : null;
 }

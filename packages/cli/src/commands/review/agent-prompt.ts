@@ -433,7 +433,10 @@ function toolBudgetBlock(
       'counted in. It is a soft ceiling. At the ceiling: stop exploring, write ' +
       'your findings from the evidence already in hand, and disclose each ' +
       'unfinished check on its own line, exactly as `Budget gap: <the check>` — ' +
-      'the coverage tool reads those lines, so the format is load-bearing. The ' +
+      'the coverage tool reads those lines, so the format is load-bearing. If ' +
+      'nothing was cut short, write NO `Budget gap:` line at all — the format ' +
+      'is only for checks the ceiling stopped, and a "none" written in it is ' +
+      'parsed as a gap someone must rule on. The ' +
       'budget never suppresses a finding: a candidate you can already name goes ' +
       'in your return regardless (at `Confidence: low` if the budget stopped ' +
       'you before verifying it).',

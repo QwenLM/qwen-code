@@ -403,8 +403,9 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'none — all 5 Windows checks failed to start',
       'none — all planned checks completed except the Windows matrix',
       // The budget adverbial is end-anchored like its siblings: a clause
-      // continuing past it discloses skipped work.
+      // continuing past it discloses skipped work — in both branch forms.
       'none — all checks completed within budget, but the Windows matrix never ran',
+      'None (all checks completed within the tool-call budget, but the Windows matrix never ran)',
       '<integration tests on Windows> runner unavailable',
     ]) {
       expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
