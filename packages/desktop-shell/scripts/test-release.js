@@ -70,7 +70,7 @@ async function testBootstrapWorkspaceVisibility() {
   assert.doesNotMatch(bootstrapHtml, /class="mark">Q</);
   assert.match(
     bootstrapHtml,
-    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*body\[data-state='starting'\] \.shell \{[\s\S]*?display: flex;[\s\S]*?flex-direction: column;[\s\S]*?align-items: center;/,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*body\[data-state='starting'\] \.mark \{[^}]*\}\s*body\[data-state='starting'\] \.brand \{[^}]*justify-content: center;[^}]*\}\s*body\[data-state='starting'\] \.status \{[^}]*text-align: center;[^}]*\}/,
     'The reduced-motion startup view must keep the logo and status text on the same horizontal center.',
   );
   const primary = await createBootstrapHarness();

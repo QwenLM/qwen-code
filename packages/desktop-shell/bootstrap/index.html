@@ -127,21 +127,15 @@
         body[data-state='starting'] .mark {
           animation: none;
         }
-        /* The visible status text stacks under the logo; center both so they
-           share the same horizontal center as the animated logo-only view. */
-        body[data-state='starting'] .shell {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
+        body[data-state='starting'] .brand {
+          justify-content: center;
         }
         body[data-state='starting'] .status {
           position: static;
           width: auto;
           height: auto;
           margin: 18px 0 0;
-          padding: 0;
           overflow: visible;
-          border: 0;
           clip: auto;
           clip-path: none;
           white-space: normal;
