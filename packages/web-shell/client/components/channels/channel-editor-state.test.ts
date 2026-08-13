@@ -230,6 +230,27 @@ describe('Channel editor state', () => {
     expect(draft.values.sessionScope).toBe('chat_thread');
   });
 
+  it('uses a visible scope for a new Channel without chat_thread support', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope'
+          ? {
+              ...field,
+              default: 'thread',
+              options: field.options?.filter(
+                (option) => option.value !== 'chat_thread',
+              ),
+            }
+          : field,
+      ),
+    };
+
+    const draft = createChannelEditorDraft(descriptor);
+
+    expect(draft.values.sessionScope).toBe('user');
+  });
+
   it('preserves an inherited legacy thread default when editing', () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       ...DINGTALK,

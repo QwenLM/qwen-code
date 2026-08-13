@@ -175,7 +175,13 @@ function assertSharedField(
   }
   if (key === 'groups') {
     if (!isRecord(value)) {
-      throw invalidConfig(`Channel field "${key}" must be an object.`);
+      if (
+        containsUnsafeObjectKey(value) ||
+        !isDeepStrictEqual(previous, value)
+      ) {
+        throw invalidConfig(`Channel field "${key}" must be an object.`);
+      }
+      return true;
     }
     const previousGroups = isRecord(previous) ? previous : {};
     for (const [groupId, groupConfig] of Object.entries(value)) {

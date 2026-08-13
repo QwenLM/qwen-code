@@ -96,12 +96,14 @@ function initialFieldValue(
       if (field.key === 'groupPolicy') return 'disabled';
       if (field.key !== 'sessionScope') return '';
     }
-    if (
-      field.key === 'sessionScope' &&
-      field.default === 'thread' &&
-      field.options?.some((option) => option.value === 'chat_thread')
-    ) {
-      return instance ? 'thread' : 'chat_thread';
+    if (field.key === 'sessionScope' && field.default === 'thread') {
+      if (instance) return 'thread';
+      return (
+        field.options?.find((option) => option.value === 'chat_thread')
+          ?.value ??
+        field.options?.find((option) => option.value !== 'thread')?.value ??
+        field.default
+      );
     }
     return field.default ?? field.options?.[0]?.value ?? '';
   }

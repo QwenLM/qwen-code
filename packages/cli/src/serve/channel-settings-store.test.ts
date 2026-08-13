@@ -682,6 +682,86 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it.each([
+    { stored: null, changed: [] },
+    { stored: [], changed: null },
+  ])(
+    'preserves unchanged non-record groups but rejects a changed value',
+    async ({ stored, changed }) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              type: 'management-validation-test',
+              clientId: 'client-id',
+              clientSecret: 'existing-secret',
+              groups: stored,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: stored,
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      });
+
+      expect(next.channels['bot']).toMatchObject({
+        clientId: 'updated-id',
+        groups: stored,
+      });
+
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: next.revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'updated-id',
+            groups: changed,
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    },
+  );
+
+  it('rejects unchanged non-record groups containing an unsafe key', async () => {
+    const groups = [JSON.parse('{"__proto__":{"polluted":true}}') as unknown];
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            clientSecret: 'existing-secret',
+            groups,
+          },
+        },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups,
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
   it('preserves unchanged legacy values in known group fields', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
