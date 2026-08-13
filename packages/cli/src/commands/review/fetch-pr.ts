@@ -80,6 +80,8 @@ interface FetchPrArgs {
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
   effort?: ReviewEffort;
+  /** The incremental anchor — the head the last clean round reviewed. */
+  since?: string;
 }
 
 type FetchPrResult = PlanReport & {
@@ -152,7 +154,84 @@ type FetchPrResult = PlanReport & {
    * local review's plan has no such field: nothing is posted there.
    */
   prDescriptionHasHan: boolean;
+  /**
+   * Present when `--since <sha>` was passed: the incremental-review scoping
+   * decision, validated HERE so the orchestrator never hand-runs git against
+   * an anchor. `effective: true` without `upToDate` means the diff and plan
+   * in this report cover `since..fetchedSha` instead of the merge-base range.
+   * `upToDate: true` means nothing has landed since the anchor (the anchor is
+   * the head, or the commits since it change no bytes) — the diff and plan
+   * then cover the FULL range, because the flows that continue past an
+   * up-to-date anchor (a model change, `--comment`) run a full review.
+   * `effective: false` carries the reason the anchor was refused — a rebase
+   * or force-push (`not-an-ancestor`), a sha this history has never seen
+   * (`unknown-commit`), or a delta capture that failed (`capture-failed`) —
+   * and the diff and plan are the full range.
+   */
+  incremental?: IncrementalDecision;
 };
+
+export interface IncrementalDecision {
+  since: string;
+  effective: boolean;
+  upToDate?: boolean;
+  reason?: 'unknown-commit' | 'not-an-ancestor' | 'capture-failed';
+}
+
+/** The git questions the anchor ruling asks, injectable for tests. */
+export interface AnchorProbe {
+  /** `git cat-file -e <sha>^{commit}` — does this history hold the anchor? */
+  commitExists(sha: string): boolean;
+  /** `git merge-base --is-ancestor <a> <b>` — is it behind the fetched head? */
+  isAncestor(a: string, b: string): boolean;
+  /** `git rev-parse <sha>^{commit}` — the full sha, for the head comparison. */
+  resolveCommit(sha: string): string | null;
+}
+
+/**
+ * Rule on an incremental anchor against the fetched history. Pure — the
+ * probe is the git surface — because the SKILL used to ask the orchestrator
+ * to run these exact checks by hand, and a hand-run check is one a run can
+ * skip. The hex allowlist comes first so an anchor recovered from a marker
+ * or cache is never handed to git as something flag-shaped.
+ *
+ * `diffBase` is the full sha to scope the diff from, null when the diff must
+ * stay full-range (anchor refused, or already at the head).
+ */
+export function resolveIncrementalAnchor(
+  since: string,
+  fetchedSha: string,
+  probe: AnchorProbe,
+): { incremental: IncrementalDecision; diffBase: string | null } {
+  if (!/^[0-9a-f]{7,64}$/i.test(since) || !probe.commitExists(since)) {
+    return {
+      incremental: { since, effective: false, reason: 'unknown-commit' },
+      diffBase: null,
+    };
+  }
+  if (!probe.isAncestor(since, fetchedSha)) {
+    return {
+      incremental: { since, effective: false, reason: 'not-an-ancestor' },
+      diffBase: null,
+    };
+  }
+  const resolved = probe.resolveCommit(since);
+  if (resolved === null) {
+    // cat-file saw it but rev-parse cannot name it — treat as unknown rather
+    // than let an effective:true ride a full-range diff and misstate scope.
+    return {
+      incremental: { since, effective: false, reason: 'unknown-commit' },
+      diffBase: null,
+    };
+  }
+  if (resolved === fetchedSha) {
+    return {
+      incremental: { since, effective: true, upToDate: true },
+      diffBase: null,
+    };
+  }
+  return { incremental: { since, effective: true }, diffBase: resolved };
+}
 
 /** Count lines of `<ref>:<path>`, or 0 if it does not exist there. */
 function fileLineCount(ref: string, path: string): number {
@@ -286,29 +365,87 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   let diffPathAbsolute: string | null = null;
   let diffSha256: string | null = null;
   let diffText = '';
-  if (mergeBaseSha) {
+  // Every knob user config could turn is pinned in `lib/diff-flags.ts`,
+  // shared with `capture-local` so the two capture paths cannot drift into
+  // producing diffs that parse differently. Null on a failed capture — the
+  // callers distinguish "captured empty" from "could not capture".
+  const captureRange = (left: string): string | null => {
     try {
-      // Every knob user config could turn is pinned in `lib/diff-flags.ts`,
-      // shared with `capture-local` so the two capture paths cannot drift into
-      // producing diffs that parse differently.
       const buf = gitRaw(
         ...PINNED_DIFF_CONFIG,
         'diff',
         ...PINNED_DIFF_FLAGS,
-        `${mergeBaseSha}..${fetchedSha}`,
+        `${left}..${fetchedSha}`,
       );
       writeFileSync(diffRel, buf);
-      diffText = buf.toString('utf8');
       diffPath = diffRel;
       diffPathAbsolute = resolve(diffRel);
       diffSha256 = createHash('sha256').update(buf).digest('hex');
+      return buf.toString('utf8');
     } catch (err) {
       writeStderrLine(`Failed to capture diff: ${(err as Error).message}`);
+      return null;
     }
-  } else {
+  };
+
+  // The incremental anchor rules first: an effective anchor scopes the diff
+  // to `since..head` and the merge base is not consulted for the capture at
+  // all (the range needs no base, so a failed base fetch does not cost the
+  // incremental path). Every refusal falls back to the full range with its
+  // reason in the report — never silently.
+  let anchor: {
+    incremental: IncrementalDecision;
+    diffBase: string | null;
+  } | null = null;
+  if (args.since !== undefined) {
+    anchor = resolveIncrementalAnchor(args.since, fetchedSha, {
+      commitExists: (sha) =>
+        gitOpt('cat-file', '-e', `${sha}^{commit}`) !== null,
+      isAncestor: (a, b) =>
+        gitOpt('merge-base', '--is-ancestor', a, b) !== null,
+      resolveCommit: (sha) => gitOpt('rev-parse', `${sha}^{commit}`),
+    });
+  }
+  /** True when the FINAL captured diff is the incremental delta. */
+  let scopedDelta = false;
+  if (anchor?.diffBase) {
+    const delta = captureRange(anchor.diffBase);
+    if (delta === null) {
+      // Infrastructure, not anchor validity — but the report must not claim
+      // an incremental scope the capture never produced.
+      anchor.incremental = {
+        since: anchor.incremental.since,
+        effective: false,
+        reason: 'capture-failed',
+      };
+    } else if (delta.trim() === '') {
+      // Commits since the anchor change no bytes: nothing new to review.
+      // Same outcome as anchor-at-head, and the full range is captured below
+      // for the flows that continue anyway (a model change, --comment).
+      anchor.incremental.upToDate = true;
+    } else {
+      diffText = delta;
+      scopedDelta = true;
+    }
+  }
+  if (!scopedDelta) {
+    if (mergeBaseSha) {
+      diffText = captureRange(mergeBaseSha) ?? '';
+    } else {
+      writeStderrLine(
+        `Could not resolve merge-base of ${meta.baseRefName} and ${ref}; ` +
+          `agents will have to fall back to running \`git diff\` themselves.`,
+      );
+    }
+  }
+  if (anchor) {
+    const inc = anchor.incremental;
     writeStderrLine(
-      `Could not resolve merge-base of ${meta.baseRefName} and ${ref}; ` +
-        `agents will have to fall back to running \`git diff\` themselves.`,
+      inc.upToDate
+        ? `Incremental: anchor ${inc.since.slice(0, 10)} is up to date with the head — nothing new to review.`
+        : scopedDelta
+          ? `Incremental: scoped to ${inc.since.slice(0, 10)}..${fetchedSha.slice(0, 10)}.`
+          : `Incremental anchor ${inc.since.slice(0, 10)} refused (${inc.reason}); reviewing the full diff.`,
     );
   }
   // `buildDiffPlan` throws when the chunks do not tile the diff — a coverage
@@ -413,7 +550,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // then "resolved from a possibly stale local ref" (the warning above says
     // so), and a stale base ref that already contains the head commits diffs
     // to empty — the same wrong recommendation, one cause further out.
-    ...(isEmptyDiff({ diffPath, baseFetchFailed, diffText })
+    ...(!scopedDelta && isEmptyDiff({ diffPath, baseFetchFailed, diffText })
       ? { emptyDiff: true }
       : {}),
     // Collapse detection compares recomputed reality against GitHub's
@@ -430,7 +567,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // upstream collapse moves it by the size of the PR. Kept as a disclosure
     // precisely because the ratio is not a measurement of the same quantity
     // twice.
-    ...(isCollapsedFromUpstream({
+    // Both comparisons above read the FULL merge-base range against GitHub's
+    // advertised full-PR stat; a delta-scoped diff is a different quantity on
+    // one side only. An incremental delta is always far smaller than the
+    // advertised stat, so the collapse ratio would fire on every incremental
+    // review — both flags are full-range facts and are skipped on a delta.
+    ...(!scopedDelta &&
+    isCollapsedFromUpstream({
       diffText,
       baseFetchFailed,
       additions: meta.additions,
@@ -449,6 +592,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute,
     diffSha256,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+    ...(anchor ? { incremental: anchor.incremental } : {}),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
       operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
       hasDeadline: hasReviewDeadline(process.env),
@@ -620,6 +764,17 @@ export const fetchPrCommand: CommandModule = {
           'personas from the required roster; recorded in the plan so ' +
           'check-coverage, agent-prompt --roster and compose-review all read ' +
           'one value. Omit for the full (high) roster.',
+      })
+      .option('since', {
+        type: 'string',
+        describe:
+          'Incremental anchor: the head sha the last clean review round ' +
+          'covered (from the review cache, or the posted ledger marker). ' +
+          'Validated against the fetched history here — an anchor that is ' +
+          'unknown or not an ancestor of the head falls back to the full ' +
+          'diff with the reason in the report; a valid one scopes the diff ' +
+          "and the chunk plan to since..head. The decision is the report's " +
+          '`incremental` field.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);

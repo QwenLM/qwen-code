@@ -11,6 +11,8 @@ import {
   countDiffChangedLines,
   isEmptyDiff,
   isCollapsedFromUpstream,
+  resolveIncrementalAnchor,
+  type AnchorProbe,
 } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
@@ -463,6 +465,98 @@ describe('fetch-pr report assembly', () => {
       const report = await reportFor({});
       expect(report.effort).toBeUndefined();
     });
+  });
+});
+
+describe('resolveIncrementalAnchor', () => {
+  const HEAD = 'f'.repeat(40);
+  const ANCHOR = 'a'.repeat(40);
+  /** A history that holds the anchor behind the head. */
+  const probe = (over: Partial<AnchorProbe> = {}): AnchorProbe => ({
+    commitExists: () => true,
+    isAncestor: () => true,
+    resolveCommit: (sha) => (sha === ANCHOR ? ANCHOR : sha),
+    ...over,
+  });
+
+  it('scopes to a valid anchor behind the head', () => {
+    const r = resolveIncrementalAnchor(ANCHOR, HEAD, probe());
+    expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
+    expect(r.diffBase).toBe(ANCHOR);
+  });
+
+  it('reports up-to-date when the anchor IS the head, and keeps the full range', () => {
+    // The flows that continue past an up-to-date anchor (a model change,
+    // --comment) run a full review, so the diff must not be scoped to the
+    // empty range.
+    const r = resolveIncrementalAnchor(HEAD, HEAD, probe());
+    expect(r.incremental).toEqual({
+      since: HEAD,
+      effective: true,
+      upToDate: true,
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  it('refuses an anchor the history has never seen', () => {
+    const r = resolveIncrementalAnchor(ANCHOR, HEAD, {
+      ...probe(),
+      commitExists: () => false,
+    });
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'unknown-commit',
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  it('refuses a rebased-away anchor — not an ancestor of the head', () => {
+    const r = resolveIncrementalAnchor(ANCHOR, HEAD, {
+      ...probe(),
+      isAncestor: () => false,
+    });
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'not-an-ancestor',
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  it('never hands a flag-shaped or non-hex anchor to git', () => {
+    // The anchor arrives from a cache file or a posted marker; the hex
+    // allowlist runs BEFORE any probe so nothing flag-shaped reaches git.
+    for (const bad of [
+      '--upload-pack=/tmp/x',
+      'HEAD',
+      'refs/heads/main',
+      '$(rm -rf /)',
+      'abc123', // 6 chars — below the 7-char abbreviation floor
+    ]) {
+      let probed = false;
+      const r = resolveIncrementalAnchor(bad, HEAD, {
+        commitExists: () => ((probed = true), true),
+        isAncestor: () => ((probed = true), true),
+        resolveCommit: () => ((probed = true), HEAD),
+      });
+      expect(probed).toBe(false);
+      expect(r.incremental).toEqual({
+        since: bad,
+        effective: false,
+        reason: 'unknown-commit',
+      });
+    }
+  });
+
+  it('treats an anchor rev-parse cannot name as unknown, not as a full-range effective', () => {
+    // effective:true over a full-range diff would misstate the report's scope.
+    const r = resolveIncrementalAnchor(ANCHOR, HEAD, {
+      ...probe(),
+      resolveCommit: () => null,
+    });
+    expect(r.incremental.effective).toBe(false);
+    expect(r.diffBase).toBeNull();
   });
 });
 
