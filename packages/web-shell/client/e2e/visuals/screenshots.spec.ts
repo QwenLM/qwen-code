@@ -266,7 +266,7 @@ for (const theme of THEMES) {
                 label: 'Sender Policy',
                 kind: 'enum',
                 required: true,
-                default: 'pairing',
+                default: 'allowlist',
                 options: [
                   { value: 'pairing', label: 'Pairing' },
                   { value: 'allowlist', label: 'Allowlist' },

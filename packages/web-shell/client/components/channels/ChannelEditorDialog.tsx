@@ -236,7 +236,11 @@ export function ChannelEditorDialog({
   );
   const sessionScopeOptions = (sessionScopeField?.options ?? []).filter(
     (option) =>
-      option.value !== 'thread' || instance?.config.sessionScope === 'thread',
+      option.value !== 'thread' ||
+      instance?.config.sessionScope === 'thread' ||
+      (instance !== undefined &&
+        instance.config.sessionScope === undefined &&
+        sessionScopeField?.default === 'thread'),
   );
   const remainingSessionFields = sessionFields.filter(
     (field) => field !== sessionScopeField,
@@ -898,6 +902,7 @@ export function ChannelEditorDialog({
                       <Input
                         id={`${formId}-allowedGroupIds`}
                         value={draft.allowedGroupIds}
+                        aria-invalid={Boolean(errors['allowedGroupIds'])}
                         placeholder={t(
                           'channels.editor.field.shared.allowedGroupIds.placeholder',
                         )}

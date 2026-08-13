@@ -218,7 +218,7 @@ test('creates and deletes a typed Channel configuration', async ({
             label: 'Sender Policy',
             kind: 'enum',
             required: true,
-            default: 'pairing',
+            default: 'allowlist',
             options: [
               { value: 'pairing', label: 'Pairing' },
               { value: 'allowlist', label: 'Allowlist' },
@@ -319,6 +319,9 @@ test('creates and deletes a typed Channel configuration', async ({
   await page.getByLabel('Instance name').fill('release-bot');
   await page.getByLabel('Client ID (AppKey)').fill('ding-client-id');
   await page.getByLabel('Client Secret (AppSecret)').fill('ding-client-secret');
+  await expect(page.getByLabel('Allowed user IDs')).toBeVisible();
+  await page.getByLabel('Direct message policy').click();
+  await page.getByRole('option', { name: 'Pairing' }).click();
   await expect(page.getByLabel('Allowed user IDs')).toHaveCount(0);
   await expect(
     page.getByRole('heading', { name: 'Conversation management' }),

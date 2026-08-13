@@ -101,7 +101,7 @@ function initialFieldValue(
       field.default === 'thread' &&
       field.options?.some((option) => option.value === 'chat_thread')
     ) {
-      return 'chat_thread';
+      return instance ? 'thread' : 'chat_thread';
     }
     return field.default ?? field.options?.[0]?.value ?? '';
   }

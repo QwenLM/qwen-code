@@ -68,7 +68,7 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
       label: 'Sender Policy',
       kind: 'enum',
       required: true,
-      default: 'pairing',
+      default: 'allowlist',
       options: [
         { value: 'pairing', label: 'Pairing' },
         { value: 'allowlist', label: 'Allowlist' },
@@ -325,6 +325,29 @@ describe('ChannelEditorDialog', () => {
         .querySelector('[role="radio"][value="thread"]')
         ?.getAttribute('data-state'),
     ).toBe('checked');
+
+    const defaultThreadDescriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: 'thread' } : field,
+      ),
+    };
+    const defaultThreadInstance: DaemonChannelInstanceSnapshot = {
+      ...INSTANCE,
+      config: { ...INSTANCE.config },
+    };
+    delete defaultThreadInstance.config.sessionScope;
+    await renderDialog({
+      descriptor: defaultThreadDescriptor,
+      instance: defaultThreadInstance,
+    });
+
+    expect(document.body.textContent).toContain('By thread (legacy)');
+    expect(
+      document
+        .querySelector('[role="radio"][value="thread"]')
+        ?.getAttribute('data-state'),
+    ).toBe('checked');
   });
 
   it('clears validation errors when switching workspaces', async () => {
@@ -524,6 +547,9 @@ describe('ChannelEditorDialog', () => {
     });
 
     expect(onSave).not.toHaveBeenCalled();
+    expect(
+      inputByLabel('Allowed group IDs')?.getAttribute('aria-invalid'),
+    ).toBe('true');
     expect(document.body.textContent).toContain(
       'Enter a group ID other than __proto__, constructor, or prototype.',
     );
@@ -545,12 +571,13 @@ describe('ChannelEditorDialog', () => {
       setInputValue(clientSecret!, 'ding-client-secret');
     });
 
-    expect(inputByLabel('Allowed user IDs')).toBeNull();
-    await selectOption('Direct message policy', 'Allowlist');
     const allowedUsers = inputByLabel('Allowed user IDs');
     expect(allowedUsers).not.toBeNull();
+    await selectOption('Direct message policy', 'Pairing');
+    expect(inputByLabel('Allowed user IDs')).toBeNull();
+    await selectOption('Direct message policy', 'Allowlist');
     await act(async () => {
-      setInputValue(allowedUsers!, 'staff-a, staff-b');
+      setInputValue(inputByLabel('Allowed user IDs')!, 'staff-a, staff-b');
     });
 
     await selectOption('Group policy', 'Allowlist');

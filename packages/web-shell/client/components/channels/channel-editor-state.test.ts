@@ -230,6 +230,29 @@ describe('Channel editor state', () => {
     expect(draft.values.sessionScope).toBe('chat_thread');
   });
 
+  it('preserves an inherited legacy thread default when editing', () => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      fields: DINGTALK.fields.map((field) =>
+        field.key === 'sessionScope' ? { ...field, default: 'thread' } : field,
+      ),
+    };
+    const instance = configuredInstance();
+    delete instance.config.sessionScope;
+
+    const draft = createChannelEditorDraft(descriptor, instance);
+
+    expect(draft.values.sessionScope).toBe('thread');
+    expect(
+      buildChannelUpsertRequest(
+        descriptor,
+        draft,
+        'revision-session-scope',
+        instance,
+      ).config.sessionScope,
+    ).toBe('thread');
+  });
+
   it('fills safe policy defaults when editing a legacy instance', () => {
     const instance = configuredInstance();
     delete instance.config.senderPolicy;

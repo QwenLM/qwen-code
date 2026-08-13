@@ -745,7 +745,7 @@ describe('ChannelsManagerPage', () => {
   it('does not load Channel routes when the capability is unavailable', async () => {
     workspaceState.current = {
       ...workspaceState.current,
-      capabilities: { features: [] },
+      capabilities: { features: [], workspaces: [] },
     };
     await renderPage();
 
