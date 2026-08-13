@@ -777,6 +777,7 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  setConfigOptionImpl?: AcpSessionBridge['setSessionConfigOption'];
   setLanguageImpl?: (
     sessionId: string,
     params: { language: string; syncOutputLanguage: boolean },
@@ -1057,6 +1058,10 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  setConfigOptionCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
+  }>;
   setLanguageCalls: Array<{
     sessionId: string;
     params: { language: string; syncOutputLanguage: boolean };
@@ -1215,6 +1220,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
   const workspaceMemoryForgetCalls: FakeBridge['workspaceMemoryForgetCalls'] =
@@ -1563,6 +1569,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       hooks: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const setConfigOptionImpl =
+    opts.setConfigOptionImpl ?? (async () => ({ configOptions: [] }));
   const setLanguageCalls: FakeBridge['setLanguageCalls'] = [];
   const setLanguageImpl =
     opts.setLanguageImpl ??
@@ -1791,6 +1799,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
     shellCalls,
@@ -2084,6 +2093,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async setSessionConfigOption(sessionId, req) {
+      setConfigOptionCalls.push({ sessionId, req });
+      return setConfigOptionImpl(sessionId, req);
     },
     async setSessionLanguage(sessionId, params, context) {
       setLanguageCalls.push({
@@ -16379,6 +16392,46 @@ describe('createServeApp', () => {
         .send({ modelId: 'qwen3-coder' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/config-option', () => {
+    it('routes reasoning effort to the session owner and returns its current options', async () => {
+      const configOptions = [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select' as const,
+          currentValue: 'medium',
+          options: [{ value: 'medium', name: 'Medium' }],
+        },
+      ];
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({ configOptions }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId: 'spoofed-B',
+          configId: 'reasoning_effort',
+          value: 'medium',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ configOptions });
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'reasoning_effort',
+            value: 'medium',
+          },
+        },
+      ]);
     });
   });
 
