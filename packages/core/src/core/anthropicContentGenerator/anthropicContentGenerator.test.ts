@@ -3551,10 +3551,21 @@ describe('AnthropicContentGenerator', () => {
       ]);
     });
 
-    it('rejects a complete call followed by an unterminated call without emitting either', async () => {
+    it('routes an unterminated tool call through max-token recovery without emitting the batch', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* parallelToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 2,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 2,
+            delta: { type: 'text_delta', text: 'partial response' },
+          };
+          yield { type: 'content_block_stop', index: 2 };
           yield {
             type: 'content_block_start',
             index: 0,
@@ -3617,6 +3628,381 @@ describe('AnthropicContentGenerator', () => {
         contents: 'Hello',
       } as unknown as GenerateContentParameters);
       const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+
+      expect(
+        chunks
+          .flatMap((chunk) => chunk.candidates ?? [])
+          .flatMap((candidate) => candidate.content?.parts ?? [])
+          .map((part) => part.text ?? '')
+          .join(''),
+      ).toContain('partial response');
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishReason,
+      ).toBe(FinishReason.MAX_TOKENS);
+    });
+
+    it.each([
+      { case: 'an empty argument buffer', partialJson: '' },
+      {
+        case: 'an unterminated string',
+        partialJson: '{"command":"rm -rf /tmp/scra',
+      },
+      { case: 'an unclosed object', partialJson: '{"command":"pwd"' },
+      { case: 'a missing argument value', partialJson: '{"command":' },
+      { case: 'a trailing comma', partialJson: '{"command":"pwd",}' },
+    ])(
+      'routes $case through max-token recovery without emitting a call',
+      async ({ partialJson }) => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* truncatedToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-truncated',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'input_json_delta', partial_json: partialJson },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            yield {
+              type: 'message_delta',
+              delta: { stop_reason: 'max_tokens' },
+              usage: { output_tokens: 100 },
+            };
+          })(),
+        );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 100 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+        const chunks: GenerateContentResponse[] = [];
+        for await (const chunk of stream) chunks.push(chunk);
+
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(
+          chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)
+            ?.finishReason,
+        ).toBe(FinishReason.MAX_TOKENS);
+      },
+    );
+
+    it.each(['[]', 'null', '42'])(
+      'rejects a non-object argument root under max_tokens: %s',
+      async (partialJson) => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* nonObjectToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-invalid',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: { type: 'input_json_delta', partial_json: partialJson },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            yield {
+              type: 'message_delta',
+              delta: { stop_reason: 'max_tokens' },
+              usage: { output_tokens: 100 },
+            };
+          })(),
+        );
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model: 'claude-test',
+            apiKey: 'test-key',
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 100 },
+            schemaCompliance: 'auto',
+          },
+          mockConfig,
+        );
+
+        const stream = await generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+        const chunks: GenerateContentResponse[] = [];
+        let streamError: unknown;
+        try {
+          for await (const chunk of stream) chunks.push(chunk);
+        } catch (error) {
+          streamError = error;
+        }
+
+        expect(streamError).toMatchObject({
+          name: 'InvalidStreamError',
+          type: 'MALFORMED_TOOL_CALL',
+        });
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(
+          chunks.some((chunk) =>
+            chunk.candidates?.some(
+              (candidate) => candidate.finishReason === FinishReason.MAX_TOKENS,
+            ),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('emits a complete non-empty tool call even when the stop reason is max_tokens', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* completeToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'max_tokens' },
+            usage: { output_tokens: 100 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        {
+          id: 'call-complete',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+        },
+      ]);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishReason,
+      ).toBe(FinishReason.MAX_TOKENS);
+    });
+
+    it('releases a complete tool call when a non-tool block remains open at the stop reason', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* completeToolUseWithOpenTextStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: { type: 'text_delta', text: 'done' },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use' },
+            usage: { output_tokens: 5 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        {
+          id: 'call-complete',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+        },
+      ]);
+    });
+
+    it('accepts a stop reason when no tool calls are pending', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* textStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'done' },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishReason,
+      ).toBe(FinishReason.STOP);
+    });
+
+    it('rejects an open tool-use block at end of stream', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* openToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-open',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
       let streamError: unknown;
       try {
         for await (const chunk of stream) chunks.push(chunk);
@@ -3638,39 +4024,39 @@ describe('AnthropicContentGenerator', () => {
         stopReason: undefined,
       },
       {
-        case: 'no argument bytes before max tokens',
-        partialJson: '',
-        stopReason: 'max_tokens',
-      },
-      {
         case: 'an unterminated string',
         partialJson: '{"command":"rm -rf /tmp/scra',
-        stopReason: 'max_tokens',
+        stopReason: 'tool_use',
       },
       {
         case: 'an unclosed object',
         partialJson: '{"command":"pwd"',
-        stopReason: 'max_tokens',
+        stopReason: 'tool_use',
       },
       {
         case: 'a missing argument value',
         partialJson: '{"command":',
-        stopReason: 'max_tokens',
+        stopReason: 'tool_use',
       },
       {
         case: 'a trailing comma',
         partialJson: '{"command":"pwd",}',
-        stopReason: 'max_tokens',
+        stopReason: 'tool_use',
       },
       {
         case: 'an array root',
         partialJson: '[]',
-        stopReason: 'max_tokens',
+        stopReason: 'tool_use',
       },
       {
-        case: 'a scalar root',
+        case: 'a null root',
         partialJson: 'null',
-        stopReason: 'max_tokens',
+        stopReason: 'tool_use',
+      },
+      {
+        case: 'a numeric root',
+        partialJson: '42',
+        stopReason: 'tool_use',
       },
     ])(
       'rejects tool arguments with $case without emitting a function call',
