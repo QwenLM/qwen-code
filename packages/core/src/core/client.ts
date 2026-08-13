@@ -945,7 +945,7 @@ export class GeminiClient {
       this.logMemoryPrefetchDelivery(
         handle,
         'discarded',
-        deduped,
+        result,
         result.selectedDocs.length > 0
           ? 'already_delivered'
           : 'no_relevant_results',

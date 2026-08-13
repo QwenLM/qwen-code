@@ -5247,6 +5247,77 @@ hello
       expect(toolText).not.toContain('- overlapping');
     });
 
+    it('logs already-delivered discards with the selector count', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nOverlapping memory body.',
+          selectedDocs: [overlapping],
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(toolCallStream());
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const userDone = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe-discard',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await userDone;
+
+      settleRecall!({
+        prompt: '## Relevant memory\n\nOVERLAP_MARKER',
+        selectedDocs: [overlapping],
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe-discard-tool',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          strategy: 'model',
+          docs_selected: 1,
+          discard_reason: 'already_delivered',
+        }),
+      );
+    });
+
     it('delivers no fast result when the turn is cancelled inside the initial window', async () => {
       vi.useFakeTimers();
       const controller = new AbortController();

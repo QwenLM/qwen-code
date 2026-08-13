@@ -115,8 +115,10 @@ because a correct selection that never reaches the model is worth nothing.
 - A labeled set covers Chinese, English, Japanese, Korean, mixed text,
   NFKC normalization, body-only matches, and no-result queries.
 - Long CJK queries keep bounded scoring work and preserve both query ends.
-- Existing active-tool noise filtering and model-selector fallback behavior
-  remain unchanged.
+- Existing active-tool noise filtering remains unchanged. The model-selector
+  failure fallback still triggers and returns at most five documents; its
+  scoring quality intentionally improves per the scorer changes above
+  (measured by the frozen-scorer comparison in `recall-eval.test.ts`).
 
 ### Known limitations
 

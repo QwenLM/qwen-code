@@ -530,14 +530,14 @@ flowchart TD
 
 记录选中的 Memory 是否真的送达主模型（Selection 事件无法回答这个问题）。
 
-| 字段             | 类型                                                                                                                                      | 说明         |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| `phase`          | `'fast'` \| `'refined'`                                                                                                                   | **投递阶段** |
-| `delivery_point` | `'initial'` \| `'tool_result'` \| `'discarded'`                                                                                           | 投递位置     |
-| `discard_reason` | `'no_safe_delivery_point'` \| `'new_query'` \| `'reset'` \| `'abort'` \| `'shutdown'` \| `'no_relevant_results'` \| `'already_delivered'` | 丢弃原因     |
-| `strategy`       | `'none'` \| `'heuristic'` \| `'model'`                                                                                                    | **选择方式** |
-| `docs_selected`  | number                                                                                                                                    | 投递文档数   |
-| `latency_ms`     | number                                                                                                                                    | 自发起的耗时 |
+| 字段             | 类型                                                                                                                                      | 说明                                                       |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `phase`          | `'fast'` \| `'refined'`                                                                                                                   | **投递阶段**                                               |
+| `delivery_point` | `'initial'` \| `'tool_result'` \| `'discarded'`                                                                                           | 投递位置                                                   |
+| `discard_reason` | `'no_safe_delivery_point'` \| `'new_query'` \| `'reset'` \| `'abort'` \| `'shutdown'` \| `'no_relevant_results'` \| `'already_delivered'` | 丢弃原因                                                   |
+| `strategy`       | `'none'` \| `'heuristic'` \| `'model'`                                                                                                    | **选择方式**                                               |
+| `docs_selected`  | number                                                                                                                                    | 结果文档数（投递事件为实际投递数；discarded 事件为选中数） |
+| `latency_ms`     | number                                                                                                                                    | 自发起的耗时                                               |
 
 > **`phase` 与 `strategy` 正交，互不替代。** `phase` 描述**何时**送达：`fast` 是预算
 > 超时后注入的确定性结果，`refined` 是 Model Selector 选出的结果。`strategy` 描述
