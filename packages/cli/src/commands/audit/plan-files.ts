@@ -12,7 +12,7 @@
 // orchestrator.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -25,6 +25,7 @@ import {
   type AuditEffort,
 } from './lib/files-plan.js';
 import type { ParsedAuditArgs } from './parse-args.js';
+import { AUDIT_READ_MAX_BYTES, readGuarded } from './lib/safe-read.js';
 
 interface PlanFilesArgs {
   path?: string;
@@ -39,7 +40,13 @@ interface PlanFilesArgs {
 function readArgsReport(path: string): ParsedAuditArgs {
   let parsed: Partial<ParsedAuditArgs>;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<ParsedAuditArgs>;
+    // Guarded read: the path is any file on disk — a writer-less FIFO
+    // must not freeze the fail-closed diagnostic this reader exists for.
+    const content = readGuarded(path, AUDIT_READ_MAX_BYTES);
+    if (content === null) {
+      throw new Error(`cannot read ${path}`);
+    }
+    parsed = JSON.parse(content.toString('utf8')) as Partial<ParsedAuditArgs>;
   } catch (err) {
     // A truncated/partial report is the same hand-authored input class as
     // a wrong-shape one — surface the designed diagnostic, not a raw
@@ -50,12 +57,14 @@ function readArgsReport(path: string): ParsedAuditArgs {
       })`,
     );
   }
+  // Optional-chained: JSON.parse('null') succeeds and bypasses the
+  // try/catch — the shape check must not dereference null.
   if (
-    typeof parsed.targetPath !== 'string' ||
-    typeof parsed.targetPathAbsolute !== 'string' ||
-    (parsed.effort !== 'low' &&
-      parsed.effort !== 'medium' &&
-      parsed.effort !== 'high')
+    typeof parsed?.targetPath !== 'string' ||
+    typeof parsed?.targetPathAbsolute !== 'string' ||
+    (parsed?.effort !== 'low' &&
+      parsed?.effort !== 'medium' &&
+      parsed?.effort !== 'high')
   ) {
     throw new Error(
       'plan-files: --args-report is not a parse-args verdict — regenerate it.',
@@ -133,7 +142,6 @@ function runPlanFiles(args: PlanFilesArgs): void {
     projectRoot,
     `${plan.artifacts.reportSlug}.md`,
   );
-  plan.artifacts.fallbackRoot = guard.fallbackRoot;
 
   const result = { targetPath, ...plan, guard };
   mkdirSync(dirname(resolve(args.out)), { recursive: true });

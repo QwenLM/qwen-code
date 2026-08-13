@@ -14,14 +14,15 @@ import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { probeGit, runGit, type FilesPlan } from './files-plan.js';
+import { AUDIT_READ_MAX_BYTES, readGuarded } from './safe-read.js';
 
 /** Callers are agent-authored and read whole into the sidecar: bound the
  *  read so a pathological path cannot OOM the capture. */
@@ -65,6 +66,14 @@ export interface SidecarMeta {
    *  degrades like noVcs, but the header must not claim "outside any git
    *  worktree" and the drift arms re-probe at checkpoint time. */
   vcsProbeFailed?: boolean;
+  /** A corrupt/truncated sidecar forced a fresh MID-RUN capture: the
+   *  run-start baseline was reset and any drift before the re-capture is
+   *  invisible — the skill stops on it like headUnknown. */
+  recaptured?: string;
+  /** HEAD had no commit at capture (git init without a commit, an orphan
+   *  branch): drift-check treats "still unborn" as definitively unmoved
+   *  instead of headUnknown, and the first landing commit as headMoved. */
+  headUnborn?: boolean;
 }
 
 export interface Sidecar {
@@ -92,8 +101,11 @@ function recordCaller(sidecarDir: string, caller: string): string | undefined {
     // Stat before reading: callers are agent-authored — a writer-less FIFO
     // blocks readFileSync forever and a device node buffers until OOM. A
     // skipped caller stays name-registered (drift-check watches it), so the
-    // skip is never a silent drop.
-    const st = lstatSync(caller);
+    // skip is never a silent drop. statSync follows symlinks: a symlinked
+    // caller with regular-file content is baselined like any other (lstat
+    // rejected it and left it name-only, which drift-check then flags at
+    // every checkpoint — a phantom drift).
+    const st = statSync(caller);
     if (!st.isFile() || st.size > CALLER_MAX_BYTES) return undefined;
     const hash = sha256(readFileSync(caller));
     const callersRoot = join(sidecarDir, 'callers');
@@ -103,12 +115,81 @@ function recordCaller(sidecarDir: string, caller: string): string | undefined {
     // skipped copy never becomes a silent drop at drift-check time.
     const rel = relative(callersRoot, dest);
     if (rel.startsWith('..') || isAbsolute(rel)) return hash;
-    mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(caller, dest);
+    // The copy is best-effort: the hash was computed BEFORE it, and a
+    // failed copy (ENOSPC, a squatter) must not discard it — that would
+    // turn a transient error into permanent false drift.
+    try {
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(caller, dest);
+    } catch {
+      // copy skipped: the hash stays in callerHashes.
+    }
     return hash;
   } catch {
     return undefined;
   }
+}
+
+/** Tracked and staged changes, path-scoped so the sidecar never carries
+ *  unrelated dirty content from elsewhere in the repository. Returns false
+ *  when the probe fails without an answer. */
+function captureDiffArm(rootAbs: string, sidecarDir: string): boolean {
+  const diff = git(rootAbs, ['diff', 'HEAD', '--', rootAbs]);
+  if (diff === null) return false;
+  if (diff.length > 0) {
+    writeFileSync(join(sidecarDir, 'diff.patch'), diff, 'utf8');
+  }
+  return true;
+}
+
+/** Untracked content copies: `git ls-files --others` WITHOUT
+ *  --exclude-standard — the raw listing covers the gitignored-untracked
+ *  class — filtered to the files the plan enumerates, so the capture
+ *  inherits the enumeration's directory-name exclusions. Returns false
+ *  when the listing fails or every enumerated copy does. */
+function captureUntrackedArm(
+  plan: FilesPlan,
+  sidecarDir: string,
+  rootAbs: string,
+): boolean {
+  const enumerated = new Set([
+    ...plan.subjectFiles.map((f) => f.path),
+    ...plan.testCorpus.map((f) => f.path),
+  ]);
+  const others = git(rootAbs, ['ls-files', '-z', '--others', '--', rootAbs]);
+  if (others === null) return false;
+  const listed = others.split('\0').filter((p) => p.length > 0);
+  // A collapsed trailing-/ entry is a nested git repository: expand it
+  // against the enumerated files under it.
+  const names = new Set<string>();
+  for (const entry of listed) {
+    if (entry.endsWith('/')) {
+      for (const rel of enumerated) {
+        if (rel.startsWith(entry)) names.add(rel);
+      }
+    } else {
+      names.add(entry);
+    }
+  }
+  let copied = 0;
+  let failed = 0;
+  for (const rel of [...names].sort()) {
+    if (!enumerated.has(rel)) continue;
+    const src = join(rootAbs, rel);
+    const dest = join(sidecarDir, 'untracked', rel);
+    try {
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(src, dest);
+      copied++;
+    } catch {
+      // A file that vanishes between the listing and its copy is skipped;
+      // the capture degrades instead of aborting.
+      failed++;
+    }
+  }
+  // Every enumerated copy failing is a degraded arm exactly like a failed
+  // listing: a silently partial sidecar must not publish as complete.
+  return !(copied === 0 && failed > 0);
 }
 
 /** Capture the run-start sidecar: the path-scoped diff, the untracked
@@ -126,6 +207,7 @@ export function captureSidecar(
   // A re-run with --callers (1c's registration lands mid-fan-out) preserves
   // the run-start captures and only extends the caller set — the walked-file
   // baseline must stay the run-start content.
+  let recaptured: string | undefined;
   const existingPath = join(sidecarDir, 'sidecar.json');
   if (existsSync(existingPath)) {
     try {
@@ -137,6 +219,30 @@ export function captureSidecar(
         const hash = recordCaller(sidecarDir, caller);
         if (hash !== undefined) existing.callerHashes[caller] = hash;
       }
+      // An arm that degraded transiently at capture can be repaired here —
+      // this re-run is the only command that can retry it. The baselines
+      // stay preserved; only the failed arms run again.
+      if (
+        existing.meta.captureDegraded !== undefined &&
+        existing.meta.captureDegraded.length > 0
+      ) {
+        const probe = probeGit(
+          rootAbs,
+          ['rev-parse', '--show-toplevel'],
+          GIT_TIMEOUT_MS,
+        );
+        if (probe.ok) {
+          const still: Array<'diff' | 'untracked'> = [];
+          for (const arm of existing.meta.captureDegraded) {
+            const ok =
+              arm === 'diff'
+                ? captureDiffArm(rootAbs, sidecarDir)
+                : captureUntrackedArm(plan, sidecarDir, rootAbs);
+            if (!ok) still.push(arm);
+          }
+          existing.meta.captureDegraded = still.length > 0 ? still : undefined;
+        }
+      }
       writeFileSync(existingPath, JSON.stringify(existing, null, 2), 'utf8');
       return existing;
     } catch {
@@ -144,7 +250,11 @@ export function captureSidecar(
       // this fall-through the remedy loadSidecar names — re-run snapshot,
       // which Step 4 does to extend the caller set — re-enters this same
       // branch and throws forever. A fresh capture rewrites the file, which
-      // is all the recovery the corrupted one allows.
+      // is all the recovery the corrupted one allows — but it RESETS the
+      // run-start baseline mid-run, so the fresh sidecar says so: drift
+      // before the re-capture is invisible and the skill stops on it.
+      recaptured =
+        'the previous sidecar.json was corrupt or truncated — the run-start baseline was re-captured mid-run';
     }
   }
 
@@ -158,62 +268,29 @@ export function captureSidecar(
     capturedAt: new Date().toISOString(),
     noVcs: top === null,
   };
+  if (recaptured !== undefined) meta.recaptured = recaptured;
   if (!probe.ok && !probe.notRepo) {
     meta.vcsProbeFailed = true;
   }
   const captureDegraded: Array<'diff' | 'untracked'> = [];
   if (top !== null) {
-    meta.headSha = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
+    const head = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
+    if (head !== undefined) {
+      meta.headSha = head;
+    } else {
+      // An unborn HEAD (git init without a commit, an orphan branch) is a
+      // DEFINITIVE state, not an unknown one: the branch ref exists, so
+      // record it and let the checkpoint treat "still unborn" as unmoved.
+      const ref = git(rootAbs, ['symbolic-ref', 'HEAD']);
+      if (ref !== null && ref.trim() !== '') meta.headUnborn = true;
+    }
     const subtree = subtreeHashAt(rootAbs, top.trim());
     if (subtree) meta.subtreeHash = subtree;
-    // Tracked and staged changes, path-scoped so the sidecar never carries
-    // unrelated dirty content from elsewhere in the repository.
-    const diff = git(rootAbs, ['diff', 'HEAD', '--', rootAbs]);
-    if (diff === null) {
+    if (!captureDiffArm(rootAbs, sidecarDir)) {
       captureDegraded.push('diff');
-    } else if (diff.length > 0) {
-      writeFileSync(join(sidecarDir, 'diff.patch'), diff, 'utf8');
     }
-  }
-
-  // Untracked content copies: `git ls-files --others` WITHOUT
-  // --exclude-standard — the raw listing covers the gitignored-untracked
-  // class — filtered to the files the plan enumerates, so the capture
-  // inherits the enumeration's directory-name exclusions.
-  const enumerated = new Set([
-    ...plan.subjectFiles.map((f) => f.path),
-    ...plan.testCorpus.map((f) => f.path),
-  ]);
-  if (top !== null) {
-    const others = git(rootAbs, ['ls-files', '-z', '--others', '--', rootAbs]);
-    if (others === null) {
+    if (!captureUntrackedArm(plan, sidecarDir, rootAbs)) {
       captureDegraded.push('untracked');
-    } else {
-      const listed = others.split('\0').filter((p) => p.length > 0);
-      // A collapsed trailing-/ entry is a nested git repository: expand it
-      // against the enumerated files under it.
-      const names = new Set<string>();
-      for (const entry of listed) {
-        if (entry.endsWith('/')) {
-          for (const rel of enumerated) {
-            if (rel.startsWith(entry)) names.add(rel);
-          }
-        } else {
-          names.add(entry);
-        }
-      }
-      for (const rel of [...names].sort()) {
-        if (!enumerated.has(rel)) continue;
-        const src = join(rootAbs, rel);
-        const dest = join(sidecarDir, 'untracked', rel);
-        try {
-          mkdirSync(dirname(dest), { recursive: true });
-          copyFileSync(src, dest);
-        } catch {
-          // A file that vanishes between the listing and its copy is
-          // skipped; the capture degrades instead of aborting.
-        }
-      }
     }
   }
 
@@ -221,12 +298,12 @@ export function captureSidecar(
   // named `__proto__` must get a baseline like any other.
   const hashes: Record<string, string> = Object.create(null);
   for (const file of [...plan.subjectFiles, ...plan.testCorpus]) {
-    try {
-      hashes[file.path] = sha256(readFileSync(join(rootAbs, file.path)));
-    } catch {
-      // A file that vanishes between plan and capture is reported deleted
-      // at the first checkpoint: the absence is the signal.
-    }
+    // Guarded read: a writer-less FIFO swapped into a walked path must not
+    // hang the capture. A null (vanished, non-regular, oversized) leaves
+    // the file without a baseline — reported deleted at the first
+    // checkpoint: the absence is the signal.
+    const content = readGuarded(join(rootAbs, file.path), AUDIT_READ_MAX_BYTES);
+    if (content !== null) hashes[file.path] = sha256(content);
   }
 
   const callerHashes: Record<string, string> = Object.create(null);
@@ -274,23 +351,41 @@ export interface DriftReport {
 
 export function loadSidecar(sidecarDir: string): Sidecar {
   const file = join(sidecarDir, 'sidecar.json');
-  let raw: string;
-  try {
-    raw = readFileSync(file, 'utf8');
-  } catch (err) {
+  // Guarded read: the sidecar path is orchestrator-handled — a writer-less
+  // FIFO in its place must not hang every downstream command.
+  const content = readGuarded(file, AUDIT_READ_MAX_BYTES);
+  if (content === null) {
     throw new Error(
-      `audit: cannot read sidecar ${file} — ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `audit: cannot read sidecar ${file} — re-run \`qwen audit snapshot\`.`,
     );
   }
+  const raw = content.toString('utf8');
+  let parsed: unknown;
   try {
-    return JSON.parse(raw) as Sidecar;
+    parsed = JSON.parse(raw);
   } catch {
     throw new Error(
       `audit: sidecar ${file} is corrupt or truncated — re-run \`qwen audit snapshot\`.`,
     );
   }
+  // Valid JSON is not yet a Sidecar: a wrong-shape file ({} / {"meta":{}})
+  // must hit the same friendly corruption error, not crash driftCheck with
+  // a raw TypeError.
+  const isPlainRecord = (v: unknown): boolean =>
+    typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (
+    !isPlainRecord(parsed) ||
+    !isPlainRecord((parsed as Record<string, unknown>)['meta']) ||
+    !isPlainRecord((parsed as Record<string, unknown>)['hashes']) ||
+    !isPlainRecord((parsed as Record<string, unknown>)['callerHashes']) ||
+    !Array.isArray((parsed as Record<string, unknown>)['callerNames']) ||
+    !Array.isArray((parsed as Record<string, unknown>)['uncoverableNames'])
+  ) {
+    throw new Error(
+      `audit: sidecar ${file} is corrupt or truncated — re-run \`qwen audit snapshot\`.`,
+    );
+  }
+  return parsed as Sidecar;
 }
 
 /** Re-check the audited path against the run-start capture. Content-keyed:
@@ -313,15 +408,17 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
       deletedFiles.push(file.path);
       continue;
     }
-    let current: string;
-    try {
-      current = sha256(readFileSync(abs));
-    } catch {
-      // Unreadable or replaced by a directory since the capture: content
-      // that can no longer be aligned against the baseline is drift.
+    // Guarded read: a writer-less FIFO swapped into a walked path must
+    // not hang the checkpoint.
+    const content = readGuarded(abs, AUDIT_READ_MAX_BYTES);
+    if (content === null) {
+      // Unreadable or replaced by a directory/FIFO since the capture:
+      // content that can no longer be aligned against the baseline is
+      // drift.
       driftedFiles.push(file.path);
       continue;
     }
+    const current = sha256(content);
     if (baseline === undefined) {
       newFiles.push(file.path);
     } else if (current !== baseline) {
@@ -344,11 +441,9 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
       driftedCallers.push(caller);
       continue;
     }
-    try {
-      if (sha256(readFileSync(caller)) !== baseline) {
-        driftedCallers.push(caller);
-      }
-    } catch {
+    // Guarded read: callers are agent-authored paths.
+    const content = readGuarded(caller, CALLER_MAX_BYTES);
+    if (content === null || sha256(content) !== baseline) {
       driftedCallers.push(caller);
     }
   }
@@ -362,7 +457,11 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
   // has nothing to re-probe.
   if (!sidecar.meta.noVcs || sidecar.meta.vcsProbeFailed) {
     const head = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
-    if (head === undefined || sidecar.meta.headSha === undefined) {
+    if (sidecar.meta.headUnborn) {
+      // "HEAD did not exist, still does not exist" is definitively
+      // unmoved; a resolvable HEAD means the first commit landed.
+      headMoved = head !== undefined;
+    } else if (head === undefined || sidecar.meta.headSha === undefined) {
       headUnknown = true;
     } else {
       headMoved = head !== sidecar.meta.headSha;

@@ -40,11 +40,10 @@ beforeEach(() => {
     testLines: 0,
     estimate: null,
     eventModule: { detected: false, callSites: 0, files: 0 },
-    deepReadQuota: 10,
     lowTier: null,
     fileGroups: null,
     agentBound: null,
-    artifacts: { reportSlug: 'mod', fallbackRoot: '' },
+    artifacts: { reportSlug: 'mod' },
   };
   planPath = join(dir, 'plan.json');
   writeFileSync(planPath, JSON.stringify(plan));
@@ -90,7 +89,7 @@ describe('checkAnchorsCommand handler', () => {
     expect(process.exitCode).toBe(4);
   });
 
-  it('exits 4 for a caller cited with a relative path', () => {
+  it('throws for a callers file containing a relative path', () => {
     writeFileSync(
       reportPath,
       [

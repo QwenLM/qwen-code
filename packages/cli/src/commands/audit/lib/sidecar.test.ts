@@ -7,13 +7,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { captureSidecar, driftCheck } from './sidecar.js';
 import { buildFilesPlan, collectAuditFiles } from './files-plan.js';
@@ -172,12 +175,20 @@ describe('caller registration', () => {
     const prevCwd = process.cwd();
     process.chdir(join(dir, 'src'));
     try {
+      captureSidecar(p, sidecarDir);
+      const before = new Set(readdirSync(sidecarDir));
       // Reads fine (../caller.ts resolves), but the '..' must not normalize
       // the copy out of sidecarDir/callers.
       const extended = captureSidecar(p, sidecarDir, ['../caller.ts']);
       expect(extended.callerHashes['../caller.ts']).toBeDefined();
       expect(extended.callerNames).toEqual(['../caller.ts']);
       expect(existsSync(join(sidecarDir, 'caller.ts'))).toBe(false);
+      // Positive pin on WHERE nothing lands: the blocked copy must not
+      // add ANY sidecar-root entry (nothing escaped to repo or parent),
+      // and the source file stays untouched.
+      const added = readdirSync(sidecarDir).filter((e) => !before.has(e));
+      expect(added).toEqual([]);
+      expect(existsSync(join(dir, 'caller.ts'))).toBe(true);
     } finally {
       process.chdir(prevCwd);
     }
@@ -192,6 +203,36 @@ describe('caller registration', () => {
     expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([caller]);
   });
 
+  it('surfaces a valid-JSON wrong-shape sidecar as corruption, not a TypeError', () => {
+    const p = plan();
+    captureSidecar(p, sidecarDir);
+    // {}: valid JSON, wrong shape — driftCheck must hit the friendly
+    // corruption diagnostic instead of a raw TypeError.
+    writeFileSync(join(sidecarDir, 'sidecar.json'), '{}', 'utf8');
+    expect(() => driftCheck(p, sidecarDir)).toThrow(/corrupt or truncated/);
+    // The extend re-run recovers the same way as for a truncated file.
+    const recovered = captureSidecar(p, sidecarDir);
+    expect(recovered.meta.recaptured).toContain('re-captured mid-run');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'never hangs reading a FIFO swapped into a walked path',
+    () => {
+      const p = plan();
+      captureSidecar(p, sidecarDir);
+      // A writer-less FIFO where a walked file used to be must not hang
+      // the checkpoint (or the capture, at run start).
+      rmSync(join(dir, 'src', 'a.ts'));
+      execFileSync('mkfifo', [join(dir, 'src', 'a.ts')]);
+      const drift = driftCheck(p, sidecarDir);
+      expect(drift.driftedFiles).toEqual(['src/a.ts']);
+      // A FRESH capture skips the FIFO instead of hanging on the read.
+      rmSync(sidecarDir, { recursive: true, force: true });
+      const recapture = captureSidecar(p, sidecarDir);
+      expect(recapture.hashes['src/a.ts']).toBeUndefined();
+    },
+  );
+
   it('recaptures fresh when the existing sidecar is corrupt', () => {
     const caller = join(dir, 'caller.ts');
     writeFileSync(caller, 'call();\n');
@@ -204,8 +245,61 @@ describe('caller registration', () => {
     const recaptured = captureSidecar(p, sidecarDir, [caller]);
     expect(recaptured.callerNames).toEqual([caller]);
     expect(recaptured.hashes['src/a.ts']).toBeDefined();
+    // The fresh capture RESET the run-start baseline mid-run: the sidecar
+    // says so, so the skill stops on it like headUnknown.
+    expect(recaptured.meta.recaptured).toContain('re-captured mid-run');
     expect(() => driftCheck(p, sidecarDir)).not.toThrow();
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'name-records a FIFO caller without opening it',
+    () => {
+      // A writer-less FIFO caller must not hang the capture at read.
+      execFileSync('mkfifo', [join(dir, 'pipe-caller')]);
+      const p = plan();
+      const sidecar = captureSidecar(p, sidecarDir, [join(dir, 'pipe-caller')]);
+      expect(sidecar.callerNames).toEqual([join(dir, 'pipe-caller')]);
+      expect(sidecar.callerHashes[join(dir, 'pipe-caller')]).toBeUndefined();
+      expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([
+        join(dir, 'pipe-caller'),
+      ]);
+    },
+  );
+
+  it('name-records an over-size caller without buffering it', () => {
+    const big = join(dir, 'big-caller.ts');
+    writeFileSync(big, 'x'.repeat(10 * 1024 * 1024 + 1));
+    const p = plan();
+    const sidecar = captureSidecar(p, sidecarDir, [big]);
+    expect(sidecar.callerNames).toEqual([big]);
+    expect(sidecar.callerHashes[big]).toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'baselines a symlinked caller through its regular-file target',
+    () => {
+      // lstat rejected links and left them name-only — drift-check then
+      // flagged them at every checkpoint (a phantom drift).
+      writeFileSync(join(dir, 'real-caller.ts'), 'call();\n');
+      symlinkSync(join(dir, 'real-caller.ts'), join(dir, 'link-caller.ts'));
+      const p = plan();
+      const link = join(dir, 'link-caller.ts');
+      const sidecar = captureSidecar(p, sidecarDir, [link]);
+      expect(sidecar.callerHashes[link]).toBeDefined();
+      expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([]);
+      // A squatter at the copy destination must not discard the hash: the
+      // name-and-hash contract holds even when the copy cannot land.
+      const realCaller = join(dir, 'real-caller.ts');
+      const dest = join(
+        sidecarDir,
+        'callers',
+        realCaller.replace(/^([A-Za-z]:)?[\\/]/, ''),
+      );
+      mkdirSync(dest, { recursive: true }); // a dir where the copy lands
+      const reExtended = captureSidecar(p, sidecarDir, [realCaller]);
+      expect(reExtended.callerHashes[realCaller]).toBeDefined();
+    },
+  );
 });
 
 describe('captureSidecar inside a worktree', () => {
@@ -225,6 +319,22 @@ describe('captureSidecar inside a worktree', () => {
         GIT_COMMITTER_EMAIL: 't@t',
       },
     });
+  }
+
+  /** A PATH shim exiting 3 stands in for a missing/hanging git binary:
+   *  every spawn fails without an answer (status 3, no git message). */
+  function withBrokenGit<T>(fn: () => T): T {
+    const shimDir = join(dir, 'git-shim');
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexit 3\n');
+    chmodSync(join(shimDir, 'git'), 0o755);
+    const savedPath = process.env['PATH'];
+    process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
+    try {
+      return fn();
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
   }
 
   it('captures the SHA, subtree hash, path-scoped diff, and untracked copies', () => {
@@ -310,6 +420,9 @@ describe('captureSidecar inside a worktree', () => {
     expect(existsSync(join(sidecarDir, 'untracked', 'untracked.ts'))).toBe(
       false,
     );
+    // Every enumerated copy failed: the capture must publish as degraded,
+    // not silently partial.
+    expect(sidecar.meta.captureDegraded).toEqual(['untracked']);
   });
 
   it('a subtree-touching commit fires both git-state arms', () => {
@@ -383,5 +496,137 @@ describe('captureSidecar inside a worktree', () => {
     expect(drift.headMoved).toBe(true);
     expect(drift.subtreeMoved).toBe(false);
     expect(drift.driftedFiles).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'marks vcsProbeFailed when the toplevel probe fails without an answer',
+    () => {
+      const repo = join(dir, 'repo-vf');
+      mkdirSync(join(repo, 'mod'), { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+      git(['add', '.'], repo);
+      git(['commit', '-m', 'init', '-q'], repo);
+      const modPlan = buildFilesPlan(
+        join(repo, 'mod'),
+        join(repo, 'mod'),
+        'medium',
+        collectAuditFiles(join(repo, 'mod')),
+      );
+      const sidecar = withBrokenGit(() => captureSidecar(modPlan, sidecarDir));
+      expect(sidecar.meta.noVcs).toBe(true);
+      expect(sidecar.meta.vcsProbeFailed).toBe(true);
+      // The checkpoint re-probes with a working git: the content arm keeps
+      // answering, and the unknown head is marked, not guessed.
+      writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 2;\n');
+      const drift = driftCheck(modPlan, sidecarDir);
+      expect(drift.headUnknown).toBe(true);
+      expect(drift.driftedFiles).toEqual(['a.ts']);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reports headUnknown when the checkpoint probe fails without an answer',
+    () => {
+      const repo = join(dir, 'repo-hu');
+      mkdirSync(join(repo, 'mod'), { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+      git(['add', '.'], repo);
+      git(['commit', '-m', 'init', '-q'], repo);
+      const modPlan = buildFilesPlan(
+        join(repo, 'mod'),
+        join(repo, 'mod'),
+        'medium',
+        collectAuditFiles(join(repo, 'mod')),
+      );
+      captureSidecar(modPlan, sidecarDir);
+      const drift = withBrokenGit(() => driftCheck(modPlan, sidecarDir));
+      expect(drift.headUnknown).toBe(true);
+      expect(drift.subtreeUnknown).toBe(true);
+      // The content arm is fs-based and keeps answering.
+      expect(drift.driftedFiles).toEqual([]);
+    },
+  );
+
+  it('marks the diff arm degraded on an unborn HEAD', () => {
+    const repo = join(dir, 'repo-unborn');
+    mkdirSync(join(repo, 'mod'), { recursive: true });
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+    // No commit: HEAD does not exist — `git diff HEAD` cannot answer, but
+    // the unborn state itself is definitive, not unknown.
+    const modPlan = buildFilesPlan(
+      join(repo, 'mod'),
+      join(repo, 'mod'),
+      'medium',
+      collectAuditFiles(join(repo, 'mod')),
+    );
+    const sidecar = captureSidecar(modPlan, sidecarDir);
+    expect(sidecar.meta.headSha).toBeUndefined();
+    expect(sidecar.meta.headUnborn).toBe(true);
+    expect(sidecar.meta.captureDegraded).toEqual(['diff']);
+    expect(sidecar.hashes['a.ts']).toBeDefined();
+  });
+
+  it('treats a still-unborn HEAD as definitively unmoved', () => {
+    const repo = join(dir, 'repo-unborn2');
+    mkdirSync(join(repo, 'mod'), { recursive: true });
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+    const modPlan = buildFilesPlan(
+      join(repo, 'mod'),
+      join(repo, 'mod'),
+      'medium',
+      collectAuditFiles(join(repo, 'mod')),
+    );
+    captureSidecar(modPlan, sidecarDir);
+    const drift = driftCheck(modPlan, sidecarDir);
+    expect(drift.headMoved).toBe(false);
+    expect(drift.headUnknown).toBeFalsy();
+  });
+
+  it('treats the first landing commit on an unborn HEAD as moved', () => {
+    const repo = join(dir, 'repo-unborn3');
+    mkdirSync(join(repo, 'mod'), { recursive: true });
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+    const modPlan = buildFilesPlan(
+      join(repo, 'mod'),
+      join(repo, 'mod'),
+      'medium',
+      collectAuditFiles(join(repo, 'mod')),
+    );
+    captureSidecar(modPlan, sidecarDir);
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'first', '-q'], repo);
+    const drift = driftCheck(modPlan, sidecarDir);
+    expect(drift.headMoved).toBe(true);
+    expect(drift.headUnknown).toBeFalsy();
+  });
+
+  it('repairs a degraded diff arm on the extend re-run once HEAD exists', () => {
+    const repo = join(dir, 'repo-repair');
+    mkdirSync(repo, { recursive: true });
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'a.ts'), 'const a = 1;\n');
+    const repoPlan = buildFilesPlan(
+      repo,
+      repo,
+      'medium',
+      collectAuditFiles(repo),
+    );
+    const captured = captureSidecar(repoPlan, sidecarDir);
+    expect(captured.meta.captureDegraded).toEqual(['diff']);
+    // The first commit lands; the extend re-run is the only command that
+    // can retry the failed arm — it must, against the preserved baseline.
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'first', '-q'], repo);
+    const caller = join(repo, 'caller.ts');
+    writeFileSync(caller, 'call();\n');
+    const extended = captureSidecar(repoPlan, sidecarDir, [caller]);
+    expect(extended.meta.captureDegraded ?? []).toEqual([]);
+    expect(extended.callerNames).toEqual([caller]);
+    expect(extended.hashes['a.ts']).toBe(captured.hashes['a.ts']);
   });
 });

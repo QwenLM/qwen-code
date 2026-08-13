@@ -85,24 +85,27 @@ describe('guardCheckCommand handler', () => {
   let originalCwd: string;
   let originalExitCode: typeof process.exitCode;
   let originalQwenHome: string | undefined;
+  let originalConfigNosystem: string | undefined;
+  let originalConfigGlobal: string | undefined;
 
   beforeEach(() => {
     originalCwd = process.cwd();
     originalExitCode = process.exitCode;
     originalQwenHome = process.env['QWEN_HOME'];
+    originalConfigNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
+    originalConfigGlobal = process.env['GIT_CONFIG_GLOBAL'];
     process.exitCode = undefined;
     repo = mkdtempSync(join(tmpdir(), 'audit-guard-check-'));
     // Hermetic: the fallback root lives under QWEN_HOME.
     process.env['QWEN_HOME'] = join(repo, 'qwen-home');
-    execFileSync('git', ['init', '-q'], {
-      cwd: repo,
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: join(repo, 'empty-gitconfig'),
-      },
-    });
+    // Process-level git-config hermeticity: the in-process check-ignore
+    // probes spawn git with the ambient process.env, so pinning only the
+    // `git init` subprocess leaks a host global exclude (e.g. one ignoring
+    // .qwen/) into the verdicts.
     writeFileSync(join(repo, 'empty-gitconfig'), '');
+    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+    process.env['GIT_CONFIG_GLOBAL'] = join(repo, 'empty-gitconfig');
+    execFileSync('git', ['init', '-q'], { cwd: repo });
     process.chdir(repo);
     vi.mocked(writeStdoutLine).mockClear();
     vi.mocked(writeStderrLine).mockClear();
@@ -113,6 +116,12 @@ describe('guardCheckCommand handler', () => {
     process.exitCode = originalExitCode;
     if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
     else process.env['QWEN_HOME'] = originalQwenHome;
+    if (originalConfigNosystem === undefined)
+      delete process.env['GIT_CONFIG_NOSYSTEM'];
+    else process.env['GIT_CONFIG_NOSYSTEM'] = originalConfigNosystem;
+    if (originalConfigGlobal === undefined)
+      delete process.env['GIT_CONFIG_GLOBAL'];
+    else process.env['GIT_CONFIG_GLOBAL'] = originalConfigGlobal;
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -148,22 +157,84 @@ describe('guardCheckCommand handler', () => {
     expect(process.exitCode).toBe(5);
   });
 
-  it('credits plan-time exposure only when the plan landed at the fallback', () => {
-    // The handler compares against the FRESH probe's fallbackRoot, so the
-    // fixture must land where Storage actually puts it.
+  it('fails closed on a valid-JSON wrong-shape guard section', () => {
+    // A raw TypeError out of guardTripped would exit 1 and bypass the
+    // exit-5 relocation path; the unusable section degrades to a missing
+    // baseline instead.
+    const planPath = join(repo, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ guard: {} }));
+    run({ reportSlug: 'mod', plan: planPath });
+    expect(process.exitCode).toBe(5);
+  });
+
+  it('does not credit a plan in the repo: the relocation never happened', () => {
     const fallback = Storage.getAuditFallbackDir(repo);
     const planTime = report('unprotected', 'unprotected');
     planTime.fallbackRoot = fallback;
-    // A plan still sitting in the repo: the relocation never happened.
     const inRepoPlan = join(repo, 'plan.json');
     writeFileSync(inRepoPlan, JSON.stringify({ guard: planTime }));
     run({ reportSlug: 'mod', plan: inRepoPlan });
     expect(process.exitCode).toBe(5);
-    // The same plan relocated under the fallback root: credited.
-    process.exitCode = undefined;
+  });
+
+  it('does not credit a relocation whose fallback root is itself exposed', () => {
+    // QWEN_HOME inside the worktree (the beforeEach fixture): the fallback
+    // root sits inside a repo with nothing ignoring it, so crediting the
+    // relocation would certify committable artifacts at exit 0.
+    const fallback = Storage.getAuditFallbackDir(repo);
+    const planTime = report('unprotected', 'unprotected');
+    planTime.fallbackRoot = fallback;
+    const relocatedPlan = join(fallback, 'plan.json');
+    writeFileSync(relocatedPlan, JSON.stringify({ guard: planTime }));
+    run({ reportSlug: 'mod', plan: relocatedPlan });
+    expect(process.exitCode).toBe(5);
+  });
+
+  it('credits a relocation to a fallback outside any worktree', () => {
+    const outsideHome = mkdtempSync(join(tmpdir(), 'audit-qwen-home-'));
+    try {
+      process.env['QWEN_HOME'] = outsideHome;
+      const fallback = Storage.getAuditFallbackDir(repo);
+      const planTime = report('unprotected', 'unprotected');
+      planTime.fallbackRoot = fallback;
+      const relocatedPlan = join(fallback, 'plan.json');
+      writeFileSync(relocatedPlan, JSON.stringify({ guard: planTime }));
+      run({ reportSlug: 'mod', plan: relocatedPlan });
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      rmSync(outsideHome, { recursive: true, force: true });
+    }
+  });
+
+  it('credits a relocation to an in-worktree fallback that is ignored', () => {
+    // The fallback inside the worktree is safe exactly when git says the
+    // landing is ignored there.
+    writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
+    const fallback = Storage.getAuditFallbackDir(repo);
+    const planTime = report('unprotected', 'unprotected');
+    planTime.fallbackRoot = fallback;
     const relocatedPlan = join(fallback, 'plan.json');
     writeFileSync(relocatedPlan, JSON.stringify({ guard: planTime }));
     run({ reportSlug: 'mod', plan: relocatedPlan });
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it('probes the plan’s own reportSlug over the agent-transcribed argv slug', () => {
+    // A name-selective re-include keyed on the REAL slug stays invisible
+    // to a misnamed probe: the plan's artifacts.reportSlug is
+    // authoritative for the probed name.
+    writeFileSync(
+      join(repo, '.gitignore'),
+      '.qwen/*\n!.qwen/audits/\n.qwen/audits/*\n!.qwen/audits/[0-9]*-mod.md\n',
+    );
+    const planPath = join(repo, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({ artifacts: { reportSlug: 'mod' } }),
+    );
+    // argv slug misnamed on purpose: with the plan's slug honored, the
+    // re-included report name is probed and the guard fires.
+    run({ reportSlug: 'm0d', plan: planPath });
+    expect(process.exitCode).toBe(5);
   });
 });

@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -444,6 +445,71 @@ const y = x;
     expect(findings[0].anchor).toBe('- location: /var/run\nkey: value');
     expect(findings[0].locations).toEqual(['dup.ts']);
   });
+
+  it('does not latch a self-closing inline fence', () => {
+    // A fence that opens AND closes on the Anchor field line must not
+    // swallow the following fields and findings into this anchor.
+    const selfClosing = [
+      '### [Critical] first',
+      '- Location: dup.ts:1',
+      '- Anchor: ```const x = 1;```',
+      '- Issue: a',
+      '### [Suggestion] second',
+      '- Location: unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(selfClosing);
+    expect(findings).toHaveLength(2);
+    expect(findings[0].anchor).toBe('const x = 1;');
+    expect(findings[1]).toMatchObject({
+      title: 'second',
+      locations: ['unique.ts'],
+    });
+  });
+
+  it('synthesizes a fail-closed block for orphan non-anchor fields', () => {
+    // A deviant header invisible to all three nets followed only by
+    // Issue/Failure scenario/Severity lines must not parse to zero
+    // findings — the gate must rule on it instead of exiting 0.
+    const orphan = [
+      '## Critical Findings',
+      '- Issue: something wrong',
+      '- Failure scenario: when x',
+      '- Severity: Critical',
+    ].join('\n');
+    const findings = parseReportFindings(orphan);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      severity: '',
+      locations: [],
+      anchor: '',
+    });
+  });
+
+  it('names an unclosed fence at EOF as a truncation', () => {
+    const truncated = [
+      '### [Critical] truncated',
+      '- Location: dup.ts:1',
+      '- Anchor: ```',
+      'const x = 1;',
+    ].join('\n');
+    const findings = parseReportFindings(truncated);
+    expect(findings).toHaveLength(2);
+    expect(findings[1].title).toContain('unclosed anchor fence');
+    expect(findings[1].severity).toBe('');
+  });
+
+  it('accepts bold labels with the colon outside the bold', () => {
+    const boldOutside = [
+      '### [Critical] bold outside',
+      '- **Location**: unique.ts:1',
+      '- **Anchor**: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(boldOutside);
+    expect(findings[0].locations).toEqual(['unique.ts']);
+    expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
 });
 
 describe('resolveAnchors', () => {
@@ -583,5 +649,123 @@ describe('resolveAnchors', () => {
     } finally {
       rmSync(caller, { force: true });
     }
+  });
+
+  it('resolves a multi-line anchor quoted from indented code', () => {
+    writeFileSync(
+      join(dir, 'indented.ts'),
+      'function f() {\n  const a = 1;\n  const b = a;\n  return b;\n}\n',
+    );
+    const indentedPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const findings = parseReportFindings(
+      [
+        '### [Critical] indented quote',
+        '- Location: indented.ts:2',
+        '- Anchor:',
+        '  const a = 1;',
+        '  const b = a;',
+        '- Issue: a',
+      ].join('\n'),
+    );
+    // push() dedents the needle to column 0; the file keeps its indent —
+    // matching must stay indent-tolerant or the common case (a snippet
+    // from a function body) is unanchorable by construction.
+    expect(findings[0].anchor).toBe('const a = 1;\nconst b = a;');
+    expect(resolveAnchors(findings, indentedPlan)[0].verdict).toBe('resolved');
+  });
+
+  it('binds a whole Location whose filename contains a comma', () => {
+    writeFileSync(join(dir, 'a,b.ts'), 'export const commaFile = 1;\n');
+    const commaPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const findings = parseReportFindings(
+      [
+        '### [Critical] comma file',
+        '- Location: a,b.ts:1',
+        '- Anchor: export const commaFile = 1;',
+      ].join('\n'),
+    );
+    // The comma split shreds 'a,b.ts' into fragments that match nothing;
+    // the raw whole value must bind when it names a known file.
+    expect(resolveAnchors(findings, commaPlan)[0].verdict).toBe('resolved');
+  });
+
+  it('grades a fence-residue-only anchor unresolved, whatever the file holds', () => {
+    // The cited file carries a stray backtick — the old slice(1,-1)
+    // turned the residue into a needle matching it, certifying an empty
+    // snippet.
+    writeFileSync(join(dir, 'stray.ts'), 'prose with one ` backtick\n');
+    const strayPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const findings = parseReportFindings(
+      [
+        '### [Critical] residue',
+        '- Location: stray.ts:1',
+        '- Anchor: ```',
+      ].join('\n'),
+    );
+    expect(findings[0].anchor).toBe('');
+    expect(resolveAnchors(findings, strayPlan)[0].verdict).toBe('unresolved');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'grades a FIFO swapped into a cited subject unresolved without hanging',
+    () => {
+      // The cited path is agent-authored: a writer-less FIFO swapped in
+      // between plan and resolution must not hang the write gate.
+      const pipePlan = buildFilesPlan(
+        dir,
+        dir,
+        'medium',
+        collectAuditFiles(dir),
+      );
+      rmSync(join(dir, 'unique.ts'));
+      execFileSync('mkfifo', [join(dir, 'unique.ts')]);
+      const findings = parseReportFindings(
+        [
+          '### [Critical] fifo citation',
+          '- Location: unique.ts:1',
+          '- Anchor: anything',
+        ].join('\n'),
+      );
+      expect(resolveAnchors(findings, pipePlan)[0].verdict).toBe('unresolved');
+    },
+  );
+
+  it('grades a cited file deleted before resolution unresolved', () => {
+    // Plan (Step 1) and resolution (Step 7) are separated by the whole
+    // run — the cited file can vanish in between (TOCTOU); the read
+    // failure branch must stay fail-closed.
+    writeFileSync(join(dir, 'ephemeral.ts'), 'export const gone = 1;\n');
+    const ephemeralPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    rmSync(join(dir, 'ephemeral.ts'));
+    const findings = parseReportFindings(
+      [
+        '### [Critical] deleted subject',
+        '- Location: ephemeral.ts:1',
+        '- Anchor: export const gone = 1;',
+      ].join('\n'),
+    );
+    expect(resolveAnchors(findings, ephemeralPlan)[0].verdict).toBe(
+      'unresolved',
+    );
   });
 });

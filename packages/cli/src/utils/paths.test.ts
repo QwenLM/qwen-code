@@ -37,4 +37,21 @@ describe('safeTarget', () => {
     expect(safeTarget('...')).toBe('target');
     expect(safeTarget('///')).toBe('target');
   });
+
+  it('bounds deep targets to the one-component cap, keeping them distinct', () => {
+    // A 30-level nested path flattens past POSIX's 255-byte filename
+    // component cap (ENAMETOOLONG): truncate and carry a hash of the
+    // ORIGINAL target so distinct deep paths stay distinct.
+    const deepA = Array.from({ length: 30 }, (_, i) => `level${i}`).join('/');
+    const deepB = Array.from({ length: 30 }, (_, i) => `layer${i}`).join('/');
+    const slugA = safeTarget(deepA);
+    const slugB = safeTarget(deepB);
+    expect(slugA.length).toBeLessThanOrEqual(200);
+    expect(slugB.length).toBeLessThanOrEqual(200);
+    expect(slugA).not.toBe(slugB);
+    // Deterministic: the same target always flattens to the same slug.
+    expect(safeTarget(deepA)).toBe(slugA);
+    // Shallow targets stay untouched.
+    expect(safeTarget('packages/core')).toBe('packages_core');
+  });
 });

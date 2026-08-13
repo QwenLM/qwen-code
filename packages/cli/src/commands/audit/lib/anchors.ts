@@ -13,8 +13,8 @@
 // past the tolerated axes (an unparseable header, a missing field) still
 // emits an entry with empty fields, so the gate fires instead of skipping it.
 
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { AUDIT_READ_MAX_BYTES, readGuarded } from './safe-read.js';
 import type { FilesPlan } from './files-plan.js';
 import type { Severity } from '../../../utils/findings.js';
 
@@ -26,6 +26,10 @@ export interface ReportFinding {
   /** The cited files, audit-relative (or absolute registered callers). A
    *  pair finding carries both ends. */
   locations: string[];
+  /** The raw Location value before comma/and splitting: a single cited
+   *  file whose NAME carries a comma or spaced 'and' must still bind when
+   *  the whole value names a known file. */
+  locationRaw?: string;
   anchor: string;
 }
 
@@ -58,15 +62,17 @@ const SEVERITY_HEADING_RE = /^#{2,6}\s*(?:critical|suggestion)\b\s*:/i;
 const BOLD_FINDING_RE = /^\*\*\s*\[(?:critical|suggestion)\]/i;
 // Field names match case-insensitively: header matching is deliberately
 // case-lenient, and LLM casing deviation on the fields must not fail a
-// correctly-anchored finding. Bold labels (`- **Location:**`) are the same
-// deviation the header net tolerates on headers.
-const FIELD_RE = /^-\s+(?:\*\*)?(Location|Anchor):(?:\*\*)?\s*(.*)$/i;
+// correctly-anchored finding. Bold labels are the same deviation the
+// header net tolerates on headers, colon inside OR outside the bold
+// (`- **Location:**` / `- **Location**:`).
+const FIELD_RE =
+  /^-\s+(?:\*\*)?(Location|Anchor)(?:\*\*)?\s*:(?:\*\*)?\s*(.*)$/i;
 // Anchor collection ends only on a RECOGNIZED finding field indented at or
 // shallower than the Anchor field line: a deeper-indented line inside the
 // quoted snippet (a YAML/markdown list item, an embedded `- Issue:`) must
 // not truncate the anchor.
 const FIELD_END_RE =
-  /^-\s+(?:\*\*)?(Issue|Failure scenario|Severity|Location|Anchor):/i;
+  /^-\s+(?:\*\*)?(Issue|Failure scenario|Severity|Location|Anchor)(?:\*\*)?\s*:/i;
 
 function leadingIndent(line: string): number {
   let i = 0;
@@ -151,7 +157,12 @@ export function parseReportFindings(report: string): ReportFinding[] {
       hi--;
     } else if (hi - lo === 1) {
       const trimmed = collected[lo].trim();
-      if (
+      if (/^`+$/.test(trimmed)) {
+        // A line of fence markers only is residue, not a snippet: empty
+        // it so the gate grades the finding unresolved instead of
+        // matching a stray backtick in the cited file.
+        collected[lo] = '';
+      } else if (
         trimmed.length >= 6 &&
         trimmed.startsWith('```') &&
         trimmed.endsWith('```')
@@ -186,6 +197,7 @@ export function parseReportFindings(report: string): ReportFinding[] {
       title: current.title,
       severity: current.severity,
       locations: current.locations,
+      locationRaw: current.locationRaw,
       anchor,
     });
     current = null;
@@ -205,11 +217,18 @@ export function parseReportFindings(report: string): ReportFinding[] {
         current.anchorLines = [];
       }
       inAnchor = true;
-      inFence = field[2].trim().startsWith('```');
+      const value = field[2].trim();
+      // Latch only when the fence OPENS without closing on the same line:
+      // a self-closing inline fence (`- Anchor: ```foo```) must not
+      // swallow every subsequent line into this anchor.
+      inFence =
+        value.startsWith('```') &&
+        !(value.length >= 6 && value.endsWith('```'));
       anchorIndent = leadingIndent(rawLine);
       current.anchorLines.push(field[2].trimEnd());
     } else {
       current.locations = parseLocations(field[2]);
+      current.locationRaw = field[2];
     }
   };
 
@@ -259,11 +278,26 @@ export function parseReportFindings(report: string): ReportFinding[] {
       BOLD_FINDING_RE.test(line)
     ) {
       push();
-      findings.push({ title: line, severity: '', locations: [], anchor: '' });
+      // Open a fail-closed block rather than emitting at once: fields that
+      // follow a deviant header attach to it, so the block emits ONCE with
+      // whatever it carried (with no fields it still emits at EOF — either
+      // shape grades unresolved).
+      current = {
+        title: line,
+        severity: '',
+        locations: [],
+        anchor: '',
+        anchorLines: [],
+      };
+      inAnchor = false;
+      inFence = false;
       continue;
     }
     const field = FIELD_RE.exec(line);
-    if (!field) continue;
+    // Any recognized field — not only Location/Anchor — opens a synthetic
+    // block: orphan Issue/Failure scenario/Severity lines with no open
+    // block must not parse to zero findings and a silent exit 0.
+    if (!field && !FIELD_END_RE.test(line)) continue;
     if (!current) {
       // A field with no open block: the bare-header deviation (a header the
       // nets tolerate as a section heading, followed by real fields). The
@@ -279,8 +313,43 @@ export function parseReportFindings(report: string): ReportFinding[] {
     }
     handleField(raw, line);
   }
+  // An unclosed fence at EOF means the draft is truncated mid-anchor: emit
+  // the collected block AND a synthetic entry naming the truncation, so the
+  // remediation sees the true cause instead of a bare 'failed to resolve'.
+  const fenceUnclosed = current !== null && inAnchor && inFence;
   push();
+  if (fenceUnclosed) {
+    findings.push({
+      title: 'unclosed anchor fence at end of report — the draft is truncated',
+      severity: '',
+      locations: [],
+      anchor: '',
+    });
+  }
   return findings;
+}
+
+/** Count matches of a multi-line needle tolerating the haystack's base
+ *  indent: the needle arrives dedented to column 0, while code quoted from
+ *  an indented body keeps its indent in the file. Each window of
+ *  consecutive lines is compared after stripping the window's own base
+ *  indent (relative indent inside the snippet is preserved). */
+function countIndentTolerantMatches(haystack: string, needle: string): number {
+  const needleLines = needle.split('\n');
+  const hayLines = haystack.split('\n');
+  let count = 0;
+  for (let i = 0; i + needleLines.length <= hayLines.length; i++) {
+    const base = leadingIndent(hayLines[i]);
+    let matches = true;
+    for (let j = 0; j < needleLines.length; j++) {
+      if (dedent(hayLines[i + j], base) !== needleLines[j]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) count++;
+  }
+  return count;
 }
 
 /** Resolve each finding's anchor against the cited files. The resolution set
@@ -309,33 +378,63 @@ export function resolveAnchors(
       return { finding, verdict: 'unresolved', matchCount: 0 };
     }
     const needle = finding.anchor.replace(/\r\n/g, '\n');
+    // A single cited file whose NAME carries a comma or spaced 'and' is
+    // shredded by the split into fragments that match nothing: try the
+    // WHOLE raw value against the known set first, and fall back to the
+    // fragments only when it names nothing.
+    const whole =
+      finding.locationRaw !== undefined
+        ? normalizeLocation(finding.locationRaw)
+        : '';
+    const locations =
+      whole !== '' && (allowed.has(whole) || callerSet.has(whole))
+        ? [whole]
+        : finding.locations;
     let matchCount = 0;
     let onePerLocation = true;
-    for (const location of finding.locations) {
+    for (const location of locations) {
       const isCaller = callerSet.has(location);
       if (!isCaller && !allowed.has(location)) {
         return { finding, verdict: 'out-of-scope', matchCount: 0 };
       }
       const abs = isCaller ? location : join(plan.targetPathAbsolute, location);
-      let haystack: string;
-      try {
-        haystack = readFileSync(abs, 'utf8');
-      } catch {
+      // Guarded read: the cited path is agent-authored — a writer-less FIFO
+      // must not hang the gate, nor a multi-GB file exhaust memory.
+      const content = readGuarded(abs, AUDIT_READ_MAX_BYTES);
+      if (content === null) {
         return { finding, verdict: 'unresolved', matchCount: 0 };
       }
       // Multi-line anchors join with \n; a CRLF file (Windows checkouts,
       // vendored .bat/.cmd) must resolve against the same anchor, so
       // normalize both sides to LF before matching.
-      haystack = haystack.replace(/\r\n/g, '\n');
+      const haystack = content.toString('utf8').replace(/\r\n/g, '\n');
       // Count PER CITED LOCATION: a pair finding's snippet appears in every
       // cited file by definition, so a sum across locations grades exactly
       // the pair class ambiguous whenever it binds at all. The finding
       // resolves only when each cited file contributes exactly one hit.
-      let locationMatches = 0;
-      let idx = haystack.indexOf(needle);
-      while (idx !== -1) {
-        locationMatches++;
-        idx = haystack.indexOf(needle, idx + 1);
+      let locationMatches: number;
+      if (needle.includes('\n')) {
+        // Multi-line needles match indent-tolerantly: the needle is
+        // dedented to column 0, so a snippet quoted from an indented body
+        // must still resolve (a raw substring search would never find it).
+        // Every line-start raw occurrence is one window match too, so the
+        // window count subsumes it; add only raw matches starting MID-line.
+        locationMatches = countIndentTolerantMatches(haystack, needle);
+        let idx = haystack.indexOf(needle);
+        while (idx !== -1) {
+          const lineStart = haystack.lastIndexOf('\n', idx - 1) + 1;
+          if (haystack.slice(lineStart, idx).trim() !== '') {
+            locationMatches++;
+          }
+          idx = haystack.indexOf(needle, idx + 1);
+        }
+      } else {
+        locationMatches = 0;
+        let idx = haystack.indexOf(needle);
+        while (idx !== -1) {
+          locationMatches++;
+          idx = haystack.indexOf(needle, idx + 1);
+        }
       }
       matchCount += locationMatches;
       if (locationMatches !== 1) onePerLocation = false;

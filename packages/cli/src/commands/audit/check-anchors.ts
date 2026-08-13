@@ -10,10 +10,10 @@
 // recorded in the report header — never silently shipped.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync } from 'node:fs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { parseReportFindings, resolveAnchors } from './lib/anchors.js';
 import { readCallersFile, readPlanFile } from './lib/read-json.js';
+import { AUDIT_READ_MAX_BYTES, readGuarded } from './lib/safe-read.js';
 
 export const checkAnchorsCommand: CommandModule = {
   command: 'check-anchors',
@@ -45,16 +45,15 @@ export const checkAnchorsCommand: CommandModule = {
     const registeredCallers = callers
       ? readCallersFile(callers, 'check-anchors')
       : [];
-    let reportText: string;
-    try {
-      reportText = readFileSync(report, 'utf8');
-    } catch (err) {
+    // Guarded read: the report draft is agent-authored — a writer-less
+    // FIFO must not hang the write gate.
+    const reportContent = readGuarded(report, AUDIT_READ_MAX_BYTES);
+    if (reportContent === null) {
       throw new Error(
-        `audit check-anchors: cannot read ${report} — ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `audit check-anchors: cannot read ${report} — missing, unreadable, not a regular file, or oversized.`,
       );
     }
+    const reportText = reportContent.toString('utf8');
     const findings = parseReportFindings(reportText);
     const results = resolveAnchors(findings, planJson, registeredCallers);
     writeStdoutLine(JSON.stringify(results, null, 2));

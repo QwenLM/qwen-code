@@ -327,6 +327,47 @@ describe('buildLowReaderPrompt', () => {
     expect(() => buildLowReaderPrompt(inconsistent)).toThrow(/angle floor/);
   });
 
+  it('refuses a floor claim that drops one of the two floor angles', () => {
+    // The floor shrinks to EXACTLY A and C: a plan claiming it while
+    // carrying only A walks less than the floor promises.
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    const short: FilesPlan = {
+      ...lowPlan,
+      lowTier: {
+        ...lowPlan.lowTier!,
+        angleFloorApplied: true,
+        angles: ['A'],
+      },
+    };
+    expect(() => buildLowReaderPrompt(short)).toThrow(/angle floor/);
+  });
+
+  it('refuses a stale plan carrying duplicate angles', () => {
+    // A duplicated angle renders twice in the prompt while the receipt
+    // claims one walk per angle.
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    const dup: FilesPlan = {
+      ...lowPlan,
+      lowTier: {
+        ...lowPlan.lowTier!,
+        angleFloorApplied: false,
+        angles: ['A', 'A', 'C'],
+      },
+    };
+    expect(() => buildLowReaderPrompt(dup)).toThrow(/duplicate angles/);
+  });
+
+  it('refuses a findingCap that is not a positive integer', () => {
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    for (const cap of [0, -3, 1.5]) {
+      const bad: FilesPlan = {
+        ...lowPlan,
+        lowTier: { ...lowPlan.lowTier!, findingCap: cap },
+      };
+      expect(() => buildLowReaderPrompt(bad)).toThrow(/positive integer/);
+    }
+  });
+
   it('the floor note records the shrink via the per-angle receipt, not a nonexistent header field', () => {
     const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
     const prompt = buildLowReaderPrompt(lowPlan);

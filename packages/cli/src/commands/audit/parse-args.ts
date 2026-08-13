@@ -20,18 +20,27 @@ export interface ParsedAuditArgs {
 }
 
 export function parseAuditArgs(raw: string): ParsedAuditArgs {
-  // The tokenizer strips quotes with no escape processing, so an UNBALANCED
-  // quote must never reach it: an unquoted apostrophe would silently
-  // re-target the audit (`src/it's-dir` becomes `src/its-dir`), and an
-  // unclosed quote swallows the rest of the string. Balanced quoting stays
-  // supported — it is the only way to carry a spaced path.
-  const singles = raw.split("'").length - 1;
-  const doubles = raw.split('"').length - 1;
-  if (singles % 2 !== 0 || doubles % 2 !== 0) {
+  // The tokenizer strips quotes with no escape processing, so an UNCLOSED
+  // quote must never reach it: it would swallow the rest of the string
+  // (flags included). Validate with the tokenizer's own nesting semantics
+  // — inside an open quote the OTHER quote character is literal content,
+  // so `"src/O'Brien dir"` stays balanced while `"a'"b'` does not. Raw
+  // per-character parity fails both directions: it accepts semantically
+  // unclosed input and refuses balanced paths that contain an apostrophe.
+  let openQuote: '"' | "'" | null = null;
+  for (const ch of raw) {
+    if (openQuote !== null) {
+      if (ch === openQuote) openQuote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") openQuote = ch;
+  }
+  if (openQuote !== null) {
     throw new Error(
-      'audit parse-args: unbalanced quote in the argument string — a path ' +
-        'with spaces needs a matching quote pair on both ends, and a path ' +
-        'that itself contains a quote character cannot be parsed safely.',
+      'audit parse-args: unbalanced quote in the argument string — a ' +
+        'quoted segment is not closed. A path with spaces needs a matching ' +
+        'quote pair on both ends; the opposite quote character may appear ' +
+        'inside a quoted path.',
     );
   }
   const tokens = tokenizeArgs(raw);
@@ -108,7 +117,7 @@ export const parseArgsCommand: CommandModule = {
         'audit parse-args: --stdin cannot be negated — the command is stdin-only.',
       );
     }
-    const raw = readFileSync(0, 'utf8').replace(/\r?\n$/, '');
+    const raw = readFileSync(0, 'utf8');
     const json = JSON.stringify(parseAuditArgs(raw), null, 2);
     if (out) {
       mkdirSync(dirname(out), { recursive: true });

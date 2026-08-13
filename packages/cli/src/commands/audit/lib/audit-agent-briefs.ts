@@ -13,7 +13,9 @@
 
 import {
   AUDIT_SCRATCH_PREFIX,
+  DEEP_READ_QUOTA,
   LOW_ANGLE_FLOOR_LINES,
+  LOW_SWEEP_FLOOR_LINES,
   type AuditRoleId,
   type FilesPlan,
 } from './files-plan.js';
@@ -91,7 +93,7 @@ ${SEVERITY_HEURISTIC}`,
 1. Enumerate the module's exported symbols (start from its index/barrel file).
 2. grep for all callers and importers of each significant exported function/class/interface across the repo.
 3. Check each call site against the callee's actual contract: parameter count/type, return type (does any caller ignore a \`null\`/error return?), behavioral contract (a new exception, a changed default), required preconditions (initialization order, registration).
-4. Budget rule: deep-read at most 10 callers per exported symbol; register the rest by name. If the module exports more than 10 symbols, prioritize those whose contract is subtle (nullable returns, async, security decisions) and say which you skipped. Every caller you deep-read is REGISTERED (path + content hash) — the audit's drift protection re-hashes them at checkpoints. When the quota binds, disclose it: which exports hit the cap and which callers were name-registered only.
+4. Budget rule: deep-read at most ${DEEP_READ_QUOTA} callers per exported symbol; register the rest by name. If the module exports more than ${DEEP_READ_QUOTA} symbols, prioritize those whose contract is subtle (nullable returns, async, security decisions) and say which you skipped. Every caller you deep-read is REGISTERED (path + content hash) — the audit's drift protection re-hashes them at checkpoints. When the quota binds, disclose it: which exports hit the cap and which callers were name-registered only.
 
 **Producer direction — does every field/option ever get a value?**
 For every config field, option, or optional parameter the module READS, grep its write/read sites — including files outside the module — and ask what happens when it arrives \`undefined\` or defaulted. A reader's \`if (!x)\` guard that becomes unreachable-through means the gated feature silently does nothing. Severity is decided at the read site, not the declaration. Never explain an unpopulated field with author intent you cannot observe.
@@ -210,7 +212,7 @@ For each: name the concrete mistake the newcomer will make and the wrong outcome
  *  `eventModule.detected` from call patterns, and the detection outcome
  *  rides into the report header either way. */
 const EVENT_COVERAGE_ADDENDUM = `
-**EVENT-COVERAGE WALK (this module was detected as an event/lifecycle system).** Enumerate the events the module defines, then every call-site path that SHOULD fire each one — including early-return, error, and abort paths in the CALLERS. An event that one path fires and its sibling does not is a finding — name the silent path. Budget rule: deep-read at most 10 call sites per event and register the rest by name — spend the deep-read slots on callers' early-return, error, and abort paths FIRST, because a failure that fires only on those paths is invisible to a happy-path read, and happy-path callers are the cheap ones to register by name. When the budget binds, disclose it: which events hit the cap and which callers were name-registered only.`;
+**EVENT-COVERAGE WALK (this module was detected as an event/lifecycle system).** Enumerate the events the module defines, then every call-site path that SHOULD fire each one — including early-return, error, and abort paths in the CALLERS. An event that one path fires and its sibling does not is a finding — name the silent path. Budget rule: deep-read at most ${DEEP_READ_QUOTA} call sites per event and register the rest by name — spend the deep-read slots on callers' early-return, error, and abort paths FIRST, because a failure that fires only on those paths is invisible to a happy-path read, and happy-path callers are the cheap ones to register by name. When the budget binds, disclose it: which events hit the cap and which callers were name-registered only.`;
 
 function subjectFileList(plan: FilesPlan): string {
   return plan.subjectFiles
@@ -310,11 +312,41 @@ export function buildLowReaderPrompt(plan: FilesPlan): string {
       'buildLowReaderPrompt: the plan carries no angles — regenerate the plan.',
     );
   }
-  // The floor shrinks the set to exactly A and C: a plan that claims the
-  // floor while carrying other angles misreports coverage both ways.
-  if (low.angleFloorApplied && low.angles.some((a) => a !== 'A' && a !== 'C')) {
+  if (new Set(low.angles).size !== low.angles.length) {
     throw new Error(
-      'buildLowReaderPrompt: the plan claims the angle floor while carrying angles beyond A and C — regenerate the plan.',
+      'buildLowReaderPrompt: the plan carries duplicate angles — regenerate the plan.',
+    );
+  }
+  if (!Number.isInteger(low.findingCap) || low.findingCap <= 0) {
+    throw new Error(
+      'buildLowReaderPrompt: the plan carries a findingCap that is not a positive integer — regenerate the plan.',
+    );
+  }
+  // The floor shrinks the set to EXACTLY A and C: a plan that claims the
+  // floor while carrying other angles — or dropping one of the two —
+  // misreports coverage both ways.
+  if (
+    low.angleFloorApplied &&
+    (low.angles.length !== 2 ||
+      !low.angles.includes('A') ||
+      !low.angles.includes('C'))
+  ) {
+    throw new Error(
+      'buildLowReaderPrompt: the plan claims the angle floor while not carrying exactly angles A and C — regenerate the plan.',
+    );
+  }
+  // The floor/sweep claims must agree with the plan's own walked line
+  // total — a claim-vs-data mismatch renders a self-contradicting prompt
+  // and silently drops (or fakes) coverage.
+  const walked = walkedSubjectLines(plan);
+  if (low.angleFloorApplied !== walked < LOW_ANGLE_FLOOR_LINES) {
+    throw new Error(
+      "buildLowReaderPrompt: the plan's angle-floor claim disagrees with its walked subject lines — regenerate the plan.",
+    );
+  }
+  if (low.sweep !== walked >= LOW_SWEEP_FLOOR_LINES) {
+    throw new Error(
+      "buildLowReaderPrompt: the plan's sweep claim disagrees with its walked subject lines — regenerate the plan.",
     );
   }
   const angleList = low.angles.map((a) => `- ${angleDefs[a]}`).join('\n');
@@ -335,6 +367,8 @@ export function buildLowReaderPrompt(plan: FilesPlan): string {
   return `${UNTRUSTED_DATA_PREAMBLE}
 
 CONTEXT: You are the low-tier reader for an audit of EXISTING, merged code — the directory ${plan.targetPathAbsolute} (${plan.subjectFiles.length} subject files, ${walkedSubjectLines(plan)} subject lines). This is triage, not an audit: your findings ship UNVERIFIED, capped at ${low.findingCap}, most severe first.
+
+The walk is read-only: do NOT modify any file under audit, and do not run any of the module's code — no probes, no suite runs. Settle every claim by reading, and grade the evidence as a code read.
 
 Subject files (read every one): ${subjectFileList(plan)}${corpus}${uncoverable}
 

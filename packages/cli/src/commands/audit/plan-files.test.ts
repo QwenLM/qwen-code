@@ -29,23 +29,26 @@ describe('planFilesCommand handler', () => {
   let originalCwd: string;
   let originalExitCode: typeof process.exitCode;
   let originalQwenHome: string | undefined;
+  let originalConfigNosystem: string | undefined;
+  let originalConfigGlobal: string | undefined;
 
   beforeEach(() => {
     originalCwd = process.cwd();
     originalExitCode = process.exitCode;
     originalQwenHome = process.env['QWEN_HOME'];
+    originalConfigNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
+    originalConfigGlobal = process.env['GIT_CONFIG_GLOBAL'];
     process.exitCode = undefined;
     repo = mkdtempSync(join(tmpdir(), 'audit-plan-files-'));
     process.env['QWEN_HOME'] = join(repo, 'qwen-home');
-    execFileSync('git', ['init', '-q'], {
-      cwd: repo,
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: join(repo, 'empty-gitconfig'),
-      },
-    });
+    // Process-level git-config hermeticity: the guard's in-process
+    // check-ignore probes spawn git with the ambient process.env, so
+    // pinning only the `git init` subprocess leaks a host global exclude
+    // (e.g. one ignoring .qwen/) into the verdicts.
     writeFileSync(join(repo, 'empty-gitconfig'), '');
+    process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+    process.env['GIT_CONFIG_GLOBAL'] = join(repo, 'empty-gitconfig');
+    execFileSync('git', ['init', '-q'], { cwd: repo });
     target = join(repo, 'mod');
     mkdirSync(target, { recursive: true });
     writeFileSync(join(target, 'a.ts'), 'const a = 1;\n');
@@ -59,6 +62,12 @@ describe('planFilesCommand handler', () => {
     process.exitCode = originalExitCode;
     if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
     else process.env['QWEN_HOME'] = originalQwenHome;
+    if (originalConfigNosystem === undefined)
+      delete process.env['GIT_CONFIG_NOSYSTEM'];
+    else process.env['GIT_CONFIG_NOSYSTEM'] = originalConfigNosystem;
+    if (originalConfigGlobal === undefined)
+      delete process.env['GIT_CONFIG_GLOBAL'];
+    else process.env['GIT_CONFIG_GLOBAL'] = originalConfigGlobal;
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -140,6 +149,16 @@ describe('planFilesCommand handler', () => {
     const corrupt = join(repo, 'corrupt-args.json');
     writeFileSync(corrupt, '{"targetPath": ');
     expect(() => run({ argsReport: corrupt, out: 'o' })).toThrow(
+      /not a parse-args verdict/,
+    );
+  });
+
+  it('surfaces a JSON-literal-null args-report with the same diagnostic', () => {
+    // JSON.parse('null') succeeds and bypasses the parse try/catch; the
+    // shape check must not dereference null.
+    const nullReport = join(repo, 'null-args.json');
+    writeFileSync(nullReport, 'null');
+    expect(() => run({ argsReport: nullReport, out: 'o' })).toThrow(
       /not a parse-args verdict/,
     );
   });

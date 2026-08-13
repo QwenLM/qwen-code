@@ -123,7 +123,7 @@ const BINARY_EXT_RE =
  *  scope — recording the names surfaces them at the confirmation while no
  *  content copy, walker read, or model payload ever sees them. */
 const SECRET_FILE_RE =
-  /(^|\/)(\.env|\.env\.[^/]+|\.npmrc|\.netrc|credentials\.json|id_rsa[^/]*|[^/]+\.(pem|key|p12|pfx|keystore|tfstate))$/i;
+  /(^|\/)(\.env|\.env\.[^/]+|[^/]+\.env|\.npmrc|\.netrc|credentials\.json|id_[^/]+|[^/]+\.(pem|key|p12|pfx|keystore|tfstate(\.backup)?))$/i;
 
 // --- Enumeration -------------------------------------------------------------
 
@@ -162,8 +162,15 @@ const BUILD_OUTPUT_DIRS = new Set(['dist', 'build', 'bundle']);
  *  it is walked instead of silently dropped. Outside a worktree — or for an
  *  untracked directory — the heuristic stands. */
 function dirHasTrackedFiles(dirAbs: string): boolean {
-  const listing = runGit(dirAbs, ['ls-files', '--', dirAbs], GIT_TIMEOUT_MS);
-  return listing !== null && listing.trim().length > 0;
+  // .git stays excluded unconditionally: a broken git must not fail-open
+  // into walking its internals.
+  if (basename(dirAbs) === '.git') return false;
+  const probe = probeGit(dirAbs, ['ls-files', '--', dirAbs], GIT_TIMEOUT_MS);
+  if (probe.ok) return probe.out.trim().length > 0;
+  // Git's definitive not-a-worktree answer lets the name heuristic stand;
+  // a FAILED probe has no answer, so walk instead of silently dropping a
+  // tracked directory the heuristic caught.
+  return !probe.notRepo;
 }
 
 function isExcludedDirName(name: string, underVendor: boolean): boolean {
@@ -347,15 +354,47 @@ const EVENT_CALL_RE =
 
 /** Comments and string literals mention keywords without calling anything;
  *  matching them steers 1c's deep-read budget at nonexistent events. The
- *  strip is a heuristic (the detection is one), not a language parser. */
+ *  strip is a heuristic (the detection is one), not a language parser.
+ *  Single pass in source order: a string literal starting before a comment
+ *  marker consumes the marker as literal content (a URL's `//`), never the
+ *  other way around. */
 function stripCommentsAndStrings(content: string): string {
-  return content
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\/\/[^\n]*/g, '')
-    .replace(
-      /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g,
-      '""',
-    );
+  let out = '';
+  let i = 0;
+  const n = content.length;
+  while (i < n) {
+    const ch = content[i];
+    const next = i + 1 < n ? content[i + 1] : '';
+    if (ch === '/' && next === '/') {
+      const end = content.indexOf('\n', i + 2);
+      i = end === -1 ? n : end;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      const end = content.indexOf('*/', i + 2);
+      i = end === -1 ? n : end + 2;
+      continue;
+    }
+    // '#' comments (Python/shell): only at line start or after whitespace,
+    // so a JS private field (`this.#x`) keeps its member name.
+    if (ch === '#' && (i === 0 || /\s/.test(content[i - 1]))) {
+      const end = content.indexOf('\n', i + 1);
+      i = end === -1 ? n : end;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      i++;
+      while (i < n && content[i] !== ch) {
+        i += content[i] === '\\' ? 2 : 1;
+      }
+      i++; // closing quote (or past EOF for an unterminated literal)
+      out += '""';
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 interface FileMeasure {
@@ -529,24 +568,65 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
 
 // --- Git-geometry refusals ----------------------------------------------------
 
-/** The one git probe helper for the audit command group: argv-form
- *  execFileSync under a caller-chosen deadline. Consolidated so a future
- *  fix to process invocation lands in one place. */
+/** GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE override `-C` path resolution, so
+ *  an ambient value makes every probe answer against a foreign repository;
+ *  strip them (plus GIT_OBJECT_DIRECTORY) so `-C` is the sole repository
+ *  selector. */
+function gitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env['GIT_DIR'];
+  delete env['GIT_WORK_TREE'];
+  delete env['GIT_INDEX_FILE'];
+  delete env['GIT_OBJECT_DIRECTORY'];
+  return env;
+}
+
+interface GitSpawn {
+  ok: boolean;
+  out: string;
+  stderr: string;
+  /** Null when the spawn itself failed (missing binary, timeout kill). */
+  status: number | null;
+}
+
+/** The one process invocation for every git probe in the audit command
+ *  group: argv-form execFileSync under a caller-chosen deadline, with the
+ *  repository-selecting env scrubbed. Consolidated so a future fix to
+ *  process invocation lands in one place. */
+function spawnGit(root: string, args: string[], timeoutMs: number): GitSpawn {
+  try {
+    const out = execFileSync('git', ['-C', root, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      maxBuffer: 64 * 1024 * 1024,
+      env: gitEnv(),
+    });
+    return { ok: true, out, stderr: '', status: 0 };
+  } catch (err) {
+    const e = err as { status?: number | null; stderr?: unknown } | null;
+    const stderr =
+      typeof e?.stderr === 'string'
+        ? e.stderr
+        : Buffer.isBuffer(e?.stderr)
+          ? e.stderr.toString('utf8')
+          : '';
+    return {
+      ok: false,
+      out: '',
+      stderr,
+      status: typeof e?.status === 'number' ? e.status : null,
+    };
+  }
+}
+
 export function runGit(
   root: string,
   args: string[],
   timeoutMs: number,
 ): string | null {
-  try {
-    return execFileSync('git', ['-C', root, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
-    });
-  } catch {
-    return null;
-  }
+  const spawn = spawnGit(root, args, timeoutMs);
+  return spawn.ok ? spawn.out : null;
 }
 
 function git(root: string, args: string[]): string | null {
@@ -554,7 +634,7 @@ function git(root: string, args: string[]): string | null {
 }
 
 /** A git probe that distinguishes the three outcomes a guard needs:
- *  success, DEFINITIVELY not a worktree (git's own exit-128 answer), and
+ *  success, DEFINITIVELY not a worktree (git's own answer), and
  *  failure-without-answer (timeout, transient error, missing binary).
  *  Collapsing the third into the second lets a guard pass vacuously on
  *  exactly the runs where it cannot verify anything. */
@@ -567,20 +647,14 @@ export function probeGit(
   args: string[],
   timeoutMs: number,
 ): GitProbe {
-  try {
-    return {
-      ok: true,
-      out: execFileSync('git', ['-C', root, ...args], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: timeoutMs,
-        maxBuffer: 64 * 1024 * 1024,
-      }),
-    };
-  } catch (err) {
-    const status = (err as { status?: number } | null)?.status;
-    return { ok: false, notRepo: status === 128 };
-  }
+  const spawn = spawnGit(root, args, timeoutMs);
+  if (spawn.ok) return { ok: true, out: spawn.out };
+  // Git exits 128 for fatals beyond "not a git repository" (dubious
+  // ownership, corrupt config): only git's own message is definitive, a
+  // bare exit code is not.
+  const notRepo =
+    spawn.status === 128 && /not a git repository/i.test(spawn.stderr);
+  return { ok: false, notRepo };
 }
 
 export interface GitGeometry {
@@ -629,14 +703,19 @@ export function submoduleRefusal(rootAbs: string): string | null {
     'rev-parse',
     '--show-superproject-working-tree',
   ]);
-  if (superproject && superproject.trim() !== '') {
+  if (superproject === null) {
+    return 'the superproject probe failed — cannot rule out a submodule';
+  }
+  if (superproject.trim() !== '') {
     return 'the audited path resolves inside a submodule — no drift coverage inside submodules in v1';
   }
   const rel = toPosix(relative(toplevel, realRoot));
   // -z is load-bearing: paths arrive verbatim (no C-quoting), and this parse
   // has no unquoting logic.
   const listing = git(toplevel, ['ls-files', '-s', '-z']);
-  if (listing === null) return null;
+  if (listing === null) {
+    return 'the gitlink enumeration failed — cannot rule out a submodule';
+  }
   const gitlinks = listing
     .split('\0')
     .filter((line) => line.startsWith('160000 '))
@@ -704,7 +783,8 @@ function guardDir(
   // (probes run before the first write), so resolve the LEADING components
   // one by one and probe the physical equivalent.
   let probeDir = toPosix(dir);
-  const parts = dir.split('/');
+  let resolvedViaSymlink = false;
+  const parts = probeDir.split('/');
   for (let i = 1; i <= parts.length; i++) {
     const prefixAbs = join(projectRoot, parts.slice(0, i).join('/'));
     let prefixStat: Stats;
@@ -730,9 +810,11 @@ function guardDir(
       };
     }
     const rel = relative(realpathSync(gitRoot), target);
-    if (rel.startsWith('..') || isAbsolute(rel)) {
+    if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
       // The link points outside the worktree: the artifacts physically
-      // land where git can never commit them.
+      // land where git can never commit them. ('..' alone or a leading
+      // '../' — a repo-relative name that merely STARTS with '..' is a
+      // legal in-repo entry and keeps probing.)
       return {
         dir,
         representative: join(dir, representativeFiles[0]),
@@ -742,6 +824,7 @@ function guardDir(
       };
     }
     probeDir = toPosix(join(rel, ...parts.slice(i)));
+    resolvedViaSymlink = true;
     break;
   }
   // The artifacts land under the invocation cwd, which may be a subdirectory
@@ -750,7 +833,11 @@ function guardDir(
   const prefix = toPosix(
     relative(realpathSync(gitRoot), realpathSync(projectRoot)),
   );
-  const prefixDir = prefix === '' ? '' : `${prefix}/`;
+  // The symlink branch rewrites probeDir to a toplevel-relative PHYSICAL
+  // path: the cwd-relative prefix is already inside it and must not be
+  // prepended again (a double-prefixed probe asks about a path that does
+  // not exist).
+  const prefixDir = resolvedViaSymlink || prefix === '' ? '' : `${prefix}/`;
   // Probe every artifact name shape actually written and take the worst
   // verdict: re-includes can be name-selective, so one exposed shape is an
   // exposed directory.
@@ -766,13 +853,16 @@ function guardDir(
   }
   // :(literal): the prefix may start with ':' (a legal directory name),
   // which git would otherwise parse as pathspec magic and answer empty.
+  // -z is load-bearing: paths arrive verbatim (no C-quoting of non-ASCII
+  // names), mirroring submoduleRefusal's parse.
   const trackedOut = git(gitRoot, [
     'ls-files',
+    '-z',
     '--',
     `:(literal)${prefixDir}${probeDir}/`,
   ]);
   const trackedFiles = (trackedOut ?? '')
-    .split('\n')
+    .split('\0')
     .filter((p) => p.length > 0)
     .slice(0, 20);
   const status: GuardStatus =
@@ -813,8 +903,12 @@ export function checkLocalOnlyGuard(
         `audit-raw-args-${ts}.txt`,
         `audit-plan-${ts}.json`,
         `audit-callers-${ts}.json`,
-        `audit-findings-low-${ts}.md`,
-        `audit-findings-1a-${ts}.md`,
+        // One representative per findings shape the skill writes: the
+        // low-tier reader plus every roster role of the high tier (which
+        // contains the medium roster).
+        ...['low', ...rosterForEffort('high')].map(
+          (role) => `audit-findings-${role}-${ts}.md`,
+        ),
       ]),
     ],
     fallbackRoot: Storage.getAuditFallbackDir(projectRoot),
@@ -848,7 +942,9 @@ export function applyExcludeRemedy(projectRoot: string): string {
   const prefix = top
     ? toPosix(relative(realpathSync(top.trim()), realpathSync(projectRoot)))
     : '';
-  if (/[*?[\]\\]/.test(prefix)) {
+  // \n/\r are the exclude format's line delimiter: a prefix carrying one
+  // would write malformed rules instead of refusing.
+  if (/[*?[\]\\\n\r]/.test(prefix)) {
     throw new Error(
       'audit: the landing prefix contains gitignore pattern syntax — an ' +
         'exclude rule can never match it. Use the fallback landing instead.',
@@ -1019,7 +1115,6 @@ export interface FilesPlan {
   estimate: TokenEstimate | null;
   roster: AuditRoleId[];
   lowTier: LowTierConfig | null;
-  deepReadQuota: number;
   /** High tier only: reverse-audit territory partitions of the subject set. */
   fileGroups: string[][] | null;
   /** High tier only, disclosed at the confirmation: (roster + file-group
@@ -1029,7 +1124,6 @@ export interface FilesPlan {
   agentBound: number | null;
   artifacts: {
     reportSlug: string;
-    fallbackRoot: string;
   };
 }
 
@@ -1074,7 +1168,7 @@ export function buildFilesPlan(
     ) {
       refuse(
         'empty-subjects',
-        `audit: only excluded directories under ${targetPath} (${excludedDirs.join(', ')}) — no subject files. Excluded by name: ${[...ALWAYS_EXCLUDED_DIRS].join(', ')}, plus dist/build outside vendor/.`,
+        `audit: only excluded directories under ${targetPath} (${excludedDirs.join(', ')}) — no subject files. Excluded by name: ${[...ALWAYS_EXCLUDED_DIRS].join(', ')}, plus dist/build outside vendor/, and bundle everywhere.`,
       );
     }
     refuse(
@@ -1150,7 +1244,6 @@ export function buildFilesPlan(
       effort === 'low'
         ? lowTierConfig(subjects.reduce((n, f) => n + f.lines, 0))
         : null,
-    deepReadQuota: DEEP_READ_QUOTA,
     fileGroups,
     agentBound:
       fileGroups === null
@@ -1158,7 +1251,6 @@ export function buildFilesPlan(
         : (roster.length + fileGroups.length * MAX_REVERSE_ROUNDS) * 2,
     artifacts: {
       reportSlug: safeTarget(targetPath),
-      fallbackRoot: '', // filled by the CLI, which knows the project root
     },
   };
 }

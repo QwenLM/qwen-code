@@ -8,7 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import yargs from 'yargs';
 import { parseAuditArgs, parseArgsCommand } from './parse-args.js';
+import { auditCommand } from '../audit.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 // The handler reads the raw string from fd 0 and writes the verdict to
@@ -73,14 +75,31 @@ describe('parseAuditArgs', () => {
     expect(parseAuditArgs(`'${dir}' --effort=LOW`).effort).toBe('low');
   });
 
-  it('refuses an unbalanced quote instead of silently re-targeting', () => {
-    // An unquoted apostrophe would be stripped by the tokenizer and
-    // re-target the audit (src/it's-dir -> src/its-dir); an unclosed quote
-    // would swallow the rest of the string.
+  it('refuses an unclosed quote instead of silently re-targeting', () => {
+    // An unclosed quote would swallow the rest of the string in the
+    // tokenizer; an unquoted apostrophe would re-target the audit
+    // (src/it's-dir -> src/its-dir).
     expect(() => parseAuditArgs(`src/it's-dir`)).toThrow(/unbalanced quote/);
     expect(() => parseAuditArgs(`'${dir} --effort low`)).toThrow(
       /unbalanced quote/,
     );
+    // The nesting semantics: inside an open quote the other quote
+    // character is literal content, so per-character parity is wrong in
+    // both directions — this input LOOKS parity-balanced but ends inside
+    // an unclosed single quote.
+    expect(() => parseAuditArgs(`"a'"b'`)).toThrow(/unbalanced quote/);
+  });
+
+  it('accepts an apostrophe inside a double-quoted path', () => {
+    // A balanced quoted path carrying the opposite quote character is
+    // legal shell input; the old per-character parity refused it.
+    const spaced = realpathSync(mkdtempSync(join(tmpdir(), "audit O'Brien ")));
+    try {
+      const parsed = parseAuditArgs(`"${spaced}"`);
+      expect(parsed.targetPathAbsolute).toBe(spaced);
+    } finally {
+      rmSync(spaced, { recursive: true, force: true });
+    }
   });
 
   it('rejects missing, extra, and ambiguous input', () => {
@@ -130,12 +149,16 @@ describe('parseArgsCommand handler', () => {
     );
   });
 
-  it('strips one trailing newline from the stdin payload', () => {
-    // The shell's heredoc/echo adds one; a path never ends with a newline,
-    // so exactly one is stripped and no more.
-    fsState.stdin = `'${dir}'\n`;
-    run({});
-    expect(writeStdoutLine).toHaveBeenCalled();
+  it('tolerates trailing newlines in the stdin payload', () => {
+    // The shell's heredoc/echo appends newlines; the tokenizer splits on
+    // whitespace, so the payload parses end-to-end without any stripping.
+    fsState.stdin = `'${dir}'\n\n`;
+    const out = join(dir, 'nl.json');
+    run({ out });
+    const verdict = JSON.parse(fsState.written.get(out)!) as {
+      targetPathAbsolute: string;
+    };
+    expect(verdict.targetPathAbsolute).toBe(dir);
   });
 
   it('refuses a negated --stdin (the command is stdin-only)', () => {
@@ -145,5 +168,43 @@ describe('parseArgsCommand handler', () => {
   it('surfaces parse refusals through the handler exit path', () => {
     fsState.stdin = `src/it's-dir\n`;
     expect(() => run({})).toThrow(/unbalanced quote/);
+  });
+});
+
+describe('yargs wiring', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'audit parse-args yargs ')));
+    vi.mocked(writeStdoutLine).mockClear();
+    fsState.written.clear();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('runs parse-args flat from --stdin to --out through real yargs', () => {
+    fsState.stdin = `'${dir}'`;
+    const out = join(dir, 'flat.json');
+    void yargs(['parse-args', '--stdin', '--out', out])
+      .command(parseArgsCommand)
+      .strict()
+      .exitProcess(false)
+      .parse();
+    const verdict = JSON.parse(fsState.written.get(out)!) as { effort: string };
+    expect(verdict.effort).toBe('medium');
+  });
+
+  it('runs parse-args nested under the audit command through real yargs', () => {
+    fsState.stdin = `'${dir}'`;
+    const out = join(dir, 'nested.json');
+    void yargs(['audit', 'parse-args', '--stdin', '--out', out])
+      .command(auditCommand)
+      .strict()
+      .exitProcess(false)
+      .parse();
+    const verdict = JSON.parse(fsState.written.get(out)!) as { effort: string };
+    expect(verdict.effort).toBe('medium');
   });
 });

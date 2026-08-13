@@ -10,23 +10,21 @@
 // the path — never a raw ENOENT/SyntaxError stack out of a yargs handler,
 // which replaces the designed exit codes with exit 1 + a help dump.
 
-import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { FilesPlan } from './files-plan.js';
+import { AUDIT_READ_MAX_BYTES, readGuarded } from './safe-read.js';
 
 export function readJsonFile<T>(path: string, command: string): T {
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch (err) {
+  // Guarded read: these paths are agent-touched — a writer-less FIFO must
+  // not hang the command, and a multi-GB file must not OOM the parse.
+  const content = readGuarded(path, AUDIT_READ_MAX_BYTES);
+  if (content === null) {
     throw new Error(
-      `audit ${command}: cannot read ${path} — ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `audit ${command}: cannot read ${path} — missing, unreadable, not a regular file, or oversized.`,
     );
   }
   try {
-    return JSON.parse(raw) as T;
+    return JSON.parse(content.toString('utf8')) as T;
   } catch {
     throw new Error(
       `audit ${command}: ${path} is not valid JSON — regenerate it.`,
@@ -35,18 +33,33 @@ export function readJsonFile<T>(path: string, command: string): T {
 }
 
 /** The plan shape the helpers actually read. A stale plan JSON can carry
- *  anything; validate at the read site instead of crashing mid-command. */
+ *  anything; validate at the read site instead of crashing mid-command.
+ *  Element shapes included — every consumer dereferences f.path/f.lines,
+ *  and anchors resolve against targetPathAbsolute, so a relative one would
+ *  bind a verdict to whatever sits under the invocation cwd. */
 export function readPlanFile(path: string, command: string): FilesPlan {
   const plan = readJsonFile<FilesPlan>(path, command);
-  if (
-    typeof plan?.targetPathAbsolute !== 'string' ||
-    !Array.isArray(plan?.subjectFiles) ||
-    !Array.isArray(plan?.testCorpus) ||
-    !Array.isArray(plan?.uncoverable)
-  ) {
+  const regenerate = (): never => {
     throw new Error(
       `audit ${command}: ${path} is not a plan written by \`qwen audit plan-files\` — regenerate it.`,
     );
+  };
+  const isFileEntry = (e: unknown): boolean =>
+    typeof e === 'object' &&
+    e !== null &&
+    typeof (e as Record<string, unknown>)['path'] === 'string' &&
+    typeof (e as Record<string, unknown>)['lines'] === 'number';
+  if (
+    typeof plan?.targetPathAbsolute !== 'string' ||
+    !isAbsolute(plan.targetPathAbsolute) ||
+    !Array.isArray(plan?.subjectFiles) ||
+    !Array.isArray(plan?.testCorpus) ||
+    !Array.isArray(plan?.uncoverable) ||
+    !plan.subjectFiles.every(isFileEntry) ||
+    !plan.testCorpus.every(isFileEntry) ||
+    !plan.uncoverable.every(isFileEntry)
+  ) {
+    regenerate();
   }
   return plan;
 }

@@ -44,10 +44,19 @@ export function isGitIgnored(
   // A leading ':' in the first component would be parsed as pathspec magic
   // and probe the wrong pathname ('./' disambiguates it as a literal).
   const probe = path.startsWith(':') ? `./${path}` : path;
+  // GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE override `-C` path resolution, so
+  // an ambient value would answer against a foreign repository's ignore
+  // rules; strip them so `-C` is the sole repository selector.
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env['GIT_DIR'];
+  delete env['GIT_WORK_TREE'];
+  delete env['GIT_INDEX_FILE'];
+  delete env['GIT_OBJECT_DIRECTORY'];
   try {
     execFileSync('git', ['-C', worktree, 'check-ignore', '-q', '--', probe], {
       stdio: 'ignore',
       timeout: timeoutMs,
+      env,
     });
     return true;
   } catch {

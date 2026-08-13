@@ -16,7 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   applyExcludeRemedy,
@@ -25,6 +25,7 @@ import {
   checkLocalOnlyGuard,
   classifyAuditPath,
   collectAuditFiles,
+  ESTIMATE_HEADROOM,
   estimateTokens,
   FILE_GROUP_LINES,
   LOW_ANGLE_FLOOR_LINES,
@@ -36,6 +37,7 @@ import {
   MAX_REVERSE_ROUNDS,
   resolveAuditRoot,
   rosterForEffort,
+  submoduleRefusal,
   SUBJECT_LINES_GATE,
   SUBJECT_TOKENS_PER_LINE,
   TEST_LINES_GATE,
@@ -48,13 +50,23 @@ import {
 } from './files-plan.js';
 
 let dir: string;
+let originalConfigNosystem: string | undefined;
+let originalConfigGlobal: string | undefined;
 
 beforeEach(() => {
+  originalConfigNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
+  originalConfigGlobal = process.env['GIT_CONFIG_GLOBAL'];
   dir = join(
     tmpdir(),
     `audit-plan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   mkdirSync(join(dir, 'src'), { recursive: true });
+  // Process-level git-config hermeticity: the guard's in-process
+  // check-ignore probes spawn git with the ambient process.env, so a host
+  // global exclude (e.g. one ignoring .qwen/) would leak into verdicts.
+  writeFileSync(join(dir, 'empty-gitconfig'), '');
+  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+  process.env['GIT_CONFIG_GLOBAL'] = join(dir, 'empty-gitconfig');
   writeFileSync(join(dir, 'src', 'a.ts'), 'const a = 1;\n'.repeat(10));
   writeFileSync(join(dir, 'src', 'a.test.ts'), 'x'.repeat(100));
   writeFileSync(join(dir, 'README.md'), '# hi\n');
@@ -63,6 +75,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  if (originalConfigNosystem === undefined)
+    delete process.env['GIT_CONFIG_NOSYSTEM'];
+  else process.env['GIT_CONFIG_NOSYSTEM'] = originalConfigNosystem;
+  if (originalConfigGlobal === undefined)
+    delete process.env['GIT_CONFIG_GLOBAL'];
+  else process.env['GIT_CONFIG_GLOBAL'] = originalConfigGlobal;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -265,6 +283,23 @@ describe('walkAuditTree', () => {
     },
   );
 
+  it('silently skips a linked-worktree .git pointer file', () => {
+    // A linked worktree's .git is a regular FILE (the gitdir pointer):
+    // structural metadata, never an audit subject — its gitdir content
+    // must not reach an agent prompt.
+    const root = join(dir, 'wt');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'a.ts'), 'const a = 1;\n');
+    writeFileSync(join(root, '.git'), 'gitdir: /elsewhere/.git/worktrees/wt\n');
+    const { files, excludedDirs, structuralUncoverable } = walkAuditTree(root);
+    expect(files).toContain('a.ts');
+    expect(files).not.toContain('.git');
+    expect(excludedDirs).not.toContain('.git');
+    expect(
+      structuralUncoverable.find((u) => u.path === '.git'),
+    ).toBeUndefined();
+  });
+
   it('records symlinks and never follows them', () => {
     symlinkSync(join(dir, 'src', 'a.ts'), join(dir, 'src', 'link.ts'));
     mkdirSync(join(dir, 'real'), { recursive: true });
@@ -317,10 +352,21 @@ describe('collectAuditFiles', () => {
   it('records secret-shaped files by name and never content-reads them', () => {
     writeFileSync(join(dir, '.env'), 'API_KEY=secret\n');
     writeFileSync(join(dir, '.env.local'), 'TOKEN=x\n');
+    mkdirSync(join(dir, 'config'), { recursive: true });
+    // *.env-SUFFIXED names (the .env clauses anchor to basename start).
+    writeFileSync(join(dir, 'config', 'prod.env'), 'API_KEY=x\n');
     mkdirSync(join(dir, 'deploy'), { recursive: true });
     writeFileSync(join(dir, 'deploy', 'server.pem'), '-----BEGIN-----\n');
+    // Modern SSH key names (ed25519 has been OpenSSH's default since 2021),
+    // fail-closed including the .pub halves.
+    writeFileSync(join(dir, 'deploy', 'id_ed25519'), '-----BEGIN-----\n');
+    writeFileSync(join(dir, 'deploy', 'id_ecdsa'), '-----BEGIN-----\n');
+    writeFileSync(join(dir, 'deploy', 'id_dsa'), '-----BEGIN-----\n');
     writeFileSync(join(dir, 'id_rsa'), '-----BEGIN OPENSSH-----\n');
     writeFileSync(join(dir, 'state.tfstate'), '{}\n');
+    mkdirSync(join(dir, 'infra'), { recursive: true });
+    // Holds the same credentials as the .tfstate the suffix clause catches.
+    writeFileSync(join(dir, 'infra', 'terraform.tfstate.backup'), '{}\n');
     writeFileSync(join(dir, '.npmrc'), '//registry/:_authToken=x\n');
     const c = collectAuditFiles(dir);
     const secrets = c.uncoverable.filter((u) => u.reason === 'secret-shaped');
@@ -328,8 +374,13 @@ describe('collectAuditFiles', () => {
       '.env',
       '.env.local',
       '.npmrc',
+      'config/prod.env',
+      'deploy/id_dsa',
+      'deploy/id_ecdsa',
+      'deploy/id_ed25519',
       'deploy/server.pem',
       'id_rsa',
+      'infra/terraform.tfstate.backup',
       'state.tfstate',
     ]);
     // Names surface at the confirmation; zero lines steer the gate arms.
@@ -361,9 +412,11 @@ describe('collectAuditFiles', () => {
   it('detects NUL-byte content as non-text even without a binary extension', () => {
     writeFileSync(join(dir, 'src', 'payload.ts'), 'const a = 1;\0\n');
     const c = collectAuditFiles(dir);
-    expect(c.uncoverable.find((u) => u.path === 'src/payload.ts')?.reason).toBe(
-      'non-text',
-    );
+    const entry = c.uncoverable.find((u) => u.path === 'src/payload.ts');
+    expect(entry?.reason).toBe('non-text');
+    // Load-bearing: raw 0x0A bytes are not code lines and must not steer
+    // the gate arms.
+    expect(entry?.lines).toBe(0);
   });
 
   it('detects a NUL past the head window as non-text', () => {
@@ -374,9 +427,9 @@ describe('collectAuditFiles', () => {
       `${'a'.repeat(16 * 1024)}\0trailing`,
     );
     const c = collectAuditFiles(dir);
-    expect(
-      c.uncoverable.find((u) => u.path === 'src/late-nul.ts')?.reason,
-    ).toBe('non-text');
+    const entry = c.uncoverable.find((u) => u.path === 'src/late-nul.ts');
+    expect(entry?.reason).toBe('non-text');
+    expect(entry?.lines).toBe(0);
   });
 
   it('detects an over-cap line as uncoverable with its lines counted', () => {
@@ -459,7 +512,7 @@ describe('collectAuditFiles', () => {
     expect(c.eventDetection.detected).toBe(false);
   });
 
-  it('counts .once() alongside .on() as an event call site', () => {
+  it('counts .once() as an event call site', () => {
     for (const name of ['once-bus.ts', 'once-wire.ts']) {
       writeFileSync(
         join(dir, 'src', name),
@@ -471,6 +524,23 @@ describe('collectAuditFiles', () => {
     const c = collectAuditFiles(dir);
     expect(c.eventDetection.detected).toBe(true);
     expect(c.eventDetection.files).toBe(2);
+  });
+
+  it('counts .on() as an event call site', () => {
+    // The \.on\s*\( arm of EVENT_CALL_RE needs its own positive fixture:
+    // bus.on(...) registration is a common event-API idiom.
+    for (const name of ['on-bus.ts', 'on-wire.ts']) {
+      writeFileSync(
+        join(dir, 'src', name),
+        Array.from({ length: 5 }, (_, i) => `emitter.on('e${i}', h)`).join(
+          '\n',
+        ),
+      );
+    }
+    const c = collectAuditFiles(dir);
+    expect(c.eventDetection.detected).toBe(true);
+    expect(c.eventDetection.files).toBe(2);
+    expect(c.eventDetection.callSites).toBe(10);
   });
 
   it('does not count past-tense and stem-prefix calls as event call sites', () => {
@@ -663,12 +733,20 @@ describe('estimate and token cap', () => {
     expect(permissions.floorTokens).toBeLessThanOrEqual(32_600_000);
     expect(permissions.topTokens).toBeGreaterThanOrEqual(42_000_000);
     expect(permissions.topTokens).toBeLessThanOrEqual(42_400_000);
+    // The top is EXACTLY floor × headroom: pin the constant itself, or a
+    // retune of it moves every bracket without a red test.
+    expect(permissions.topTokens).toBe(
+      Math.round(permissions.floorTokens * ESTIMATE_HEADROOM),
+    );
     // hooks: 8,516 subject / 16,335 test, measured ~46M
     const hooks = estimateTokens(8516, 16335);
     expect(hooks.floorTokens).toBeGreaterThanOrEqual(45_900_000);
     expect(hooks.floorTokens).toBeLessThanOrEqual(46_100_000);
     expect(hooks.topTokens).toBeGreaterThanOrEqual(59_500_000);
     expect(hooks.topTokens).toBeLessThanOrEqual(TOKEN_CAP);
+    expect(hooks.topTokens).toBe(
+      Math.round(hooks.floorTokens * ESTIMATE_HEADROOM),
+    );
   });
 
   it('the precision case: rounded rates would refuse the hooks module', () => {
@@ -1263,4 +1341,87 @@ describe('git-backed checks', () => {
       'no-worktree',
     ]);
   });
+
+  it('treats a 128 with a non-repo fatal as probe-failed, not no-worktree', () => {
+    // Git exits 128 for fatals beyond "not a git repository" (here: a
+    // corrupt global config); classifying that as notRepo lets the guard
+    // pass vacuously in a live worktree.
+    const repo = initRepo();
+    const saved = process.env['GIT_CONFIG_GLOBAL'];
+    writeFileSync(join(dir, 'corrupt-gitconfig'), '[core\n');
+    process.env['GIT_CONFIG_GLOBAL'] = join(dir, 'corrupt-gitconfig');
+    try {
+      const guard = checkLocalOnlyGuard(repo, 'x.md');
+      expect(guard.dirs.map((d) => d.status)).toEqual([
+        'git-failed',
+        'git-failed',
+      ]);
+      // The submodule refusal sees the same failure-without-answer.
+      expect(submoduleRefusal(join(repo, 'mod'))).toContain('probe failed');
+    } finally {
+      if (saved === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = saved;
+    }
+  });
+
+  // The PATH shim stands in for a missing/hanging git binary.
+  it.skipIf(process.platform === 'win32')(
+    'reports git-failed and refuses the submodule check when the probe fails without an answer',
+    () => {
+      const repo = initRepo();
+      const shimDir = join(dir, 'git-shim');
+      mkdirSync(shimDir, { recursive: true });
+      writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexit 3\n');
+      chmodSync(join(shimDir, 'git'), 0o755);
+      const savedPath = process.env['PATH'];
+      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
+      try {
+        const guard = checkLocalOnlyGuard(repo, 'x.md');
+        expect(guard.dirs.map((d) => d.status)).toEqual([
+          'git-failed',
+          'git-failed',
+        ]);
+        expect(submoduleRefusal(join(repo, 'mod'))).toContain('probe failed');
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+    },
+  );
+
+  // Symlink fixtures need POSIX permissions semantics.
+  it.skipIf(process.platform === 'win32')(
+    'keeps probing a ..-named in-repo symlink target',
+    () => {
+      const repo = initRepo();
+      // A legal in-repo directory whose name merely STARTS with '..' must
+      // not be misread as outside the worktree (the harmful direction:
+      // certified ok without any ignore probe).
+      mkdirSync(join(repo, '..audit-store'), { recursive: true });
+      symlinkSync(join(repo, '..audit-store'), join(repo, '.qwen'));
+      expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe(
+        'unprotected',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'probes the resolved physical path when the cwd is a subdirectory',
+    () => {
+      // The symlink branch rewrites probeDir to a toplevel-relative
+      // physical path; the cwd-relative prefix must not be prepended
+      // again (a double-prefixed probe asks about a nonexistent path and
+      // the guard answers from a fatal instead of the real landing).
+      const repo = join(dir, 'repo-sym-sub');
+      mkdirSync(join(repo, 'sub'), { recursive: true });
+      mkdirSync(join(repo, 'elsewhere'), { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, '.gitignore'), 'sub/\n');
+      symlinkSync(join(repo, 'elsewhere'), join(repo, 'sub', '.qwen'));
+      const guard = checkLocalOnlyGuard(join(repo, 'sub'), 'x.md');
+      // The physical landing elsewhere/ is NOT ignored — the guard must
+      // expose it, not certify a phantom double-prefixed path.
+      expect(guard.dirs[0].status).toBe('unprotected');
+      expect(guard.dirs[1].status).toBe('unprotected');
+    },
+  );
 });
