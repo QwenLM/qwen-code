@@ -9,3 +9,4 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 bun packages/cli/scripts/opentui-component-parity.tsx
 bun packages/cli/scripts/opentui-stats-parity.tsx
+bun packages/cli/scripts/opentui-command-parity.ts

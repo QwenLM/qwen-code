@@ -1,0 +1,49 @@
+name: tui-parity
+
+on:
+  pull_request:
+    paths:
+      - 'packages/cli/**'
+      - 'scripts/tui-parity/**'
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install deps
+        run: npm ci --workspace packages/cli --include-workspace-root || npm ci
+      - name: Build cli
+        run: npm run build --workspace packages/cli
+      - name: Component parity snapshots (ink vs opentui)
+        run: bash scripts/tui-parity/component-parity.sh
+      - name: Functional command parity (real settings)
+        run: cd packages/cli && bun scripts/opentui-command-parity.ts
+
+  noflicker:
+    # Real-model no-flicker gate; only when credentials are available.
+    runs-on: ubuntu-latest
+    if: ${{ secrets.QWEN_API_KEY != '' }}
+    env:
+      QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install deps
+        run: npm ci --workspace packages/cli --include-workspace-root || npm ci
+      - name: Build cli
+        run: npm run build --workspace packages/cli
+      - name: OpenTUI no-flicker gate (0 clears, balanced DEC2026)
+        run: bash scripts/tui-parity/accept-noflicker.sh
