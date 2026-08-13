@@ -121,6 +121,19 @@ describe('bundled review skill', () => {
     expect(body).toContain('remove it now — this convergence supersedes');
   });
 
+  it('pins the unbounded-family escalation on the divergence-class ruling', () => {
+    // Escalating from enumerating siblings to one class-level Critical is the
+    // load-bearing ledger-ruling hunk this change adds — the whole point of it. A
+    // later edit paraphrasing or reverting the incremental re-review section (the
+    // "fixed only when the structural change lands" clause especially) must fail a
+    // test, not slip through.
+    const body = skillBody();
+    expect(body).toContain('one class-level Critical');
+    expect(body).toContain(
+      'rule THAT Critical `fixed` only when the structural change lands',
+    );
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either
