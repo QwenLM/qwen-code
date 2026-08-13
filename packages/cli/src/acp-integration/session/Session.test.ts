@@ -15236,6 +15236,135 @@ describe('Session', () => {
         expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
       });
 
+      it('keeps a Goal turn graceful when the repeated-failure guard stops it', async () => {
+        // Goal turns keep the configured guard mode (they are not channel
+        // turns) but get rejectOnLoopDetected=false, so an enforce-mode
+        // failure streak stops them through the graceful branch: end_turn
+        // settlement plus the transcript stop message, never a rejection
+        // that would pause the goal without a published turn_error.
+        const guardModeEnv = 'QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD';
+        const previousGuardMode = process.env[guardModeEnv];
+        process.env[guardModeEnv] = 'enforce';
+        try {
+          session = new Session(
+            'test-session-id',
+            mockConfig,
+            mockClient,
+            mockSettings,
+          );
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+          const execute = vi.fn().mockResolvedValue({
+            llmContent: 'failed',
+            returnDisplay: 'failed',
+            error: {
+              message: 'execution failed',
+              type: core.ToolErrorType.EXECUTION_FAILED,
+            },
+          });
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'failing_tool',
+            kind: core.Kind.Execute,
+            displayName: 'Failing Tool',
+            description: 'Fails during execution',
+            build: vi.fn().mockReturnValue({
+              params: {},
+              execute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Failing Tool'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            }),
+            canUpdateOutput: false,
+            isOutputMarkdown: true,
+          });
+          const streamForBatch = (batch: number, count: number) =>
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: Array.from({ length: count }, (_, index) => ({
+                    id: `goal_failure_${batch}_${index}`,
+                    name: 'failing_tool',
+                    args: { attempt: `${batch}_${index}` },
+                  })),
+                },
+              },
+            ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 4))
+            .mockResolvedValueOnce(streamForBatch(2, 4))
+            .mockResolvedValueOnce(streamForBatch(3, 1))
+            .mockResolvedValueOnce(createEmptyStream());
+
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-guard-stop',
+          };
+          const turnKey = 'goal-runtime:turn-guard-stop';
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'running',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'check weather',
+              status: 'active',
+              evidenceCursor: { recordId: 'cursor-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              createdAt: 1234,
+              updatedAt: 1234,
+            },
+          });
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() => {
+            expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+              mockConfig,
+              expect.objectContaining({
+                loop_type: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+              }),
+              { recordToQwenLogger: false },
+            );
+          });
+          // Graceful end_turn settles the iteration; the goal is not paused.
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+          // The graceful stop keeps the user-visible stop message: it is
+          // the only explanation of a silently stopped autonomous turn.
+          expect(
+            vi.mocked(mockClient.sessionUpdate).mock.calls.some(([params]) => {
+              const update = params.update;
+              return (
+                update.sessionUpdate === 'agent_message_chunk' &&
+                update.content.type === 'text' &&
+                update.content.text.includes('Automatic continuation stopped')
+              );
+            }),
+          ).toBe(true);
+        } finally {
+          if (previousGuardMode === undefined) {
+            delete process.env[guardModeEnv];
+          } else {
+            process.env[guardModeEnv] = previousGuardMode;
+          }
+        }
+      });
+
       it('pauses without counting a Goal turn cancelled before the model request', async () => {
         // `modelStarted` decides whether settlement records an iteration.
         // A user cancel still pauses the Goal before that point; releasing

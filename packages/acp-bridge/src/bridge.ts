@@ -130,6 +130,7 @@ import {
   type ActiveWorkHeartbeatCapabilityV1,
   type ActiveWorkHoldCategory,
   type ActiveWorkSnapshotV1,
+  CHANNEL_PROMPT_META_KEY,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
@@ -1081,8 +1082,9 @@ interface SessionEntry {
    * The journaled `turn_error` event behind `turnError`, when the failed
    * turn published one. A bounded refresh replays it onto persisted
    * history so the terminal survives a page refresh; any newer turn
-   * terminal clears it so a stale error is never re-appended. Not part of
-   * the session summary.
+   * terminal — or newer turn content about to be folded by a queued
+   * terminal boundary — clears it so a stale error is never re-appended
+   * after newer content. Not part of the session summary.
    */
   turnErrorEvent?: BridgeEvent;
   retryAllowed: boolean;
@@ -1626,9 +1628,12 @@ export function extractErrorCode(err: unknown): string | undefined {
  * activity — a model switch, an extension refresh, an MCP server change,
  * a user-shell command — defeats the append and the loop terminal
  * disappears from the refreshed transcript. `session_update` events are
- * turn content except the user-shell output stream, which the guard
- * skips via `isUserShellSessionUpdate` (its history goes to the model
- * conversation, not the persisted transcript the refresh pages).
+ * turn content except the idle bookkeeping subtypes skipped via
+ * `isIdleBookkeepingSessionUpdate`: the user-shell output stream (its
+ * history goes to the model conversation, not the persisted transcript
+ * the refresh pages) and the latest-wins state snapshots
+ * (`available_commands_update`, `current_mode_update`) that settings and
+ * approval-mode refreshes fan out to idle sessions.
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
@@ -1651,22 +1656,44 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
 ]);
 
 /**
- * User-shell output is published as `session_update` on the session bus
- * while idle, but it carries no turn content for the persisted
- * transcript (it is injected into the model conversation history
- * instead), so it must not defeat the refresh-append of a pending
- * terminal error the way a real turn's `session_update` does.
+ * `session_update` frames published while idle that carry no turn content
+ * for the persisted transcript, so they must not defeat the refresh-append
+ * of a pending terminal error the way a real turn's `session_update` does:
+ * the user-shell output stream (injected into the model conversation
+ * history instead of the transcript the refresh pages) and the
+ * latest-wins state snapshots (`available_commands_update` from a
+ * skills/settings refresh, the legacy dual-emit `current_mode_update`).
  */
-function isUserShellSessionUpdate(event: BridgeEvent): boolean {
+function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (event.type !== 'session_update') return false;
   const data = event.data;
   if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
   const update = (data as Record<string, unknown>)['update'];
   if (!update || typeof update !== 'object' || Array.isArray(update))
     return false;
-  const meta = (update as Record<string, unknown>)['_meta'];
+  const updateRecord = update as Record<string, unknown>;
+  const subtype = updateRecord['sessionUpdate'];
+  if (
+    subtype === 'available_commands_update' ||
+    subtype === 'current_mode_update'
+  ) {
+    return true;
+  }
+  const meta = updateRecord['_meta'];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
   return (meta as Record<string, unknown>)['source'] === 'user-shell';
+}
+
+/**
+ * Turn-content test behind the refresh-append guard: everything that is
+ * neither idle bookkeeping nor the synthetic journal-truncation marker
+ * (which `liveJournalSnapshot` unshifts without ever ingesting it as
+ * content) counts as newer turn content.
+ */
+function isRefreshAppendTurnContent(event: BridgeEvent): boolean {
+  if (event.type === 'history_truncated') return false;
+  if (REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES.has(event.type)) return false;
+  return !isIdleBookkeepingSessionUpdate(event);
 }
 
 export function classifyTurnErrorKind(
@@ -1736,7 +1763,8 @@ function broadcastTurnError(
       // queued prompt's terminal (mutateTurnState=false) publishes the
       // event alone and leaves the active turn's refresh-replay record
       // untouched — the prompt never ran, so its terminal is not a newer
-      // turn boundary for the replay.
+      // turn boundary for the replay (but see `publishPromptTerminal`: a
+      // queued boundary that folds newer turn content supersedes it).
       entry.turnErrorEvent = published;
     }
   } catch {
@@ -1789,6 +1817,18 @@ function publishPromptTerminal(
   // lands here. Queued terminals publish their event alone and must
   // neither set nor clear session-scoped turn state.
   const mutateTurnState = pendingEntry.state === 'running';
+  if (!mutateTurnState && entry.turnErrorEvent) {
+    // A queued terminal is still a turn boundary on the bus: ingesting it
+    // folds and resets the live journal, erasing the guard's only evidence
+    // of newer turn content journaled since the pending error terminal.
+    // That content supersedes the stale error, so drop the refresh-replay
+    // record before the fold — otherwise the append would re-place the
+    // stale error AFTER the newer content.
+    const journal = entry.events.liveJournalSnapshot() ?? [];
+    if (journal.some(isRefreshAppendTurnContent)) {
+      entry.turnErrorEvent = undefined;
+    }
+  }
   if (terminal.kind === 'complete') {
     broadcastTurnComplete(
       entry,
@@ -5689,9 +5729,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             // window), so no history scan is needed.
             const journal = entry.events.liveJournalSnapshot() ?? [];
             const hasNewerTurnContent = journal.some(
-              (event) =>
-                !REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES.has(event.type) &&
-                !isUserShellSessionUpdate(event),
+              isRefreshAppendTurnContent,
             );
             if (!hasNewerTurnContent) {
               compactedReplay = [...page.events, turnErrorEvent];
@@ -7662,6 +7700,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
+                  // Channel classification is authenticated channel-worker
+                  // metadata; the daemon prompt route validates the worker
+                  // authorization and re-arms it through the trusted
+                  // `channelPrompt` context flag below.
+                  delete meta[CHANNEL_PROMPT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
@@ -7678,6 +7721,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
+                  }
+                  if (context?.channelPrompt === true) {
+                    meta[CHANNEL_PROMPT_META_KEY] = true;
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {

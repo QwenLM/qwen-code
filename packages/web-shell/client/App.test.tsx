@@ -12289,6 +12289,52 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="retry"]')).toBeNull();
   });
 
+  it('reports the turn error through turn_complete across a trailing background notification', async () => {
+    // turn_complete and the retry decision read the same backward walk, so
+    // a background-notification user block after the turn error must not
+    // hide the error from the host while the UI still offers retry.
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    testState.prompt = 'interrupt this stream';
+    await clickSubmit(container);
+    onSessionChange.mockClear();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onSessionChange });
+    });
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-with-notification',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+        {
+          id: 'background-1',
+          kind: 'user',
+          text: 'Background task completed',
+          meta: { source: 'background_notification' },
+        },
+      ];
+      testState.streamingState = 'idle';
+      rerender({ onSessionChange });
+    });
+
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'turn_complete',
+      sessionId: 'session-1',
+      error: expect.objectContaining({
+        message: 'Turn error (block turn-error-with-notification)',
+      }),
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+  });
+
   it.each([
     ['a fresh prompt id', 'prompt-2'],
     ['a reused prompt id', 'prompt-1'],

@@ -31,7 +31,10 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { DAEMON_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  CHANNEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
@@ -3367,23 +3370,31 @@ export function registerSessionRoutes(
           forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
         const promptDisplayText =
           forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+        const channelPrompt = forwardedMeta?.[CHANNEL_PROMPT_META_KEY];
         if (forwardedMeta) {
           delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
           delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
           if (Object.keys(forwardedMeta).length > 0) {
             forwardedBody['_meta'] = forwardedMeta;
           } else {
             delete forwardedBody['_meta'];
           }
         }
+        const channelWorkerAuthorized = isChannelWorkerPromptAuthorized(
+          promptAuthorization,
+          runtime.workspaceCwd,
+        );
         const trustedPromptDisplayText =
-          typeof promptDisplayText === 'string' &&
-          isChannelWorkerPromptAuthorized(
-            promptAuthorization,
-            runtime.workspaceCwd,
-          )
+          typeof promptDisplayText === 'string' && channelWorkerAuthorized
             ? promptDisplayText
             : undefined;
+        // Channel classification opts the turn out of loop-detected
+        // rejection, so it rides the same worker authorization as the
+        // display projection; a forged key from any other caller is dropped
+        // here and again at the bridge admission strip.
+        const trustedChannelPrompt =
+          channelWorkerAuthorized && channelPrompt === true;
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
@@ -3433,6 +3444,7 @@ export function registerSessionRoutes(
               ...(trustedPromptDisplayText !== undefined
                 ? { promptDisplayText: trustedPromptDisplayText }
                 : {}),
+              ...(trustedChannelPrompt ? { channelPrompt: true } : {}),
               ...(delivery !== undefined
                 ? {
                     channelDelivery: {

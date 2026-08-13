@@ -2148,6 +2148,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen.daemon.modelPrompt': 'trusted model-only prompt',
         'qwen.daemon.promptDisplayText': 'trusted display text',
         'qwen.channel.prompt': true,
+        'qwen.daemon.channelDelivery': {
+          deliveryId: 'delivery-trusted',
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+        },
       },
     });
 
@@ -2159,6 +2163,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           keep: true,
           'qwen.daemon.promptDisplayText': 'trusted display text',
           'qwen.channel.prompt': true,
+          'qwen.daemon.channelDelivery': {
+            deliveryId: 'delivery-trusted',
+            target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+          },
         },
       },
       invocation,
@@ -2169,11 +2177,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('strips channel-prompt classification from untrusted callers', async () => {
-    // `qwen.channel.prompt` opts a turn out of loop-detected rejection and
+  it('strips channel classification from untrusted callers', async () => {
+    // `qwen.channel.prompt` and `qwen.daemon.channelDelivery` both mark a
+    // turn as a channel turn, opting it out of loop-detected rejection and
     // the repeated-failure guard. Only trusted parents (the channel bridges
-    // and the daemon bridge) may set it; an untrusted client marking its own
-    // prompt as a channel turn must not reach the session. A plain
+    // and the daemon bridge) may set them; an untrusted client marking its
+    // own prompt as a channel turn must not reach the session. A plain
     // `qwen --acp` child has no expected capability and initializes
     // untrusted.
     await setupSessionMocks('untrusted-session');
@@ -2197,6 +2206,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       _meta: {
         keep: true,
         'qwen.channel.prompt': true,
+        'qwen.daemon.channelDelivery': {
+          deliveryId: 'delivery-forged',
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+        },
       },
     });
 

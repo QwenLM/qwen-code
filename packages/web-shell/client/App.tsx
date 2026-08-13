@@ -7092,16 +7092,6 @@ export function App({
   ]);
 
   useEffect(() => {
-    let turnErrorId: string | null = null;
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const block = blocks[i];
-      if (block?.kind === 'user') break;
-      if (block?.kind === 'error' && block.source === 'turn_error') {
-        turnErrorId = block.id;
-        break;
-      }
-      if (block?.kind !== 'debug') break;
-    }
     const lastTurnError = getRetryableTurnError(blocks);
     // Loop-detected turn errors still surface through turn_complete below,
     // but resubmitting a prompt the daemon stopped for loop protection
@@ -7128,7 +7118,10 @@ export function App({
     ) {
       retriedTurnErrorIdRef.current = retryableTurnError.id;
     }
-    lastTurnErrorIdRef.current = turnErrorId;
+    // Same walk as the retry decision above, so turn_complete and the
+    // retry affordance never disagree about whether the current turn has
+    // a turn error (e.g. across a trailing background notification).
+    lastTurnErrorIdRef.current = lastTurnError?.id ?? null;
     const canRetry =
       connected &&
       retryableTurnError !== undefined &&

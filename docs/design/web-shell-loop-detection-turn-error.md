@@ -14,7 +14,7 @@ Skipped tools keep their existing failed terminal update and error details so th
 
 The session remains alive and the per-turn loop state is recreated for the next prompt. Cron, background-notification, channel-delivery, and goal turns keep their existing non-interactive handling: only interactive foreground prompts reject. Goal turns bypass the bridge entirely, so rejecting one would settle it as failed and pause the goal without publishing any `turn_error`; they resolve `end_turn` like the other automatic turn types. A loop-detected rejection still drains the cron/notification queues, preserving the invariant that a loop-stopped turn never strands queued automatic work.
 
-When Web Shell reloads a live session from paginated persisted history, the bridge appends the current in-memory `turn_error` to that replay. This keeps the terminal error visible across a page refresh without changing historical persistence.
+When Web Shell reloads a live session from paginated persisted history, the bridge appends the current in-memory `turn_error` to that replay. This keeps the terminal error visible across a page refresh while the session remains idle; newer turn content — including automatic turns the rejection itself drains — supersedes it by design.
 
 ## Compatibility
 
