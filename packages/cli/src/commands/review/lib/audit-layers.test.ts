@@ -228,6 +228,13 @@ describe('parseLayerReceipts', () => {
       'Layer walked: toctou`x`', // code span after the id
       'Layer walked: toctou<b>x</b>', // inline HTML after the id
       'Layer walked: toctou![a](/u)', // image after the id
+      // An INVISIBLE code point (zero-width space, soft hyphen, word joiner)
+      // wedged between the id and the text after it renders as one stitched word
+      // on GitHub (`toctoux`), so it is not a receipt — the sentinel-only guard
+      // would miss these; folding them out of the prose view catches them.
+      'Layer walked: toctou&#8203;x', // U+200B zero-width space
+      'Layer walked: toctou&#173;x', // U+00AD soft hyphen
+      'Layer walked: toctou&#8288;`x`', // U+2060 word joiner + code span
     ];
     for (const q of hidden) expect(parseLayerReceipts(q).size).toBe(0);
     // A link's VISIBLE text is prose and still counts, and a hard break BEFORE a
@@ -240,14 +247,55 @@ describe('parseLayerReceipts', () => {
     ]);
     // A `<br>` IS a visible line break on GitHub, so a marker after it starts its
     // own line — a real receipt (the entity LF above collapses; a `<br>` does not).
-    expect([...parseLayerReceipts('x<br>Layer walked: toctou')]).toEqual([
-      'toctou',
-    ]);
+    // Pin the regex's tolerances (`\/?`, case) so a regression cannot drop them.
+    for (const br of ['<br>', '<br/>', '<BR>', '<br >']) {
+      expect([...parseLayerReceipts(`x${br}Layer walked: toctou`)]).toEqual([
+        'toctou',
+      ]);
+    }
     // A paragraph-LEADING entity newline collapses to a space GitHub renders at
     // paragraph start, so the marker stays a visible receipt.
     expect([...parseLayerReceipts('&#10;Layer walked: toctou')]).toEqual([
       'toctou',
     ]);
+    // Carve-out: an invisible wedge sitting just before a REAL break still leaves
+    // a clean line-leading receipt — folding it out keeps that credited.
+    expect([
+      ...parseLayerReceipts('Layer walked: toctou&#8203;  \nmore'),
+    ]).toEqual(['toctou']);
+  });
+
+  it('folds invisible format characters out of the entity-decoded prose view', () => {
+    // markdown-it decodes numeric entities at parse time, so a code point JS `\s`
+    // matches but GitHub renders as NOTHING (U+2028/U+2029 line separators, VT,
+    // BOM) would glue `layer<x>walked` into a phrase the anchored regex matches
+    // yet GitHub shows fused (`layerwalked`). The plain first receipt passes the
+    // prefilter (any parroted return carries one); only the glued second must drop.
+    for (const cp of ['&#8232;', '&#8233;', '&#11;', '&#65279;']) {
+      expect([
+        ...parseLayerReceipts(
+          `Layer walked: lexing — ok\nlayer${cp}walked: toctou`,
+        ),
+      ]).toEqual(['lexing']);
+    }
+    // The fold target for an entity newline must be a SPACE, not empty — else it
+    // stitches `Lay`+`er walked` into a line-leading receipt GitHub never renders
+    // (it shows `Lay er walked`). A plain marker carries the input past the prefilter.
+    expect([
+      ...parseLayerReceipts(
+        'Layer walked: lexing — real\nLay&#10;er walked: toctou',
+      ),
+    ]).toEqual(['lexing']);
+    // The prefilter reads RAW text; an entity that only DECODES into the marker
+    // phrase must not be vetoed before the parser sees the rendered prose. Each of
+    // these renders `Layer walked: toctou` on GitHub, so each is a real receipt.
+    for (const q of [
+      'Layer&#32;walked: toctou', // entity space separator
+      '&#76;ayer walked: toctou', // entity-encoded leading `L`
+      'Layer&nbsp;walked: toctou', // named entity → visible nbsp space
+    ]) {
+      expect([...parseLayerReceipts(q)]).toEqual(['toctou']);
+    }
   });
 
   it('credits a marker rendered as VISIBLE prose in any block, not just a paragraph', () => {
