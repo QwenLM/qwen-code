@@ -1,4 +1,4 @@
-# Design: natural-tone posted reviews, coupled to `review.attribution`
+# Design: plain-prose posted reviews; markers follow `review.attribution`
 
 ## Problem statement
 
@@ -18,17 +18,34 @@ LGTM! ✅`, `⚠️ Downgraded from …`.
 Projects whose communities are hostile to AI assistance treat these artifacts
 as bot output on sight, regardless of content quality.
 
-## Decision: couple tone to `review.attribution`
+## Decision: plain prose unconditionally; markers follow `review.attribution`
 
-No new setting. `review.attribution: false` already means "post without AI
-attribution"; this change widens it to cover **all** AI-attribution signals —
-the footer, the bracket severity prefixes, the emoji/LGTM fixed copy, and the
-template phrasing of comment bodies. One switch: don't look like a bot.
-`attribution: true` (the default) reproduces today's behavior byte-for-byte.
+The "AI flavour" splits into two kinds of ingredient, and they get different
+treatment:
 
-Rationale over a separate `review.tone`: the realistic use for natural tone
-is exactly the unattributed post; a granular second key mostly creates
-combinations nobody wants (footer naming the model _and_ "human" prose).
+- **Phrasing — the `— Failure scenario: <trigger> → <wrong outcome>` label,
+  the arrow notation, `LGTM! ✅`, the `⚠️` glyph** — is template voice, and
+  plainer prose is more readable for _every_ audience, including the
+  openly-attributed posts on this repository's own PRs. It goes natural
+  **unconditionally**, in both attribution modes. No setting, no register
+  branch: the model writes one style, and `submit`/`compose-review` never
+  re-introduce the scaffolding.
+- **Markers — the `**[Critical]**`/`**[Suggestion]**` prefixes and the
+  footer** — are machine-readable signals, not prose style:
+  `qwen-autofix.yml`'s Critical-only mode greps posted bodies for
+  `contains("**[Critical]**")` in a dozen places, and the prefix lets a
+  human triage blockers at a glance. They stay when attribution is on and
+  are stripped when it is off — attribution already decides whether the
+  post identifies itself, so it decides whether the post carries the
+  machine contract too.
+
+No new setting. `review.attribution: false` (#8994) now means "post without
+any AI-attribution signal": no footer, no severity markers.
+
+Rationale over a separate `review.tone`: two registers would double the
+prompt and test surface for a phrasing that is strictly worse; the only
+honest axis is whether the post carries machine-readable markers, and that
+is exactly what attribution already governs.
 
 ## Current state
 
@@ -54,8 +71,8 @@ Two constraints discovered during investigation:
 ## Proposed changes
 
 `attribution` already flows into `submit` and `compose-review` (#8994 wires
-it). The natural presentation keys off that same boolean — no new plumbing
-except surfacing it to the orchestrator (below).
+it). The markers key off that same boolean; the phrasing stops being a
+template at all — no new plumbing anywhere.
 
 ### Deterministic (code, unit-tested)
 
@@ -64,18 +81,16 @@ except surfacing it to the orchestrator (below).
    happens in the final `post` object only: the payload keeps its canonical
    marked shape, so severity counting, the unmarked-comment gate, and the
    ledger all ran on the marked comments before the transform.
-2. **`compose-review.ts`** — when attribution is off, fixed copy loses its
-   bot tells: `No issues found. LGTM! ✅` → `No issues found.`; every fixed
-   `⚠️ ` clause (downgrade, nothing-certified, unverified-findings) drops
-   the glyph but keeps the sentence. Body Criticals and the cannot-tell list
-   render without the `**[Critical]**` marker.
-3. **`parse-args.ts`** — the Step 1 verdict JSON gains `attribution:
-boolean` (resolved from `operatorReviewSettings()`), so the orchestrator
-   learns the effective presentation mode from the same invocation record
-   that already carries `comment.effective`.
-4. **`pr-context.ts`** — `CANONICAL_LGTM_RE` also matches the bare
-   `No issues found.` shape, so an attribution-off LGTM is still filtered
-   out of later reviews' context files.
+2. **`compose-review.ts`** — fixed copy goes plain **in both modes**:
+   `No issues found. LGTM! ✅` → `No issues found.`; every fixed `⚠️ `
+   clause (downgrade, nothing-certified, unverified-findings) drops the
+   glyph but keeps the sentence. Body Criticals and the cannot-tell list
+   keep their `**[Critical]**` marker when attribution is on (autofix greps
+   it) and lose it when off.
+3. **`pr-context.ts`** — `CANONICAL_LGTM_RE` matches both the legacy
+   `No issues found. LGTM! ✅` shape and the new bare `No issues found.`,
+   so old and new auto-posted approvals alike stay out of later reviews'
+   context files.
 
 ### Known tradeoffs (disclosed, accepted)
 
@@ -90,15 +105,17 @@ boolean` (resolved from `operatorReviewSettings()`), so the orchestrator
 
 ### Prompt layer (SKILL.md, dogfooded)
 
-4. Step 7's comment-body paragraph gains the attribution-off variant: write
-   each body as plain reviewer prose in the PR's language — no bracket
-   prefix, no `Failure scenario:` label, no `→` notation; state the problem,
-   when it bites, and the fix in ordinary sentences. ` ```suggestion `
-   blocks stay (human reviewers use them). **The payload still carries the
-   canonical prefixed shape** — the prefix is the pipeline's counting signal
-   and stripping it is the code's job — so the machine-checkable contract is
-   identical in both modes, and a model that ignores the prose instruction
-   degrades to a prefixed comment, not a miscounted verdict.
+4. Step 7's comment-body paragraph drops the labelled template **as the
+   only register**: write each description as plain reviewer prose in the
+   PR's language — no `Failure scenario:` label, no `→` notation; state the
+   problem, when it bites, and the fix in ordinary sentences. The evidence
+   rule is unchanged (the concrete trigger and wrong outcome must be in the
+   sentences). ` ```suggestion ` blocks stay (human reviewers use them).
+   **The payload still carries the canonical prefixed shape** — the prefix
+   is the pipeline's counting signal and stripping it is the code's job —
+   so the machine-checkable contract is identical in both modes, and a
+   model that ignores the prose instruction degrades to a prefixed comment,
+   not a miscounted verdict.
 
 ## What does not change
 
@@ -108,21 +125,22 @@ boolean` (resolved from `operatorReviewSettings()`), so the orchestrator
   language policy, not a tone artifact.
 - ` ```suggestion ` blocks.
 - qwen-code's own autofix: `qwen-autofix.yml` keys off prefix + footer, and
-  this repository's CI reviews run with defaults (attribution on), which are
-  byte-identical to today.
+  this repository's CI reviews run with attribution on, so every string the
+  workflow greps for still appears in its posts.
+- The `parse-args` verdict shape: prose style is no longer conditional, so
+  the orchestrator has nothing to branch on.
 
 ## Files affected
 
-| File                                                                         | Change                                                                          |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `packages/cli/src/commands/review/submit.ts`                                 | Prefix strip in the attribution-off post transform                              |
-| `packages/cli/src/commands/review/compose-review.ts`                         | Attribution-off fixed copy (no `LGTM! ✅`, no `⚠️`, no body-list markers)       |
-| `packages/cli/src/commands/review/parse-args.ts`                             | Verdict JSON gains `attribution`                                                |
-| `packages/cli/src/commands/review/pr-context.ts`                             | `CANONICAL_LGTM_RE` matches the markerless LGTM                                 |
-| `packages/core/src/skills/bundled/review/SKILL.md`                           | Attribution-off comment-prose paragraph; `attribution` verdict field documented |
-| `docs/users/configuration/settings.md`, `docs/users/features/code-review.md` | Widen `review.attribution` description                                          |
-| `packages/cli/src/config/settingsSchema.ts` + regenerated IDE schema         | Attribution description widened (no new key)                                    |
-| Collocated `*.test.ts`                                                       | Pin both modes; attribution-on byte-identical                                   |
+| File                                                                         | Change                                                               |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `packages/cli/src/commands/review/submit.ts`                                 | Prefix strip in the attribution-off post transform                   |
+| `packages/cli/src/commands/review/compose-review.ts`                         | Plain fixed copy in both modes; body-list markers follow attribution |
+| `packages/cli/src/commands/review/pr-context.ts`                             | `CANONICAL_LGTM_RE` matches both LGTM shapes                         |
+| `packages/core/src/skills/bundled/review/SKILL.md`                           | Plain-prose body format as the only register                         |
+| `docs/users/configuration/settings.md`, `docs/users/features/code-review.md` | Widen `review.attribution` description                               |
+| `packages/cli/src/config/settingsSchema.ts` + regenerated IDE schema         | Attribution description widened (no new key)                         |
+| Collocated `*.test.ts`                                                       | Pin both modes; plain copy in each                                   |
 
 Base branch: `pr-8994` (the setting this couples to exists only there).
 

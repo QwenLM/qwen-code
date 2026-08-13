@@ -724,7 +724,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Append the attribution footer naming the model and CLI version (e.g. "_— qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without AI attribution: no footer, no "**[Critical]**"/"**[Suggestion]**" prefixes, plain-prose comments, and no template phrases (LGTM! ✅, ⚠️) in the review body. Note: with attribution off, presubmit duplicate detection still recognizes earlier posts by the same GitHub account, but unattributed posts from other accounts escape it.',
+          'Append the attribution footer naming the model and CLI version (e.g. "_— qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without AI attribution: no footer, and no "**[Critical]**"/"**[Suggestion]**" severity markers on posted comments and body lists (the comment prose itself is plain either way). Note: with attribution off, presubmit duplicate detection still recognizes earlier posts by the same GitHub account, but unattributed posts from other accounts escape it.',
         showInDialog: true,
       },
       effort: {

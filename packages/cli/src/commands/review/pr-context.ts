@@ -418,16 +418,16 @@ export function findRootId<
 }
 
 /**
- * The exact "no issues found, LGTM" template the qwen-review pipeline
- * auto-emits, optionally followed by its model footer — and NOTHING else.
- * Anchored to the end of the body on purpose: a legacy malformed review can
- * OPEN with the LGTM line and carry a relocated `**[Critical]**` blocker
- * below it, and a prefix match dropped exactly that body from the context
- * file, letting the re-check approve past the blocker.
+ * The exact "no issues found" template the qwen-review pipeline auto-emits,
+ * optionally followed by its model footer — and NOTHING else. Anchored to
+ * the end of the body on purpose: a legacy malformed review can OPEN with
+ * the LGTM line and carry a relocated `**[Critical]**` blocker below it, and
+ * a prefix match dropped exactly that body from the context file, letting
+ * the re-check approve past the blocker.
  *
- * The `LGTM! ✅` half is optional: an attribution-off post (`review.attribution:
- * false`) emits the bare `No issues found.` — same emptiness, no footer, and
- * just as worthless to an agent reading the context file.
+ * The `LGTM! ✅` half is optional because both shapes exist in the wild: the
+ * pipeline posted `No issues found. LGTM! ✅` until the fixed copy went to
+ * plain prose, and older reviews still carry it.
  */
 export const CANONICAL_LGTM_RE =
   /^No issues found\.?\s*(?:LGTM!?\s*(?:✅\s*)?)?(?:_— [^\n]{0,200} via Qwen Code \/review(?: \(v[^\n]{1,100}\))?_\s*)?$/i;

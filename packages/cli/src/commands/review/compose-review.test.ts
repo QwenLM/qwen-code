@@ -444,7 +444,7 @@ describe('composeReview — the C/S table', () => {
   it('C=0, S=0 → APPROVE with the LGTM body', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
+    expect(r.body).toBe(`No issues found.\n\n${FOOTER}`);
   });
 
   it('includes the injected CLI version without breaking the stable marker', () => {
@@ -477,12 +477,15 @@ describe('composeReview — the C/S table', () => {
     expect(r.body).toBe('No issues found.');
   });
 
-  it('attribution off: the LGTM template collapses to the plain sentence', () => {
-    // The unattributed post carries none of the template's tells.
-    const r = composeReview(base({}), '0.21.2', false);
-    expect(r.body).not.toContain('LGTM');
-    expect(r.body).not.toContain('✅');
-    expect(r.body).not.toContain('⚠️');
+  it('the clean-approve sentence carries no template markers in either mode', () => {
+    // Plain prose is the only register now — attribution changes the footer,
+    // not the phrasing.
+    for (const attribution of [true, false]) {
+      const r = composeReview(base({}), '0.21.2', attribution);
+      expect(r.body).not.toContain('LGTM');
+      expect(r.body).not.toContain('✅');
+      expect(r.body).not.toContain('⚠️');
+    }
   });
 
   it('attribution on: a missing modelId is still refused', () => {
@@ -548,7 +551,7 @@ describe('composeReview — the low-signal Approve disclosure', () => {
   it('a zero-finding APPROVE over a non-trivial source diff carries the marker — event and body unchanged', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
+    expect(r.body).toBe(`No issues found.\n\n${FOOTER}`);
     // The fixture's roster: two chunk agents plus the test matrix.
     expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
     expect(verdictLine(r)).toBe(
@@ -1137,26 +1140,13 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
     expect(r.body).toContain(
-      '⚠️ Downgraded from Approve to Comment: self-PR; CI still running.',
+      'Downgraded from Approve to Comment: self-PR; CI still running.',
     );
-  });
-
-  it('attribution off drops the warning glyph — the downgrade sentence itself stays', () => {
-    const r = composeReview(
-      base({
-        presubmit: {
-          downgradeApprove: true,
-          downgradeReasons: ['self-PR'],
-        },
-      }),
-      '0.21.2',
-      false,
-    );
-    expect(r.body).toContain('Downgraded from Approve to Comment: self-PR.');
+    // No warning glyph — the fixed copy reads as plain prose in every mode.
     expect(r.body).not.toContain('⚠️');
   });
 
-  it('attribution off drops the glyph from the nothing-certified opener too', () => {
+  it('the nothing-certified opener carries no warning glyph either', () => {
     const r = composeReview(base({ planPath: undefined }), '0.21.2', false);
     expect(r.body).toContain(
       'This run could not certify that any of this diff was reviewed.',
@@ -1220,7 +1210,7 @@ describe('composeReview — presubmit downgrades', () => {
     );
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
-    expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
+    expect(r.body).toContain('Downgraded from Request changes to Comment');
     expect(r.body).toContain('**[Critical]** unmappable blocker');
     const sentenceIdx = r.body.indexOf('Downgraded');
     const blockerIdx = r.body.indexOf('unmappable blocker');
@@ -2284,7 +2274,7 @@ describe('coverage is recomputed, never accepted', () => {
     });
     expect(r.event).toBe('COMMENT');
     expect(r.body).toMatch(
-      /^⚠️ This run could not certify that any of this diff was reviewed\./,
+      /^This run could not certify that any of this diff was reviewed\./,
     );
     expect(r.body).toContain('Suggestions are inline.');
     expect(r.body).not.toContain('Reviewed.');
@@ -3206,8 +3196,8 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('No issues found. LGTM! ✅');
-    expect(r.body).toContain('未发现问题。LGTM！✅');
+    expect(r.body).toContain('No issues found.');
+    expect(r.body).toContain('未发现问题。');
   });
 
   it('translates the disclosures — role phrase and Not-reviewed frame', () => {
@@ -3918,8 +3908,8 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain('.github/workflows/ci.yml');
     expect(r.body).toContain('source mapping not yet supported');
-    // the LGTM copy is still there — the disclosure augments, it doesn't replace
-    expect(r.body).toContain('LGTM');
+    // the clean-approve copy is still there — the disclosure augments, it doesn't replace
+    expect(r.body).toContain('No issues found.');
   });
 });
 
@@ -4494,7 +4484,7 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     });
     expect(r.body).not.toContain('Not explored to full depth');
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('No issues found. LGTM! ✅');
+    expect(r.body).toContain('No issues found.');
   });
 
   it('leaves an already-linked entry untouched — never nests a second link', () => {
