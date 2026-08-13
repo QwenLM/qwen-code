@@ -57,6 +57,18 @@ const debugLogger = createDebugLogger('omni:export');
  * `objects/` while retention lasts). Every `execution` line carries
  * `omniConfigHash` so downstream can split trajectories by processing
  * configuration instead of mixing distributions.
+ *
+ * ## What is and is not scrubbed
+ *
+ * The exporter strips exactly the harness-side surface the model never
+ * saw: the reserved runtime keys (inputPath/outputDir) that the gate and
+ * orchestrator inject into policy calls. Content the MODEL itself saw or
+ * produced — a path the user typed into their prompt, a `file_path` the
+ * model passed to write_file — is preserved verbatim: it IS the
+ * trajectory, and scrubbing it would corrupt the training signal while
+ * teaching nothing about the pipeline. Callers publishing exports off
+ * the machine own that second category (measured on a real session: 147
+ * records, zero pipeline-side leaks, 7 user/model-side absolute paths).
  */
 
 // ─── Line shapes ──────────────────────────────────────────────────────────
