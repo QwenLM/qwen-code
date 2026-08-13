@@ -129,7 +129,13 @@ export function serializeLedger(ledger: Ledger): string {
   const render = (findings: LedgerFinding[], dropped: number): string => {
     const payload: Ledger = { v: 1, round: ledger.round, findings };
     if (dropped > 0) payload.dropped = dropped;
-    if (ledger.sha && SHA_RE.test(ledger.sha)) payload.sha = ledger.sha;
+    // A truncated list must not certify a range: the dropped entries reference
+    // code at or before the anchored head, and a next round scoped to
+    // `sha..HEAD` would never re-see it — Step 6 rules only on entries that
+    // are IN the work list, so they would retire silently. A partial ledger
+    // keeps its findings and loses its anchor, exactly as a fail-closed round
+    // does.
+    else if (ledger.sha && SHA_RE.test(ledger.sha)) payload.sha = ledger.sha;
     return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
   // Drop from the END until the whole marker fits. Trailing entries are the
@@ -194,7 +200,12 @@ export function parseLedger(body: string | undefined): Ledger | null {
         ? (raw.dropped as number)
         : undefined;
     const sha =
-      typeof raw.sha === 'string' && SHA_RE.test(raw.sha) ? raw.sha : undefined;
+      // Normalised on READ as the serializer holds on WRITE: a hand-edited
+      // marker carrying both `dropped` and `sha` would certify a range its
+      // own work list admits is partial.
+      typeof raw.sha === 'string' && SHA_RE.test(raw.sha) && !dropped
+        ? raw.sha
+        : undefined;
     return {
       v: 1,
       round: raw.round,

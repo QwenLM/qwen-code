@@ -116,6 +116,33 @@ describe('ledger marker', () => {
     expect(parseLedger(body)).toEqual(anchored);
   });
 
+  it('a truncated ledger loses its anchor — a partial work list must not certify a range', () => {
+    // Dropped entries reference code at or before the anchored head; a next
+    // round scoped to `sha..HEAD` would never re-see it, and Step 6 rules
+    // only on entries that are IN the list — the dropped ones would retire
+    // silently. Both halves hold the line: the serializer withholds the sha
+    // when it drops findings, and the parser strips a hand-edited marker
+    // that carries both.
+    const overflowing: Ledger = {
+      v: 1,
+      round: 2,
+      sha: 'abc1234def567890',
+      findings: Array.from({ length: LEDGER_MAX_FINDINGS + 1 }, (_, i) => ({
+        id: `R2-${i}`,
+        sev: 'C' as const,
+        file: 'src/a.ts',
+        title: 'x',
+      })),
+    };
+    const back = parseLedger(serializeLedger(overflowing));
+    expect(back!.dropped).toBeGreaterThan(0);
+    expect(back!.sha).toBeUndefined();
+    const handEdited = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"dropped":3,"sha":"abc1234"} -->',
+    );
+    expect(handEdited!.sha).toBeUndefined();
+  });
+
   it('drops a malformed sha but keeps the ledger — field-level fail-quiet', () => {
     // The body is another account's writable surface. A garbage anchor must
     // not cost the next round its work list, and must not survive as an
