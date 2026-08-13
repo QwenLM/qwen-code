@@ -687,7 +687,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'actions/workflows/${REVIEW_WF_ID}/runs?per_page=100',
     );
-    expect(reviewScanJob).toContain('gh api --paginate');
+    expect(reviewScanJob).not.toContain(
+      'REVIEW_RUNS_JSON="$(gh api --paginate',
+    );
     expect(reviewScanJob).toContain(
       'IN("queued", "waiting", "pending", "requested", "in_progress")',
     );
@@ -712,7 +714,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `REVIEW_WF_ID='77' PR='42' PR_HEAD_OID='abc123' BRANCH='feat/x'\nREVIEW_RUNS_JSON='${JSON.stringify(runs)}'\n${runsFilter}\nprintf '%s' "$REVIEW_RUN_STARTED_AT"`,
+          `REVIEW_WF_ID='77' PR='42' PR_HEAD_OID='abc123'\nREVIEW_RUNS_JSON='${JSON.stringify(runs)}'\n${runsFilter}\nprintf '%s' "$REVIEW_RUN_STARTED_AT"`,
         ],
         { env: { ...process.env }, encoding: 'utf8' },
       );
@@ -745,6 +747,26 @@ describe('qwen-autofix workflow', () => {
     expect(runRuns(runs({ workflow_id: 99 }))).toBe('');
     // A concluded run does not block.
     expect(runRuns(runs({ status: 'completed' }))).toBe('');
+    // A fork-controlled bare branch name alone is not identity.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'other',
+          head_branch: 'feat/x',
+          pull_requests: [],
+        }),
+      ),
+    ).toBe('');
+    // Immutable head SHA alone is still enough.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'abc123',
+          head_branch: 'other',
+          pull_requests: [],
+        }),
+      ),
+    ).toBe('2026-08-13T01:00:00Z');
     // Matching also works via pull_requests association, not only head SHA.
     expect(
       runRuns(
@@ -755,7 +777,6 @@ describe('qwen-autofix workflow', () => {
         }),
       ),
     ).toBe('2026-08-13T01:00:00Z');
-
 
     // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
     // visible acknowledgment per in-flight review run (marker keyed on the
@@ -2864,7 +2885,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(16);
+    expect(workflow.split('--paginate').length - 1).toBe(15);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
