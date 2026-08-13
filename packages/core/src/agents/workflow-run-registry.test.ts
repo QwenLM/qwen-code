@@ -911,7 +911,11 @@ describe('WorkflowRunRegistry', () => {
     onStatusChange.mockClear();
 
     r.onPhaseStarted(entry.runId, 'Inspect', 1_100);
-    r.onLogAppended(entry.runId, 'repository loaded', 1_105);
+    r.onLogAppended(
+      entry.runId,
+      '\u001b[31mrepository\u0000 loaded\u001b[0m',
+      1_105,
+    );
     expect(onStatusChange).toHaveBeenCalledTimes(1);
     r.onDispatchQueued(entry.runId, {
       id: 'dispatch-1',

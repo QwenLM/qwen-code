@@ -10,6 +10,7 @@ import type { Config } from '../../config/config.js';
 import {
   isTerminalWorkflowStatus,
   WorkflowRunRegistry,
+  type WorkflowTask,
 } from '../workflow-run-registry.js';
 import { AgentEventEmitter } from './agent-events.js';
 import { WorkflowRunner } from './workflow-runner.js';
@@ -325,6 +326,15 @@ describe('WorkflowRunner', () => {
 
   it('persists terminal runs without live fire-and-forget dispatches', async () => {
     const { config, registry } = configWithRegistry();
+    let snapshotDispatchStatuses: string[] | undefined;
+    writeWorkflowSnapshotMock.mockImplementation(
+      (_config, snapshotEntry: WorkflowTask) => {
+        snapshotDispatchStatuses = snapshotEntry.dispatches.map(
+          (dispatch) => dispatch.status,
+        );
+        return Promise.resolve();
+      },
+    );
     const handle = await WorkflowRunner.start({
       config,
       signal: new AbortController().signal,
@@ -336,12 +346,11 @@ describe('WorkflowRunner', () => {
 
     await expect(handle.completion).resolves.toMatchObject({ ok: true });
 
-    const entry = registry.get(handle.runId);
-    expect(entry).toMatchObject({ status: 'completed' });
-    expect(entry?.dispatches).toEqual([
+    expect(registry.get(handle.runId)).toMatchObject({ status: 'completed' });
+    expect(snapshotDispatchStatuses).toEqual(['cancelled']);
+    expect(registry.get(handle.runId)?.dispatches).toEqual([
       expect.objectContaining({ status: 'cancelled' }),
     ]);
-    expect(writeWorkflowSnapshotMock).toHaveBeenCalledWith(config, entry);
   });
 
   it('freezes snapshot and telemetry before late dispatches drain', async () => {
@@ -384,6 +393,12 @@ describe('WorkflowRunner', () => {
     await vi.waitFor(() =>
       expect(registry.get(handle.runId)?.agentsCompleted).toBe(1),
     );
+    let settled = false;
+    void handle.completion.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
     journalWrites[0]?.();
     await expect(handle.completion).resolves.toMatchObject({ ok: true });
 

@@ -964,13 +964,14 @@ export class WorkflowRunRegistry {
   onLogAppended(runId: string, line: string, at = Date.now()): void {
     const entry = this.entries.get(runId);
     if (!entry || !isActiveWorkflowStatus(entry.status)) return;
+    const message = stripAnsiAndControl(line);
     if (entry.recentLogs.length === 100) {
       entry.recentLogs.shift();
       const firstLog = entry.events.findIndex((event) => event.type === 'log');
       if (firstLog >= 0) entry.events.splice(firstLog, 1);
     }
-    entry.recentLogs.push(line);
-    this.appendEvent(entry, { type: 'log', at, message: line });
+    entry.recentLogs.push(message);
+    this.appendEvent(entry, { type: 'log', at, message });
   }
 
   /** Cumulative dispatch counter — incremented before each `agent()` call resolves. */
