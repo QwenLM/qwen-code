@@ -784,10 +784,10 @@ describe('presubmitCommand', () => {
     });
 
     it('does not author-match replies — even a finding-shaped reply is not a posted finding', async () => {
-      // Finding-shaped on purpose: a hand-written body fails the severityOf
-      // shape gate first, so the test would stay green with the reply guard
-      // deleted (mutation-verified) — with this body, only the
-      // !c.in_reply_to_id term keeps the reply out of the dedup set.
+      // Finding-shaped on purpose: the body PASSES the severityOf shape
+      // gate, so deleting the !c.in_reply_to_id reply guard makes this test
+      // red (mutation-verified) — only that term keeps the reply out of the
+      // dedup set.
       const result = await presubmitWithComments(
         [
           {

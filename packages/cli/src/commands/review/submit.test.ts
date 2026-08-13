@@ -336,6 +336,43 @@ describe('the posting gate', () => {
     expect(process.exitCode).toBe(3);
   });
 
+  it('matches the refusal advice to the refusal class', () => {
+    // The advice is the prose the reviewing model reads to choose its retry.
+    // An unconditional "Re-run with --comment" is wrong for the target-
+    // binding refusals the review.comment setting path reaches: the flag
+    // cannot bind a target (and the setting already stood in for it), so
+    // advising it there buys a futile retry loop. Pin both branches: a
+    // wording edit to the gate that breaks the class split reddens here.
+    const advice = () =>
+      (writeStderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+
+    // A post that was never requested: the remedy names the flag.
+    runSubmit(args({ skillArgs: file('advice-flag.txt', '6771') }));
+    expect(advice()).toContain('Re-run with `--comment`');
+    writeStderrSpy.mockClear();
+
+    // A request the recorded arguments do not bind — they name no PR...
+    runSubmit(
+      args({ skillArgs: file('advice-nopr.txt', 'src/foo.ts') }),
+      'unknown',
+      { defaultComment: true },
+    );
+    expect(advice()).not.toContain('Re-run with `--comment`');
+    expect(advice()).toContain('invoked naming it');
+    writeStderrSpy.mockClear();
+
+    // ...or a different PR than this submission targets.
+    runSubmit(
+      args({ skillArgs: file('advice-otherpr.txt', '9999') }),
+      'unknown',
+      { defaultComment: true },
+    );
+    expect(advice()).not.toContain('Re-run with `--comment`');
+    expect(advice()).toContain('invoked naming it');
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+  });
+
   it('posts when the user typed `--comment`', () => {
     runSubmit(args({ skillArgs: file('skill-args.txt', '6771 --comment') }));
 

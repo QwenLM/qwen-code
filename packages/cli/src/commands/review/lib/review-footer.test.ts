@@ -104,5 +104,30 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripReviewFooter(body)).toBe(body);
       expect(performance.now() - start).toBeLessThan(2000);
     });
+
+    it('returns a marker-carrying body with no trailing footer unchanged — and bounded', () => {
+      // The marker guard does not bound this shape: the body CONTAINS the
+      // marker (a quoted forged footer mid-text is the natural output of the
+      // loop this strip exists for), so the replace runs — and its
+      // unanchored `\s*` scan is quadratic on the whitespace run after the
+      // last marker line (probe-measured ~4× per doubling). Only the tail
+      // bound keeps this linear: without it the replace runs for seconds at
+      // this size and fails the ceiling by orders of magnitude, while the
+      // output assertion alone has no teeth — the unbounded replace returns
+      // this body identically too.
+      const body = `_— quoted via Qwen Code /review (v0.21.3), then\n\n${' '.repeat(200_000)}end`;
+      const start = performance.now();
+      expect(stripReviewFooter(body)).toBe(body);
+      expect(performance.now() - start).toBeLessThan(2000);
+    });
+
+    it('strips a trailing footer from a body longer than the tail bound', () => {
+      // A match lives at the tail, so bounding the search there must not
+      // change what a long body strips.
+      const finding = `a finding${'x'.repeat(20_000)}`;
+      expect(
+        stripReviewFooter(`${finding}\n\n${reviewFooter('m', '0.21.3')}`),
+      ).toBe(finding);
+    });
   });
 });
