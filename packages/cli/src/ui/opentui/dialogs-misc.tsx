@@ -143,15 +143,63 @@ export function OpenTuiDeleteDialog({ onClose }: P) {
   );
 }
 
-export function OpenTuiResumeDialog({ onClose }: P) {
+export function OpenTuiResumeDialog({ config, onClose }: P) {
   useEsc(onClose);
+  const [rows, setRows] = useState<Array<{ id: string; label: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    const svc = config?.getSessionService?.();
+    if (!svc) {
+      setLoading(false);
+      return;
+    }
+    svc
+      .listSessions({ size: 10 })
+      .then((res) => {
+        if (!alive) return;
+        const list = (
+          res as {
+            sessions?: Array<Record<string, unknown>>;
+          }
+        ).sessions;
+        setRows(
+          (list ?? []).map((s) => ({
+            id: String(s['sessionId'] ?? s['id'] ?? ''),
+            label: String(
+              s['title'] ??
+                s['summary'] ??
+                s['firstUserMessage'] ??
+                '(untitled)',
+            ),
+          })),
+        );
+        setLoading(false);
+      })
+      .catch(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [config]);
   return (
     <Shell title="Resume" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>
-          {'Recent sessions appear here; select one to resume.'}
-        </text>
-      </box>
+      <scrollbox height={12} marginTop={1} stickyScroll={false}>
+        {loading ? (
+          <text fg={C.dim}>{'loading sessions…'}</text>
+        ) : rows.length === 0 ? (
+          <text fg={C.dim}>{'no previous sessions'}</text>
+        ) : (
+          rows.map((r) => (
+            <box key={r.id} flexDirection="row">
+              <text fg={C.green}>{'• '}</text>
+              <text fg={C.text}>{r.label}</text>
+              <text fg={C.dim}>{`  ${r.id.slice(0, 8)}`}</text>
+            </box>
+          ))
+        )}
+      </scrollbox>
     </Shell>
   );
 }
