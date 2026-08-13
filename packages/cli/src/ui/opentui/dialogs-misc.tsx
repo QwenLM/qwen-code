@@ -14,7 +14,7 @@
  * editor) are compact here and get fidelity passes in M4.
  */
 
-import { useLayoutEffect, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -200,13 +200,46 @@ export function OpenTuiRewindDialog({ onClose }: P) {
 
 export function OpenTuiDiffDialog({ onClose }: P) {
   useEsc(onClose);
+  const [lines, setLines] = useState<string[]>([]);
+  useEffect(() => {
+    let alive = true;
+    import('node:child_process')
+      .then(({ execFile }) => {
+        execFile(
+          'git',
+          ['diff', '--color=never'],
+          { maxBuffer: 1024 * 1024 * 8 },
+          (_err, stdout) => {
+            if (alive)
+              setLines(
+                (stdout ?? '').split('\n').filter(Boolean).slice(0, 200),
+              );
+          },
+        );
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
   return (
     <Shell title="Diff" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <text fg={C.dim}>
-          {'Shows the working-tree diff for this session.'}
-        </text>
-      </box>
+      <scrollbox height={14} marginTop={1} stickyScroll={false}>
+        {lines.length === 0 ? (
+          <text fg={C.dim}>{'no working-tree changes'}</text>
+        ) : (
+          lines.map((l, i) => (
+            <text
+              key={i}
+              fg={
+                l.startsWith('+') ? C.green : l.startsWith('-') ? C.red : C.dim
+              }
+            >
+              {l}
+            </text>
+          ))
+        )}
+      </scrollbox>
     </Shell>
   );
 }
