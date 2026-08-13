@@ -592,6 +592,34 @@ describe('SubAgentTracker', () => {
       );
     });
 
+    it('should deduplicate progress updates for the same approval callId', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-eidt-dedup',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: '/test.ts',
+          originalContent: 'old',
+          newContent: 'new',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(sendUpdateSpy).toHaveBeenCalled();
+      });
+
+      const progresCalls = sendUpdateSpy.mock.calls.filter(
+        (call) => call[0]?._meta?.subagentProgress === true,
+      );
+      expect(progresCalls).toHaveLength(1);
+    });
+
     it('should respond to subagent with permission outcome', async () => {
       tracker.setup(eventEmitter, abortController.signal);
 

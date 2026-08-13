@@ -22045,7 +22045,13 @@ describe('Session', () => {
             update.sessionUpdate === 'tool_call_update' &&
             update._meta?.provenance === 'subagent',
         );
-      expect(subagentUpdates).toEqual([]);
+      // Filter out the new subagentProgress frames, as they are intentionally
+      // emitted before the cancellation check to keep the parent card live.
+      const nonProgressUpdates = subagentUpdates.filter(
+        (update: { _meta?: { subagentProgress?: boolean } }) =>
+          !update?._meta?.subagentProgress,
+      );
+      expect(nonProgressUpdates).toEqual([]);
     });
 
     it('aborts sibling Agent calls in the same batch after nested ask_user_question cancellation', async () => {
