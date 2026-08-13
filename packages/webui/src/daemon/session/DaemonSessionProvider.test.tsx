@@ -1448,7 +1448,7 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.contextWindow).toBeUndefined();
   });
 
-  it('adds daemon goal status metadata to the transcript', async () => {
+  it('adds daemon goal set and paused status metadata to the transcript', async () => {
     const session = createMockSession({
       events: async function* goalStatusEvents() {
         yield {
@@ -1464,6 +1464,24 @@ describe('DaemonSessionProvider', () => {
                   kind: 'set',
                   condition: 'ship goal sync',
                   setAt: 1234,
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalStatus: {
+                  kind: 'paused',
+                  condition: 'ship goal sync',
+                  lastReason: 'waiting for review',
                 },
               },
             },
@@ -1496,6 +1514,16 @@ describe('DaemonSessionProvider', () => {
           kind: 'set',
           condition: 'ship goal sync',
           setAt: 1234,
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        text: '',
+        source: 'goal',
+        data: {
+          kind: 'paused',
+          condition: 'ship goal sync',
+          lastReason: 'waiting for review',
         },
       }),
     ]);
@@ -12990,6 +13018,65 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('clears an existing error during autoReconnect backoff', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let callCount = 0;
+    const firstAttempt = createDeferred<void>();
+    const secondAttempt = createDeferred<void>();
+    const events = vi.fn(async function* retriableEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      callCount += 1;
+      if (callCount === 1) {
+        await firstAttempt.promise;
+        throw new Error('network timeout');
+      }
+      await secondAttempt.promise;
+      if (opts.signal?.aborted) return;
+      yield* [];
+    });
+    const laterHeartbeat = createDeferred<void>();
+    const heartbeat = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('heartbeat lost'))
+      .mockImplementation(async () => {
+        await laterHeartbeat.promise;
+        return { ok: true };
+      });
+    const session = createMockSession({ events, heartbeat });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 1,
+    });
+    await vi.waitFor(() => expect(connection?.error).toBe('heartbeat lost'));
+
+    firstAttempt.resolve();
+    await vi.waitFor(() => expect(events).toHaveBeenCalledTimes(2));
+
+    expect(connection?.error).toBeUndefined();
+
+    secondAttempt.resolve();
+    laterHeartbeat.resolve();
+  });
+
   it('routes session_died errors to notices, not transcript', async () => {
     const session = createMockSession({
       events: async function* sessionDiedEvents(
@@ -14988,6 +15075,90 @@ describe('DaemonSessionProvider', () => {
     expect(new Headers(init?.headers).get('X-Qwen-Client-Id')).toBe('client-a');
   });
 
+  it('does not apply refresh context captured before a model update', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['client_identity'],
+    });
+    const source = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+      lastEventId: 2,
+      replaySnapshot: createTextReplaySnapshot('A transcript'),
+      events: async function* sourceEvents(opts = {}) {
+        yield { v: 1, type: 'replay_complete', data: {} };
+        await new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    sdkMocks.sessions.push(source);
+    const staleContext =
+      createDeferred<Awaited<ReturnType<MockSession['context']>>>();
+    const candidate = createMockSession({
+      sessionId: 'session-a',
+      clientId: 'client-a',
+      eventEpoch: 'epoch-1',
+      lastEventId: 2,
+      replaySnapshot: createTextReplaySnapshot('refreshed transcript'),
+      context: vi
+        .fn()
+        .mockReturnValueOnce(staleContext.promise)
+        .mockResolvedValueOnce({
+          v: 1,
+          sessionId: 'session-a',
+          workspaceCwd: '/mock-workspace',
+          state: { models: { currentModelId: 'model-b' } },
+        }),
+    });
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    sdkMocks.MockDaemonSessionClient.load.mockResolvedValueOnce(candidate);
+    let refresh!: Promise<void>;
+    act(() => {
+      refresh = requireActions(actions).loadSession('session-a');
+    });
+    await act(async () => {
+      await expect(refresh).resolves.toBeUndefined();
+      await flushPromises();
+    });
+    await vi.waitFor(() => expect(candidate.context).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      await requireActions(actions).setModel('model-b');
+      await flushPromises();
+    });
+    expect(connection?.currentModel).toBe('model-b');
+
+    await act(async () => {
+      staleContext.resolve({
+        v: 1,
+        sessionId: 'session-a',
+        workspaceCwd: '/mock-workspace',
+        state: { models: { currentModelId: 'model-a' } },
+      });
+      await flushPromises();
+    });
+    expect(connection?.currentModel).toBe('model-b');
+    expect(connection?.context?.state).toEqual({
+      models: { currentModelId: 'model-b' },
+    });
+  });
+
   it('retires a prepared same-session candidate when a cross-session target supersedes it', async () => {
     const detachFetch = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -16150,7 +16321,16 @@ async function flushPromises(): Promise<void> {
 // SSE events coalesces into one reducer pass. Stay-alive mock generators never
 // end the consumer loop (which would flush synchronously), so tests that assert
 // transcript state mid-stream drain the batched dispatch here.
+// Two chained timer hops, not one: the dispatch timer and this helper's first
+// timer are registered from concurrently-draining microtask chains, so their
+// registration order is unspecified, and Node drains microtasks between timer
+// callbacks — a single hop registered first would resume the test (and its
+// assertions) before the dispatch timer ever fires. The dispatch timer is
+// always registered during the microtask drain that precedes the first hop's
+// callback, so the second hop — registered after that callback — is
+// guaranteed to fire after the dispatch has run.
 async function flushTranscriptDispatch(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
   await Promise.resolve();

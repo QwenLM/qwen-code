@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDiffPlan, chunksCoverDiff, parseDiff } from './diff-plan.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './diff-flags.js';
+import { isolateHostGitConfig } from './test-utils.js';
 
 // Driven from the production constants, not a copy of them. Hand-maintained
 // duplicates of the flag list let a flag be deleted from the capture paths while
@@ -45,6 +46,7 @@ const HOSTILE_CONFIG = [
 let repo: string;
 let subRepo: string;
 let env: NodeJS.ProcessEnv;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 /** Run git with the developer's system and global config switched off. */
 const git = (...args: string[]) =>
@@ -55,14 +57,13 @@ const gitIn = (cwd: string, ...args: string[]) =>
 
 beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), 'diff-plan-it-'));
-  const emptyConfig = join(repo, '.empty-gitconfig');
-  writeFileSync(emptyConfig, '');
+  // Shared host-git-config isolation (see isolateHostGitConfig for the
+  // incident class). This suite passes `env` explicitly to every child git
+  // rather than relying on process.env, so it snapshots the isolated env
+  // and adds its one real delta, the terminal-prompt guard.
+  gitIsolation = isolateHostGitConfig();
   env = {
     ...process.env,
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: emptyConfig,
-    // Belt and braces on platforms where the above is unsupported.
-    HOME: repo,
     GIT_TERMINAL_PROMPT: '0',
   };
 
@@ -125,6 +126,7 @@ afterAll(() => {
   // submodule, so it must outlive the tests.
   if (repo) rmSync(repo, { recursive: true, force: true });
   if (subRepo) rmSync(subRepo, { recursive: true, force: true });
+  gitIsolation.dispose();
 });
 
 /** Capture exactly as `fetch-pr` does, but under hostile config. */

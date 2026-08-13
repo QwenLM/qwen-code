@@ -931,6 +931,14 @@ export interface WebShellProps {
   onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  /**
+   * Controls whether the composer's file-upload entry points (drag-and-drop
+   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * `workspace_file_upload` capability, not instead of it: `false` force-
+   * disables upload even when the daemon advertises the capability, while
+   * `true`/omitted still requires the capability to be satisfied.
+   */
+  fileUploadEnabled?: boolean;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -1798,6 +1806,7 @@ export function App({
   builtinAtProviders,
   atProviders,
   composerTagIcons,
+  fileUploadEnabled,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2054,6 +2063,7 @@ export function App({
       markdownTableMode,
       markdown,
       loadingPhrases,
+      fileUploadEnabled,
     }),
     [
       composerTagIcons,
@@ -2077,6 +2087,7 @@ export function App({
       markdownTableMode,
       markdown,
       loadingPhrases,
+      fileUploadEnabled,
     ],
   );
   const CustomFooter = renderFooter;
@@ -6540,6 +6551,9 @@ export function App({
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
   );
+  const compactModeSetting = workspaceSettings.find(
+    (setting) => setting.key === COMPACT_MODE_SETTING_KEY,
+  );
   const currentVoiceModel = (() => {
     const value = readScopedModelSetting(
       targetedWorkspaceSettings,
@@ -6802,6 +6816,11 @@ export function App({
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
+
+  useEffect(() => {
+    const value = compactModeSetting?.values.effective;
+    if (typeof value === 'boolean') setCompactMode(value);
+  }, [compactModeSetting?.values.effective]);
 
   useEffect(() => {
     if (providedTheme) {
@@ -10186,6 +10205,20 @@ export function App({
     ],
   );
 
+  const handleReasoningEffort = useCallback(
+    (value: string) => {
+      if (sessionWriteBlocked || !connectionRef.current.sessionId) {
+        return Promise.resolve();
+      }
+      return sessionActions
+        .setReasoningEffort(value)
+        .catch((error: unknown) =>
+          reportError(error, t('reasoning.updateFailed')),
+        );
+    },
+    [reportError, sessionActions, sessionWriteBlocked, t],
+  );
+
   const handleDeleteModel = useCallback(
     (target: { authType: string; modelId: string; baseUrl?: string }) => {
       const modelActionToken = ++modelActionTokenRef.current;
@@ -12334,6 +12367,8 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          reasoning={connection.reasoning}
+                          onSelectReasoningEffort={handleReasoningEffort}
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
