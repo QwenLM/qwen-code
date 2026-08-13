@@ -45,6 +45,7 @@ describe('tool-result boundary diagnostics', () => {
         toolCallId: 'secret-tool-call-id',
         toolCallIds: ['secret-tool-call-id-2'],
         toolName: 'secret-tool-name',
+        wireUtf8Bytes: 12_345,
       }),
     ).toBe(true);
 
@@ -60,6 +61,7 @@ describe('tool-result boundary diagnostics', () => {
       toolCallHmacSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       toolCallHmacSha256s: [expect.stringMatching(/^[0-9a-f]{64}$/)],
       toolNameHmacSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      wireUtf8Bytes: 12_345,
     });
     expect(eventValues(event)[0]).toMatchObject({
       representation: 'display',
@@ -79,6 +81,7 @@ describe('tool-result boundary diagnostics', () => {
     ]) {
       expect(line).not.toContain(raw);
     }
+    expect(line).not.toContain(JSON.stringify(secret).slice(1, -1));
   });
 
   it('normalizes untrusted artifact summaries at the log sink', () => {
@@ -106,6 +109,15 @@ describe('tool-result boundary diagnostics', () => {
       artifacts: [{ state: 'undecided', kinds: ['file', 'unknown'] }],
     });
     expect(line).not.toContain('/private/secret');
+
+    observe({
+      stage: 'producer',
+      values: [{ representation: 'display', value: 'eligible' }],
+      artifacts: [{ state: 'none', kinds: [] }],
+    });
+    expect(parseEvent(debug.mock.calls[1][0] as string)).toMatchObject({
+      artifacts: [{ state: 'none', kinds: [] }],
+    });
   });
 
   it('keeps unchanged HMACs equal and changes the first mutated value', () => {
@@ -139,6 +151,7 @@ describe('tool-result boundary diagnostics', () => {
     );
     expect(hashes[0]).toBe(hashes[1]);
     expect(hashes[2]).not.toBe(hashes[1]);
+    expect(parseEvent(debug.mock.calls[0][0] as string)['mutated']).toBe(true);
   });
 
   it('hashes legacy and canonical tool names identically', () => {
@@ -183,6 +196,46 @@ describe('tool-result boundary diagnostics', () => {
 
     const values = eventValues(parseEvent(debug.mock.calls[0][0] as string));
     expect(values[0]['hmacSha256']).not.toBe(values[1]['hmacSha256']);
+    expect(values.map((value) => value['slot'])).toEqual([0, 1]);
+  });
+
+  it('reuses its lazily generated HMAC key across events', () => {
+    const debug = vi.fn();
+    const observe = createToolResultBoundaryObserver({
+      enabled: () => true,
+      logger: { debug, isEnabled: () => true },
+      thresholdBytes: 0,
+    });
+    const observation = {
+      stage: 'producer' as const,
+      sessionId: 'same-session',
+      values: [{ representation: 'display' as const, value: 'eligible' }],
+    };
+
+    observe(observation);
+    observe(observation);
+
+    expect(
+      parseEvent(debug.mock.calls[0][0] as string)['sessionHmacSha256'],
+    ).toBe(parseEvent(debug.mock.calls[1][0] as string)['sessionHmacSha256']);
+  });
+
+  it('executes enabled value and mutation thunks', () => {
+    const debug = vi.fn();
+    const values = vi.fn(() => [
+      { representation: 'display' as const, value: 'small' },
+    ]);
+    const mutated = vi.fn(() => true);
+    const observe = createToolResultBoundaryObserver({
+      enabled: () => true,
+      hmacKey: Buffer.alloc(32, 6),
+      logger: { debug, isEnabled: () => true },
+    });
+
+    expect(observe({ stage: 'producer', mutated, values })).toBe(true);
+    expect(values).toHaveBeenCalledOnce();
+    expect(mutated).toHaveBeenCalledOnce();
+    expect(parseEvent(debug.mock.calls[0][0] as string)['mutated']).toBe(true);
   });
 
   it('matches native JSON byte accounting under fixed-seed fuzzing', () => {
@@ -302,6 +355,26 @@ describe('tool-result boundary diagnostics', () => {
     ).toMatchObject({ jsonUtf8Bytes: 65_537 });
   });
 
+  it('emits when any value exceeds the threshold', () => {
+    const debug = vi.fn();
+    const observe = createToolResultBoundaryObserver({
+      enabled: () => true,
+      hmacKey: Buffer.alloc(32, 4),
+      logger: { debug, isEnabled: () => true },
+    });
+
+    expect(
+      observe({
+        stage: 'producer',
+        values: [
+          { representation: 'display', value: 'a'.repeat(65_535) },
+          { representation: 'display', value: 'small' },
+        ],
+      }),
+    ).toBe(true);
+    expect(debug).toHaveBeenCalledOnce();
+  });
+
   it('rate-limits eligible events and reports the suppressed count', () => {
     let currentTime = 0;
     const debug = vi.fn();
@@ -328,6 +401,11 @@ describe('tool-result boundary diagnostics', () => {
     expect(parseEvent(debug.mock.calls[1][0] as string)).toMatchObject({
       suppressedCount: 1,
     });
+    currentTime = 200;
+    expect(observe(observation)).toBe(true);
+    expect(parseEvent(debug.mock.calls[2][0] as string)).not.toHaveProperty(
+      'suppressedCount',
+    );
   });
 
   it('starts a new rate-limit window when the clock moves backward', () => {

@@ -121,6 +121,9 @@ describe('CLI tool-result boundary diagnostics', () => {
     expect(mockObserveBoundary).toHaveBeenLastCalledWith(
       expect.objectContaining({
         stage: 'acp_wire',
+        sessionId: 'session-secret',
+        toolCallId: 'call-secret',
+        mutated: true,
         wireUtf8Bytes: 1_235,
         artifacts: [{ state: 'reusable', kinds: ['file', 'image'] }],
         values: expect.any(Function),
@@ -242,7 +245,11 @@ describe('CLI tool-result boundary diagnostics', () => {
           _meta: {
             [LOAD_REPLAY_META_KEY]: {
               v: 1,
-              updates: [firstDelivered, secondDelivered],
+              updates: [
+                { sessionUpdate: 'plan', entries: [] },
+                firstDelivered,
+                secondDelivered,
+              ],
             },
           },
         },
@@ -273,7 +280,8 @@ describe('CLI tool-result boundary diagnostics', () => {
       'call-secret',
       { state: 'reusable', kinds: ['file'] },
     );
-    observeHeadlessToolResultWire(message, 'x'.repeat(777));
+    const frame = '汉😀';
+    observeHeadlessToolResultWire(message, frame);
 
     expect(mockObserveBoundary).toHaveBeenNthCalledWith(
       1,
@@ -298,7 +306,8 @@ describe('CLI tool-result boundary diagnostics', () => {
         stage: 'headless_wire',
         sessionId: 'session-secret',
         toolCallId: 'call-secret',
-        wireUtf8Bytes: 777,
+        mutated: true,
+        wireUtf8Bytes: Buffer.byteLength(frame, 'utf8'),
         artifacts: [{ state: 'reusable', kinds: ['file'] }],
         values: [{ representation: 'headless_content', value: 'projected' }],
       }),
@@ -323,7 +332,10 @@ describe('CLI tool-result boundary diagnostics', () => {
       { state: 'none', kinds: ['image'] },
     );
 
-    observeHeadlessJsonToolResultWire([first, second], 'x'.repeat(999));
+    observeHeadlessJsonToolResultWire(
+      [headlessMessage('uncorrelated'), first, second],
+      'x'.repeat(999),
+    );
 
     expect(mockObserveBoundary).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -353,6 +365,14 @@ describe('CLI tool-result boundary diagnostics', () => {
     mockObserveBoundary.mockReturnValue(false);
     const output = acpUpdate('small');
     observeAcpToolResultProjection(output, output, 'session-secret');
+    expect(mockObserveBoundary).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ mutated: false }),
+    );
+    expect(mockObserveBoundary).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ mutated: false }),
+    );
     mockObserveBoundary.mockClear();
 
     observeAcpToolResultWire(
@@ -387,6 +407,39 @@ describe('CLI tool-result boundary diagnostics', () => {
         acpUpdate('projected'),
         'session-secret',
       ),
+    ).not.toThrow();
+  });
+
+  it('swallows observer failures at writer boundaries', () => {
+    const acpInput = acpUpdate('original');
+    const acpOutput = acpUpdate('projected');
+    const headless = headlessMessage('projected');
+    observeAcpToolResultProjection(acpInput, acpOutput, 'session-secret');
+    observeHeadlessToolResultProjection(
+      headless,
+      'original',
+      'projected',
+      'call-secret',
+      { state: 'undecided', kinds: [] },
+    );
+    mockObserveBoundary.mockImplementation(() => {
+      throw new Error('diagnostic failure');
+    });
+
+    expect(() =>
+      observeAcpToolResultWire(
+        {
+          method: 'session/update',
+          params: { sessionId: 'session-secret', update: acpOutput },
+        },
+        10,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      observeHeadlessToolResultWire(headless, 'frame'),
+    ).not.toThrow();
+    expect(() =>
+      observeHeadlessJsonToolResultWire([headless], 'frame'),
     ).not.toThrow();
   });
 });

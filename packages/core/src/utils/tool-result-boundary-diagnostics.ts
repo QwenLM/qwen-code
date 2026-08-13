@@ -168,27 +168,26 @@ export function toolResultBoundaryArtifact(
 
 export function toolResultPartDiagnosticValues(
   value: PartListUnion,
-  representation: ToolResultRepresentation = 'model_text',
 ): ToolResultBoundaryValue[] {
   const values: ToolResultBoundaryValue[] = [];
   const parts = Array.isArray(value) ? value : [value];
   for (const candidate of parts) {
     if (typeof candidate === 'string') {
-      values.push({ representation, value: candidate });
+      values.push({ representation: 'model_text', value: candidate });
       continue;
     }
     const part = candidate as Part;
     if (typeof part.text === 'string') {
-      values.push({ representation, value: part.text });
+      values.push({ representation: 'model_text', value: part.text });
     }
     const response = part.functionResponse?.response;
     const output = response?.['output'];
     const error = response?.['error'];
     if (typeof output === 'string') {
-      values.push({ representation, value: output });
+      values.push({ representation: 'model_text', value: output });
     }
     if (typeof error === 'string') {
-      values.push({ representation, value: error });
+      values.push({ representation: 'model_text', value: error });
     }
   }
   return values;

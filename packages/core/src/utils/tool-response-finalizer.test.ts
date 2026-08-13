@@ -88,11 +88,31 @@ describe('tool response finalization', () => {
       ]),
     ];
 
-    await expect(finalizeToolResponses(config(100), entries)).resolves.toBe(
-      entries,
-    );
+    await expect(
+      finalizeToolResponses(
+        config(100),
+        entries,
+        new Map([['small', 'prompt-small']]),
+      ),
+    ).resolves.toBe(entries);
     expect(persist).not.toHaveBeenCalled();
     expect(debugLogger.info).not.toHaveBeenCalled();
+    expect(boundaryObserveMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        stage: 'finalizer_input',
+        promptId: 'prompt-small',
+        mutated: false,
+      }),
+    );
+    expect(boundaryObserveMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        stage: 'finalizer_output',
+        promptId: 'prompt-small',
+        mutated: false,
+      }),
+    );
   });
 
   it('can suppress intermediate boundary observations', async () => {
