@@ -2761,6 +2761,103 @@ describe('GeminiChat', async () => {
       ]);
     });
 
+    it('excludes a whitespace-padded degraded placeholder from curated history', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ text: '(request timeout)\n' }],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'real' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-placeholder-curation-trim',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
+      ]);
+      expect(chat.getHistory(true)).toEqual([
+        { role: 'user', parts: [{ text: 'query' }, { text: 'next' }] },
+        { role: 'model', parts: [{ text: 'real' }] },
+      ]);
+    });
+
+    it('keeps a placeholder turn that carries a functionCall in curated history', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: '(request timeout)' },
+            { functionCall: { name: 'someTool', args: {} } },
+          ],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'real' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next' },
+        'prompt-id-placeholder-curation-tool-call',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: '(request timeout)' },
+            { functionCall: { name: 'someTool', args: {} } },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'next' }] },
+      ]);
+    });
+
     it('does not deep-clone the full curated history when building request contents', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'prior question' }] },
@@ -6223,9 +6320,66 @@ describe('GeminiChat', async () => {
                 'Recovered response',
           ),
         ).toBe(true);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                '(request timeout)',
+          ),
+        ).toBe(false);
         expect(chat.getHistory()).toEqual([
           { role: 'user', parts: [{ text: 'test' }] },
           { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should exhaust retries for upstream fail-fast placeholder responses', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: '(request timeout)' }],
+                    role: 'model',
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-degraded-placeholder-exhaustion',
+        );
+        await expectStreamExhaustion(stream);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
+        expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            total_attempts: 5,
+            final_error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+            model: 'test-model',
+          }),
+        );
+
+        // History should still contain only the user message.
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
         ]);
       } finally {
         vi.useRealTimers();

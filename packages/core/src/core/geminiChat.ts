@@ -4517,6 +4517,8 @@ export class GeminiChat {
     // the post-loop block for why this is needed to keep tool_use/tool_result
     // pairing intact across the failure.
     let streamError: unknown = null;
+    let yieldedAnyChunk = false;
+    let deferredFirstChunk: GenerateContentResponse | null = null;
 
     try {
       for await (const chunk of streamResponse) {
@@ -4702,15 +4704,31 @@ export class GeminiChat {
               delete candidate.finishReason;
             }
           }
+        } else if (!yieldedAnyChunk) {
+          // Defer the first chunk that carries a finishReason so post-stream
+          // validation (placeholder check, empty-text check, etc.) can reject
+          // it before the content reaches consumers. Without this deferral a
+          // single-chunk fail-fast placeholder (text + finishReason: 'STOP')
+          // is yielded to the TUI / headless adapter before the throw fires,
+          // and neither consumer rolls back the committed output.
+          for (const candidate of chunk.candidates ?? []) {
+            if (candidate.finishReason) {
+              deferredFirstChunk = chunk;
+              break;
+            }
+          }
         }
 
-        if (
-          !chunk.candidates?.length ||
-          preparations.length > 0 ||
-          !protocolTextWasSuppressed ||
-          !protocolTagDetector.blockingOutput
-        ) {
-          yield chunk;
+        if (chunk !== deferredFirstChunk) {
+          if (
+            !chunk.candidates?.length ||
+            preparations.length > 0 ||
+            !protocolTextWasSuppressed ||
+            !protocolTagDetector.blockingOutput
+          ) {
+            yieldedAnyChunk = true;
+            yield chunk;
+          }
         }
       }
     } catch (e) {
@@ -5089,6 +5107,9 @@ export class GeminiChat {
       throw streamError;
     }
 
+    if (deferredFirstChunk) {
+      yield deferredFirstChunk;
+    }
     this.history.push({
       role: 'model',
       parts: [
