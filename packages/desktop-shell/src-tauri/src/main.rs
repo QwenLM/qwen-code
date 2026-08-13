@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
 use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
 use tauri::{
@@ -21,18 +22,23 @@ use tauri::{
     WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_updater::{Update, UpdaterExt};
 use url::Url;
 
 #[cfg(target_os = "windows")]
 const BOOTSTRAP_URL: &str = "http://tauri.localhost";
 #[cfg(not(target_os = "windows"))]
 const BOOTSTRAP_URL: &str = "tauri://localhost";
+#[cfg(target_os = "macos")]
+static FULLSCREEN_HIDE_PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static FULLSCREEN_HIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
 // Keep the default first-launch workspace aligned with the Electron shell's
 // getDefaultConversationWorkspacePath() in
 // packages/desktop/packages/shared/src/config/storage.ts: ~/Documents/Qwen,
 // relocatable through QWEN_DEFAULT_WORKSPACE_DIR (see default_workspace).
 const DEFAULT_WORKSPACE_DIRECTORY: &str = "Qwen";
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,6 +134,43 @@ fn main() {
                     .window_dirty
                     .store(true, Ordering::Relaxed);
             }
+            #[cfg(target_os = "macos")]
+            WindowEvent::Focused(true) => {
+                cancel_pending_fullscreen_hide();
+            }
+            #[cfg(target_os = "macos")]
+            WindowEvent::CloseRequested { api, .. } => {
+                save_window_state(app_handle);
+                api.prevent_close();
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    if FULLSCREEN_HIDE_PENDING.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if window.is_fullscreen().unwrap_or(false) {
+                        if window.set_fullscreen(false).is_err() {
+                            FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+                            return;
+                        }
+                        let hide_generation =
+                            FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+                        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+                        let app = app_handle.clone();
+                        let win = window.clone();
+                        // ponytail: remove this delay when Tauri exposes fullscreen-exit events.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            let _ = app.run_on_main_thread(move || {
+                                if take_pending_fullscreen_hide(hide_generation) {
+                                    let _ = win.hide();
+                                }
+                            });
+                        });
+                    } else {
+                        let _ = window.hide();
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             WindowEvent::CloseRequested { .. } => save_window_state(app_handle),
             _ => {}
         },
@@ -139,6 +182,19 @@ fn main() {
         RunEvent::Exit | RunEvent::ExitRequested { .. } => {
             save_window_state(app_handle);
             stop_runtime(app_handle);
+        }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } if should_restore_main_window(
+            has_visible_windows,
+            app_handle.get_webview_window("main").is_some_and(|window| {
+                !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false)
+            }),
+        ) =>
+        {
+            focus_main_window(app_handle)
         }
         _ => {}
     });
@@ -253,6 +309,10 @@ fn bootstrap_state(
     require_bootstrap_origin(&webview)?;
     let starting = state.starting.load(Ordering::SeqCst) != 0;
     let running = lock(&state.runtime).is_some();
+    let workspace = bootstrap_workspace(
+        lock(&state.last_workspace).clone(),
+        state.settings.workspace(),
+    );
     Ok(BootstrapState {
         desktop_version: env!("CARGO_PKG_VERSION").to_string(),
         status: if running {
@@ -262,12 +322,18 @@ fn bootstrap_state(
         } else {
             "idle"
         },
-        workspace: state
-            .settings
-            .workspace()
-            .map(|path| path.to_string_lossy().into_owned()),
+        workspace: workspace.map(|path| path.to_string_lossy().into_owned()),
         error: lock(&state.last_error).clone(),
     })
+}
+
+fn bootstrap_workspace(
+    last_workspace: Option<(PathBuf, bool)>,
+    persisted_workspace: Option<PathBuf>,
+) -> Option<PathBuf> {
+    last_workspace
+        .map(|(workspace, _)| workspace)
+        .or(persisted_workspace)
 }
 
 #[tauri::command]
@@ -377,12 +443,8 @@ fn open_logs(
 #[tauri::command]
 async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
     require_bootstrap_origin(&webview)?;
-    let update = app
-        .updater()
-        .map_err(|error| format!("Failed to initialize updater: {error}"))?
-        .check()
-        .await
-        .map_err(|error| format!("Failed to check for updates: {error}"))?
+    let update = check_for_update(&app)
+        .await?
         .ok_or_else(|| "No desktop update is available.".to_string())?;
     let version = update.version.clone();
     let confirmed = tauri::async_runtime::spawn_blocking({
@@ -665,6 +727,8 @@ fn spawn_window_state_flusher(app: AppHandle) {
 }
 
 fn focus_main_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    cancel_pending_fullscreen_hide();
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -672,8 +736,26 @@ fn focus_main_window(app: &AppHandle) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn cancel_pending_fullscreen_hide() {
+    FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    FULLSCREEN_HIDE_PENDING.store(false, Ordering::Release);
+}
+
+#[cfg(target_os = "macos")]
+fn take_pending_fullscreen_hide(generation: u64) -> bool {
+    FULLSCREEN_HIDE_GENERATION.load(Ordering::Acquire) == generation
+        && FULLSCREEN_HIDE_PENDING.swap(false, Ordering::AcqRel)
+}
+
+#[cfg(target_os = "macos")]
+fn should_restore_main_window(has_visible_windows: bool, main_needs_restore: bool) -> bool {
+    !has_visible_windows || main_needs_restore || FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed)
+}
+
 fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("local-control") {
+        window.center().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
@@ -687,6 +769,7 @@ fn show_local_control_window(app: &AppHandle) -> Result<(), String> {
     .inner_size(440.0, 500.0)
     .min_inner_size(400.0, 500.0)
     .resizable(false)
+    .center()
     .build()
     .map(|_| ())
     .map_err(|error| format!("Failed to open Local Control: {error}"))
@@ -750,11 +833,7 @@ fn check_updates_silently(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        let updater = match app.updater() {
-            Ok(updater) => updater,
-            Err(_) => return,
-        };
-        let Ok(Some(update)) = updater.check().await else {
+        let Ok(Some(update)) = check_for_update(&app).await else {
             return;
         };
         let _ = app.emit("update-available", update.version.clone());
@@ -801,6 +880,16 @@ fn check_updates_silently(app: AppHandle) {
     });
 }
 
+async fn check_for_update(app: &AppHandle) -> Result<Option<Update>, String> {
+    app.updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .build()
+        .map_err(|error| format!("Failed to initialize updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("Failed to check for updates: {error}"))
+}
+
 fn is_safe_external_url(url: &Url) -> bool {
     matches!(url.scheme(), "https" | "http" | "mailto")
 }
@@ -814,16 +903,80 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
     use super::{
-        default_workspace_override_dir, default_workspace_path, ensure_workspace_dir,
-        is_allowed_navigation, is_bootstrap_url, is_safe_external_url, is_same_origin, origin_of,
-        BOOTSTRAP_URL,
+        cancel_pending_fullscreen_hide, should_restore_main_window, take_pending_fullscreen_hide,
+        FULLSCREEN_HIDE_GENERATION, FULLSCREEN_HIDE_PENDING,
+    };
+    use super::{
+        bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
+        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
+        is_same_origin, origin_of, BOOTSTRAP_URL,
     };
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
+    #[cfg(target_os = "macos")]
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
     use url::Url;
+
+    #[test]
+    fn bootstrap_prefers_the_workspace_being_started() {
+        let attempted = PathBuf::from("/tmp/attempted");
+        let persisted = PathBuf::from("/tmp/persisted");
+        assert_eq!(
+            bootstrap_workspace(Some((attempted.clone(), false)), Some(persisted.clone())),
+            Some(attempted),
+        );
+        assert_eq!(
+            bootstrap_workspace(None, Some(persisted.clone())),
+            Some(persisted)
+        );
+        assert_eq!(
+            bootstrap_workspace(Some((PathBuf::from("/tmp/first-launch"), true)), None),
+            Some(PathBuf::from("/tmp/first-launch")),
+        );
+        assert_eq!(bootstrap_workspace(None, None), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fullscreen_hide_lifecycle_state() {
+        // has_visible, main_needs_restore, FULLSCREEN_PENDING → expected
+        let cases: &[(bool, bool, bool, bool)] = &[
+            (true, false, false, false),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, true),
+            (false, false, false, true),
+            (false, false, true, true),
+            (false, true, false, true),
+            (false, true, true, true),
+        ];
+        for (has_visible, needs_restore, pending, expected) in cases {
+            FULLSCREEN_HIDE_PENDING.store(*pending, Ordering::Relaxed);
+            assert_eq!(
+                should_restore_main_window(*has_visible, *needs_restore),
+                *expected,
+                "has_visible={}, needs_restore={}, pending={}",
+                has_visible,
+                needs_restore,
+                pending,
+            );
+        }
+        FULLSCREEN_HIDE_PENDING.store(false, Ordering::Relaxed);
+
+        FULLSCREEN_HIDE_GENERATION.store(0, Ordering::Relaxed);
+        let first_hide = FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+        cancel_pending_fullscreen_hide();
+        let second_hide = FULLSCREEN_HIDE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        FULLSCREEN_HIDE_PENDING.store(true, Ordering::Release);
+        assert!(!take_pending_fullscreen_hide(first_hide));
+        assert!(FULLSCREEN_HIDE_PENDING.load(Ordering::Relaxed));
+        assert!(take_pending_fullscreen_hide(second_hide));
+    }
 
     #[test]
     fn allows_only_the_daemon_origin_in_the_main_window() {

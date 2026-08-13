@@ -93,6 +93,14 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
   });
 
+  describe('getResponseParsingOptions', () => {
+    it('enables leak handling without treating balanced tags as protocol', () => {
+      expect(provider.getResponseParsingOptions()).toEqual({
+        contentOnlyThinkingTagLeaks: true,
+      });
+    });
+  });
+
   describe('buildHeaders', () => {
     it('should build headers with User-Agent', () => {
       const headers = provider.buildHeaders();
