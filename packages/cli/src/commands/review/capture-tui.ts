@@ -170,6 +170,10 @@ export const probes = {
   freeze: (): ProbeResult => probeOutput('freeze', '--help'),
 };
 
+/** A capture manifest is a few hundred bytes; anything past this is not
+ * one, and reading it would cost more than refusing does. */
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+
 /** The signals Node lets JavaScript observe whose default action would
  * otherwise terminate the process past the finally-based reap. NOT every
  * such signal exists here — SIGUSR2, SIGALRM, SIGXCPU and friends still
@@ -178,10 +182,6 @@ export const probes = {
  * group (measured: exit 129 with server, socket and holder all surviving),
  * and the capture window legally runs up to an hour. Exported so the signal
  * tests iterate the REAL list. */
-/** A capture manifest is a few hundred bytes; anything past this is not
- * one, and reading it would cost more than refusing does. */
-const MAX_MANIFEST_BYTES = 1024 * 1024;
-
 export const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
 
 /** The tmux control-call deadline, exported as a seam like its freezeRender
@@ -248,17 +248,17 @@ function testWithBudget(
 }
 
 let brokenPipeGuarded = false;
-/** The contract writes (refusal/success JSON, stderr summary, the reap
- * WARNING) must never flip the exit disposition: a gone reader raises an
- * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
- * trace where the machine-read contract promised exit 3 (or 0). Swallow
- * EPIPE only; anything else stays loud. */
 /** Set once this run's artifacts are on disk AND described by a manifest.
  * From that moment a stdio failure cannot change what happened: the
  * evidence exists, so an exit 1 with a stack trace would report a
  * successful capture as a failed command. */
 let artifactsComplete = false;
 
+/** The contract writes (refusal/success JSON, stderr summary, the reap
+ * WARNING) must never flip the exit disposition: a gone reader raises an
+ * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
+ * trace where the machine-read contract promised exit 3 (or 0). Swallow
+ * EPIPE only; anything else stays loud. */
 function guardBrokenPipes(): void {
   if (brokenPipeGuarded) return;
   brokenPipeGuarded = true;

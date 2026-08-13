@@ -104,15 +104,18 @@ async function withStdio(
 // thing the clear phase now accepts as its own. A bare `{"evidence":"png"}`
 // no longer qualifies, and must not: a user's own JSON carrying that field
 // authorized deleting the files beside it (probe-reproduced).
-function staleManifest(outBase: string): string {
+function staleManifest(outBase: string, evidence = 'png'): string {
   return JSON.stringify({
     command: 'printf hi',
     cwd: '/tmp',
     cols: 80,
     rows: 24,
     ansPath: `${outBase}.ans`,
-    pngPath: `${outBase}.png`,
-    evidence: 'png',
+    // An ans-only run (the degraded freeze rung) records a NULL pngPath,
+    // exactly as the command writes it — so it cannot authorize deleting
+    // anything at the png name.
+    pngPath: evidence === 'png' ? `${outBase}.png` : null,
+    evidence,
     settledBy: 'fixed-delay',
   });
 }
@@ -180,23 +183,50 @@ describe('capture-tui without tmux (probe seam)', () => {
     probes.tmux = () => ({ status: 'ok', out: 'tmux 2.8' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-oldtmux-'));
     try {
-      const { stderr } = await withStdio(() =>
-        runCaptureTui({
-          command: 'printf hi',
-          cwd: dir,
-          cols: 80,
-          rows: 24,
-          settleMs: 0,
-          until: undefined,
-          keys: undefined,
-          out: join(dir, 'cap'),
-          timeoutMs: 1000,
-        } as never),
+      // The call log, not just the message: exit 3, the wording and the
+      // absent .ans are all location-invariant, and a mutant that moved
+      // this gate BELOW plan.start stayed green on a tmux-equipped lane —
+      // a real new-session ran the user's command, then the identical
+      // refusal, with the start/reap cycle and its orphan window on every
+      // refusal on a genuinely old host. That start is the cost the gate
+      // exists to avoid, so the pin has to be able to see it.
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const callLog = join(dir, 'tmux-calls');
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 2.8"; exit 0; }\necho ""\nexit 0\n`,
+        { mode: 0o755 },
       );
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      let stderr: string;
+      try {
+        ({ stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        ));
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+      }
       expect(process.exitCode).toBe(3);
       expect(stderr).toContain('tmux 2.8 is too old');
       expect(stderr).toContain('capture-pane -N');
       expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      // Nothing was started. (The version came from the probe seam, so the
+      // log may be empty — that is the strongest form of the same claim.)
+      const calls = existsSync(callLog) ? readFileSync(callLog, 'utf8') : '';
+      expect(calls).not.toContain('new-session');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1298,6 +1328,34 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       ...over,
     } as never);
   }
+
+  it('an ans-only manifest does not authorize clearing <out>.png', async () => {
+    // Mutation-probed: dropping the `manifestHadPng` condition shipped the
+    // whole suite green while this exact shape deleted a user's file. A
+    // previous run that degraded to ans-only names no png in its manifest,
+    // so whatever sits at <out>.png is someone else's — and the re-run
+    // against the same --out (the documented reuse shape) must degrade its
+    // own png rung rather than clear the way for one. Real tmux, real
+    // version: faking 3.9 here would send flags an older runner's tmux
+    // rejects.
+    writeFileSync(join(dir, 'cap.ans'), 'old run');
+    writeFileSync(join(dir, 'cap.png'), 'user file');
+    writeFileSync(
+      join(dir, 'cap.json'),
+      staleManifest(join(dir, 'cap'), 'ans-only'),
+    );
+    const { stderr } = await withStdio(() => run());
+    expect(process.exitCode).toBeUndefined();
+    // Untouched, byte for byte — the whole point.
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
+    // ...and the run says so instead of quietly claiming a png rung.
+    expect(stderr).toContain('holds a file this capture did not write');
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    // Its own .ans was cleared and rewritten by this run.
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toContain('WORLD');
+  });
 
   it('captures the real rendering into .ans and records the ladder honestly', async () => {
     await run();
@@ -3121,39 +3179,51 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         // regression this test polices is exactly "the child did not do
         // what it should", and leaving it inside a 60s capture orphaned a
         // node process (and its tmux server) on every such failure.
-        const orphanGuard = setTimeout(() => child.kill('SIGKILL'), 90_000);
+        // BELOW this test's own budget, and held across every wait that
+        // follows: cleared before `await disposition`, the guard covered
+        // none of the window it exists for. Against the dropped-re-raise
+        // mutant this test polices, `child.kill(signal)` does not end the
+        // child, the disposition never settles, and vitest fails the test —
+        // with the guard already cleared, the child then ran out its
+        // 60s capture with its private tmux server alive on every red run.
+        const orphanGuard = setTimeout(() => child.kill('SIGKILL'), 20_000);
         try {
           expect(seen).toBe(true);
+          child.kill(signal);
+          // Capture the disposition: the re-raise half of the contract — the
+          // handler reaps FIRST and then re-raises, so the child must die OF
+          // the signal (the conventional exit disposition). A dropped
+          // re-raise reads normal completion to a harness killing a wedged
+          // capture (probe-verified: the exact mutant passed the
+          // exit-event-only version of this wait).
+          const [code, exitSignal] = await disposition;
+          expect(exitSignal).toBe(signal);
+          expect(code).toBeNull();
+          // The reap ran before the re-raise: no server named for the child.
+          let gone = false;
+          for (let i = 0; i < 40 && !gone; i++) {
+            const r = spawnSync(
+              'pgrep',
+              ['-f', `qwen-review-capture-${childPid}-`],
+              { encoding: 'utf8' },
+            );
+            if ((r.stdout ?? '').trim() === '') gone = true;
+            else await sleep(50);
+          }
+          expect(gone).toBe(true);
         } catch (e) {
           child.kill('SIGKILL');
-          clearTimeout(orphanGuard);
           throw e;
+        } finally {
+          clearTimeout(orphanGuard);
         }
-        clearTimeout(orphanGuard);
-        child.kill(signal);
-        // Capture the disposition: the re-raise half of the contract — the
-        // handler reaps FIRST and then re-raises, so the child must die OF
-        // the signal (the conventional exit disposition). A dropped
-        // re-raise reads normal completion to a harness killing a wedged
-        // capture (probe-verified: the exact mutant passed the
-        // exit-event-only version of this wait).
-        const [code, exitSignal] = await disposition;
-        expect(exitSignal).toBe(signal);
-        expect(code).toBeNull();
-        // The reap ran before the re-raise: no server named for the child.
-        let gone = false;
-        for (let i = 0; i < 40 && !gone; i++) {
-          const r = spawnSync(
-            'pgrep',
-            ['-f', `qwen-review-capture-${childPid}-`],
-            { encoding: 'utf8' },
-          );
-          if ((r.stdout ?? '').trim() === '') gone = true;
-          else await sleep(50);
-        }
-        expect(gone).toBe(true);
       }
     },
+    // Four sequential cold `node --import tsx` lifecycles, each starting a
+    // real tmux server: measured at 18.4s under load, so the default 15s
+    // fails this test against healthy production code on a busy runner.
+    // Every other child-spawning test in this file already carries a budget.
+    60_000,
   );
 
   it(// No pgrep needed: sentinel + child disposition only.
