@@ -5,9 +5,11 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { ConnectionRegistry } from './connection-registry.js';
 import { AcpPreAttachBudget } from './pre-attach-budget.js';
 import type { DeliveryResult, TransportStream } from './transport-stream.js';
+import { WsStream } from './ws-stream.js';
 
 class FakeStream implements TransportStream {
   isClosed = false;
@@ -50,6 +52,26 @@ class ControlledStream implements TransportStream {
 
   close(): void {
     this.isClosed = true;
+  }
+}
+
+class PendingWebSocket extends EventEmitter {
+  readonly OPEN = 1;
+  readyState = this.OPEN;
+  callback: ((err?: Error) => void) | undefined;
+
+  send(_data: unknown, ...args: unknown[]): void {
+    const callback = args.at(-1);
+    this.callback =
+      typeof callback === 'function'
+        ? (callback as (err?: Error) => void)
+        : undefined;
+  }
+
+  ping(): void {}
+
+  close(): void {
+    this.readyState = 3;
   }
 }
 
@@ -834,6 +856,35 @@ describe('ConnectionRegistry.getSnapshot', () => {
       expect(outcomeUnknown).toHaveBeenCalledOnce();
       expect(delivered).not.toHaveBeenCalled();
       expect(discarded).not.toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('preserves an active WebSocket receipt when close makes delivery ambiguous', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const socket = new PendingWebSocket();
+      conn.attachConnStream(new WsStream(socket as never));
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const outcomeUnknown = vi.fn();
+      const send = conn.sendConn(
+        { sessionId: 'provisional' },
+        { delivered, discarded, outcomeUnknown },
+      );
+      await vi.waitFor(() => expect(socket.callback).toBeDefined());
+
+      registry.delete(conn.connectionId);
+
+      await expect(send).resolves.toBe('outcome_unknown');
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+      socket.callback?.();
+      expect(outcomeUnknown).toHaveBeenCalledOnce();
     } finally {
       registry.dispose();
     }

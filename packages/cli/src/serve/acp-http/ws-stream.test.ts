@@ -95,14 +95,24 @@ describe('WsStream', () => {
     expect(ws.sent).toEqual([]);
   });
 
-  it('close() settles an active send before its callback arrives', async () => {
+  it('reports queued sends as closed when the stream is already closed', async () => {
+    const stream = new WsStream(ws as never);
+    stream.close();
+
+    await expect(
+      stream.sendSerialized(Buffer.from('{"ok":true}')),
+    ).resolves.toBe('closed');
+    expect(ws.sent).toEqual([]);
+  });
+
+  it('close() marks an active accepted send outcome unknown', async () => {
     const controlled = new ControlledWebSocket();
     const stream = new WsStream(controlled as never);
     const delivery = stream.sendSerialized(Buffer.from('{"ok":true}'));
     await vi.waitFor(() => expect(controlled.callback).toBeDefined());
 
     stream.close();
-    await expect(delivery).resolves.toBe('closed');
+    await expect(delivery).resolves.toBe('outcome_unknown');
 
     controlled.callback?.();
     expect(stream.isClosed).toBe(true);

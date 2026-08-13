@@ -88,9 +88,9 @@ export class WsStream implements TransportStream {
               this.activeSendClosers.delete(onSocketClose);
               resolve(result);
             };
-            const onSocketClose = () => settle('closed');
+            const onSocketClose = () => settle('outcome_unknown');
             const callback = (err?: Error) => {
-              settle(err ? 'failed' : this._closed ? 'closed' : 'delivered');
+              settle(err ? 'failed' : 'delivered');
             };
             this.activeSendClosers.add(onSocketClose);
             try {
