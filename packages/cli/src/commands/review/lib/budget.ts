@@ -414,8 +414,33 @@ export const INLINE_BUDGET_GAP_RE =
  * spans are tempered (a per-character exception lookahead), which keeps
  * them linear too.
  */
-const PLACEHOLDER_GAP_RE =
-  /^(?:<[^>]*>$|[-—*_~`]+$|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b(?:[.!…,;:\s]*$|\s+(?:skipped|found|to report)\b[.!…,;:\s]*$|\s*[-—–]\s*(?:stayed\s+(?:under|within|below|inside)\s+(?:the\s+)?(?:tool(?:[- ]call)?\s+)?budget\b[.!…,;:\s]*$|(?:all|every(?:thing)?|planned|further|no further)\b(?:(?!\b(?:but|except|excepting|excluding)\b).)*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b(?:\s+(?:within|under|inside|below)\s+(?:the\s+)?(?:tool(?:[- ]call)?\s+)?budget)?[.!…,;:\s]*$)|\s*\(\s*(?:all|every(?:thing)?)\b(?:(?!\b(?:but|except|excepting|excluding)\b)[^()])*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b(?:\s+(?:within|under|inside|below)\s+(?:the\s+)?(?:tool(?:[- ]call)?\s+)?budget)?[.!…,;:\s]*\)\s*$))/i;
+// The budget-position vocabulary, spelled ONCE for the whole idiom family:
+// the stayed idiom and both completion tails read the same words. As a
+// regex literal the family was hand-copied three times, and the copies had
+// already drifted twice in two review rounds (`below` missing from one
+// branch, the qualifiers from another).
+const BUDGET_QUALIFIED =
+  '(?:under|within|below|inside)\\s+(?:the\\s+)?(?:tool(?:[- ]call)?\\s+)?budget';
+const COMPLETION_TAIL = `(?:\\s+${BUDGET_QUALIFIED})?`;
+
+const PLACEHOLDER_GAP_RE = new RegExp(
+  '^(?:<[^>]*>$' +
+    '|[-—*_~`]+$' +
+    '|(?:none|n/a|nothing|no (?:gaps?|checks?))\\b(?:' +
+    '[.!…,;:\\s]*$' +
+    '|\\s+(?:skipped|found|to report)\\b[.!…,;:\\s]*$' +
+    `|\\s*[-—–]\\s*(?:stayed\\s+${BUDGET_QUALIFIED}\\b[.!…,;:\\s]*$` +
+    '|(?:all|every(?:thing)?|planned|further|no further)\\b' +
+    '(?:(?!\\b(?:but|except|excepting|excluding)\\b).)*' +
+    '(?<!\\b(?:none|nothing|no|zero|never|not)\\s)' +
+    `\\b(?:complete[ds]?|done|finished|covered)\\b${COMPLETION_TAIL}[.!…,;:\\s]*$)` +
+    '|\\s*\\(\\s*(?:all|every(?:thing)?)\\b' +
+    '(?:(?!\\b(?:but|except|excepting|excluding)\\b)[^()])*' +
+    '(?<!\\b(?:none|nothing|no|zero|never|not)\\s)' +
+    `\\b(?:complete[ds]?|done|finished|covered)\\b${COMPLETION_TAIL}[.!…,;:\\s]*\\)\\s*$` +
+    '))',
+  'i',
+);
 
 /** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
 const MAX_GAP_LENGTH = 160;

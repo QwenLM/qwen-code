@@ -73,6 +73,13 @@ export interface RunReviewResult {
   downgradedFrom: string | null;
   remediation: string[];
   composedPath: string | null;
+  /**
+   * The exact `.qwen/tmp` filename this run's target class pins — named in
+   * the result so a completed-but-uncaptured review (a naming drift between
+   * this pin and the skill's template) is diagnosable after Step 9 has
+   * swept the directory that would show the near-miss.
+   */
+  expectedComposedName: string;
   reportPath: string | null;
   childExitCode: number | null;
   childSignal: string | null;
@@ -144,16 +151,20 @@ const escapeRe = (s: string): string =>
  * Only a per-run nonce in the child's artifact names could key these
  * apart, and the bundled skill, not this command, would have to mint it.
  */
-export function composedPatternFor(cls: RunTargetClass): RegExp {
+export function composedNameFor(cls: RunTargetClass): string {
   switch (cls.kind) {
     case 'pr':
-      return new RegExp(`^qwen-review-pr-${cls.number}-composed\\.json$`);
+      return `qwen-review-pr-${cls.number}-composed.json`;
     case 'file':
-      return new RegExp(`^qwen-review-${escapeRe(cls.base)}-composed\\.json$`);
+      return `qwen-review-${cls.base}-composed.json`;
     case 'local':
     default:
-      return /^qwen-review-local-composed\.json$/;
+      return 'qwen-review-local-composed.json';
   }
+}
+
+export function composedPatternFor(cls: RunTargetClass): RegExp {
+  return new RegExp(`^${escapeRe(composedNameFor(cls))}$`);
 }
 
 /**
@@ -528,6 +539,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     downgradedFrom: composed?.downgradedFrom ?? null,
     remediation: composed?.remediation ?? [],
     composedPath: composedPath ? resolve(composedPath) : null,
+    expectedComposedName: composedNameFor(targetClass),
     reportPath: reportPath ? resolve(reportPath) : null,
     childExitCode,
     childSignal,
@@ -548,10 +560,18 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       writeStdoutLine(result.verdictLine ?? `Event: ${result.event}`);
       if (result.reportPath) writeStdoutLine(`Report: ${result.reportPath}`);
     } else {
+      // Name the expectation: the pin is an exact-filename contract with the
+      // skill's naming template, and by the time anyone investigates, Step 9
+      // has swept `.qwen/tmp` — the near-miss name is gone. A no-verdict
+      // report that does not say which file it was waiting for cannot be
+      // diagnosed as a naming drift.
       const detail =
         composedPath !== null
           ? `a composed verdict was found at ${resolve(composedPath)} but could not be parsed`
-          : 'no composed verdict was produced';
+          : `no composed verdict was produced (expected ${join(
+              REVIEW_TMP_DIR,
+              composedNameFor(targetClass),
+            )})`;
       writeStdoutLine(
         timedOut
           ? 'Review did not complete: timed out.'
