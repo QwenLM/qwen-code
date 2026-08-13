@@ -116,7 +116,7 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain('consent withdrawn, no %s');
     expect(workflow).toContain('fail closed, no %s');
     expect(workflow).toMatch(
-      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]*?paused \(needs-human\)[\s\S]*?elif live_skip "\$\{PR\}"; then/,
+      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]*?elif live_skip "\$\{PR\}"; then[\s\S]*?paused \(needs-human\)/,
     );
     expect(workflow).toMatch(
       /SYNCS\}" -ge "\$\{MAX_SYNCS_PER_TICK\}" \]\]; then[\s\S]{0,160}elif live_skip "\$\{PR\}"; then/,
@@ -913,10 +913,11 @@ exit 1`;
     expect(workflow).toMatch(
       /if act "#\$\{PR\}: post auto-release summary"[\s\S]{0,1800}if act "#\$\{PR\}: auto-release takeover/,
     );
-    // The release counts when the label lands off — the increment follows
-    // the DELETE, never precedes it.
+    // The budget is consumed BEFORE the first external write (R4-C3): a
+    // release ATTEMPT is bounded, so a DELETE outage can't mutate many PRs
+    // in one tick while RELEASES stays 0.
     expect(workflow).toMatch(
-      /if act "#\$\{PR\}: auto-release takeover[\s\S]{0,300}RELEASES=\$\(\( RELEASES \+ 1 \)\)/,
+      /RELEASES=\$\(\( RELEASES \+ 1 \)\)[\s\S]{0,1200}if act "#\$\{PR\}: post auto-release summary"/,
     );
     // And the DELETE removes the TAKEOVER label — never needs-human (the
     // filterable TODO must survive the release).
@@ -946,7 +947,7 @@ exit 1`;
     // toContain('AUTO_RELEASE_DAYS=3') would substring-match '=30').
     expect(workflow).toContain('=~ ^[0-9]+$');
     expect(workflow).toMatch(
-      /is not numeric; using 3"\n\s+AUTO_RELEASE_DAYS=3\n/,
+      /is not numeric or is too large; using 3"\n\s+AUTO_RELEASE_DAYS=3\n/,
     );
     // The stale-label heal (R1-13): a HUMAN unlabeled event on an
     // awaiting-human PR clears the stale escalation label — budgeted,
@@ -1061,12 +1062,11 @@ exit 1`;
     // AUTO_RELEASE_DAYS-specific guard line — a looser regex would match the
     // unrelated COUNT guard earlier in the file, and moving the normalize
     // above the guard would let `$((10#abc))` abort the tick under set -e
-    // (R3-10).
+    // (R3-10). R4-C5: the guard ALSO rejects over-long digit strings before
+    // any arithmetic (Bash-int overflow would wrap negative and pass -ge).
+    expect(workflow).toContain('is not numeric or is too large; using 3');
     expect(workflow).toMatch(
-      /is not numeric; using 3"\n\s+AUTO_RELEASE_DAYS=3\n/,
-    );
-    expect(workflow).toMatch(
-      /if \[\[ ! "\$\{AUTO_RELEASE_DAYS\}" =~ \^\[0-9\]\+\$ \]\]; then[\s\S]*?AUTO_RELEASE_DAYS=\$\(\(10#\$\{AUTO_RELEASE_DAYS\}\)\)/,
+      /if \[\[ ! "\$\{AUTO_RELEASE_DAYS\}" =~ \^\[0-9\]\+\$ \]\] \|\| \[\[ \$\{#AUTO_RELEASE_DAYS\} -gt 2 \]\]; then[\s\S]*?AUTO_RELEASE_DAYS=\$\(\(10#\$\{AUTO_RELEASE_DAYS\}\)\)/,
     );
     // The summary dedup is scoped to THIS pause cycle — markers older than
     // the latest cap notice don't suppress a second release's summary
@@ -1187,27 +1187,29 @@ exit 1`;
         h.includes('reached the round cap') ||
         h.includes('this was the last automatic attempt'),
     );
-    const transient = headlines.filter((h) =>
-      h.includes('a setup step failed'),
+    // R4-S1: BOTH sets must be explicit and exhaustive. A headline in
+    // neither list means the producer added wording nobody classified — and
+    // if that wording is terminal, the dashboard reason silently degrades.
+    // So unclassified must be EMPTY, not "asserted false": require every
+    // producer headline to be named terminal or transient here.
+    const transient = headlines.filter(
+      (h) =>
+        h.includes('a setup step failed') ||
+        h.includes('will retry on the next scan') ||
+        h.includes('Could not produce a passing fix for this feedback'),
+    );
+    const unclassified = headlines.filter(
+      (h) => !terminal.includes(h) && !transient.includes(h),
     );
     expect(terminal.length).toBe(5);
-    expect(transient).toHaveLength(1);
+    expect(transient).toHaveLength(4);
+    expect(unclassified).toEqual([]);
     const matches = (h) =>
       execFileSync('jq', ['-rn', '--arg', 'b', h, `$b | test("${reasonRe}")`], {
         encoding: 'utf8',
       }).trim();
     for (const h of terminal) expect(matches(h)).toBe('true');
     for (const h of transient) expect(matches(h)).toBe('false');
-    // Every extracted headline must be CLASSIFIED — an unclassified one
-    // (today: the retry-transient/item-level variants) is asserted against
-    // the regex expecting false, so a future terminal headline that misses
-    // the hard-coded substrings fails loudly instead of degrading the
-    // dashboard reason silently (R2-14).
-    const unclassified = headlines.filter(
-      (h) => !terminal.includes(h) && !transient.includes(h),
-    );
-    expect(unclassified.length).toBeGreaterThan(0);
-    for (const h of unclassified) expect(matches(h)).toBe('false');
   });
 
   it('pins the previously mutation-tested gaps from review round 2', () => {
@@ -1327,12 +1329,15 @@ exit 1`;
     );
     expect(workflow).not.toContain('fail closed — no release evaluation ran');
     // R3-8: the conflict-dispatch lever refuses a paused (needs-human) PR
-    // instead of spending a dispatch slot the scan would refuse.
+    // instead of spending a dispatch slot the scan would refuse. R4-C1: the
+    // check reads the LIVE label payload (after live_skip), not the
+    // tick-start snapshot — a needs-human applied after enumeration is
+    // still caught.
     expect(workflow).toContain(
       'paused (needs-human) — conflict stays unhandled until re-arm',
     );
     expect(workflow).toMatch(
-      /elif \[\[ -n "\$\{NH_PREFIX\}" \]\]; then\n\s+#[\s\S]*?conflict stays unhandled until re-arm/,
+      /elif \[\[ "\$\(jq -r --arg l "\$\{NEEDS_HUMAN_LABEL\}" '\[\.labels\[\]\?\.name\] \| index\(\$l\) != null' <<< "\$\{LIVE_LABELS_JSON\}"\)" == "true" \]\]; then\n\s+#[\s\S]*?conflict stays unhandled until re-arm/,
     );
     // R1-10: the CI-status classifiers are shared helpers, and NEITHER loop
     // inlines its own copy of the jq (a check-naming change must land once).

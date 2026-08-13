@@ -1829,13 +1829,34 @@ jobs:
               # `/takeover stop` retries the removal — but must not disappear
               # silently either: masked, the ack reads "released" while the
               # loop keeps managing the PR.
+              # Track whether the takeover release actually LANDED: success
+              # or 404 (already gone) both mean the label is off. A 403/5xx/
+              # network failure means it is still on — in that case the
+              # needs-human removal below must NOT run, or the PR keeps the
+              # takeover label while losing its escalation label (and the
+              # release ack posted here would latch RELEASE_ACKED, blocking
+              # every automated path that could re-apply it). (R4-32)
+              REMOVED_OK=true
               if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
-                [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
+                if [[ "${REMOVE_ERR}" == *404* ]]; then
+                  REMOVED_OK=true
+                else
+                  REMOVED_OK=false
+                  echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"
+                fi
               fi
               echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
               # Released means a human is driving — the escalation label is
-              # stale. 404 is the common case (never paused).
-              if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+              # stale. Remove it only when the release landed (REMOVED_OK)
+              # AND the PR is not frozen by skip (a frozen PR must keep its
+              # only filterable escalation state — R4-3). 404 is the common
+              # case (never paused).
+              SKIP_STATE="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
+              if [[ "${REMOVED_OK}" != "true" ]]; then
+                echo "::warning::#${PR}: release did not land — keeping ${NEEDS_HUMAN_LABEL}; the next /takeover stop retries both"
+              elif [[ "${SKIP_STATE}" == "true" ]]; then
+                echo "🧭 ${NEEDS_HUMAN_LABEL} removal skipped: ${SKIP_LABEL} present on #${PR}"
+              elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
                 [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
               fi
               # Release ack, direct from the command — the exact mirror of
@@ -1920,9 +1941,11 @@ jobs:
           # EVERYWHERE (mirrors the takeover-command guard): a frozen PR
           # must keep its escalation label, because the fresh re-arm window
           # won't re-apply it while skip is present and no scan manages the
-          # PR — an unguarded DELETE would silently drop the only filterable
-          # escalation state, with no shepherd heal to restore it.
-          if [[ "$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' || echo '')" == "true" ]]; then
+          # PR. And the read FAILS CLOSED (mirrors takeover-ack's exit-1):
+          # an unreadable label state must keep the label, never drop it.
+          if ! RETRY_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null)"; then
+            echo "::warning::#${PR}: label state unreadable — keeping ${NEEDS_HUMAN_LABEL} (fail closed)"
+          elif [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${RETRY_LABELS}")" == "true" ]]; then
             echo "🧭 ${NEEDS_HUMAN_LABEL} removal skipped: ${SKIP_LABEL} present on #${PR}"
           elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
             [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
@@ -2002,13 +2025,15 @@ jobs:
           fi
           # The escalation label goes stale on a real engage or any release
           # (a human is driving again). NOT on base-refused (nothing changed)
-          # and NOT on skip-blocked (management never resumed). 404 is the
-          # common case (the PR was never paused). Runs BEFORE the ack
-          # comment: the state change already happened (the human toggled
-          # the label — the comment is purely informational), so a transient
-          # comment failure aborting this step under set -e must not strand
-          # the stale label.
-          if [[ "${ACK}" == 'released' || ( "${ACK}" == 'engaged' && "${HAS_SKIP}" != 'true' ) ]]; then
+          # and NOT on skip-blocked (management never resumed) — and a
+          # RELEASE onto a skip-frozen PR also keeps the label: nothing
+          # manages or restores that PR, so it must stay in the needs-human
+          # filter (R4-3). 404 is the common case (the PR was never paused).
+          # Runs BEFORE the ack comment: the state change already happened
+          # (the human toggled the label — the comment is purely
+          # informational), so a transient comment failure aborting this step
+          # under set -e must not strand the stale label.
+          if [[ ( "${ACK}" == 'released' || "${ACK}" == 'engaged' ) && "${HAS_SKIP}" != 'true' ]]; then
             if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
               [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
             fi

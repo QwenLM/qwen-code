@@ -451,17 +451,17 @@ jobs:
                 ACTION_NOTE='conflict dispatch already sent for this head'
               elif [[ "${DISPATCHES}" -ge "${MAX_CONFLICT_DISPATCHES_PER_TICK}" ]]; then
                 ACTION_NOTE='conflict-dispatch budget reached this tick'
-              elif [[ -n "${NH_PREFIX}" ]]; then
-                # A paused PR's own label declares the loop stopped on it —
-                # the dispatched scan would refuse ("Dispatch refused …
-                # stays unhandled"), so spending a dispatch slot here only
-                # posts a contradictory comment and plants a dedup marker.
-                # The conflict stays unhandled until a human re-arms.
-                ACTION_NOTE='paused (needs-human) — conflict stays unhandled until re-arm'
               elif live_skip "${PR}"; then
                 # Budget first: once it is exhausted no mutation is possible,
                 # so the PAT-backed live label read would be pure waste.
                 ACTION_NOTE="$(skip_note dispatch)"
+              elif [[ "$(jq -r --arg l "${NEEDS_HUMAN_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${LIVE_LABELS_JSON}")" == "true" ]]; then
+                # Check needs-human from the LIVE payload, not the tick-start
+                # snapshot: the autofix loop can apply the label after
+                # enumeration, and dispatching conflict work onto a now-paused
+                # PR would plant a dedup marker the paused scan never acts on.
+                # The conflict stays unhandled until a human re-arms.
+                ACTION_NOTE='paused (needs-human) — conflict stays unhandled until re-arm'
               else
                 if act "#${PR}: dispatch autofix for conflict resolution" \
                   env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"; then
@@ -535,9 +535,13 @@ jobs:
           HUMAN_ROWS=''
           # The variable is operator-tunable, so it is also operator-
           # breakable: a non-numeric value would fail the -ge comparison
-          # under set -e mid-tick. Fall back to the default instead.
-          if [[ ! "${AUTO_RELEASE_DAYS}" =~ ^[0-9]+$ ]]; then
-            echo "::warning::AUTO_RELEASE_DAYS '${AUTO_RELEASE_DAYS}' is not numeric; using 3"
+          # under set -e mid-tick. Fall back to the default instead. The
+          # digit-only regex still admits values above Bash's signed-int
+          # range (e.g. 9223372036854775808 wraps negative, so EVERY pause
+          # age would pass the -ge check) — bound by string LENGTH before any
+          # arithmetic, so a huge value can never reach the comparison.
+          if [[ ! "${AUTO_RELEASE_DAYS}" =~ ^[0-9]+$ ]] || [[ ${#AUTO_RELEASE_DAYS} -gt 2 ]]; then
+            echo "::warning::AUTO_RELEASE_DAYS '${AUTO_RELEASE_DAYS}' is not numeric or is too large; using 3"
             AUTO_RELEASE_DAYS=3
           fi
           # Leading zeros pass the regex but bash reads 08/09 as bad octal at
@@ -648,6 +652,10 @@ jobs:
               HAS_TK="$(jq -r --arg l "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${ROW}")"
               UPD_AGO='?'
               [[ -n "${UPDATED}" ]] && UPD_AGO="$(days_since "${UPDATED}")d"
+              # Row routing follows POST-ACTION label state, not the
+              # pre-mutation snapshot: a successful release moves the PR to
+              # Awaiting human; a successful heal drops it from both tables.
+              if [[ "${HAS_TK}" == "true" ]]; then ROUTE='takeover'; else ROUTE='awaiting'; fi
 
               STATE='🛑 needs-human'
               NOTE='—'
@@ -723,7 +731,21 @@ jobs:
                   NOTE='pause timestamp unreadable — release deferred (fail closed)'
                 elif [[ -n "${RESUME_TS}" && "${RESUME_TS}" > "${TERM_TS}" ]]; then
                   STATE='managed (re-armed)'
-                  NOTE='resumed after the last pause — the escalation label is stale'
+                  # The PR is re-armed but still carries needs-human — a
+                  # resume-side removal failed. Clear the stale label here
+                  # (bounded, skip-vetoed) or the PR stays pinned in the
+                  # paused population forever.
+                  if [[ "${CLEANUPS}" -ge "${MAX_CLEANUPS_PER_TICK}" ]]; then
+                    NOTE='resumed; stale-label cleanup budget reached this tick'
+                  elif live_skip "${PR}"; then
+                    NOTE="$(skip_note cleanup)"
+                  elif act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (re-armed)" \
+                    gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
+                    CLEANUPS=$(( CLEANUPS + 1 ))
+                    NOTE='resumed — cleared stale escalation label'
+                  else
+                    NOTE='resumed after the last pause — the escalation label is stale'
+                  fi
                 else
                   PAUSE_D="$(days_since "${TERM_TS}")"
                   STATE="🛑 needs-human ${PAUSE_D}d"
@@ -745,6 +767,11 @@ jobs:
                     elif [[ "$(jq -r --arg a "${TAKEOVER_LABEL}" --arg b "${NEEDS_HUMAN_LABEL}" '([.labels[]?.name] | index($a) != null) and ([.labels[]?.name] | index($b) != null)' <<< "${LIVE_LABELS_JSON}")" != "true" ]]; then
                       NOTE='labels changed since the snapshot — deferring release'
                     else
+                      # Consume the budget BEFORE the first external write:
+                      # a release ATTEMPT is what is bounded. Counting only
+                      # successful DELETEs would let a DELETE outage mutate
+                      # many PRs in one tick while RELEASES stayed 0.
+                      RELEASES=$(( RELEASES + 1 ))
                       # Summary FIRST (dedup'd by its own marker — the
                       # comment stream is already loaded), THEN the label
                       # removal: a failed summary leaves both labels in
@@ -765,11 +792,13 @@ jobs:
                         fi
                       fi
                       if [[ "${SUMMARY_POSTED}" != "0" ]]; then
-                        # The release HAPPENED when the label lands off, so
-                        # that is what counts against the per-tick budget.
                         if act "#${PR}: auto-release takeover (paused ${PAUSE_D}d)" \
                           gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')"; then
-                          RELEASES=$(( RELEASES + 1 ))
+                          # Released — only needs-human remains, so the PR
+                          # belongs in Awaiting human NOW, not the takeover
+                          # pool (route from post-action state, not the
+                          # pre-mutation snapshot).
+                          ROUTE='awaiting'
                           NOTE="auto-released after ${PAUSE_D}d paused"
                         else
                           NOTE='takeover label removal failed — will retry next tick'
@@ -808,6 +837,9 @@ jobs:
                   elif act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (manual release by @${UNLABEL_ACTOR})" \
                     gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
                     CLEANUPS=$(( CLEANUPS + 1 ))
+                    # Both labels are gone now — the PR is fully released and
+                    # must drop out of the dashboard entirely.
+                    ROUTE='none'
                     NOTE="cleared stale escalation label (released by @${UNLABEL_ACTOR})"
                   else
                     NOTE='stale-label cleanup failed — will retry next tick'
@@ -819,9 +851,9 @@ jobs:
               # dashboard for exactly the tick something went wrong.
               echo "🐑 #${PR} [${STATE}] → ${NOTE}"
               SAFE_NOTE="${NOTE//\\/\\\\}"
-              if [[ "${HAS_TK}" == "true" ]]; then
+              if [[ "${ROUTE}" == 'takeover' ]]; then
                 TAKEOVER_ROWS="${TAKEOVER_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${STATE} | ${SAFE_NOTE//|/\\|} |\n"
-              else
+              elif [[ "${ROUTE}" == 'awaiting' ]]; then
                 HUMAN_ROWS="${HUMAN_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${SAFE_NOTE//|/\\|} |\n"
               fi
             done < <(jq -c '.[]' /tmp/human.json)

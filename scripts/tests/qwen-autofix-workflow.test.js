@@ -3213,10 +3213,11 @@ describe('qwen-autofix workflow', () => {
       workflow.match(/\$\{NEEDS_HUMAN_LABEL\} removal failed/g)?.length,
     ).toBe(6);
     // The ack job removes on a real engage or any release — but NOT on
-    // base-refused (nothing changed) or skip-blocked (management never
-    // resumed).
+    // base-refused (nothing changed), NOT on skip-blocked (management never
+    // resumed), and NOT on a release onto a skip-frozen PR (nothing manages
+    // or restores it — R4-3): both arms now require HAS_SKIP != 'true'.
     expect(workflow).toContain(
-      '"${ACK}" == \'released\' || ( "${ACK}" == \'engaged\' && "${HAS_SKIP}" != \'true\' )',
+      '( "${ACK}" == \'released\' || "${ACK}" == \'engaged\' ) && "${HAS_SKIP}" != \'true\'',
     );
   });
 
@@ -9749,7 +9750,12 @@ exit 1
     expect(rearmStep).toBeTruthy();
     const block = rearmStep.replace(/\n {10}/g, '\n');
 
-    const runRearm = ({ actor = BOT, apiFail = false, labels = '[]' } = {}) => {
+    const runRearm = ({
+      actor = BOT,
+      apiFail = false,
+      labels = '[]',
+      viewFail = false,
+    } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
       try {
         writeFileSync(
@@ -9763,6 +9769,7 @@ exit 1
             'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
             `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
             'elif [[ "$1" == "pr" && "$2" == "view" ]]; then',
+            `  if [[ "${viewFail}" == "true" ]]; then echo "GraphQL: Something went wrong" >&2; exit 1; fi`,
             `  printf '%s' '{"labels":${labels}}'`,
             'fi',
           ].join('\n'),
@@ -9828,6 +9835,15 @@ exit 1
     expect(skipped.calls).toContain('pr comment');
     expect(skipped.calls).not.toContain('api -X DELETE');
     expect(skipped.stdout).toContain('removal skipped');
+
+    // R4-2: the skip check FAILS CLOSED — a transient `gh pr view` failure
+    // keeps the label rather than dropping it (the marker still posts; only
+    // the cleanup is withheld).
+    const readFailed = runRearm({ actor: BOT, viewFail: true });
+    expect(readFailed.status).toBe(0);
+    expect(readFailed.calls).toContain('pr comment');
+    expect(readFailed.calls).not.toContain('api -X DELETE');
+    expect(readFailed.stdout).toContain('label state unreadable');
 
     // Actor mismatch: the PAT authenticates as someone else -> the guard exits
     // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
