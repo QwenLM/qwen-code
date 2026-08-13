@@ -53,6 +53,36 @@ const KIND_MAP: Record<Kind, ToolKind> = {
   [Kind.Other]: 'other',
 };
 
+function stripBoundaryArtifactsFromRawOutput(resultDisplay: unknown): unknown {
+  if (
+    typeof resultDisplay !== 'object' ||
+    resultDisplay === null ||
+    !('type' in resultDisplay) ||
+    resultDisplay.type !== 'task_execution' ||
+    !('toolCalls' in resultDisplay) ||
+    !Array.isArray(resultDisplay.toolCalls)
+  ) {
+    return resultDisplay;
+  }
+
+  let changed = false;
+  const toolCalls = resultDisplay.toolCalls.map((toolCall) => {
+    if (
+      typeof toolCall !== 'object' ||
+      toolCall === null ||
+      !('boundaryArtifact' in toolCall)
+    ) {
+      return toolCall;
+    }
+    const rawOutputToolCall: Record<string, unknown> = { ...toolCall };
+    delete rawOutputToolCall['boundaryArtifact'];
+    changed = true;
+    return rawOutputToolCall;
+  });
+
+  return changed ? { ...resultDisplay, toolCalls } : resultDisplay;
+}
+
 /**
  * Unified tool call event emitter.
  *
@@ -194,7 +224,7 @@ export class ToolCallEmitter extends BaseEmitter {
       callId: params.callId,
       success: params.success,
       message: params.message,
-      resultDisplay: params.resultDisplay,
+      resultDisplay: stripBoundaryArtifactsFromRawOutput(params.resultDisplay),
       errorMessage: params.error?.message,
       artifacts: params.artifacts,
       contentPrefix: buildToolResultContentPrefix(params.resultDisplay),
