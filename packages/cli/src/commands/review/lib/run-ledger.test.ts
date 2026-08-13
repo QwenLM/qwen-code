@@ -15,8 +15,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
+  lstatSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
   readFileSync,
   utimesSync,
@@ -25,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendRunSession,
+  priorSessionEntries,
   priorSessionIds,
   runSessionsPath,
   readResumeMarker,
@@ -214,5 +218,76 @@ describe('marker dedup — a caller retry must not double-count', () => {
     recordRestart(plan, 'head-moved abc1234->def5678');
     recordRestart(plan, 'head-moved def5678->0123abc');
     expect(readResumeMarker(plan).restarts).toHaveLength(2);
+  });
+});
+
+describe('the properties the threat model rests on', () => {
+  it('refuses the bare traversal ids `..` and `.`', () => {
+    // Today only the leading-alphanumeric rule stops these; pinning them
+    // means a regex refactor cannot quietly hand them to the path assembler.
+    for (const id of ['..', '.', './x', '..\\evil']) {
+      appendRunSession(plan, envOf(id));
+    }
+    expect(priorSessionIds(plan, envOf('S9'))).toEqual([]);
+  });
+
+  it('applies the same charset gate to the resume marker on read', () => {
+    recordResume(plan, envOf('S2'));
+    const marker = JSON.parse(readFileSync(resumeMarkerPath(plan), 'utf8'));
+    marker.resumes.push({ sessionId: '../../etc', atMs: Date.now() });
+    writeFileSync(resumeMarkerPath(plan), JSON.stringify(marker));
+    expect(readResumeMarker(plan).resumes.map((r) => r.sessionId)).toEqual([
+      'S2',
+    ]);
+  });
+
+  it('deduplicates on READ, not only on append', () => {
+    // The file sits in a directory the orchestrator can reach; a duplicated
+    // entry would make the cost ledger bill one session twice.
+    appendRunSession(plan, envOf('S1'));
+    const raw = JSON.parse(readFileSync(runSessionsPath(plan), 'utf8'));
+    writeFileSync(runSessionsPath(plan), JSON.stringify([...raw, ...raw]));
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
+  });
+
+  it('keeps a same-millisecond append inside the epoch fence', () => {
+    // fetch-pr writes the plan and appends two statements later: Date.now()
+    // floors to integer ms while mtimeMs is fractional, so without the slack
+    // a same-millisecond entry would read as older than its own run.
+    const mtimeMs = statSync(plan).mtimeMs;
+    appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs));
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
+  });
+
+  it('drops an entry older than the slack window', () => {
+    const mtimeMs = statSync(plan).mtimeMs;
+    appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs) - 3000);
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
+  it('writes through a planted symlink without following it', () => {
+    // `noFollow: true` on both ledger writes: without it atomicWriteFileSync
+    // resolves the chain and the rename lands on the TARGET.
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    const target = join(root, 'outside.json');
+    writeFileSync(target, '"untouched"');
+    symlinkSync(target, runSessionsPath(plan));
+    appendRunSession(plan, envOf('S1'));
+    expect(readFileSync(target, 'utf8')).toBe('"untouched"');
+    expect(lstatSync(runSessionsPath(plan)).isSymbolicLink()).toBe(false);
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
+  });
+
+  it('bounds each prior session by the next attempt start', () => {
+    // Inside the epoch fence: entries date from the plan's own capture on.
+    const base = Math.floor(statSync(plan).mtimeMs);
+    appendRunSession(plan, envOf('S0'), base);
+    appendRunSession(plan, envOf('S1'), base + 60_000);
+    expect(priorSessionEntries(plan, envOf('S2'))).toEqual([
+      { sessionId: 'S0', atMs: base, endsAtMs: base + 60_000 },
+      { sessionId: 'S1', atMs: base + 60_000, endsAtMs: null },
+    ]);
   });
 });

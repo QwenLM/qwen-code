@@ -12,8 +12,10 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
+  chmodSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   mkdirSync,
   utimesSync,
@@ -346,6 +348,9 @@ describe('readRunTranscripts — the run across its sessions', () => {
 
   it('lists the current session dir first, priors after, deduplicated', () => {
     const plan = planWithLedger('S0', 'S0', 'S1');
+    // A prior session that exists on disk: the accessor skips a ledgered id
+    // whose directory is absent or symlinked, so the fixture must be real.
+    priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
     expect(transcriptDirsForRun(plan, ENV)).toEqual([
       join(dir, 'subagents', 'S1'),
       join(dir, 'subagents', 'S0'),
@@ -397,6 +402,87 @@ describe('readRunTranscripts — currentDirOptional', () => {
       readRunTranscripts(plan, undefined, {}, undefined, {
         currentDirOptional: true,
       }),
+    ).toThrow(TranscriptsUnavailableError);
+  });
+});
+
+describe('readRunTranscripts — containment and fault handling', () => {
+  const transcript = (agentId: string): string =>
+    JSON.stringify({
+      agentId,
+      agentName: 'general-purpose',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: `launch ${agentId}` }] },
+    }) + '\n';
+
+  function planWithLedger(...sessionIds: string[]): string {
+    const plan = join(dir, 'qwen-review-pr-7-fetch.json');
+    writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
+    const recordDir = join(dir, 'qwen-review-pr-7-fetch-prompts');
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'run-sessions.json'),
+      JSON.stringify(
+        sessionIds.map((id) => ({ sessionId: id, atMs: Date.now() })),
+      ),
+    );
+    return plan;
+  }
+
+  it('refuses a prior session whose directory is a symlink', () => {
+    // The ledger's charset gate stops `..`, but `subagents/<id>` can BE a
+    // symlink and readdir/readFile follow one — that would let foreign
+    // transcripts enter as this run's prior evidence.
+    const plan = planWithLedger('S0', 'S1');
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'agent-foreign.jsonl'), transcript('foreign'));
+    symlinkSync(outside, join(dir, 'subagents', 'S0'));
+    mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+    file('agent-a1.jsonl', transcript('a1'));
+
+    const recs = readRunTranscripts(plan, undefined, ENV);
+    expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+    expect(transcriptDirsForRun(plan, ENV)).toEqual([
+      join(dir, 'subagents', 'S1'),
+    ]);
+  });
+
+  it('still throws when the current dir is unreadable, not merely absent', () => {
+    // EACCES on an EXISTING directory is a live fault; absorbing it would
+    // certify on prior evidence while the current records are unreadable.
+    const plan = planWithLedger('S0', 'S1');
+    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(dir, 'subagents', 'S0', 'agent-a0.jsonl'),
+      transcript('a0'),
+    );
+    const cur = join(dir, 'subagents', 'S1');
+    mkdirSync(cur, { recursive: true });
+    chmodSync(cur, 0o000);
+    try {
+      expect(() =>
+        readRunTranscripts(plan, undefined, ENV, undefined, {
+          currentDirOptional: true,
+        }),
+      ).toThrow(TranscriptsUnavailableError);
+    } finally {
+      chmodSync(cur, 0o755);
+    }
+  });
+
+  it('throws on a missing current dir when the run has no prior evidence', () => {
+    // No ledger: this is a run that has shown nothing, not a continuation.
+    const plan = join(dir, 'qwen-review-pr-7-fetch.json');
+    writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
+    expect(() =>
+      readRunTranscripts(
+        plan,
+        undefined,
+        { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S-none' },
+        undefined,
+        { currentDirOptional: true },
+      ),
     ).toThrow(TranscriptsUnavailableError);
   });
 });

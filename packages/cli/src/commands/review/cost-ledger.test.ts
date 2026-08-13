@@ -6,11 +6,13 @@
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -1445,5 +1447,159 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
     expect(ledger.priorSessions).toBe(1);
     expect(ledger.agents).toHaveLength(1);
     expect(ledger.totals.inputTokens).toBe(2_500);
+  });
+});
+
+describe('cost-ledger — prior-session bounds, faults and wall time', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  function fixture(): {
+    plan: string;
+    env: NodeJS.ProcessEnv;
+    project: string;
+  } {
+    const project = mkdtempSync(join(tmpdir(), 'ledger-bounds-'));
+    dirs.push(project);
+    mkdirSync(join(project, 'chats'), { recursive: true });
+    mkdirSync(join(project, 'subagents', SESSION), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
+    );
+    const plan = join(project, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        diffPathAbsolute: join(project, 'diff.txt'),
+        diffLines: 10,
+        chunks: [{ id: 1, startLine: 1, endLine: 10 }],
+      }),
+    );
+    const start = new Date('2026-08-03T10:00:00Z');
+    utimesSync(plan, start, start);
+    return {
+      plan,
+      project,
+      env: {
+        QWEN_CODE_PROJECT_DIR: project,
+        QWEN_CODE_SESSION_ID: SESSION,
+      } as NodeJS.ProcessEnv,
+    };
+  }
+
+  /** The ledger fetch-pr writes: S0 interrupted, the current session resumed. */
+  function runLedger(
+    project: string,
+    resumedAt = '2026-08-03T10:09:00Z',
+  ): void {
+    const d = join(project, 'plan-prompts');
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, 'run-sessions.json'),
+      JSON.stringify([
+        { sessionId: 'S0', atMs: Date.parse('2026-08-03T10:00:30Z') },
+        { sessionId: SESSION, atMs: Date.parse(resumedAt) },
+      ]),
+    );
+  }
+
+  it("clamps a prior session's chat to the moment the next attempt began", () => {
+    // The interrupted CLI session went on serving unrelated turns after the
+    // review died; billing those as review cost is the mirror of the
+    // omission that folding prior cost exists to fix.
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+        // After the resume began: another conversation, not this review.
+        event('2026-08-03T18:00:00Z', { input: 9_000, output: 900 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(1);
+    expect(ledger.totals.inputTokens).toBe(1_500);
+  });
+
+  it('discloses an unreadable prior agent dir instead of silently flooring it', () => {
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+    );
+    const priorDir = join(project, 'subagents', 'S0');
+    mkdirSync(priorDir, { recursive: true });
+    chmodSync(priorDir, 0o000);
+    try {
+      const seen: string[] = [];
+      const spy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((chunk: unknown) => {
+          seen.push(String(chunk));
+          return true;
+        });
+      let ledger;
+      try {
+        ledger = computeLedger(plan, env);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(ledger.priorSessions).toBe(1);
+      expect(
+        seen.some((l) => l.includes("prior session's subagent transcripts")),
+      ).toBe(true);
+    } finally {
+      chmodSync(priorDir, 0o755);
+    }
+  });
+
+  it('never reads a symlinked prior session directory', () => {
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    const outside = mkdtempSync(join(tmpdir(), 'ledger-foreign-'));
+    dirs.push(outside);
+    writeFileSync(
+      join(outside, 'agent-foreign.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 7_000, output: 700 }),
+      ].join('\n'),
+    );
+    symlinkSync(outside, join(project, 'subagents', 'S0'));
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.agents).toHaveLength(0);
+    expect(ledger.totals.inputTokens).toBe(500);
+  });
+
+  it("sums each session's own span rather than spanning the dead gap", () => {
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:01:00Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:02:00Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      [
+        event('2026-08-03T10:10:00Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:13:00Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+
+    const ledger = computeLedger(plan, env);
+    // 60s (prior) + 180s (current) — not the 720s envelope.
+    expect(ledger.totals.wallSeconds).toBe(240);
   });
 });

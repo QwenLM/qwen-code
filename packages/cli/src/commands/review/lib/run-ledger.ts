@@ -88,7 +88,7 @@ function readSessions(planPath: string): SessionEntry[] {
     ) as unknown;
     if (!Array.isArray(parsed)) return [];
     const epoch = runEpochMs(planPath);
-    return parsed.filter(
+    const kept = parsed.filter(
       (e): e is SessionEntry =>
         typeof e === 'object' &&
         e !== null &&
@@ -96,6 +96,14 @@ function readSessions(planPath: string): SessionEntry[] {
         SESSION_ID_RE.test((e as SessionEntry).sessionId) &&
         typeof (e as SessionEntry).atMs === 'number' &&
         (e as SessionEntry).atMs >= epoch,
+    );
+    // Deduplicate on READ, not only on append: the file lives in a directory
+    // the orchestrator can reach, and a hand-written duplicate would make a
+    // consumer that iterates entries (the cost ledger) bill one session
+    // twice. First occurrence wins — it carries the session's real start.
+    const seen = new Set<string>();
+    return kept.filter((e) =>
+      seen.has(e.sessionId) ? false : (seen.add(e.sessionId), true),
     );
   } catch {
     return [];
@@ -138,10 +146,33 @@ export function priorSessionIds(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
+  return priorSessionEntries(planPath, env).map((e) => e.sessionId);
+}
+
+/**
+ * The same prior sessions, with the timestamps that bound them.
+ *
+ * `endsAtMs` is the NEXT ledger entry's `atMs` — the moment the following
+ * attempt started, which is the only end boundary this run records. The cost
+ * ledger clamps a prior session's chat usage to it: an interrupted session
+ * whose CLI kept being used for unrelated turns afterwards would otherwise
+ * bill that activity as review cost, the mirror of the omission the ledger
+ * exists to prevent. `null` when nothing followed it (it is the newest prior
+ * entry and the current session's own start is not recorded here).
+ */
+export function priorSessionEntries(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Array<{ sessionId: string; atMs: number; endsAtMs: number | null }> {
   const current = env['QWEN_CODE_SESSION_ID']?.trim();
-  return readSessions(planPath)
-    .map((e) => e.sessionId)
-    .filter((id) => id !== current);
+  const all = readSessions(planPath);
+  return all
+    .map((e, i) => ({
+      sessionId: e.sessionId,
+      atMs: e.atMs,
+      endsAtMs: i + 1 < all.length ? all[i + 1].atMs : null,
+    }))
+    .filter((e) => e.sessionId !== current);
 }
 
 /** Resume/restart bookkeeping for one review run. */
@@ -194,6 +225,10 @@ export function readResumeMarker(planPath: string): ResumeMarker {
             typeof e === 'object' &&
             e !== null &&
             typeof e.sessionId === 'string' &&
+            // Same closed charset as the session ledger: these ids have the
+            // same address semantics, and one read path applying the gate
+            // while the other does not is how a threat model rots.
+            SESSION_ID_RE.test(e.sessionId) &&
             typeof e.atMs === 'number' &&
             e.atMs >= epoch,
         )

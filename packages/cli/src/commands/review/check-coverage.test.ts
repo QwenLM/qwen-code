@@ -2192,7 +2192,7 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
     const r = coverageFromTranscripts(p, ENV);
     expect(r.ok).toBe(true);
     expect(r.coveredChunks).toEqual([1, 2]);
-    expect(r.recoveredAgents).toBeGreaterThanOrEqual(1);
+    expect(r.recoveredAgents).toBe(1);
     // Continuity is NOT a disclosure: that channel caps the verdict and
     // renders under "Not reviewed:" — recovered work is the opposite of a
     // gap. compose-review renders its own non-capping note from the count.
@@ -2238,5 +2238,79 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
 
     const r = coverageFromTranscripts(plan(), ENV);
     expect(r.recoveredAgents).toBe(0);
+  });
+});
+
+describe('coverage — a stale Uncoverable declaration cannot cap live coverage', () => {
+  function ledger(planPath: string, ...ids: string[]): void {
+    const d = promptRecordDir(planPath);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, 'run-sessions.json'),
+      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    );
+  }
+
+  function moveToSession(id: string, session: string): void {
+    mkdirSync(join(dir, 'subagents', session), { recursive: true });
+    renameSync(
+      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+      join(dir, 'subagents', session, `agent-${id}.jsonl`),
+    );
+  }
+
+  it('a superseded prior-attempt declaration does not delete the chunk it covers', () => {
+    // The prior attempt's chunk-1 agent declared chunk 1 unreachable; this
+    // run's chunk-1 agent read it. The post-loop `covered.delete()` is
+    // order-independent, so without the supersession guard no relaunch could
+    // ever clear the cap — on lines this run demonstrably read.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1old', good(1), {
+      calls: 1,
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    moveToSession('a1old', 'S0');
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+    // ...and the declaring record is not announced as recovered work.
+    expect(r.recoveredAgents).toBe(0);
+  });
+
+  it('an unsuperseded declaration still caps, resumed or not', () => {
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1old', good(1), {
+      calls: 1,
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    moveToSession('a1old', 'S0');
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('credits the prior attempt when this session launched nothing at all', () => {
+    // The zero-launch continuation: the harness creates subagents/<session>
+    // on the first launch, so a run that recovered everything has no dir.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+    for (const name of readdirSync(join(dir, 'subagents', 'S1'))) {
+      moveToSession(name.replace(/^agent-|\.jsonl$/g, ''), 'S0');
+    }
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.recoveredAgents).toBeGreaterThanOrEqual(2);
   });
 });

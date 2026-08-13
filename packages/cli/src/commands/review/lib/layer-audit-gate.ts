@@ -96,9 +96,13 @@ function readReverseAuditReturns(
   try {
     const since = statSync(planPath).mtimeMs;
     // Run-scoped: a resumed run's earlier auditors ran in a different session.
-    const auditors = readRunTranscripts(planPath, since, env, diffPath).filter(
-      (t) => t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY),
-    );
+    // `currentDirOptional`: without it a zero-launch resumed continuation
+    // throws here, the catch below reports `identityMatched: 0`, and the
+    // gate DEFERS to the reverse-audit-ran floor — failing open on exactly
+    // the layers the prior attempt never walked.
+    const auditors = readRunTranscripts(planPath, since, env, diffPath, {
+      currentDirOptional: true,
+    }).filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY));
     const corroborated = auditors
       .filter(
         (t) =>

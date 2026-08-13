@@ -37,7 +37,7 @@
 // This module never takes a path from the model. The session id and project dir
 // come from the environment the CLI itself exported.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { ToolNames } from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
 import { priorSessionIds } from './run-ledger.js';
@@ -100,7 +100,14 @@ export interface AgentRecord {
   fromPriorSession?: boolean;
 }
 
-/** Why no transcripts could be read. Never conflated with "the agents idled". */
+/**
+ * Why no transcripts could be read. Never conflated with "the agents idled".
+ *
+ * Carries the underlying readdir failure as `cause` where one exists, so a
+ * caller can distinguish "the directory does not exist yet" (ENOENT — the
+ * legitimate pre-launch state of a resumed run's own session) from a real
+ * infrastructure fault, which must never be absorbed.
+ */
 export class TranscriptsUnavailableError extends Error {}
 
 /**
@@ -384,6 +391,10 @@ export function readTranscripts(
       `no subagent transcripts at ${dir} (${(err as Error).message}). The ` +
         'harness writes one per agent; if there are none, either no agents ran ' +
         'or the harness could not write them.',
+      // The original errno travels with it: a caller that tolerates "the dir
+      // does not exist yet" must be able to tell that apart from EACCES/EIO,
+      // and the flattened message string cannot say which it was.
+      { cause: err },
     );
   }
 
@@ -410,13 +421,52 @@ export function transcriptDirsForRun(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  const { projectDir, dir } = transcriptPaths(env);
+  const { dir } = transcriptPaths(env);
   const dirs = [dir];
-  for (const id of priorSessionIds(planPath, env)) {
-    const prior = join(projectDir, 'subagents', id);
-    if (!dirs.includes(prior)) dirs.push(prior);
+  for (const prior of priorSessionDirs(planPath, env)) {
+    if (!dirs.includes(prior.dir)) dirs.push(prior.dir);
   }
   return dirs;
+}
+
+/**
+ * The EARLIER sessions of this run, as directories that are actually inside
+ * the harness's own tree.
+ *
+ * The ledger's charset gate keeps an id from traversing out with `..` or a
+ * separator, but `subagents/<id>` can itself BE a symlink — and `readdirSync`
+ * and `readFileSync` follow one. That would defeat the containment this
+ * feature's threat model rests on ("a fabricated id can at most point a
+ * reader at a directory inside the harness's own subagents tree"), so a
+ * symlinked (or unstattable) prior directory is skipped: invisible evidence
+ * re-owes the work, which is the failure direction every reader here takes.
+ *
+ * Shared by every prior-session consumer — the transcript union and the cost
+ * ledger both assemble their paths from this, so the guard cannot be
+ * bypassed by a call site that builds its own `join`.
+ */
+export function priorSessionDirs(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Array<{ sessionId: string; dir: string; chatFile: string }> {
+  const { projectDir } = transcriptPaths(env);
+  const out: Array<{ sessionId: string; dir: string; chatFile: string }> = [];
+  for (const sessionId of priorSessionIds(planPath, env)) {
+    const dir = join(projectDir, 'subagents', sessionId);
+    try {
+      if (lstatSync(dir).isSymbolicLink()) continue;
+    } catch {
+      // Absent (the attempt died before launching any agent) or unstattable:
+      // either way there is nothing here this run may read.
+      continue;
+    }
+    out.push({
+      sessionId,
+      dir,
+      chatFile: join(projectDir, 'chats', `${sessionId}.jsonl`),
+    });
+  }
+  return out;
 }
 
 /**
@@ -436,9 +486,13 @@ export function transcriptDirsForRun(
  * `currentDirOptional` exists for exactly one caller shape: a resumed run
  * reading the PREVIOUS attempt's evidence before this session has launched
  * any agent — the harness creates `subagents/<session>` on the first launch,
- * so at that moment the current directory legitimately does not exist. A
- * missing ENVIRONMENT (no session id, no project dir) still throws: that is
- * an infrastructure fact whichever session it is.
+ * so at that moment the current directory legitimately does not exist. It is
+ * deliberately narrow on both axes: only ENOENT is absorbed (a permission or
+ * I/O fault on an existing directory is a live infrastructure fault), and
+ * only when this run actually has prior-session evidence to read instead —
+ * a run with no ledger and no directory has shown nothing, which is the
+ * infrastructure fact this module has always refused to certify past. A
+ * missing ENVIRONMENT (no session id, no project dir) still throws.
  */
 export function readRunTranscripts(
   planPath: string,
@@ -450,19 +504,34 @@ export function readRunTranscripts(
   // Validates the env first, so the optional-dir branch below can only ever
   // be absorbing "no directory yet", never "no environment".
   transcriptPaths(env);
+  const priors = priorSessionDirs(planPath, env);
   let out: AgentRecord[];
   try {
     out = readTranscripts(since, env, diffPath);
   } catch (err) {
+    const code = (
+      (err as { cause?: NodeJS.ErrnoException } | undefined)?.cause as
+        | NodeJS.ErrnoException
+        | undefined
+    )?.code;
     if (
       !(err instanceof TranscriptsUnavailableError) ||
-      opts.currentDirOptional !== true
+      opts.currentDirOptional !== true ||
+      // ONLY the not-created-yet case. EACCES/EIO/ENOTDIR on an existing
+      // directory is a live infrastructure fault: absorbing it would let a
+      // run certify on prior-session evidence alone while the current
+      // session's records are unreadable and nothing says so.
+      code !== 'ENOENT' ||
+      // ...and only when there IS prior evidence to read instead. With no
+      // ledgered session this is a run that has shown nothing, which every
+      // reader here must keep refusing to certify past.
+      priors.length === 0
     ) {
       throw err;
     }
     out = [];
   }
-  for (const dir of transcriptDirsForRun(planPath, env).slice(1)) {
+  for (const { dir } of priors) {
     let names: string[];
     try {
       names = listAgentTranscriptFiles(dir);
