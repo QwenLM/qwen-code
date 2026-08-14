@@ -8206,6 +8206,36 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('does not report a session with the previous workspace while loading', async () => {
+    mockConnection.sessionId = 'session-2';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.loadingTranscript = true;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+    const onSessionIdChange = vi.fn();
+    const { rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.loadingTranscript = false;
+    mockConnection.error = 'target load failed';
+    rerender({ onSessionIdChange });
+    await flush();
+
+    expect(onSessionIdChange).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(
+      'session-2',
+      'secondary',
+      '/work/secondary',
+    );
+  });
+
   it('reports the selected workspace, not the stale connection workspace, when no session is active', async () => {
     // A cleared session leaves connection.workspaceCwd pointing at the old
     // workspace (here: a secondary with a running task). Starting a new chat
@@ -10009,16 +10039,10 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
-  it('does not finish a same-id workspace switch before commit', async () => {
+  it('does not finish a same-id workspace switch before load', async () => {
     const load = deferred<void>();
     mockSessionActions.loadSession.mockImplementationOnce(() => {
-      mockConnection.sessionTransition = {
-        phase: 'preparing',
-        operation: 'load',
-        origin: 'action',
-        targetSessionId: 'session-1',
-        targetWorkspaceCwd: '/work/b',
-      };
+      mockConnection.loadingTranscript = true;
       return load.promise;
     });
     const { rerender } = renderApp();
@@ -10043,7 +10067,7 @@ describe('App session callbacks', () => {
 
     await act(async () => {
       mockConnection.workspaceCwd = '/work/b';
-      mockConnection.sessionTransition = undefined;
+      mockConnection.loadingTranscript = false;
       load.resolve();
       rerender();
       await load.promise;
@@ -10074,6 +10098,7 @@ describe('App session callbacks', () => {
         workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
       },
     );
+    expect(mockSessionActions.loadSession).toHaveBeenCalledOnce();
   });
 
   it('does not steal focus when an approval appears before deferred session focus', async () => {
@@ -10378,15 +10403,15 @@ describe('App session callbacks', () => {
     });
 
     act(() => {
+      mockConnection.loadingTranscript = true;
       rerender({
-        desiredSessionTargetPending: true,
         onSubmitBefore,
         onSessionChange,
       });
     });
     act(() => {
+      mockConnection.loadingTranscript = false;
       rerender({
-        desiredSessionTargetPending: false,
         onSubmitBefore,
         onSessionChange,
       });
@@ -11226,16 +11251,16 @@ describe('App session callbacks', () => {
     });
     await callbackStarted.promise;
     act(() => {
+      mockConnection.loadingTranscript = true;
       rerender({
-        desiredSessionTargetPending: true,
         onSessionChange,
         onSessionCreated,
         onSubmitBefore,
       });
     });
     act(() => {
+      mockConnection.loadingTranscript = false;
       rerender({
-        desiredSessionTargetPending: false,
         onSessionChange,
         onSessionCreated,
         onSubmitBefore,
@@ -11291,15 +11316,15 @@ describe('App session callbacks', () => {
     expect(secondAccepted).toBe(false);
     expect(secondCommit).not.toHaveBeenCalled();
     act(() => {
+      mockConnection.loadingTranscript = true;
       rerender({
-        desiredSessionTargetPending: true,
         onSessionChange,
         onSessionCreated,
       });
     });
     act(() => {
+      mockConnection.loadingTranscript = false;
       rerender({
-        desiredSessionTargetPending: false,
         onSessionChange,
         onSessionCreated,
       });
@@ -11742,7 +11767,8 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
 
     act(() => {
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     const allowBPrompt = vi.fn().mockResolvedValue(undefined);
     act(() => {
@@ -11750,8 +11776,8 @@ describe('App session callbacks', () => {
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.ownerVersion += 1;
+      mockConnection.loadingTranscript = false;
       rerender({
-        desiredSessionTargetPending: false,
         onSubmitBefore: allowBPrompt,
       });
     });
@@ -11854,7 +11880,8 @@ describe('App session callbacks', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       retryApproval.resolve();
@@ -11869,7 +11896,8 @@ describe('App session callbacks', () => {
         { kind: 'error', source: 'turn_error', id: 'turn-error-2' },
       ];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-1';
@@ -11921,14 +11949,16 @@ describe('App session callbacks', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-2';
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-1';
@@ -11994,14 +12024,16 @@ describe('App session callbacks', () => {
     });
 
     act(() => {
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-2';
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
 
     const allowNewerPrompt = vi.fn().mockResolvedValue(undefined);
@@ -12088,14 +12120,16 @@ describe('App session callbacks', () => {
     expect(onSubmitBefore).toHaveBeenCalledTimes(2);
 
     act(() => {
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-2';
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-1';
@@ -12119,14 +12153,16 @@ describe('App session callbacks', () => {
     expect(onSubmitBefore).toHaveBeenCalledTimes(4);
 
     act(() => {
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-2';
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       newerRetryApproval.resolve();
@@ -12760,7 +12796,8 @@ describe('App session callbacks', () => {
           text: 'terminated',
         },
       ];
-      rerender({ desiredSessionTargetPending: true });
+      mockConnection.loadingTranscript = true;
+      rerender({});
     });
 
     const retry = container.querySelector<HTMLButtonElement>(
@@ -12772,7 +12809,10 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
 
-    act(() => rerender({ desiredSessionTargetPending: false }));
+    act(() => {
+      mockConnection.loadingTranscript = false;
+      rerender({});
+    });
     await flush();
     const unblockedRetry = container.querySelector<HTMLButtonElement>(
       '[data-testid="retry"]',
@@ -13069,15 +13109,15 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
 
     act(() => {
+      mockConnection.loadingTranscript = true;
       rerender({
-        desiredSessionTargetPending: true,
         onSubmitBefore,
         onSessionChange,
       });
     });
     act(() => {
+      mockConnection.loadingTranscript = false;
       rerender({
-        desiredSessionTargetPending: false,
         onSubmitBefore,
         onSessionChange,
       });
@@ -13482,10 +13522,12 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('plan');
 
     act(() => {
-      rerender({ desiredSessionTargetPending: true });
+      mockConnection.loadingTranscript = true;
+      rerender({});
     });
     act(() => {
-      rerender({ desiredSessionTargetPending: false });
+      mockConnection.loadingTranscript = false;
+      rerender({});
     });
     await act(async () => {
       approval.resolve();
@@ -13764,7 +13806,8 @@ describe('App session callbacks', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       retryApproval.resolve();
@@ -13775,10 +13818,12 @@ describe('App session callbacks', () => {
 
     act(() => {
       mockConnection.workspaceCwd = '/tmp/project';
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await flush();
 
@@ -13849,7 +13894,8 @@ describe('App session callbacks', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       oldRetryApproval.resolve();
@@ -13861,7 +13907,8 @@ describe('App session callbacks', () => {
       testState.ownerVersion += 1;
       mockConnection.workspaceCwd = undefined;
       testState.blocks = [];
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     testState.prompt = 'second';
     await clickSubmit(container);
@@ -13873,7 +13920,8 @@ describe('App session callbacks', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       activeRetryApproval.resolve();
@@ -13883,10 +13931,12 @@ describe('App session callbacks', () => {
 
     act(() => {
       mockConnection.workspaceCwd = '/tmp/project';
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await flush();
 
@@ -14189,7 +14239,8 @@ describe('App session callbacks', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       retryApproval.resolve();
@@ -14204,7 +14255,8 @@ describe('App session callbacks', () => {
         { kind: 'error', source: 'turn_error', id: 'turn-error-1' },
       ];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     expect(container.querySelector('[data-testid="retry"]')).toBeNull();
     act(() => {
@@ -18194,7 +18246,8 @@ describe('App prompt send failure retry', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.workspaceCwd = '/tmp/project-2';
@@ -18203,7 +18256,8 @@ describe('App prompt send failure retry', () => {
         { id: 'user-1', role: 'user', content: 'other owner' },
       ];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       retryApproval.resolve();
@@ -18306,14 +18360,16 @@ describe('App prompt send failure retry', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.messages = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       approveRetry?.();
@@ -18415,7 +18471,8 @@ describe('App prompt send failure retry', () => {
       await Promise.resolve();
     });
     act(() => {
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.sessionId = 'session-1';
@@ -18423,7 +18480,8 @@ describe('App prompt send failure retry', () => {
       testState.blocks = [];
       testState.messages = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       approveRetry?.();
@@ -18518,14 +18576,16 @@ describe('App prompt send failure retry', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.messages = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       approveRetry?.();
@@ -18601,14 +18661,16 @@ describe('App prompt send failure retry', () => {
       container
         .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
         ?.click();
-      rerender({ desiredSessionTargetPending: true, onSubmitBefore });
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
     });
     act(() => {
       mockConnection.workspaceCwd = '/tmp/project-2';
       testState.blocks = [];
       testState.messages = [];
       testState.ownerVersion += 1;
-      rerender({ desiredSessionTargetPending: false, onSubmitBefore });
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore });
     });
     await act(async () => {
       approveRetry?.();
