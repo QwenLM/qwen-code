@@ -400,18 +400,40 @@ export function parseReviewArgs(
   //   tiebreak.
   // A token the user typed OUTSIDE any flag always outranks a flag value:
   // when one exists, every invalid value is a typo beside the real target.
+  // And a PR-shaped rescue must be UNIQUE: two PR-shaped values arriving as
+  // invalid flag values (`--severity-floor 6711 --effort 6712`) are an
+  // ambiguous invocation — silently reviewing the first would review the
+  // wrong PR half the time, so both are refused, loudly, and the review
+  // falls back to the local diff nothing contradicted.
   const soleCandidate = kept.length === 1;
   const hasValidCandidate = kept.some((k) => k.invalidValueOf === undefined);
+  const isPrShaped = (token: string): boolean => {
+    const shape = classifyToken(token);
+    return (
+      shape !== null &&
+      shape !== 'invalid-url' &&
+      (shape.type === 'pr-number' || shape.type === 'pr-url')
+    );
+  };
+  const prShapedInvalid = kept.filter(
+    (k) => k.invalidValueOf !== undefined && isPrShaped(k.token),
+  );
+  if (!hasValidCandidate && prShapedInvalid.length > 1) {
+    warnings.push(
+      `Ambiguous target: ${prShapedInvalid
+        .map((k) => JSON.stringify(k.token))
+        .join(
+          ' and ',
+        )} both arrived as invalid flag values and both look like PR targets; refusing to choose between them.`,
+    );
+  }
   const targetTokens: string[] = [];
   for (const k of kept) {
     const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
     if (k.invalidValueOf !== undefined) {
-      const shape = classifyToken(k.token);
-      const prShaped =
-        shape !== null &&
-        shape !== 'invalid-url' &&
-        (shape.type === 'pr-number' || shape.type === 'pr-url');
-      const survives = prShaped ? !hasValidCandidate : soleCandidate;
+      const survives = isPrShaped(k.token)
+        ? !hasValidCandidate && prShapedInvalid.length === 1
+        : soleCandidate;
       if (!survives) {
         issues.push({ kind: 'discarded', value: k.token });
         continue;

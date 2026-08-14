@@ -230,6 +230,17 @@ describe('bundled review skill', () => {
       "git --literal-pathspecs diff <commitId>..HEAD --unified=0 -- '<file>'",
     );
     expect(body).toContain('neither hardening is optional');
+    // The embedded-apostrophe rule is load-bearing on its own: a legal name
+    // like `it's.ts` breaks the quoted token without it, and deleting only
+    // that clause left every other assertion green (round-5 review finding).
+    expect(body).toContain("a `'` inside the name becomes `'\\''`");
+    // The state carries the verdict's floor UNRESOLVED — a round-resolved
+    // `suggestion` is indistinguishable from the operator's explicit
+    // posture-off override, and passing it turned every legal rounds-2-5
+    // age deferral into an unlicensed one (round-5 review finding).
+    expect(body).toContain(
+      "verdict's `severityFloor` into the compose state UNRESOLVED",
+    );
     // The age rule's premise needs the previous round to have READ the code
     // it vouches for: scope that round disclosed as not reviewed gets no
     // age suppression (round-1 review finding).

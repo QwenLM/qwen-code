@@ -453,6 +453,23 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
     ).toBe(true);
   });
 
+  it('two PR-shaped flag values are ambiguous — refused, never first-wins', () => {
+    // `--severity-floor 6711 --effort 6712`: silently reviewing 6711 would
+    // review the wrong PR half the time. Both are discarded with a warning
+    // that names them, and the review falls back to the local diff.
+    const got = parseReviewArgs('--severity-floor 6711 --effort 6712');
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.extraTokens).toEqual([]);
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Ambiguous target') &&
+          w.includes('"6711"') &&
+          w.includes('"6712"'),
+      ),
+    ).toBe(true);
+  });
+
   it('two invalid values are two typos, not a target and a tiebreak', () => {
     // "Sole target candidate" is literal: with two invalid tokens neither is
     // sole, so both are discarded and the review falls back to the local

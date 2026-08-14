@@ -685,8 +685,15 @@ function composeReviewBody(
   // em-dash), so a title like "critical-path latency" passes; full
   // reconciliation against the findings artifact is a structural follow-up,
   // and this kills the cheap shape today.
+  // Separator-agnostic on purpose: the entry format prescribes an em dash,
+  // but the channel is model-written and an ASCII hyphen or en dash is the
+  // cheapest real miss — `a.ts:88 - Critical: token check skipped` slipping
+  // past an em-dash-anchored match is exactly the APPROVE-over-a-blocker
+  // this exists to kill. The accepted false positive is a title carrying a
+  // literal `critical:` ("non-critical: cleanup") — the refusal names the
+  // entry and rewording it is cheap; shipping the miss is not.
   const criticalDeferral = deferredSuggestions.find((x) =>
-    /\[critical\]|(?:^|—)\s*critical\s*:/i.test(x),
+    /\[critical\]|\bcritical\s*:/i.test(x),
   );
   if (criticalDeferral !== undefined) {
     throw new TypeError(
@@ -695,14 +702,20 @@ function composeReviewBody(
       )}`,
     );
   }
-  // The channel's OTHER precondition, same fail-closed treatment: deferring
-  // is only ever licensed by the posture, so a deferral under an explicitly
-  // disabled posture (floor `suggestion`) or on round 1 of `auto` (no
-  // posture engaged, no age reference to defer against) is a model
-  // mis-execution that would silently un-post findings — the one direction
-  // this module must never let free text take. `critical` licenses any
-  // round; `auto` licenses round 2+ (the code-age rule) and round 6+ (the
-  // floor). Absent means `auto` — a caller predating the field.
+  // The channel's OTHER precondition: deferring is only ever licensed by
+  // the posture — `critical` at any round; `auto` from round 2 (the
+  // code-age rule) and round 6 (the floor); never an explicit `suggestion`
+  // (the operator turned the posture off) and never round 1 of `auto` (no
+  // posture, no age reference). An unlicensed deferral is a model
+  // mis-execution that would silently un-post findings — but the response
+  // is a CAP, not a refusal: a thrown compose loses the WHOLE round,
+  // Criticals included, and `prevRound` is a best-effort side-file read
+  // whose every failure mode returns 0 — a missing file at a true round 6
+  // must degrade to a disclosed, uncertified verdict, never to no verdict
+  // at all. The findings render; the cap keeps anything from certifying
+  // past them; the anchor is withheld with every other cap. The shape check
+  // stays a refusal — a floor that is not one of the three values is a
+  // malformed state file, same as a NaN count.
   const severityFloor = input.severityFloor ?? 'auto';
   if (
     severityFloor !== 'critical' &&
@@ -715,22 +728,14 @@ function composeReviewBody(
       )}`,
     );
   }
-  if (deferredSuggestions.length > 0) {
-    if (severityFloor === 'suggestion') {
-      throw new TypeError(
-        'compose-review: deferredSuggestions is non-empty under an explicit ' +
-          '`suggestion` floor — the operator turned the posture off, so ' +
-          'nothing may be deferred; post the findings instead',
-      );
-    }
-    if (severityFloor === 'auto' && prevRound === 0) {
-      throw new TypeError(
-        'compose-review: deferredSuggestions is non-empty on round 1 under ' +
-          'the auto floor — no posture is engaged and no age reference ' +
-          'exists; post the findings instead',
-      );
-    }
-  }
+  const unlicensedDeferral =
+    deferredSuggestions.length === 0
+      ? null
+      : severityFloor === 'suggestion'
+        ? 'the operator turned the posture off (`--severity-floor suggestion`)'
+        : severityFloor === 'auto' && prevRound === 0
+          ? 'no posture is engaged on round 1 and no age reference exists'
+          : null;
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
@@ -1250,6 +1255,7 @@ function composeReviewBody(
     cappedBy.push('unreviewed-dimension');
   }
   if (contextUnavailable) cappedBy.push('context-unavailable');
+  if (unlicensedDeferral !== null) cappedBy.push('unlicensed-deferral');
   if (criticalsUnverified) cappedBy.push('criticals-unverified');
   if (findingsUnverifiedAtCompose) {
     cappedBy.push('findings-unverified-at-compose');
@@ -1749,6 +1755,18 @@ function composeReviewBody(
     });
   const deferredMore = deferredSuggestions.length - deferredShown.length;
   const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
+  // The unlicensed-deferral disclosure precedes the list it disclaims: the
+  // findings stay visible, but nothing may read the paragraph below as a
+  // sanctioned deferral when the posture never licensed one.
+  const unlicensedDeferralBlock: Bi[] =
+    unlicensedDeferral === null
+      ? []
+      : [
+          {
+            en: `⚠️ ${deferredSuggestions.length} finding(s) were deferred without a posture licence — ${unlicensedDeferral}. They are listed below, but this verdict is capped: findings may be under-posted this round.`,
+            zh: `⚠️ ${deferredSuggestions.length} 条发现在姿态未授权的情况下被延后——${unlicensedDeferral}。清单见下，但本判定已被限制：本轮发现可能未被完整发布。`,
+          },
+        ];
   const deferredSuggestionsBlock: Bi[] = deferredSuggestions.length
     ? [
         {
@@ -1776,6 +1794,7 @@ function composeReviewBody(
       ...deferredBlock,
       ...testPlanBlock,
       ...repositoryContextBlock,
+      ...unlicensedDeferralBlock,
       ...deferredSuggestionsBlock,
       ...bodyCriticalBlock,
     ];
@@ -1813,6 +1832,7 @@ function composeReviewBody(
           ...deferredBlock,
           ...testPlanBlock,
           ...repositoryContextBlock,
+          ...unlicensedDeferralBlock,
           ...deferredSuggestionsBlock,
         ],
         notReviewedParts.length ||
@@ -1963,8 +1983,9 @@ function composeReviewBody(
   //     planner recommends disclosing without claiming the code is defective.
   clauses.push(...repositoryContextBlock);
 
-  // 6e. Convergence-posture deferrals (non-capping) — non-Critical findings
-  //     recorded but not requested this round.
+  // 6e. Convergence-posture deferrals — the licence disclosure (capping)
+  //     precedes the list (non-capping).
+  clauses.push(...unlicensedDeferralBlock);
   clauses.push(...deferredSuggestionsBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
@@ -2716,6 +2737,7 @@ export function verdictLine(r: ComposeReviewResult): string {
     'uncoverable-chunk': 'part of the diff cannot be read at all',
     'unreviewed-dimension': 'a dimension nobody reviewed',
     'context-unavailable': "the PR's existing discussion could not be read",
+    'unlicensed-deferral': 'findings were deferred without a posture licence',
     'findings-unverified-at-compose':
       'findings were still unverified when the loop ended',
   };

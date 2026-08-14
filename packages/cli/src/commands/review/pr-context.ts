@@ -739,7 +739,10 @@ export interface RecoveredLedger {
  *   reference and its provenance for Step 6's convergence posture. Readers
  *   of the ledger shape (compose-review's round count, Step 1's
  *   recovered-anchor check) ignore the extra keys.
- * - Not recovered, reviews READ (`fetchSucceeded`): the PR demonstrably
+ * - Not recovered, reviews POSITIVELY read (`sawReviews` — a non-empty
+ *   reviews list was actually walked; an empty list is indistinguishable
+ *   from a 4xx-style error envelope `ghApiAll` flattens to `[]`, and must
+ *   not destroy state): the PR demonstrably
  *   holds no prior round for this account — the file is another account's
  *   or a deleted round's leftovers, and it is REMOVED whole: carrying its
  *   round counter would stamp a first review "round N+1" and engage the
@@ -759,12 +762,27 @@ export interface RecoveredLedger {
 export function persistRecoveredLedger(
   sideFilePath: string,
   recovered: RecoveredLedger | null,
-  fetchSucceeded: boolean,
+  sawReviews: boolean,
 ): void {
+  // Unique per process: two same-PR fetches racing on one fixed `.tmp` can
+  // rename each other's bytes (A renames B's write; B's ENOENT is
+  // swallowed), leaving the side file disagreeing with the context A holds
+  // in memory. Distinct temp names make the rename last-writer-wins on the
+  // FINAL path only, which is the intended semantics. The temp is unlinked
+  // on a failed rename so an aborted write leaves no debris.
   const writeAtomic = (text: string) => {
-    const tmp = `${sideFilePath}.tmp`;
+    const tmp = `${sideFilePath}.${process.pid}.tmp`;
     writeFileSync(tmp, text);
-    renameSync(tmp, sideFilePath);
+    try {
+      renameSync(tmp, sideFilePath);
+    } catch (err) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        /* debris removal is best-effort */
+      }
+      throw err;
+    }
   };
   if (recovered) {
     try {
@@ -786,7 +804,7 @@ export function persistRecoveredLedger(
     }
     return;
   }
-  if (fetchSucceeded) {
+  if (sawReviews) {
     try {
       rmSync(sideFilePath, { force: true });
     } catch {
@@ -1120,7 +1138,11 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   persistRecoveredLedger(
     join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
     prevRecovered,
-    !recoveryThrew,
+    // POSITIVELY read: a non-empty list this run actually walked. An empty
+    // `reviews` may be a real review-less PR or an error envelope ghApiAll
+    // flattened to [] — indistinguishable, so it must not delete a live
+    // round counter; the strip path handles it conservatively.
+    reviews.length > 0 && !recoveryThrew,
   );
 
   const md = buildMarkdown(

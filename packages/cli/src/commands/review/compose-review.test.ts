@@ -4439,23 +4439,61 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     expect(parseLedger(r.body)?.round).toBe(6);
   });
 
-  it('refuses deferrals the posture does not license', () => {
-    // The channel only ever removes findings from posting, so it fails
-    // closed on both unlicensed shapes: an explicit `suggestion` floor is
-    // the operator saying "post everything", and round 1 under `auto` has
-    // no posture engaged and no age reference to defer against. Rounds 2-5
-    // under `auto` stay licensed — the code-age rule defers there.
-    expect(() =>
-      composeReview(
-        base({
-          severityFloor: 'suggestion',
-          deferredSuggestions: ['a.ts:1 — nit'],
-        }),
-      ),
-    ).toThrow(/turned the posture off/);
-    expect(() =>
-      composeReview(base({ deferredSuggestions: ['a.ts:1 — nit'] })),
-    ).toThrow(/round 1 under.*auto/);
+  it('caps — never refuses — deferrals the posture does not license', () => {
+    // The channel only ever removes findings from posting, so unlicensed
+    // shapes fail CLOSED but not FATAL: a thrown compose loses the whole
+    // round, Criticals included, and `prevRound` is a best-effort side-file
+    // read whose every failure mode returns 0 — a missing file at a true
+    // round 6 must degrade to a disclosed, capped verdict, never to no
+    // verdict at all (round-5 review finding). Both shapes render the list,
+    // disclose the missing licence, cap the event, and withhold the anchor.
+    const explicitOff = composeReview(
+      base({
+        severityFloor: 'suggestion',
+        deferredSuggestions: ['a.ts:1 — nit'],
+      }),
+    );
+    expect(explicitOff.cappedBy).toContain('unlicensed-deferral');
+    expect(explicitOff.event).toBe('COMMENT');
+    expect(explicitOff.body).toContain('without a posture licence');
+    expect(explicitOff.body).toContain('- a.ts:1 — nit');
+    expect(parseLedger(explicitOff.body)?.sha).toBeUndefined();
+    const round1Auto = composeReview(
+      base({ deferredSuggestions: ['a.ts:1 — nit'] }),
+    );
+    expect(round1Auto.cappedBy).toContain('unlicensed-deferral');
+    expect(round1Auto.event).toBe('COMMENT');
+    expect(verdictLine(round1Auto)).toContain(
+      'findings were deferred without a posture licence',
+    );
+  });
+
+  it('auto with a recovered previous round licenses the age-rule deferral', () => {
+    // The round-5 review caught the shipped contradiction: SKILL said
+    // "carry the RESOLVED floor", so a legal round-3 age deferral arrived
+    // as 'suggestion' and was refused as the operator's override. The state
+    // now carries `auto` unresolved and the module licenses it by the round
+    // it derives itself — this pins the legal rounds-2-5 shape end to end.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 2, findings: [] }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      deferredSuggestions: ['a.ts:1 — [review] aged-out nit'],
+    });
+    expect(r.cappedBy).toEqual([]);
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('convergence posture (round 3, not a blocker)');
   });
 
   it('exactly at the line cap, the verdict line does not claim truncation', () => {
@@ -4601,6 +4639,15 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
       composeReview(
         base({
           deferredSuggestions: ['a.ts:1 — Critical: authentication bypass'],
+        }),
+      ),
+    ).toThrow(/never deferred/);
+    // Separator-agnostic (round-5 review finding): the cheapest real miss
+    // was an ASCII hyphen where the format prescribes an em dash.
+    expect(() =>
+      composeReview(
+        base({
+          deferredSuggestions: ['src/auth.ts:88 - Critical: token check'],
         }),
       ),
     ).toThrow(/never deferred/);
