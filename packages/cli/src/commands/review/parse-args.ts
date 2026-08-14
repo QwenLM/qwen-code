@@ -114,6 +114,11 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
 export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
   'critical',
   'suggestion',
+  // `auto` is a legal EXPLICIT value too — it is the schema-enumerated
+  // default's name, so an operator typing `--severity-floor auto` means
+  // "the round-adaptive rule" (overriding a configured floor), not a typo
+  // to reject and then promote into a bogus file target.
+  'auto',
 ]);
 
 // The verdict's owner/repo/number are interpolated into `gh` commands by the
@@ -136,9 +141,11 @@ function asEffort(value: string): ReviewEffort | null {
   return EFFORT_LEVELS.has(lower) ? (lower as ReviewEffort) : null;
 }
 
-function asSeverityFloor(value: string): ReviewSeverityFloor | null {
+function asSeverityFloor(value: string): ReviewSeverityFloor | 'auto' | null {
   const lower = value.toLowerCase();
-  return SEVERITY_FLOORS.has(lower) ? (lower as ReviewSeverityFloor) : null;
+  return SEVERITY_FLOORS.has(lower)
+    ? (lower as ReviewSeverityFloor | 'auto')
+    : null;
 }
 
 /**
@@ -250,7 +257,7 @@ export function parseReviewArgs(
   let commentRequestedByFlag = false;
   let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
-  let explicitFloor: ReviewSeverityFloor | null = null;
+  let explicitFloor: ReviewSeverityFloor | 'auto' | null = null;
 
   // The configured default gets the same validation as an explicit flag:
   // settings loading performs no enum validation, so a hand-edited typo
@@ -271,7 +278,11 @@ export function parseReviewArgs(
   let invalidConfiguredFloor: string | undefined;
   if (defaults.severityFloor !== undefined) {
     const normalized = asSeverityFloor(defaults.severityFloor);
-    if (normalized !== null) {
+    if (normalized === 'auto') {
+      // The default's own name: the same round-adaptive rule as an unset
+      // setting. The settings caller pre-maps it, but a direct caller must
+      // get identical semantics.
+    } else if (normalized !== null) {
       configuredFloor = normalized;
     } else {
       invalidConfiguredFloor = defaults.severityFloor;
@@ -338,6 +349,14 @@ export function parseReviewArgs(
         i++;
         continue;
       }
+      // A quoted-empty value ('' survives tokenization) is a missing value,
+      // not a candidate — and it is CONSUMED, or the leftover '' token would
+      // classify as an empty-string file target.
+      if (next === '') {
+        effortIssues.push({ kind: 'missing' });
+        i++;
+        continue;
+      }
       if (next === undefined || isFlag(next)) {
         // Flag-final, or followed by another flag: the value is simply
         // missing. Never consume a flag as a value.
@@ -367,6 +386,11 @@ export function parseReviewArgs(
       const nextFloor = next !== undefined ? asSeverityFloor(next) : null;
       if (nextFloor !== null) {
         explicitFloor = nextFloor;
+        i++;
+        continue;
+      }
+      if (next === '') {
+        floorIssues.push({ kind: 'missing' });
         i++;
         continue;
       }

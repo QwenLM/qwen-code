@@ -118,10 +118,14 @@ const DETERMINISTIC_TAG_RE = /\[(?:build|test|probe)\]/i;
  * immediately after the first em-dash: scanning the whole entry classified
  * `a.ts:1 — [review] mishandles [test] configuration files` deterministic
  * off its TITLE, which skipped the verifier floor for an unverified claim
- * (probe-confirmed fail-open). An entry with no em-dash matches nothing and
- * stays non-deterministic — the fail-closed direction.
+ * (probe-confirmed fail-open). Separator-agnostic like the Critical tripwire
+ * below: an ASCII hyphen or en dash is the cheapest real spelling drift, and
+ * two spellings of one deterministic finding must not produce opposite
+ * verdicts — the unmatched form demanded a verifier that cannot exist, the
+ * self-inflicted cap the floor comment forbids. An entry with no separator
+ * at all matches nothing and stays non-deterministic — fail-closed.
  */
-const DETERMINISTIC_DEFERRAL_RE = /^[^—]*—\s*\[(?:build|test|probe)\]/i;
+const DETERMINISTIC_DEFERRAL_RE = /^[^—–-]*[—–-]\s*\[(?:build|test|probe)\]/i;
 
 /**
  * Reads a PR's description body, given its `owner/repo` and number. The one
@@ -178,8 +182,13 @@ export interface ComposeReviewInput {
    * channel's precondition is checkable: deferrals are legitimate under a
    * `critical` floor at any round, and under `auto` from round 2 (the
    * code-age rule) — never under an explicit `suggestion` floor (the
-   * operator turned the posture off) and never on round 1 of `auto` (no
-   * posture, no age reference). Absent reads as `auto` — a pre-flag caller.
+   * operator turned the posture off), never on round 1 of `auto` (no
+   * posture, no age reference), never under `auto` in the
+   * context-unavailable state (the round is unknowable), and never ABSENT
+   * beside a non-empty deferral list: the field ships in the same PR as the
+   * channel, so omission is fail-closed — a dropped echo must not silently
+   * re-license what an explicit `suggestion` floor forbade. Unlicensed
+   * shapes cap; they never throw.
    */
   severityFloor?: 'critical' | 'suggestion' | 'auto';
   /**
@@ -672,34 +681,34 @@ function composeReviewBody(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );
-  const deferredSuggestions = toStringList(
+  const deferredIn = toStringList(
     input.deferredSuggestions,
     'deferredSuggestions',
   )
     .map(stripReviewFooter)
     .filter((entry) => entry.trim() !== '');
-  // A Critical is never deferred — the SKILL rule, given a deterministic
-  // tripwire because this channel is model-written free text that casts no
-  // vote on `C`: a Critical routed here would compose an APPROVE over a
-  // blocker. Marker forms only (`[Critical]`, or `Critical:` after the
-  // em-dash), so a title like "critical-path latency" passes; full
-  // reconciliation against the findings artifact is a structural follow-up,
-  // and this kills the cheap shape today.
-  // Separator-agnostic on purpose: the entry format prescribes an em dash,
-  // but the channel is model-written and an ASCII hyphen or en dash is the
-  // cheapest real miss — `a.ts:88 - Critical: token check skipped` slipping
-  // past an em-dash-anchored match is exactly the APPROVE-over-a-blocker
-  // this exists to kill. The accepted false positive is a title carrying a
-  // literal `critical:` ("non-critical: cleanup") — the refusal names the
-  // entry and rewording it is cheap; shipping the miss is not.
-  const criticalDeferral = deferredSuggestions.find((x) =>
-    /\[critical\]|\bcritical\s*:/i.test(x),
+  // A Critical marker in the deferral channel is RELOCATED, never fatal and
+  // never deferred: the entry is a Critical by its own marker, so it moves
+  // into the body Criticals — it counts toward `C`, the event blocks, and
+  // the round posts. The earlier refusal shared the flaw the round-5 fix
+  // removed from the licence check: a throw loses the WHOLE round, real
+  // drafted Criticals included, and in an unattended loop nothing
+  // recomposes. Separator-agnostic (an ASCII hyphen is the cheapest real
+  // spelling drift), with a lookbehind so hyphenated compounds — the
+  // SKILL's own "non-Critical findings" phrasing — do not trip it; the
+  // residual false positive (a Suggestion title literally opening
+  // `critical:`) now costs one wrongly-blocking body entry the next round
+  // rules on, not a lost round.
+  const CRITICAL_DEFERRAL_RE = /\[critical\]|(?<![\w-])critical\s*:/i;
+  const relocatedCriticals = deferredIn.filter((x) =>
+    CRITICAL_DEFERRAL_RE.test(x),
   );
-  if (criticalDeferral !== undefined) {
-    throw new TypeError(
-      `compose-review: deferredSuggestions must not carry a Critical — a Critical is never deferred, it posts: ${JSON.stringify(
-        criticalDeferral,
-      )}`,
+  const deferredSuggestions = deferredIn.filter(
+    (x) => !CRITICAL_DEFERRAL_RE.test(x),
+  );
+  for (const stray of relocatedCriticals) {
+    bodyCriticals.push(
+      `${stray} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
     );
   }
   // The channel's OTHER precondition: deferring is only ever licensed by
@@ -716,6 +725,8 @@ function composeReviewBody(
   // past them; the anchor is withheld with every other cap. The shape check
   // stays a refusal — a floor that is not one of the three values is a
   // malformed state file, same as a NaN count.
+  const floorAbsent =
+    input.severityFloor === undefined || input.severityFloor === null;
   const severityFloor = input.severityFloor ?? 'auto';
   if (
     severityFloor !== 'critical' &&
@@ -728,14 +739,6 @@ function composeReviewBody(
       )}`,
     );
   }
-  const unlicensedDeferral =
-    deferredSuggestions.length === 0
-      ? null
-      : severityFloor === 'suggestion'
-        ? 'the operator turned the posture off (`--severity-floor suggestion`)'
-        : severityFloor === 'auto' && prevRound === 0
-          ? 'no posture is engaged on round 1 and no age reference exists'
-          : null;
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
@@ -1196,6 +1199,34 @@ function composeReviewBody(
     input.contextUnavailable,
     'contextUnavailable',
   );
+
+  // The deferral licence, decided here because two of its arms need inputs
+  // parsed above: deferring is only ever licensed by the posture —
+  // `critical` at any round; `auto` from round 2 (the code-age rule) and
+  // round 6 (the floor); never an explicit `suggestion` (posture off),
+  // never round 1 of `auto` (no posture, no age reference), never `auto` in
+  // the context-unavailable state (the round is unknowable — SKILL resolves
+  // it as round 1), and never with the field ABSENT beside a non-empty list
+  // (the licence cannot be checked, and the channel ships in the same PR as
+  // the field — omission is fail-closed, not grandfathered). The response
+  // is a CAP, not a refusal: a thrown compose loses the whole round,
+  // Criticals included, and `prevRound` is a best-effort side-file read
+  // whose every failure mode returns 0 — a missing file at a true round 6
+  // must degrade to a disclosed, uncertified verdict, never to no verdict
+  // at all. The findings render; the cap keeps anything from certifying
+  // past them; the anchor is withheld with every other cap.
+  const unlicensedDeferral =
+    deferredSuggestions.length === 0
+      ? null
+      : floorAbsent
+        ? 'the state carried no `severityFloor`, so the licence cannot be checked'
+        : severityFloor === 'suggestion'
+          ? 'the operator turned the posture off (`--severity-floor suggestion`)'
+          : severityFloor === 'auto' && contextUnavailable
+            ? 'the round is unknowable in the context-unavailable state'
+            : severityFloor === 'auto' && prevRound === 0
+              ? 'no posture is engaged on round 1 and no age reference exists'
+              : null;
   const presubmitRaw: unknown = input.presubmit ?? {};
   if (typeof presubmitRaw !== 'object' || Array.isArray(presubmitRaw)) {
     throw new TypeError(
@@ -1739,19 +1770,23 @@ function composeReviewBody(
   const deferredShown = deferredSuggestions
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
     .map((entry) => {
-      const oneLine = entry
+      const collapsed = entry
         .split('\n')
         .map((seg) => seg.trim())
         .filter((seg) => seg !== '')
-        .join(' ')
-        .slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
+        .join(' ');
+      let oneLine = collapsed.slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
       // The cap slices UTF-16 code units; a cut landing inside a surrogate
       // pair leaves a lone high surrogate that serializes as U+FFFD into the
       // posted body — and the zh clause keeps titles untranslated, so astral
       // CJK/emoji at the boundary are a real input, not a curiosity.
-      return /[\uD800-\uDBFF]/.test(oneLine.charAt(oneLine.length - 1))
-        ? oneLine.slice(0, -1)
-        : oneLine;
+      if (/[\uD800-\uDBFF]/.test(oneLine.charAt(oneLine.length - 1))) {
+        oneLine = oneLine.slice(0, -1);
+      }
+      // A trimmed entry must say so — a claim cut mid-sentence otherwise
+      // renders as a complete finding line on the PR record.
+      if (oneLine.length < collapsed.length) oneLine += '…';
+      return oneLine;
     });
   const deferredMore = deferredSuggestions.length - deferredShown.length;
   const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
@@ -1771,7 +1806,7 @@ function composeReviewBody(
     ? [
         {
           en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker) — recorded, not requested in this round:\n\n${deferredShown
-            .map((entry) => `- ${entry}`)
+            .map((entry) => `- ${mdField(entry)}`)
             .join(
               '\n',
             )}${deferredMore > 0 ? `\n- …and ${deferredMore} more (see the run report)` : ''}`,
@@ -1895,6 +1930,10 @@ function composeReviewBody(
       // shape the comment below forbids. (A gap the caller promoted into
       // `unreviewedDimensions` already denies certification above.)
       keptBudgetGaps.length === 0 &&
+      // An unlicensed deferral withdrew findings from posting without a
+      // licence — "no blockers" cannot open a body whose own ⚠️ clause says
+      // findings may be under-posted.
+      unlicensedDeferral === null &&
       !findingsUnverifiedAtCompose;
     // The opener may not say "Reviewed." over a disclosure set that denies it.
     // #7268's posted body opened exactly that way — "Reviewed. Suggestions are
