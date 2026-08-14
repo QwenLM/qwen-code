@@ -1175,6 +1175,28 @@ describe('TurnBoundaryCompactionEngine', () => {
       ).toEqual([1]);
     });
 
+    it('pins each usage disjunct and the non-numeric exclusion separately', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const withUsage = (id: number, usage: Record<string, unknown>) => {
+        const event = makeTextChunkWithParent(id, '', 'agent-1');
+        (
+          event.data as { update: { _meta: Record<string, unknown> } }
+        ).update._meta['usage'] = usage;
+        return event;
+      };
+      // outputTokens alone pins the second disjunct.
+      engine.ingest(withUsage(1, { outputTokens: 7 }));
+      // inputTokens alone pins the first disjunct.
+      engine.ingest(withUsage(2, { inputTokens: 3 }));
+      // Non-numeric fields must NOT count as usage.
+      engine.ingest(withUsage(3, { inputTokens: 'unknown' }));
+      engine.ingest(makeTextChunkWithParent(4, 'nested detail', 'agent-1'));
+
+      expect(
+        engine.snapshot('summary').liveJournal.map((event) => event.id),
+      ).toEqual([1, 2]);
+    });
+
     it('excludes parented tool frames from the summary journal under cap pressure', () => {
       const engine = new TurnBoundaryCompactionEngine({
         maxJournalEvents: 2,
@@ -1524,10 +1546,14 @@ describe('TurnBoundaryCompactionEngine', () => {
       }
 
       // Each ask reports the caps as grown by the previous grant; the third
-      // ask (which refuses) still observes the grown caps.
+      // ask (which refuses) still observes the grown caps. The fourth ask is
+      // the summary journal's own breach after the full journal's refusal —
+      // per-journal throttles let it ask even though the full journal was
+      // just refused at the same timestamp.
       expect(seen).toEqual([
         { maxEvents: 1, maxBytes: 8 * 1024 * 1024 },
         { maxEvents: 2, maxBytes: 16 * 1024 * 1024 },
+        { maxEvents: 4, maxBytes: 32 * 1024 * 1024 },
         { maxEvents: 4, maxBytes: 32 * 1024 * 1024 },
       ]);
     });
@@ -1569,9 +1595,11 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal.filter((e) => e.id !== undefined)).toHaveLength(
         2,
       );
-      // A thrown advisor is recorded as a refusal: the second breach must
-      // be swallowed by the throttle, not re-ask on the hot ingest path.
-      expect(advisor).toHaveBeenCalledTimes(1);
+      // A thrown advisor is recorded as a refusal on EACH journal (both
+      // hold the same root frames, so both breach on the same append): the
+      // second breach must be swallowed by both throttles, not re-ask on
+      // the hot ingest path.
+      expect(advisor).toHaveBeenCalledTimes(2);
     });
 
     it('treats a non-growing or malformed grant as a refusal', () => {
@@ -1629,7 +1657,9 @@ describe('TurnBoundaryCompactionEngine', () => {
         engine.ingest(makeUserMessage(i, `message-${i}`));
       }
 
-      expect(advisor).toHaveBeenCalledTimes(1);
+      // Both journals hold the same root frames and breach on the same
+      // append, so each records its own refusal of the shrinking grant.
+      expect(advisor).toHaveBeenCalledTimes(2);
       expect(engine.journalLimits()).toEqual({
         maxEvents: 2,
         maxBytes: 8 * 1024 * 1024,
@@ -1714,7 +1744,9 @@ describe('TurnBoundaryCompactionEngine', () => {
       engine.ingest(makeUserMessage(2, 'second large event'), 150);
       engine.ingest(makeUserMessage(3, 'third large event'), 300);
 
-      expect(advisor).toHaveBeenCalledTimes(2);
+      // Both journals hold the same root frames and breach on the same
+      // append, so each walks its own two non-improving calls.
+      expect(advisor).toHaveBeenCalledTimes(4);
       expect(engine.journalLimits()).toEqual({
         maxEvents: ENTRY_BASELINE,
         maxBytes: 300,
@@ -1792,8 +1824,9 @@ describe('TurnBoundaryCompactionEngine', () => {
 
       // The first breach is a length-1 journal (no ask: the survivor is
       // kept regardless); each of the next two breaches walks two
-      // intermediate grants and then hits the refusal.
-      expect(advisor).toHaveBeenCalledTimes(6);
+      // intermediate grants and then hits the refusal (three calls) —
+      // once per journal, since both hold the same root frames.
+      expect(advisor).toHaveBeenCalledTimes(12);
       expect(engine.journalLimits()).toEqual({
         maxEvents: ENTRY_BASELINE,
         maxBytes: 300,
@@ -1825,8 +1858,9 @@ describe('TurnBoundaryCompactionEngine', () => {
       engine.ingest(makeUserMessage(2, 'second large event'), 250);
 
       // 64 non-improving grants exhaust the per-breach walk budget; the
-      // caps roll back to the baseline.
-      expect(advisor).toHaveBeenCalledTimes(64);
+      // caps roll back to the baseline. Both journals hold the same root
+      // frames and breach on the same append, so each walks its own 64.
+      expect(advisor).toHaveBeenCalledTimes(128);
       expect(engine.journalLimits()).toEqual({
         maxEvents: 2,
         maxBytes: 300,
@@ -1835,7 +1869,7 @@ describe('TurnBoundaryCompactionEngine', () => {
       // Exhaustion counts as a refusal: a breach inside the throttle
       // window must not re-ask on the hot ingest path.
       engine.ingest(makeUserMessage(3, 'third large event'), 250);
-      expect(advisor).toHaveBeenCalledTimes(64);
+      expect(advisor).toHaveBeenCalledTimes(128);
       const snap = engine.snapshot();
       expect(markerOf(snap)).toBeDefined();
       expect(
@@ -1909,16 +1943,17 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
       engine.ingest(makeUserMessage(1, 'a'));
       engine.ingest(makeUserMessage(2, 'b'));
-      expect(advisor).toHaveBeenCalledTimes(1);
+      // Both journals hold the same root frames, so each asks once.
+      expect(advisor).toHaveBeenCalledTimes(2);
 
       // Still over the cap, but inside the refusal throttle window.
       engine.ingest(makeUserMessage(3, 'c'));
       engine.ingest(makeUserMessage(4, 'd'));
-      expect(advisor).toHaveBeenCalledTimes(1);
+      expect(advisor).toHaveBeenCalledTimes(2);
 
       clockMs += 10_000;
       engine.ingest(makeUserMessage(5, 'e'));
-      expect(advisor).toHaveBeenCalledTimes(2);
+      expect(advisor).toHaveBeenCalledTimes(4);
     });
 
     it('re-asks after a refusal when the clock source jumps backward', () => {
@@ -1934,11 +1969,12 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
       engine.ingest(makeUserMessage(1, 'a'));
       engine.ingest(makeUserMessage(2, 'b'));
-      expect(advisor).toHaveBeenCalledTimes(1);
+      // Both journals hold the same root frames, so each asks once.
+      expect(advisor).toHaveBeenCalledTimes(2);
 
       clockMs = 50_000;
       engine.ingest(makeUserMessage(3, 'c'));
-      expect(advisor).toHaveBeenCalledTimes(2);
+      expect(advisor).toHaveBeenCalledTimes(4);
     });
 
     it('resets the refusal throttle at a turn boundary', () => {
@@ -1951,24 +1987,25 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
       engine.ingest(makeUserMessage(1, 'a'));
       engine.ingest(makeUserMessage(2, 'b'));
-      expect(advisor).toHaveBeenCalledTimes(1);
+      // Both journals hold the same root frames, so each asks once.
+      expect(advisor).toHaveBeenCalledTimes(2);
 
       engine.ingest(makeTurnComplete(3));
       engine.ingest(makeUserMessage(4, 'c'));
       engine.ingest(makeUserMessage(5, 'd'));
-      expect(advisor).toHaveBeenCalledTimes(2);
+      expect(advisor).toHaveBeenCalledTimes(4);
     });
 
     it('clears the refusal throttle when a re-ask is granted', () => {
-      // A refusal at t0, a backward clock jump that lets a re-ask grant,
-      // then a breach back inside [t0, t0+10s): the grant must have
-      // cleared the stale refusal, or the engine throttles asks the pool
-      // is willing to grant.
+      // Refusals at t0 (one per journal), a backward clock jump that
+      // lets a re-ask grant, then a breach back inside [t0, t0+10s): the
+      // grant must have cleared the journal's stale refusal, or the
+      // engine throttles asks the pool is willing to grant.
       let clockMs = 100_000;
       let calls = 0;
       const advisor = vi.fn(() => {
         calls += 1;
-        return calls === 2
+        return calls === 3
           ? { maxEvents: 2, maxBytes: 16 * 1024 * 1024 }
           : undefined;
       });
@@ -1980,16 +2017,16 @@ describe('TurnBoundaryCompactionEngine', () => {
       });
       engine.ingest(makeUserMessage(1, 'a'));
       engine.ingest(makeUserMessage(2, 'b'));
-      expect(advisor).toHaveBeenCalledTimes(1);
+      expect(advisor).toHaveBeenCalledTimes(2);
 
       clockMs = 50_000;
       engine.ingest(makeUserMessage(3, 'c'));
-      expect(advisor).toHaveBeenCalledTimes(2);
+      expect(advisor).toHaveBeenCalledTimes(3);
       expect(engine.journalLimits().maxEvents).toBe(2);
 
       clockMs = 105_000;
       engine.ingest(makeUserMessage(4, 'd'));
-      expect(advisor).toHaveBeenCalledTimes(3);
+      expect(advisor).toHaveBeenCalledTimes(4);
     });
 
     it('keeps grown caps across turn boundaries', () => {
@@ -2050,6 +2087,46 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(engine.journalLimits()).toEqual({
         maxEvents: 100,
         maxBytes: 140,
+      });
+      const summary = engine.snapshot('summary');
+      expect(markerOf(summary)).toBeUndefined();
+      expect(summary.liveJournal.map((event) => event.id)).toEqual([1, 3]);
+    });
+
+    it('lets the summary journal ask despite a same-moment full journal refusal', () => {
+      // The full journal's breach refusal must not swallow the summary
+      // journal's independent breach ask: the throttles are per-journal,
+      // so at a fixed clock the summary breach below still reaches the
+      // advisor and retains both root frames marker-free.
+      const clockMs = 1_000_000;
+      const asks: Array<{ maxEvents: number; maxBytes: number }> = [];
+      const grants: Array<{ maxEvents: number; maxBytes: number } | undefined> =
+        [
+          undefined, // full journal breach: refuse
+          { maxEvents: 100, maxBytes: 200 }, // summary journal breach: accept
+        ];
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 100,
+        maxJournalBytes: 100,
+        now: () => clockMs,
+        onJournalGrowth: (current) => {
+          asks.push({ ...current });
+          return grants.shift();
+        },
+      });
+      engine.ingest(makeUserMessage(1, 'root-1'), 70);
+      engine.ingest(makeTextChunkWithParent(2, 'nested', 'agent-1'), 60);
+      // Same timestamp as the refusal above: an engine-wide throttle would
+      // swallow this summary breach and evict root-1 irreversibly.
+      engine.ingest(makeUserMessage(3, 'root-2'), 60);
+
+      expect(asks).toEqual([
+        { maxEvents: 100, maxBytes: 100 },
+        { maxEvents: 100, maxBytes: 100 },
+      ]);
+      expect(engine.journalLimits()).toEqual({
+        maxEvents: 100,
+        maxBytes: 200,
       });
       const summary = engine.snapshot('summary');
       expect(markerOf(summary)).toBeUndefined();

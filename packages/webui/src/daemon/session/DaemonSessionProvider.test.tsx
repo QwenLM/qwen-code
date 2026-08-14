@@ -13496,6 +13496,95 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.sessionId).toBe('session-epoch-closed-tail');
   });
 
+  it('requests summary live replay when a created session reconnects', async () => {
+    // The reconnectSessionId branch (createOrAttach origin, no sessionId
+    // prop) is a distinct projection call site from the restoreSessionId
+    // branch the epoch-reset test above exercises.
+    const epochResetDelivered = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-created-reconnect',
+      events: async function* epochResetThenClose() {
+        epochResetDelivered.resolve();
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'epoch_reset',
+            lastDeliveredId: 50,
+            earliestAvailableId: 1,
+          },
+        };
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_closed',
+          data: { reason: 'client_close' },
+        };
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-created-reconnect',
+      events: createPendingEvents(reloaded),
+    });
+    sdkMocks.sessions.push(session, reloadedSession);
+
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    // Explicit `sessionId: undefined` suppresses the harness's
+    // auto-injection, so the initial connect goes through createOrAttach
+    // and the epoch-reset reload through the reconnectSessionId branch.
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      sessionId: undefined,
+      subagentTranscriptMode: 'summary',
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    await act(async () => {
+      await epochResetDelivered.promise;
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      'session-created-reconnect',
+      {
+        workspaceCwd: '/mock-workspace',
+        timeoutMs: 70_000,
+        liveReplayMode: 'summary',
+      },
+      expect.any(String),
+    );
+    expect(connection?.status).toBe('connected');
+    expect(connection?.sessionId).toBe('session-created-reconnect');
+  });
+
   it.each(['idle_timeout', 'last_client_detached'] as const)(
     'does NOT stop reconnect on session_closed with reason "%s"',
     async (reason) => {

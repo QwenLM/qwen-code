@@ -5882,16 +5882,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // would include nested frames the summary client discards and the full
       // journal's `history_truncated` marker even when the summary journal
       // never truncated.
-      const waiterReplayFields =
-        liveReplayMode !== inFlight.liveReplayMode
-          ? historyPageSize !== undefined
+      let waiterReplayFields: ReturnType<typeof replayFieldsFor> | undefined;
+      let restoredBase = restored;
+      if (liveReplayMode !== inFlight.liveReplayMode) {
+        waiterReplayFields =
+          historyPageSize !== undefined
             ? await refreshedReplayFieldsFor(
                 entry,
                 historyPageSize,
                 liveReplayMode,
               )
-            : replayFieldsFor(entry, action, liveReplayMode)
-          : undefined;
+            : replayFieldsFor(entry, action, liveReplayMode);
+        // The recompute is the waiter's authoritative replay view. Drop
+        // the owner-level replay fields so anything the recompute does not
+        // re-emit — a clean page fetch omits `historyHasMore` and is never
+        // partial/degraded — cannot leak through the spread below. Matches
+        // the existing-entry attach path, which returns the recompute
+        // result unmerged.
+        const {
+          compactedReplay: _ownerCompactedReplay,
+          liveJournal: _ownerLiveJournal,
+          lastEventId: _ownerLastEventId,
+          eventEpoch: _ownerEventEpoch,
+          replayDegraded: _ownerReplayDegraded,
+          partial: _ownerPartial,
+          replayError: _ownerReplayError,
+          historyHasMore: _ownerHistoryHasMore,
+          ...ownerWithoutReplay
+        } = restored;
+        restoredBase = ownerWithoutReplay;
+      }
       // `refreshedReplayFieldsFor` swallows fetch failures into the
       // in-memory fallback, so re-assert after the await above: a channel
       // death mid-fetch would otherwise attach the waiter to a session the
@@ -5931,7 +5951,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
       return {
-        ...restored,
+        ...restoredBase,
         attached: true,
         clientId,
         createdAt: entry.createdAt,

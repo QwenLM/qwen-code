@@ -108,6 +108,10 @@ interface LiveJournalState {
   totalEvents: number;
   truncatedEvents: number;
   textSegment?: LiveJournalTextSegment;
+  // Growth-refusal throttle for THIS journal. The full and summary
+  // journals breach their shared caps independently, so a refusal owed to
+  // one journal's pressure must not swallow the other journal's ask.
+  growthDeniedAt?: number;
 }
 
 function createLiveJournalState(): LiveJournalState {
@@ -248,7 +252,6 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private maxJournalBytes: number;
   private readonly onJournalGrowth: JournalGrowthAdvisor | undefined;
   private readonly now: () => number;
-  private journalGrowthDeniedAt: number | undefined;
   private readonly onReplayWindowEviction:
     | ((eviction: ReplayWindowEviction) => void)
     | undefined;
@@ -576,8 +579,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     const advisor = this.onJournalGrowth;
     if (!advisor || this.closed) return;
     const now = this.now();
-    if (this.journalGrowthDeniedAt !== undefined) {
-      const sinceDenialMs = now - this.journalGrowthDeniedAt;
+    if (journal.growthDeniedAt !== undefined) {
+      const sinceDenialMs = now - journal.growthDeniedAt;
       // A negative reading means the injected clock jumped backward; treat
       // the window as elapsed rather than refusing asks until the old
       // wall-clock time is reached again.
@@ -620,13 +623,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         this.retainedTailCount(journal, grant.maxEvents, grant.maxBytes) >
         originalRetained
       ) {
-        this.journalGrowthDeniedAt = undefined;
+        journal.growthDeniedAt = undefined;
         return;
       }
     }
     this.maxJournalEvents = originalEvents;
     this.maxJournalBytes = originalBytes;
-    this.journalGrowthDeniedAt = now;
+    journal.growthDeniedAt = now;
   }
 
   /** Entries of the newest-first tail the eviction loop would retain. */
@@ -857,12 +860,12 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   }
 
   private resetJournal(): void {
-    this.fullJournal = createLiveJournalState();
-    this.summaryJournal = createLiveJournalState();
     // Grown caps intentionally persist across turn boundaries — they are
     // session ceilings, not per-turn state. A refusal, however, belonged
-    // to the finished turn's pressure; a new turn gets a fresh ask.
-    this.journalGrowthDeniedAt = undefined;
+    // to the finished turn's pressure; recreating both journal states
+    // clears each journal's throttle so a new turn gets a fresh ask.
+    this.fullJournal = createLiveJournalState();
+    this.summaryJournal = createLiveJournalState();
   }
 
   private addReplaySegment(events: BridgeEvent[], turnCount: number): void {

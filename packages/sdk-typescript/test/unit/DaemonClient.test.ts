@@ -2765,6 +2765,27 @@ describe('DaemonClient', () => {
       expect(calls[0]?.signal).toBeNull();
     });
 
+    it('omits liveReplayMode from the load wire body when unset', async () => {
+      // Omission means `full` on the server; a default that sent the field
+      // would silently switch every existing loader to the projection.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          state: {},
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.loadSession('s-1', {
+        workspaceCwd: '/work/a',
+        timeoutMs: 0,
+      });
+
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/load');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+    });
+
     it('sends client identity headers on restore requests', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {

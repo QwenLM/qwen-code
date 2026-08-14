@@ -5158,6 +5158,63 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('selects summary live replay on a no-page existing-entry attach', async () => {
+    // The no-page attach branch projects from the in-memory journal
+    // directly; this pins its mode argument (the paged test above routes
+    // through refreshedReplayFieldsFor instead).
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'in_progress',
+      },
+    });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'nested detail' },
+        _meta: { parentToolCallId: 'agent-1' },
+      },
+    });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'completed',
+      },
+    });
+
+    const summary = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      liveReplayMode: 'summary',
+    });
+    expect(summary.liveJournal).not.toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          update: expect.objectContaining({
+            _meta: { parentToolCallId: 'agent-1' },
+          }),
+        }),
+      }),
+    );
+    expect(summary.liveJournal).not.toContainEqual(
+      expect.objectContaining({ type: 'history_truncated' }),
+    );
+    expect(summary.liveJournal?.map((event) => event.id)).toEqual([1, 3]);
+
+    await bridge.shutdown();
+  });
+
   describe('adaptive live-journal growth pool', () => {
     it('grows a breaching session from the pool instead of truncating', async () => {
       const gate = deferred<void>();
@@ -6767,6 +6824,39 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('coerces a summary resume to full replay so a plain resume coalesces', async () => {
+    // Resume responses carry no replay projection, so the coercion is
+    // observable through the coalesce fence: if the resume action
+    // recorded the requested 'summary' mode in flight, this plain
+    // ('full') resume would be rejected with RestoreInProgressError
+    // instead of sharing the in-flight restore.
+    const resume = deferred<ResumeSessionResponse>();
+    const handle = makeChannel({ resumeSessionImpl: () => resume.promise });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    const first = bridge.resumeSession({
+      sessionId: 'resume-coerces-to-full',
+      workspaceCwd: WS_A,
+      liveReplayMode: 'summary',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.resumeSessionCalls).toHaveLength(1);
+    });
+
+    const second = bridge.resumeSession({
+      sessionId: 'resume-coerces-to-full',
+      workspaceCwd: WS_A,
+    });
+
+    resume.resolve({ modes: null });
+    const [owner, waiter] = await Promise.all([first, second]);
+    expect(owner.attached).toBe(false);
+    expect(waiter.attached).toBe(true);
+    expect(handle.agent.resumeSessionCalls).toHaveLength(1);
+
+    await bridge.shutdown();
+  });
+
   it.each([
     ['a different explicit page', 500],
     ['an omitted page', undefined],
@@ -7280,6 +7370,65 @@ describe('createAcpSessionBridge', () => {
     expect(waiterJournal).toContain('root-before');
     expect(waiterJournal).toContain('root-after');
     expect(waiterJournal).not.toContain('nested-');
+    await bridge.shutdown();
+  });
+
+  it('does not leak owner replay flags into a waiter whose page came back clean', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => load.promise,
+      // The waiter's transcript fetch succeeds with the whole history in
+      // one page: hasMore false, not partial.
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return { v: 1, events: [], hasMore: false };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      maxJournalEvents: 2,
+    });
+
+    // The owner's bulk-replay response says more history exists, so its
+    // result carries historyHasMore: true.
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-waiter-clean-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+      liveReplayMode: 'full',
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-waiter-clean-page',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+      liveReplayMode: 'summary',
+    });
+
+    load.resolve({
+      _meta: {
+        'qwen.session.loadReplay': { v: 1, updates: [], hasMore: true },
+      },
+    });
+    const [owner, waiter] = await Promise.all([first, second]);
+    expect(owner.historyHasMore).toBe(true);
+
+    // The waiter's own page fetch says the opposite; the owner's
+    // historyHasMore (and any partial/replayError/replayDegraded) must
+    // not survive the merge with the recomputed fields.
+    expect(waiter.historyHasMore).toBeUndefined();
+    expect(waiter.partial).toBeUndefined();
+    expect(waiter.replayError).toBeUndefined();
+    expect(waiter.replayDegraded).toBeUndefined();
+    expect(waiter.compactedReplay).toEqual([]);
+    expect(waiter.liveJournal).toEqual([]);
+
     await bridge.shutdown();
   });
 
