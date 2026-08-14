@@ -6515,6 +6515,58 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should yield a deferred function call before surfacing a stream error', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield stopResponse([
+            {
+              functionCall: {
+                name: 'someTool',
+                args: {},
+              },
+            },
+          ]);
+          throw new Error('stream failed');
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-deferred-function-call-stream-error',
+      );
+      const events: StreamEvent[] = [];
+
+      await expect(
+        (async () => {
+          for await (const event of stream) {
+            events.push(event);
+          }
+        })(),
+      ).rejects.toThrow('stream failed');
+
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.some(
+              (part) => part.functionCall?.name === 'someTool',
+            ),
+        ),
+      ).toBe(true);
+      expect(chat.getHistory().at(-1)).toEqual({
+        role: 'model',
+        parts: [
+          {
+            functionCall: expect.objectContaining({
+              name: 'someTool',
+              args: {},
+            }),
+          },
+        ],
+      });
+    });
+
     it('should retry a tool result continuation placeholder without yielding it', async () => {
       vi.useFakeTimers();
       try {
@@ -8679,6 +8731,54 @@ describe('GeminiChat', async () => {
                 event.type === StreamEventType.CHUNK &&
                 event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
                   '(request timeout)',
+            ),
+          ).toBe(false);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'Recovered response' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('retries a placeholder cut before finish without replaying it', async () => {
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('(request timeout)')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Recovered response', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-cut-placeholder-before-finish',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  '(request timeout)',
+            ),
+          ).toBe(false);
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.RETRY && event.isContinuation,
             ),
           ).toBe(false);
           expect(recordAssistantTurn).toHaveBeenCalledTimes(1);

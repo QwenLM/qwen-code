@@ -1163,6 +1163,13 @@ function isValidContentPart(part: Part): boolean {
 // substring check would false-positive on legitimate mentions.
 const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
 
+function isDegradedPlaceholderPrefix(text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    trimmed.length > 0 && UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(trimmed)
+  );
+}
+
 function isDegradedPlaceholderTurn(content: Content): boolean {
   const parts = content.parts ?? [];
   if (parts.length === 0) return false;
@@ -4518,6 +4525,21 @@ export class GeminiChat {
     let yieldedAnyChunk = false;
     let deferredFirstChunk: GenerateContentResponse | null = null;
     let pendingDegradedPlaceholderChunks: GenerateContentResponse[] = [];
+    const isDegradedPlaceholderPrefixChunk = (
+      chunk: GenerateContentResponse,
+    ) => {
+      const parts =
+        chunk.candidates?.flatMap(
+          (candidate) => candidate.content?.parts ?? [],
+        ) ?? [];
+      if (parts.some((part) => part.functionCall !== undefined)) return false;
+      return isDegradedPlaceholderPrefix(
+        parts
+          .filter((part) => !part.thought && part.text)
+          .map((part) => part.text)
+          .join(''),
+      );
+    };
 
     try {
       for await (const chunk of streamResponse) {
@@ -4727,9 +4749,7 @@ export class GeminiChat {
           .join('')
           .trim();
         const shouldHoldDegradedPlaceholder =
-          !hasToolCall &&
-          pendingPlaceholderText.length > 0 &&
-          UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(pendingPlaceholderText);
+          !hasToolCall && isDegradedPlaceholderPrefix(pendingPlaceholderText);
 
         if (chunk !== deferredFirstChunk) {
           if (
@@ -4755,10 +4775,14 @@ export class GeminiChat {
       streamError = e;
     }
     if (streamError !== null) {
-      for (const pendingChunk of pendingDegradedPlaceholderChunks) {
+      if (
+        deferredFirstChunk &&
+        !isDegradedPlaceholderPrefixChunk(deferredFirstChunk)
+      ) {
         yieldedAnyChunk = true;
-        yield pendingChunk;
+        yield deferredFirstChunk;
       }
+      deferredFirstChunk = null;
       pendingDegradedPlaceholderChunks = [];
     }
 
@@ -5036,6 +5060,14 @@ export class GeminiChat {
         'UPSTREAM_DEGRADED_RESPONSE',
       );
     }
+    for (const pendingChunk of pendingDegradedPlaceholderChunks) {
+      yield pendingChunk;
+    }
+    pendingDegradedPlaceholderChunks = [];
+    if (deferredFirstChunk) {
+      yield deferredFirstChunk;
+    }
+    deferredFirstChunk = null;
     if (
       willPersistToHistory &&
       (thoughtContentPart || contentText || hasToolCall || usageMetadata)
@@ -5143,12 +5175,6 @@ export class GeminiChat {
       throw streamError;
     }
 
-    for (const pendingChunk of pendingDegradedPlaceholderChunks) {
-      yield pendingChunk;
-    }
-    if (deferredFirstChunk) {
-      yield deferredFirstChunk;
-    }
     this.history.push({
       role: 'model',
       parts: [
