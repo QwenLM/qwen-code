@@ -50,10 +50,9 @@ const DESCRIPTION_COLUMN = 24;
 // + search block(3) + list marginTop(1) + preview block(3) + footer(2).
 // The preview block is exactly one content line: buildStatusLinePresetLines
 // returns at most one line, and the empty state renders one fallback line.
-// The count stays valid at widths of ~25 columns and above: every counted
-// text renders with wrap="truncate", and option labels plus the separator
-// are capped to the terminal width. Below that, the untruncated title and
-// "Type to search" prompt can wrap.
+// Every counted text renders with wrap="truncate", and option labels plus
+// the separator are capped to the terminal width, so the count stays valid
+// at any width.
 const STATUS_LINE_DIALOG_FIXED_ROWS = 15;
 // Terminal cells an option row spends outside its label: dialog
 // border(2) + paddingX(2) + active marker(2) + checkbox(4).
@@ -313,13 +312,17 @@ export function StatusLineDialog({
     >
       {hasFullLayout && (
         <>
-          <Text bold>Configure Status Line</Text>
+          <Text bold wrap="truncate">
+            Configure Status Line
+          </Text>
           <Text color={theme.text.secondary} wrap="truncate">
             Select which items to display in the status line.
           </Text>
 
           <Box marginTop={1} flexDirection="column">
-            <Text color={theme.text.secondary}>Type to search</Text>
+            <Text color={theme.text.secondary} wrap="truncate">
+              Type to search
+            </Text>
             <Text wrap="truncate">{query ? `> ${query}` : '>'}</Text>
           </Box>
         </>
@@ -347,7 +350,9 @@ export function StatusLineDialog({
       {hasFullLayout && (
         <>
           <Box marginTop={1} flexDirection="column">
-            <Text color={theme.text.secondary}>Preview</Text>
+            <Text color={theme.text.secondary} wrap="truncate">
+              Preview
+            </Text>
             {previewLines.length > 0 ? (
               previewLines.map((line, index) => (
                 <Text

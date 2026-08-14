@@ -84,10 +84,9 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
 const NAME_COLUMN = 24;
 // Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
 // + search row(2) + list marginTop(1) + footer(2). The optional locked-skills
-// block adds 2 + N rows when present; not counted here. The count stays
-// valid at widths of ~18 columns and above: every counted text except the
-// short title renders with wrap="truncate", and list labels are capped to
-// the terminal width.
+// block adds 2 + N rows when present; not counted here. Every counted text
+// renders with wrap="truncate" and list labels are capped to the terminal
+// width, so the count stays valid at any width.
 const SKILLS_DIALOG_FIXED_ROWS = 11;
 // Terminal cells a MultiSelect row spends outside its label: dialog
 // border(2) + paddingX(2) + active marker(2) + checkbox(4).
@@ -562,11 +561,22 @@ export function SkillsManagerDialog({
   const hasQuery = query.trim().length > 0;
   const showsLockedSearchResults =
     hasQuery && items.length === 0 && filteredLocked.length > 0;
+  // When even the frame alone overflows the budget, shed border, paddingY,
+  // and footer (6 rows) — mirroring the /statusline compact path — so the
+  // always-rendered list row fits.
+  // ponytail: compact floors at 6 rows; below that the 5-row compact frame
+  // itself clips — drop title/subtitle/search too if users hit it.
+  const compact =
+    availableTerminalHeight !== undefined &&
+    availableTerminalHeight <= SKILLS_DIALOG_FIXED_ROWS;
+  const frameRows = compact
+    ? SKILLS_DIALOG_FIXED_ROWS - 6
+    : SKILLS_DIALOG_FIXED_ROWS;
   // Rows left for the unlocked list + locked block after the fixed chrome.
   const residual =
     availableTerminalHeight === undefined
       ? Number.MAX_SAFE_INTEGER
-      : Math.max(0, availableTerminalHeight - SKILLS_DIALOG_FIXED_ROWS);
+      : Math.max(0, availableTerminalHeight - frameRows);
   // Allocation: the interactive unlocked list claims rows first (the list
   // area always renders at least one row — a forced item, a fallback
   // message, or the all-locked hint), and the read-only locked block
@@ -679,14 +689,16 @@ export function SkillsManagerDialog({
 
   return (
     <Box
-      borderStyle="round"
+      borderStyle={compact ? undefined : 'round'}
       borderColor={theme.border.default}
       flexDirection="column"
       paddingX={1}
-      paddingY={1}
+      paddingY={compact ? 0 : 1}
       width="100%"
     >
-      <Text bold>{t('Manage Skills')}</Text>
+      <Text bold wrap="truncate">
+        {t('Manage Skills')}
+      </Text>
       <Text color={theme.text.secondary} wrap="truncate">
         {hasQuery
           ? t('{{matched}} / {{total}} skills · ', {
@@ -694,6 +706,11 @@ export function SkillsManagerDialog({
               total: String(totalCount),
             })
           : t('{{count}} skills · ', { count: String(totalCount) })}
+        {!showsLockedSearchResults &&
+        hiddenLockedCount > 0 &&
+        lockedRowBudget === 0
+          ? `(+${hiddenLockedCount} locked) `
+          : ''}
         {t(
           'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
         )}
@@ -779,11 +796,13 @@ export function SkillsManagerDialog({
         unlockedSkills.length > 0 &&
         lockedHint}
 
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary} dimColor wrap="truncate">
-          {t('↑/↓ navigate · backspace edits search')}
-        </Text>
-      </Box>
+      {!compact && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} dimColor wrap="truncate">
+            {t('↑/↓ navigate · backspace edits search')}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }
