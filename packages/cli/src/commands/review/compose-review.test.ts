@@ -5850,7 +5850,18 @@ describe('composeReview — a resumed run is continuity, not a coverage gap', ()
 
     const r = composeReview(input);
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
+    // The EXACT joined body, not a substring: on the approve path the
+    // separator is chosen per-render, and continuity is the only block
+    // present here. Asserted as a whole, a separator that forgot this block
+    // glues the note onto the verdict sentence with a single space; asserted
+    // with `toContain`, that reads identically.
+    expect(r.body).toBe(
+      'No issues found. LGTM! ✅\n\n' +
+        'Resumed run (not a gap): 1 agent result(s) from the interrupted ' +
+        'earlier attempt were re-certified from the harness records and ' +
+        'counted as reviewed.\n\n' +
+        '_— test-model via Qwen Code /review (vunknown)_',
+    );
     expect(r.body).not.toContain('Not reviewed: review continuity');
     expect(r.body).not.toContain('Partially reviewed');
   });

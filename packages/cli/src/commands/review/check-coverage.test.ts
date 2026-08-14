@@ -2260,32 +2260,110 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
 });
 
 describe('verificationGaps — a resumed run reads the prior attempt', () => {
+  /** Re-home a transcript into another session, re-stamping its records. */
+  function moveToSession(id: string, session: string): void {
+    mkdirSync(join(dir, 'subagents', session), { recursive: true });
+    const from = join(dir, 'subagents', 'S1', `agent-${id}.jsonl`);
+    writeFileSync(
+      join(dir, 'subagents', session, `agent-${id}.jsonl`),
+      readFileSync(from, 'utf8').replaceAll(
+        '"sessionId":"S1"',
+        `"sessionId":"${session}"`,
+      ),
+    );
+    rmSync(from, { force: true });
+  }
+
+  /** The ledger `fetch-pr` writes, through the real writers. */
+  function ledger(planPath: string, ...ids: string[]): void {
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        planPath,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
+    );
+    recordResume(planPath, ENV, nowMs + 1500);
+  }
+
+  /**
+   * A compliant Step 4/5 agent: recorded prompt, brief and findings on disk,
+   * and a transcript of an agent launched verbatim with it that opened both.
+   * Returns the agent id so the caller can re-home it into a prior session.
+   */
+  function step45(
+    planPath: string,
+    key: string,
+    opts: { returned?: boolean } = {},
+  ): string {
+    const d = promptRecordDir(planPath);
+    mkdirSync(d, { recursive: true });
+    const brief = briefPath(planPath, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const findings = findingsFilePath(planPath, key);
+    writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+    const prompt =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${findings}")\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+    const id = `v-${key.replace(/[^a-z0-9]/gi, '_')}`;
+    transcript(id, prompt, {
+      calls: 2,
+      opens: [brief, findings],
+      // `returned: false` is the died-mid-flight shape: every delivery check
+      // still passes (recorded prompt, brief opened, findings read) and only
+      // the final text is missing, which is exactly the record that must not
+      // certify a verification.
+      ...(opts.returned === false ? { text: '' } : {}),
+    });
+    return id;
+  }
+
   it('accepts Step 4/5 evidence that exists only in a prior session', () => {
     // The zero-launch continuation, pinned at the verification floor rather
     // than inferred from its coverage sibling: a current-session-only reader
     // regressing here would report the steps as never run.
+    //
+    // The fixture must BUILD both steps. `plan()` alone emits neither role,
+    // so with no Step 4/5 records at all the two failures merge into one gap
+    // whose subject is the combined `'verification and reverse audit'` —
+    // which equals neither exact string, and an assertion pair written as
+    // `not.toContain('verification')` then passes on a review where nothing
+    // was verified. That is what this test used to do.
     const p = plan();
-    for (const name of readdirSync(join(dir, 'subagents', 'S1'))) {
-      mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
-      const from = join(dir, 'subagents', 'S1', name);
-      writeFileSync(
-        join(dir, 'subagents', 'S0', name),
-        readFileSync(from, 'utf8').replaceAll(
-          '"sessionId":"S1"',
-          '"sessionId":"S0"',
-        ),
-      );
-      rmSync(from, { force: true });
-    }
-    const now = Date.now();
-    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S0' }, now);
-    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
-    recordResume(p, ENV, now + 1500);
+    const ids = [step45(p, 'verify'), step45(p, 'reverse-audit')];
+    for (const id of ids) moveToSession(id, 'S0');
+    ledger(p, 'S0', 'S1');
     rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
 
     const r = verificationGaps(p, { postsFindings: true }, ENV);
-    expect(r.gaps.map((g) => g.subject)).not.toContain('verification');
-    expect(r.gaps.map((g) => g.subject)).not.toContain('reverse audit');
+    // No gaps AT ALL, not the absence of two names: the combined subject is
+    // exactly the shape a name-based assertion cannot see.
+    expect(r.gaps).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('refuses prior-session Step 4/5 evidence whose agent never returned', () => {
+    // The same fixture, minus the return: an interrupted attempt's verifier
+    // that opened its brief and died satisfies every delivery check — the
+    // prompt was recorded, the brief was read — while its verification never
+    // existed. The gate reads live records only, and both steps come back
+    // owed.
+    const p = plan();
+    const ids = [
+      step45(p, 'verify', { returned: false }),
+      step45(p, 'reverse-audit', { returned: false }),
+    ];
+    for (const id of ids) moveToSession(id, 'S0');
+    ledger(p, 'S0', 'S1');
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps).not.toEqual([]);
   });
 });
 
@@ -2376,6 +2454,27 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     const r = coverageFromTranscripts(p, ENV);
     expect(r.ok).toBe(true);
     expect(r.recoveredAgents).toBe(0);
+  });
+
+  it('counts two prior records that only supersede each other', () => {
+    // A whiff-relaunch INSIDE the interrupted attempt: two records for the
+    // same chunk, both clearing the bar, and no current-session agent at all.
+    // Checked against every record, each supersedes the other and both drop
+    // out — the continuity note then reports nothing while coverage credits
+    // the chunk, so on this single-chunk plan the recovered work appears
+    // nowhere. Supersession is about what THIS run re-did.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1first', good(1), { calls: 2 });
+    moveToSession('a1first', 'S0');
+    transcript('a1retry', good(1), { calls: 3 });
+    moveToSession('a1retry', 'S0');
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(true);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.recoveredAgents).toBe(2);
   });
 
   it('does NOT credit a prior agent that died mid-flight', () => {

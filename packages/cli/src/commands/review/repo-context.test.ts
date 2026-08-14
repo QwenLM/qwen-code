@@ -1047,4 +1047,46 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('preserves a SUB-MILLISECOND plan mtime, and stays silent about it', () => {
+    // The case a `Date`-backdated fixture cannot reach. `Date` carries whole
+    // milliseconds; APFS and ext4 keep nanoseconds. Restoring from
+    // `planStat.mtime` truncates the remainder, so the plan comes back with a
+    // mtime that is CLOSE to the original and not equal to it — and the run
+    // ledger's exact `planMtimeMs === planMtime` fence reads that as a
+    // different plan and drops every session entry, silently emptying the
+    // resume ledger. The test that shipped alongside the restore used an
+    // integer-millisecond fixture, which round-trips exactly and sees none of
+    // this.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-epoch-sub-ms-'));
+    const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      // Seconds as a float: 0.1234567 s past the epoch second, which no
+      // `Date` can hold.
+      const seconds = Math.floor(Date.now() / 1000) - 3600 + 0.1234567;
+      utimesSync(planPath, seconds, seconds);
+      const mtimeBefore = statSync(planPath).mtimeMs;
+      // The fixture is only meaningful if this filesystem actually keeps the
+      // fraction; on one that does not, the integer case above already covers
+      // it.
+      const hasSubMs = mtimeBefore !== Math.floor(mtimeBefore);
+
+      runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
+
+      if (hasSubMs) {
+        expect(statSync(planPath).mtimeMs).toBe(mtimeBefore);
+      }
+      // And no WARNING: the verification compares floats that survived a
+      // filesystem round trip, so an exact-equality check reports failure on
+      // every enrichment that changed anything.
+      const printed = err.mock.calls.map((c) => String(c[0])).join('');
+      expect(printed).not.toContain("could not restore the plan's timestamp");
+    } finally {
+      err.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

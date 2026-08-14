@@ -38,13 +38,6 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
 /**
- * Where the prompts this plan's agents were built from are recorded.
- *
- * Derived from the plan path, by both the writer and the reader, so that neither
- * takes it as an argument. A path the model can choose is a path the model can
- * point somewhere flattering.
- */
-/**
  * Slack for the run-epoch fence: absorbs the sub-millisecond skew between a
  * file mtime (fractional) and `Date.now()` (integral) when a record is
  * written moments after the plan. Real cross-run gaps are minutes to hours.
@@ -69,6 +62,13 @@ export function runEpochMs(planPath: string): number {
   }
 }
 
+/**
+ * Where the prompts this plan's agents were built from are recorded.
+ *
+ * Derived from the plan path, by both the writer and the reader, so that neither
+ * takes it as an argument. A path the model can choose is a path the model can
+ * point somewhere flattering.
+ */
 export function promptRecordDir(planPath: string): string {
   const p = resolve(planPath);
   return join(dirname(p), `${basename(p).replace(/\.json$/i, '')}-prompts`);

@@ -1402,6 +1402,32 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
     );
   }
 
+  it('bills the current session from its own entry, not from the plan', () => {
+    // The floor this pins: a `/review` launched inside a long-lived CLI
+    // session must not bill that session's earlier turns. The plan's mtime is
+    // 10:00 and this session's ledger entry is 10:09, so a conversation at
+    // 10:05 sits between the two candidate floors — the only place the
+    // difference is observable, and every other fixture here puts its events
+    // above both.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      [
+        // After the plan, before this attempt began: the operator's own
+        // conversation, which the review did not cause.
+        event('2026-08-03T10:05:00Z', { input: 900_000, output: 40_000 }),
+        // The review itself.
+        event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
+      ].join(''),
+    );
+    runLedger(plan, project);
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.main.calls).toBe(1);
+    expect(ledger.main.inputTokens).toBe(500);
+    expect(ledger.main.outputTokens).toBe(50);
+  });
+
   it("folds the interrupted attempt's main loop and agents into the totals", () => {
     const { plan, env, project } = fixture();
     runLedger(plan, project);

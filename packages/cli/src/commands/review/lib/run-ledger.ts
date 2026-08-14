@@ -64,9 +64,11 @@ const FUTURE_SLACK_MS = 2000;
  * its late transcripts would then be credited here. An entry carries the
  * mtime it saw, and a reader keeps only entries that saw THIS plan — which a
  * fresh run necessarily rewrote and a resumed run deliberately did not.
- * Entries without the field (written before it existed) fall back to the
- * window, so an in-flight upgrade degrades rather than erasing a resumable
- * run's ledger.
+ * Entries without the field never exist in the wild — it shipped in the same
+ * change as the ledger itself — so there is no fallback: an entry that cannot
+ * say which plan it saw is dropped. (An earlier revision degraded to the
+ * window instead; the fallback was removed as unsound and this paragraph
+ * outlived it by one round.)
  */
 function planMtimeMs(planPath: string): number | null {
   try {
@@ -84,7 +86,7 @@ function runCeilingMs(nowMs: number = Date.now()): number {
 interface SessionEntry {
   sessionId: string;
   atMs: number;
-  /** The plan mtime this entry was written against; absent on old files. */
+  /** The plan mtime this entry was written against. Required on read. */
   planMtimeMs?: number;
 }
 
@@ -93,11 +95,6 @@ export function runSessionsPath(planPath: string): string {
   return join(promptRecordDir(planPath), SESSIONS_FILE);
 }
 
-/**
- * This run's session entries, oldest first. Unreadable or malformed → empty:
- * the failure direction is "earlier evidence invisible", which coverage answers
- * by requiring the work again — never the reverse.
- */
 /**
  * Read one ledger file, refusing anything that is not a regular file.
  *
@@ -124,6 +121,11 @@ function readLedgerFile(path: string): string | null {
   }
 }
 
+/**
+ * This run's session entries, oldest first. Unreadable or malformed → empty:
+ * the failure direction is "earlier evidence invisible", which coverage answers
+ * by requiring the work again — never the reverse.
+ */
 function readSessions(planPath: string): SessionEntry[] {
   try {
     const raw = readLedgerFile(runSessionsPath(planPath));
@@ -218,17 +220,6 @@ export function priorSessionIds(
 }
 
 /**
- * The same prior sessions, with the timestamps that bound them.
- *
- * `endsAtMs` is the NEXT ledger entry's `atMs` — the moment the following
- * attempt started, which is the only end boundary this run records. The cost
- * ledger clamps a prior session's chat usage to it: an interrupted session
- * whose CLI kept being used for unrelated turns afterwards would otherwise
- * bill that activity as review cost, the mirror of the omission the ledger
- * exists to prevent. `null` when nothing followed it (it is the newest prior
- * entry and the current session's own start is not recorded here).
- */
-/**
  * This session's own ledger entry, if it wrote one.
  *
  * Needed for the cost floor: a review that starts inside an EXISTING CLI
@@ -270,6 +261,17 @@ function resumeAuthorized(
   );
 }
 
+/**
+ * The same prior sessions, with the timestamps that bound them.
+ *
+ * `endsAtMs` is the NEXT ledger entry's `atMs` — the moment the following
+ * attempt started, which is the only end boundary this run records. The cost
+ * ledger clamps a prior session's chat usage to it: an interrupted session
+ * whose CLI kept being used for unrelated turns afterwards would otherwise
+ * bill that activity as review cost, the mirror of the omission the ledger
+ * exists to prevent. `null` when nothing followed it (it is the newest prior
+ * entry and the current session's own start is not recorded here).
+ */
 export function priorSessionEntries(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,

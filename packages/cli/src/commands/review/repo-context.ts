@@ -422,11 +422,23 @@ export function runRepoContext(
   }
   if (!planUnchanged) {
     atomicWriteFileSync(planPath, serialized);
-    utimesSync(planPath, planStat.atime, planStat.mtime);
+    // Seconds as a FLOAT, not the `Date` objects: a `Date` carries integer
+    // milliseconds, while APFS and ext4 keep nanoseconds — so restoring from
+    // `planStat.mtime` truncates the sub-millisecond remainder and lands on a
+    // timestamp that is close to the original but not equal to it. The exact
+    // `planMtimeMs === planMtime` fence in the run ledger reads that as a
+    // DIFFERENT plan and drops every session entry, silently emptying the
+    // resume ledger on a filesystem that keeps finer time than a `Date` can
+    // hold. Passing `mtimeMs / 1000` preserves the fraction.
+    utimesSync(planPath, planStat.atimeMs / 1000, planStat.mtimeMs / 1000);
     // The rename commits a new mtime before the restore lands. Verify it:
     // an unrestored epoch fences out this run's own evidence, and a silent
-    // one is worse than a loud one.
-    if (statSync(planPath).mtimeMs !== planStat.mtimeMs) {
+    // one is worse than a loud one. Compared with a millisecond of tolerance
+    // rather than exact float equality — `mtimeMs` is a float derived from a
+    // nanosecond counter, and the last bits do not survive every filesystem's
+    // round trip. A whole millisecond of drift is far below the epoch slack
+    // and far above the representation noise this must not report as failure.
+    if (Math.abs(statSync(planPath).mtimeMs - planStat.mtimeMs) > 1) {
       writeStderrLine(
         `WARNING: could not restore the plan's timestamp at ${planPath}; ` +
           `the run epoch has moved, and evidence recorded before this ` +

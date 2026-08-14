@@ -422,16 +422,7 @@ export function coverageFromTranscripts(
     plan.diffPathAbsolute,
     { currentDirOptional: true },
   );
-  // A PRIOR attempt's agent that never returned did not review anything: the
-  // session died mid-flight, so its findings never existed. Dropped HERE, at
-  // the source, rather than in the coverage walk alone — the same record
-  // would otherwise still satisfy roster matching and the Step 4/5 delivery
-  // floor, and a gate reading a different evidence set than its siblings is
-  // how a review certifies work nobody did. An empty return in the CURRENT
-  // session is an agent still running, which the idle checks own.
-  const records = allRecords.filter(
-    (r) => !(r.fromPriorSession && r.finalText.trim() === ''),
-  );
+  const records = liveRecords(allRecords);
   const built = readRecordedPrompts(planPath);
 
   const blindAgents: string[] = [];
@@ -508,18 +499,30 @@ export function coverageFromTranscripts(
   // suppressed when ANOTHER record satisfies the same target — same chunk served
   // by a verbatim launch that opened the diff, or same built prompt delivered
   // verbatim to an agent that opened its brief.
-  const chunkSatisfied = (c: number, self: AgentRecord): boolean => {
+  // `only` narrows WHICH records may supersede. Left open (the default) for
+  // the gap and uncoverable walks, where any qualifying record is a genuine
+  // repair whichever attempt ran it; narrowed to the current session for the
+  // recovery COUNT — see `supersededByCurrent`.
+  const chunkSatisfied = (
+    c: number,
+    self: AgentRecord,
+    only: (r: AgentRecord) => boolean = () => true,
+  ): boolean => {
     const b = builtOf(`chunk-${c}`);
     if (b === undefined) return false;
     return records.some(
       (r) =>
         r !== self &&
+        only(r) &&
         assignedChunk(r) === c &&
         wasDeliveredVerbatim(r.launchPrompt, b) &&
         r.diffToolCalls > 0,
     );
   };
-  const keySatisfied = (rec: AgentRecord): boolean => {
+  const keySatisfied = (
+    rec: AgentRecord,
+    only: (r: AgentRecord) => boolean = () => true,
+  ): boolean => {
     for (const key of built.keys()) {
       const b = builtOf(key);
       if (b === undefined) continue;
@@ -529,6 +532,7 @@ export function coverageFromTranscripts(
         records.some(
           (r) =>
             r !== rec &&
+            only(r) &&
             wasDeliveredVerbatim(r.launchPrompt, b) &&
             r.successfulCallArgs.some((a) => a.includes(needle)),
         )
@@ -540,6 +544,26 @@ export function coverageFromTranscripts(
   };
   const superseded = (rec: AgentRecord, chunk: number | null): boolean =>
     chunk !== null ? chunkSatisfied(chunk, rec) : keySatisfied(rec);
+  /**
+   * Was this prior-session record's obligation redone in THIS session?
+   *
+   * The recovery count answers "what work did this run reuse", so only a
+   * current-session relaunch supersedes: two prior records that both clear the
+   * bar — a whiff-relaunch inside the interrupted attempt, say — otherwise
+   * supersede EACH OTHER and both vanish from the count, while coverage still
+   * credits their chunk. The continuity note would then under-report work the
+   * same report simultaneously counts as reviewed, which on a single-chunk
+   * plan means the recovered work appears nowhere at all.
+   */
+  const supersededByCurrent = (
+    rec: AgentRecord,
+    chunk: number | null,
+  ): boolean => {
+    const current = (r: AgentRecord): boolean => r.fromPriorSession !== true;
+    return chunk !== null
+      ? chunkSatisfied(chunk, rec, current)
+      : keySatisfied(rec, current);
+  };
 
   // Parsed once per record: the gap scan also feeds the supersession check
   // below, and the parse is not free on a long return.
@@ -1052,7 +1076,7 @@ export function coverageFromTranscripts(
       // Not if a CURRENT record already satisfied the same obligation: the
       // count is what the continuity note reports, and announcing recovery
       // for superseded work would misdescribe what this run reused.
-      !superseded(r, assignedChunk(r)),
+      !supersededByCurrent(r, assignedChunk(r)),
   ).length;
 
   return {
@@ -1429,6 +1453,25 @@ export interface VerificationReport {
  * CLI recorded building (`reverse-audit` / `reverse-audit--chunk-N` / `verify`) and
  * the harness's transcript of an agent launched with it that opened its brief.
  */
+/**
+ * Drop a PRIOR attempt's agents that never returned.
+ *
+ * A session that died mid-flight left records whose findings never existed:
+ * the agent opened its brief, said nothing, and the process went away. Such a
+ * record still carries a recorded prompt and an opened brief, which is the
+ * whole of the Step 4/5 delivery floor — so left in, it certifies a
+ * verification nobody performed. An empty return in the CURRENT session is a
+ * different thing entirely: an agent still running, which the idle checks own.
+ *
+ * Every gate that reads run-scoped evidence goes through here. The filter
+ * lived at one read site and not the other, and the site without it was the
+ * one that certifies Steps 4 and 5 — a gate reading a different evidence set
+ * than its siblings is how a review certifies work nobody did.
+ */
+function liveRecords(all: AgentRecord[]): AgentRecord[] {
+  return all.filter((r) => !(r.fromPriorSession && r.finalText.trim() === ''));
+}
+
 export function verificationGaps(
   planPath: string,
   opts: { postsFindings: boolean },
@@ -1437,12 +1480,10 @@ export function verificationGaps(
   const { plan, mtimeMs } = readPlan(planPath);
   // Run-scoped for the same reason as `coverageFromTranscripts`: a resumed
   // run's Step 4/5 evidence may sit in the interrupted attempt's session dir.
-  const records = readRunTranscripts(
-    planPath,
-    mtimeMs,
-    env,
-    plan.diffPathAbsolute,
-    { currentDirOptional: true },
+  const records = liveRecords(
+    readRunTranscripts(planPath, mtimeMs, env, plan.diffPathAbsolute, {
+      currentDirOptional: true,
+    }),
   );
   const built = readRecordedPrompts(planPath);
   const gaps: VerificationReport['gaps'] = [];
