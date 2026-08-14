@@ -5,7 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, type SpawnOptions } from 'node:child_process';
 import { DaemonClient } from '@qwen-code/sdk';
 
 export interface SpawnedDaemon {
@@ -70,10 +70,10 @@ export interface DaemonHandle {
  * tested — a wrong flag would otherwise only fail at real-process spawn time,
  * which no hermetic test exercises.
  */
-export function buildServeArgs(port: number): string[] {
+export function buildServeArgs(port: number, workspaceCwd?: string): string[] {
   // The daemon defines `--hostname` (NOT `--host`) and `--port`; under
   // `.strict()` an unknown flag aborts startup. See packages/cli/src/commands/serve.ts.
-  return [
+  const args = [
     'serve',
     '--hostname',
     '127.0.0.1',
@@ -81,6 +81,8 @@ export function buildServeArgs(port: number): string[] {
     String(port),
     '--require-auth',
   ];
+  if (workspaceCwd) args.push('--workspace', workspaceCwd);
+  return args;
 }
 
 /** Default spawner: launch `qwen serve` on loopback with QWEN_SERVER_TOKEN. */
@@ -88,6 +90,7 @@ function defaultSpawner(
   token: string,
   qwenBin: string,
   port: number,
+  workspaceCwd?: string,
 ): SpawnedDaemon {
   // Ephemeral-port (0) read-back from the daemon's stdout is not implemented;
   // polling http://127.0.0.1:0 would never connect. Fail loudly instead of
@@ -109,11 +112,13 @@ function defaultSpawner(
   // a GRANDCHILD. Signalling only the tracked child (the shim) orphans the
   // daemon, which reparents to init and survives. Group-kill reaches both. We do
   // NOT `unref()` — we keep tracking the child.
-  const child = spawn(qwenBin, buildServeArgs(port), {
+  const spawnOpts: SpawnOptions = {
     env: { ...process.env, QWEN_SERVER_TOKEN: token },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
-  });
+    ...(workspaceCwd && { cwd: workspaceCwd }),
+  };
+  const child = spawn(qwenBin, buildServeArgs(port, workspaceCwd), spawnOpts);
 
   const TAIL_MAX = 4000;
   let stderrTail = '';
@@ -214,7 +219,7 @@ export async function startDaemon(
     const port = opts.port ?? 0;
     const spawned = opts.spawner
       ? opts.spawner(token)
-      : defaultSpawner(token, opts.qwenBin ?? 'qwen', port);
+      : defaultSpawner(token, opts.qwenBin ?? 'qwen', port, undefined);
     daemon = new DaemonClient({
       baseUrl: spawned.baseUrl,
       token: spawned.token,

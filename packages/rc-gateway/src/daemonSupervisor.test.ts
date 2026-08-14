@@ -15,6 +15,24 @@ afterEach(async () => {
 });
 
 describe('daemonSupervisor', () => {
+  it('adds --workspace when a workspace cwd is given', () => {
+    const args = buildServeArgs(4181, '/home/evan/projects/qwen-code');
+    expect(args).toEqual([
+      'serve',
+      '--hostname',
+      '127.0.0.1',
+      '--port',
+      '4181',
+      '--require-auth',
+      '--workspace',
+      '/home/evan/projects/qwen-code',
+    ]);
+  });
+
+  it('omits --workspace when no cwd is given (unchanged default)', () => {
+    expect(buildServeArgs(4180)).not.toContain('--workspace');
+  });
+
   it('builds serve args with the flags the daemon actually accepts', () => {
     const args = buildServeArgs(4180);
     // The daemon defines --hostname (not --host) and validates with strict yargs.
