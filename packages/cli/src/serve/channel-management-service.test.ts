@@ -922,6 +922,30 @@ describe('createChannelManagementService', () => {
     expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
   });
 
+  it('marks statePersisted false when the confirmed-dead stop record fails to persist (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+    // The same disk condition that broke startup/rollback can also fail
+    // this write: the boolean must be aggregated onto the rethrown error
+    // like the sibling stoppedChannels branch, or the 502 body carries no
+    // loss indicator, the client has no retry handle, and the channel
+    // silently resurrects on the next `--channel all` (#8975).
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      statePersisted: false,
+    });
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+  });
+
   it('persists the confirmed-dead stop under the canonical workspace form (#8975)', async () => {
     const { service, manager } = setup({ committedNames: ['bot'] });
     manager.setChannelEnabled.mockRejectedValueOnce(

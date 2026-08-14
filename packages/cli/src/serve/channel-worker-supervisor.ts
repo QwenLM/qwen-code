@@ -749,6 +749,11 @@ export function createChannelWorkerSupervisor(
       // (mode-names) or nothing at all (mode-all) as stopped (#8975).
       delete snapshot.requestedChannels;
       delete snapshot.adapters;
+      // Keep the enable path honest on a dead worker: the manager's
+      // committedChannelNames() must skip terminal-failed workers
+      // (state === 'failed' && nextRestartAt === undefined), or a
+      // per-channel start early-returns {changed: false} and never
+      // relaunches (#8975).
       return false;
     }
     clearRestartTimer();

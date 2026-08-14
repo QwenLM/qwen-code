@@ -328,14 +328,13 @@ function stoppedChannelsByWorkspace(
 
 /**
  * The control state rides HTTP responses verbatim (GET/PUT/DELETE
- * /workspace/channel): strip `lastConnectedChannels`, an internal input of
- * the stop capture that the SDK's `DaemonChannelWorkerSnapshot` does not
- * declare. The capture reads the group snapshots directly, so stripping in
- * the public aggregation does not narrow what a stop records (#8975).
+ * /workspace/channel, GET /daemon/status, POST /workspace/channel/reload):
+ * strip `lastConnectedChannels`, an internal input of the stop capture
+ * that the SDK's `DaemonChannelWorkerSnapshot` does not declare. The
+ * capture reads the group snapshots directly, so stripping in these public
+ * accessors does not narrow what a stop records (#8975).
  */
-function publicWorkerSnapshot(
-  worker: ChannelWorkerGroupSnapshot,
-): ChannelWorkerGroupSnapshot {
+function publicWorkerSnapshot<T extends ChannelWorkerSnapshot>(worker: T): T {
   if (!worker.lastConnectedChannels) return worker;
   const publicSnapshot = { ...worker };
   delete publicSnapshot.lastConnectedChannels;
@@ -593,13 +592,31 @@ export function createChannelWorkerManager(
     }
   };
 
+  // A terminal-failed worker (restart budget exhausted, no restart
+  // scheduled) will never connect anything again. Reporting its names as
+  // committed makes a per-channel start early-return `{changed: false}` on
+  // the dead worker instead of relaunching it — silently swallowing the
+  // natural recovery command. Same predicate as the stop-side
+  // `workspaceWorkerStarting` guard in channel-management-service (#8975).
+  const isTerminalFailedWorker = (
+    worker: ChannelWorkerGroupSnapshot,
+  ): boolean => worker.state === 'failed' && worker.nextRestartAt === undefined;
+
   const committedChannelNames = (): string[] => {
     if (!committedSelection) return [];
     if (committedSelection.mode === 'names') {
-      return [...committedSelection.names];
+      const deadNames = new Set<string>();
+      for (const worker of group?.snapshots() ?? []) {
+        if (!isTerminalFailedWorker(worker)) continue;
+        for (const name of worker.requestedChannels ?? worker.channels) {
+          deadNames.add(name);
+        }
+      }
+      return committedSelection.names.filter((name) => !deadNames.has(name));
     }
     const names = new Set<string>();
     for (const worker of group?.snapshots() ?? []) {
+      if (isTerminalFailedWorker(worker)) continue;
       for (const name of worker.requestedChannels ?? worker.channels) {
         // The mode-`all` launch placeholder is not a real channel; leaking it
         // here breaks enabled checks, stop recording and status (#8975).
@@ -779,9 +796,9 @@ export function createChannelWorkerManager(
         }
         commit(committedSelection, targetGroups);
         const snapshots = group.snapshots();
-        return (
+        return publicWorkerSnapshot(
           snapshots.find((worker) => worker.primary) ??
-          snapshots[0] ?? { ...DISABLED_SNAPSHOT }
+            snapshots[0] ?? { ...DISABLED_SNAPSHOT },
         );
       });
     },
@@ -847,12 +864,15 @@ export function createChannelWorkerManager(
             `Workspace "${workspaceCwd}" has no channel worker after reload.`,
           );
         }
-        return worker;
+        return publicWorkerSnapshot(worker);
       });
     },
     state: snapshot,
-    primarySnapshot: () => group?.primarySnapshot() ?? { ...DISABLED_SNAPSHOT },
-    snapshots: () => group?.snapshots() ?? [],
+    primarySnapshot: () =>
+      publicWorkerSnapshot(
+        group?.primarySnapshot() ?? { ...DISABLED_SNAPSHOT },
+      ),
+    snapshots: () => (group?.snapshots() ?? []).map(publicWorkerSnapshot),
     committedChannelNames,
     enqueueWebhookTask(task) {
       if (!group || draining) {

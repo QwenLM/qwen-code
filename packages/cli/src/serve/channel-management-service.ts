@@ -647,10 +647,19 @@ export function createChannelManagementService(
           // code + rolledBack together, not rolledBack alone: the
           // stop-phase failure shape (code channel_worker_stop_failed)
           // can leave an old worker alive, where recording `stopped`
-          // would be wrong.
-          new ChannelStateStore(
-            daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
-          ).trySet(name, 'stopped');
+          // would be wrong. Aggregate the persistence boolean like the
+          // sibling stoppedChannels branch: the same disk condition that
+          // broke startup can also fail this write, and the 502 body must
+          // carry the loss or the client has no retry handle (#8975).
+          if (
+            !new ChannelStateStore(
+              daemonChannelRuntimeStatePath(
+                canonicalForGuard(opts.workspaceCwd),
+              ),
+            ).trySet(name, 'stopped')
+          ) {
+            error.statePersisted = false;
+          }
         }
         throw error;
       }

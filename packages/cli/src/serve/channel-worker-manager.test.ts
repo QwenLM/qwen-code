@@ -1091,6 +1091,11 @@ describe('createChannelWorkerManager', () => {
 
     expect(result).toMatchObject({ changed: true });
     expect(result.stoppedChannels).toBeUndefined();
+    // An empty capture must not short-circuit the tear-down: the manager
+    // reporting {changed: true} while the worker survives is the zombie
+    // shape the degraded-canonicalization twin pins (#8975).
+    expect(group.stop).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({ enabled: false });
   });
 
   it('filters the phantom all placeholder out of a carried connected set (#8975)', async () => {
@@ -1113,6 +1118,10 @@ describe('createChannelWorkerManager', () => {
     const result = await test.manager.stopSelection();
 
     expect(result.stoppedChannels).toBeUndefined();
+    // Empty capture must not short-circuit the tear-down (zombie shape,
+    // see the degraded-canonicalization twin) (#8975).
+    expect(group.stop).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({ enabled: false });
   });
 
   it('skips empty capture groups on guard-passing zero-channel shapes (#8975)', async () => {
@@ -1137,6 +1146,10 @@ describe('createChannelWorkerManager', () => {
     const result = await test.manager.stopSelection();
 
     expect(result.stoppedChannels).toBeUndefined();
+    // Empty capture must not short-circuit the tear-down (zombie shape,
+    // see the degraded-canonicalization twin) (#8975).
+    expect(group.stop).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({ enabled: false });
   });
 
   it('records the carried connected set when a stop lands in the mode-all crash-restart window (#8975)', async () => {
@@ -1265,6 +1278,108 @@ describe('createChannelWorkerManager', () => {
     ]);
   });
 
+  it('strips lastConnectedChannels from every public snapshot surface (#8975)', async () => {
+    // state() was already stripped; the sibling surfaces riding GET
+    // /daemon/status (primarySnapshot/snapshots) and the reload responses
+    // must strip too, or raw API clients couple to an internal stop-
+    // capture input the SDK's DaemonChannelWorkerSnapshot does not
+    // declare. The capture reads the group snapshots directly and must
+    // stay untouched (#8975).
+    const leaked = workerSnapshot({
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      lastConnectedChannels: ['telegram'],
+    });
+    const group = fakeGroup({
+      snapshots: vi.fn(() => [leaked]),
+      primarySnapshot: vi.fn(() => leaked),
+    });
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    expect(test.manager.primarySnapshot()).not.toHaveProperty(
+      'lastConnectedChannels',
+    );
+    expect(test.manager.snapshots()[0]).not.toHaveProperty(
+      'lastConnectedChannels',
+    );
+    const reloaded = await test.manager.reload();
+    expect(reloaded).not.toHaveProperty('lastConnectedChannels');
+    const reloadedWorkspace = await test.manager.reloadWorkspace(
+      PRIMARY,
+      'telegram',
+    );
+    expect(reloadedWorkspace).not.toHaveProperty('lastConnectedChannels');
+    // The capture's input is intact.
+    expect(group.snapshots()[0]).toHaveProperty('lastConnectedChannels', [
+      'telegram',
+    ]);
+  });
+
+  it('relaunches a terminal-failed mode-all worker on a per-channel start (#8975)', async () => {
+    // Budget exhausted AFTER ready committed: the terminal snapshot keeps
+    // `channels` (the connected set) but drops requestedChannels/adapters.
+    // committedChannelNames() must skip the dead worker, or the natural
+    // recovery command `qwen channel start telegram` early-returns
+    // {changed: false} on it and the channel stays down — no restart is
+    // scheduled and nothing else relaunches the worker (#8975).
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['telegram'],
+        requestedChannels: undefined,
+        adapters: undefined,
+        lastConnectedChannels: ['telegram'],
+        error: 'Channel worker restart budget exhausted.',
+      }),
+    ]);
+
+    expect(test.manager.committedChannelNames()).toEqual([]);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'telegram', workspaceCwd: PRIMARY },
+      true,
+    );
+
+    expect(result).toMatchObject({ changed: true });
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['telegram'] },
+      'set',
+    );
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it('relaunches a terminal-failed mode-names worker on a per-channel start (#8975)', async () => {
+    // Mode-names twin: the committed names come from the selection, not
+    // the worker snapshot, so the dead worker's names must be subtracted
+    // there too; an explicit start is the only path back up (#8975).
+    const group = fakeGroup({ isHealthy: vi.fn(() => false) });
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['telegram'],
+        requestedChannels: undefined,
+        adapters: undefined,
+        error: 'Channel worker restart budget exhausted.',
+      }),
+    ]);
+
+    expect(test.manager.committedChannelNames()).toEqual([]);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'telegram', workspaceCwd: PRIMARY },
+      true,
+    );
+
+    expect(result).toMatchObject({ changed: true });
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+  });
+
   it('records only the connected channels from a budget-exhausted mode-names worker (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
@@ -1343,6 +1458,10 @@ describe('createChannelWorkerManager', () => {
     const result = await test.manager.stopSelection();
 
     expect(result.stoppedChannels).toBeUndefined();
+    // Empty capture must not short-circuit the tear-down (zombie shape,
+    // see the degraded-canonicalization twin) (#8975).
+    expect(group.stop).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({ enabled: false });
   });
 
   it('keeps the stop capture alive when workspace canonicalization fails (#8975)', async () => {
