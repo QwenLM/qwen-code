@@ -319,6 +319,24 @@ implement — satisfying a nit is never a reason to bloat the code.
   identity). A maintainer writing "fix X before merge" after round five
   means exactly that when it reaches you — plus failed checks and the
   requested base-conflict resolution.
+- Diff-growth trajectory: `feedback.md` opens with a `Diff growth this window`
+  section (source/test net lines vs budget, and how many prior rounds were
+  already over budget) whenever growth is measured. Use it: prefer minimal,
+  root-cause, subtractive fixes over additive guards, and read a rising
+  trajectory as a signal — if closing a finding would grow the diff materially
+  AND the same class of gap keeps reappearing on code an earlier round added,
+  the right response is to escalate for a split, not to add another guard.
+- Not converging (the diff keeps growing past budget): when `feedback.md`
+  contains a `Needs a maintainer's decision — this PR is not converging`
+  section, the growth brake has been over budget across rounds and the diff is
+  still not shrinking — the findings themselves are driving the growth, so
+  Critical-only cannot help (the Criticals ARE the growth). Do NOT apply more
+  code fixes this round. This is a `defer-to-human` item: STOP `BLOCKED` with a
+  handoff that names the decision and lays out the options — split the PR (land
+  the core, track the remaining findings as follow-up issues), redesign, or
+  accept the current state with the tail deferred — plus your recommendation.
+  Continuing to patch, or deciding the split yourself, is exactly the wrong
+  move; the call is the maintainer's.
 - Needs a maintainer's decision: a finding that turns on a judgment that is
   NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
   should the PR be split?), two reviewers asking for opposite things, or whether
