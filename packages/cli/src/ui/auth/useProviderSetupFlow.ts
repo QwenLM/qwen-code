@@ -129,8 +129,17 @@ export function useProviderSetupFlow(
   // by env var loses custom-provider drafts because their env key includes
   // the user-entered endpoint.
   const protocolDraftsRef = useRef(
-    new Map<AuthType, { baseUrl: string; apiKey: string }>(),
+    new Map<
+      AuthType,
+      {
+        baseUrl: string;
+        committedBaseUrl: string;
+        apiKey: string;
+        modelIds: string;
+      }
+    >(),
   );
+  const committedBaseUrlRef = useRef('');
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
@@ -188,10 +197,7 @@ export function useProviderSetupFlow(
       }
       setApiKey(prefillKey);
       setExistingProviderEnv(existingEnv ?? {});
-      protocolDraftsRef.current.set(proto, {
-        baseUrl: resolved,
-        apiKey: prefillKey,
-      });
+      committedBaseUrlRef.current = resolved;
 
       setApiKeyError(null);
       // Built-in defaults go to the recommended list (checked), user-added
@@ -221,12 +227,17 @@ export function useProviderSetupFlow(
       trimmedDefaultModelIdsRef.current.set(normalizedResolved, [
         ...trimmedDefaultIds,
       ]);
-      setModelIds(
-        [
-          ...defaultIds.filter((id) => !trimmedDefaultIds.has(id)),
-          ...customIds,
-        ].join(', '),
-      );
+      const initialModelIds = [
+        ...defaultIds.filter((id) => !trimmedDefaultIds.has(id)),
+        ...customIds,
+      ].join(', ');
+      setModelIds(initialModelIds);
+      protocolDraftsRef.current.set(proto, {
+        baseUrl: resolved,
+        committedBaseUrl: resolved,
+        apiKey: prefillKey,
+        modelIds: initialModelIds,
+      });
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -243,6 +254,7 @@ export function useProviderSetupFlow(
   const reset = useCallback(() => {
     apiKeyDraftsRef.current.clear();
     protocolDraftsRef.current.clear();
+    committedBaseUrlRef.current = '';
     customModelIdsByBaseUrlRef.current.clear();
     trimmedDefaultModelIdsRef.current.clear();
     setProvider(null);
@@ -269,7 +281,12 @@ export function useProviderSetupFlow(
     (selectedProtocol: AuthType) => {
       setProtocol(selectedProtocol);
       if (selectedProtocol !== protocol) {
-        protocolDraftsRef.current.set(protocol, { baseUrl, apiKey });
+        protocolDraftsRef.current.set(protocol, {
+          baseUrl,
+          committedBaseUrl: committedBaseUrlRef.current,
+          apiKey,
+          modelIds,
+        });
         const draft = protocolDraftsRef.current.get(selectedProtocol);
         if (draft) {
           setBaseUrl(draft.baseUrl);
@@ -277,18 +294,23 @@ export function useProviderSetupFlow(
             draft.baseUrl ? '' : getDefaultBaseUrlForProtocol(selectedProtocol),
           );
           setApiKey(draft.apiKey);
+          setModelIds(draft.modelIds);
+          committedBaseUrlRef.current = draft.committedBaseUrl;
         } else {
           // Clear baseUrl so the user types fresh; show the protocol's
           // default endpoint as a placeholder (used if they submit blank).
           setBaseUrl('');
           setBaseUrlPlaceholder(getDefaultBaseUrlForProtocol(selectedProtocol));
           setApiKey('');
+          setModelIds('');
+          committedBaseUrlRef.current = '';
         }
         setApiKeyError(null);
+        setModelIdsError(null);
       }
       goNext();
     },
-    [apiKey, baseUrl, goNext, protocol],
+    [apiKey, baseUrl, goNext, modelIds, protocol],
   );
 
   const selectBaseUrl = useCallback(
@@ -358,6 +380,7 @@ export function useProviderSetupFlow(
               '',
           );
         }
+        committedBaseUrlRef.current = selectedUrl;
       }
       goNext();
     },
@@ -387,10 +410,43 @@ export function useProviderSetupFlow(
     if (!baseUrl.trim()) {
       setBaseUrl(effective);
     }
+    if (provider) {
+      const previousEnvKey = providerEnvKey(
+        provider,
+        protocol,
+        committedBaseUrlRef.current,
+      );
+      const nextEnvKey = providerEnvKey(provider, protocol, effective);
+      let nextApiKey = apiKey;
+      if (nextEnvKey !== previousEnvKey) {
+        apiKeyDraftsRef.current.set(previousEnvKey, apiKey);
+        nextApiKey =
+          apiKeyDraftsRef.current.get(nextEnvKey) ??
+          existingProviderEnv[nextEnvKey] ??
+          '';
+        setApiKey(nextApiKey);
+      }
+      committedBaseUrlRef.current = effective;
+      protocolDraftsRef.current.set(protocol, {
+        baseUrl: effective,
+        committedBaseUrl: effective,
+        apiKey: nextApiKey,
+        modelIds,
+      });
+    }
     setBaseUrlError(null);
     goNext();
     return true;
-  }, [baseUrl, baseUrlPlaceholder, goNext]);
+  }, [
+    apiKey,
+    baseUrl,
+    baseUrlPlaceholder,
+    existingProviderEnv,
+    goNext,
+    modelIds,
+    protocol,
+    provider,
+  ]);
 
   const changeBaseUrl = useCallback((value: string) => {
     setBaseUrl(value);

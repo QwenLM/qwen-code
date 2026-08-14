@@ -261,6 +261,60 @@ describe('provider endpoint state', () => {
     ).toEqual(['kimi-k3', 'my-api-model']);
   });
 
+  it('restores each saved endpoint custom set without cross-endpoint union', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const savedCustoms = new Map([
+      [codingUrl, []],
+      [apiUrl, ['my-api-model']],
+    ]);
+
+    const atApi = modelIdsAfterBaseUrlChange(
+      kimi,
+      codingUrl,
+      apiUrl,
+      'k3-256k, coding-custom',
+      ['coding-custom'],
+      [],
+      savedCustoms.get(apiUrl),
+    );
+    expect(atApi).toEqual({
+      modelIds: ['kimi-k3', 'my-api-model'],
+      customModelIds: ['my-api-model'],
+    });
+
+    const backAtCoding = modelIdsAfterBaseUrlChange(
+      kimi,
+      apiUrl,
+      codingUrl,
+      atApi.modelIds.join(', '),
+      atApi.customModelIds,
+      [],
+      savedCustoms.get(codingUrl),
+    );
+    expect(backAtCoding).toEqual({
+      modelIds: ['k3-256k'],
+      customModelIds: [],
+    });
+  });
+
+  it('does not resurrect a saved custom id trimmed at the destination', () => {
+    expect(
+      modelIdsAfterBaseUrlChange(
+        kimi,
+        'https://api.moonshot.ai/v1',
+        'https://api.kimi.com/coding/v1',
+        'kimi-k3',
+        [],
+        ['k3'],
+        ['k3'],
+      ),
+    ).toEqual({
+      modelIds: ['k3-256k'],
+      customModelIds: ['k3'],
+    });
+  });
+
   it('keeps custom provenance when the id leaves the field as an endpoint built-in', () => {
     // kimi-k3 is seeded as a Coding Plan custom and collides with the API
     // endpoint built-in; removing it from the field on the API endpoint means

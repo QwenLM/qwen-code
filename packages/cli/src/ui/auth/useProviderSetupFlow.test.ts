@@ -9,6 +9,8 @@ import {
   applyProviderInstallPlan,
   AuthType,
   buildInstallPlan,
+  customProvider,
+  generateCustomEnvKey,
   type ModelProvidersConfig,
   type ProviderConfig,
 } from '@qwen-code/qwen-code-core';
@@ -855,7 +857,7 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.apiKey).toBe('sk-new-rotated');
   });
 
-  it('restores edited endpoint and key together across protocol switches', () => {
+  it('restores edited endpoint, key, and models together across protocol switches', () => {
     const provider: ProviderConfig = {
       id: 'custom-multi-protocol-provider',
       label: 'Custom Multi Protocol Provider',
@@ -881,19 +883,23 @@ describe('useProviderSetupFlow', () => {
     act(() => {
       result.current.changeBaseUrl('https://edited.example/v1');
       result.current.changeApiKey('sk-edited');
+      result.current.changeModelIds('openai-a, openai-b');
     });
     act(() => {
       result.current.selectProtocol(AuthType.USE_ANTHROPIC);
     });
+    expect(result.current.state.modelIds).toBe('');
     act(() => {
       result.current.changeBaseUrl('https://anthropic-proxy.example/v1');
       result.current.changeApiKey('sk-anthropic');
+      result.current.changeModelIds('anthropic-a');
     });
     act(() => {
       result.current.selectProtocol(AuthType.USE_OPENAI);
     });
     expect(result.current.state.baseUrl).toBe('https://edited.example/v1');
     expect(result.current.state.apiKey).toBe('sk-edited');
+    expect(result.current.state.modelIds).toBe('openai-a, openai-b');
 
     act(() => {
       result.current.selectProtocol(AuthType.USE_ANTHROPIC);
@@ -902,6 +908,59 @@ describe('useProviderSetupFlow', () => {
       'https://anthropic-proxy.example/v1',
     );
     expect(result.current.state.apiKey).toBe('sk-anthropic');
+    expect(result.current.state.modelIds).toBe('anthropic-a');
+  });
+
+  it('restores the credential for a submitted custom endpoint', () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const unknownUrl = 'https://unknown.example/v1';
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+
+    act(() => {
+      result.current.start(
+        customProvider,
+        AuthType.USE_OPENAI,
+        {
+          [generateCustomEnvKey(AuthType.USE_OPENAI, firstUrl)]: 'sk-first',
+          [generateCustomEnvKey(AuthType.USE_OPENAI, secondUrl)]: 'sk-second',
+        },
+        [],
+        firstUrl,
+      );
+    });
+
+    act(() => {
+      result.current.changeBaseUrl(secondUrl);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    expect(result.current.state.apiKey).toBe('sk-second');
+
+    act(() => {
+      result.current.changeBaseUrl(`${firstUrl}/`);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    expect(result.current.state.apiKey).toBe('sk-first');
+
+    act(() => {
+      result.current.changeBaseUrl(unknownUrl);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    expect(result.current.state.apiKey).toBe('');
+
+    act(() => {
+      result.current.changeBaseUrl(secondUrl);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    expect(result.current.state.apiKey).toBe('sk-second');
   });
 
   it('keeps a promoted protocol default endpoint in its protocol draft', () => {

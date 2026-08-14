@@ -134,10 +134,12 @@ export function initialApiKey(drafts: Map<string, string>): string {
  *
  * `customModelIds` carries the user-owned ids tracked by the form (seeded
  * saved models that are not the seeded endpoint's defaults, plus typed ids).
- * They always survive switches; classifying the field against a provider-wide
- * built-in union instead silently dropped ids colliding with a sibling
- * endpoint's built-in, and the next submit's prepend-and-remove-owned merge
- * then deleted those models from settings.
+ * An unseen destination inherits the edited custom ids. A destination with
+ * saved state restores its own custom ids instead, so sibling-only models are
+ * not re-homed under the selected endpoint on submit. Classifying the field
+ * against a provider-wide built-in union instead silently dropped ids
+ * colliding with a sibling endpoint's built-in, and the next submit's
+ * prepend-and-remove-owned merge then deleted those models from settings.
  */
 export function modelIdsAfterBaseUrlChange(
   provider: QwenProviderSummary,
@@ -146,14 +148,14 @@ export function modelIdsAfterBaseUrlChange(
   currentModelIds: string,
   customModelIds: readonly string[] = [],
   trimmedNextDefaultModelIds: readonly string[] = [],
-  savedNextCustomModelIds: readonly string[] = [],
+  savedNextCustomModelIds?: readonly string[],
 ): { modelIds: string[]; customModelIds: string[] } {
   const previousDefaults = new Set(defaultModelIds(provider, previousBaseUrl));
   const nextDefaults = defaultModelIds(provider, nextBaseUrl);
   const trimmedNextDefaults = new Set(trimmedNextDefaultModelIds);
   const fieldIds = parseModelIds(currentModelIds);
   const fieldSet = new Set(fieldIds);
-  const nextCustomModelIds = [
+  const editedCustomModelIds = [
     ...new Set([
       // Ids the user deleted from the field stay deleted — except an id that
       // is the previous endpoint's built-in: it can be absent from the field
@@ -163,14 +165,16 @@ export function modelIdsAfterBaseUrlChange(
         (id) => fieldSet.has(id) || previousDefaults.has(id),
       ),
       ...fieldIds.filter((id) => !previousDefaults.has(id)),
-      ...savedNextCustomModelIds,
     ]),
+  ];
+  const nextCustomModelIds = [
+    ...new Set(savedNextCustomModelIds ?? editedCustomModelIds),
   ];
   return {
     modelIds: [
       ...new Set([
         ...nextDefaults.filter((id) => !trimmedNextDefaults.has(id)),
-        ...nextCustomModelIds,
+        ...nextCustomModelIds.filter((id) => !trimmedNextDefaults.has(id)),
       ]),
     ],
     customModelIds: nextCustomModelIds,
