@@ -1517,6 +1517,8 @@ const EN: Messages = {
   'error.unknown': 'Unknown error',
   'error.modelStreamInterrupted':
     'Model response stream was interrupted. Please retry.',
+  'error.loopDetected':
+    'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
@@ -2207,6 +2209,7 @@ const EN: Messages = {
   'resume.title': 'Resume Session',
   'parallelAgents.title': 'Parallel agents',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} done`,
+  'parallelAgents.failed': (v) => `${v?.count ?? 0} failed`,
   'skills.actions': 'Skill actions',
   'skills.disable': 'Disable',
   'skills.disabled': 'Skill disabled.',
@@ -4363,6 +4366,8 @@ const ZH: Messages = {
   'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
   'error.unknown': '未知错误',
   'error.modelStreamInterrupted': '模型响应流已中断，请重试。',
+  'error.loopDetected':
+    '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
@@ -4998,6 +5003,7 @@ const ZH: Messages = {
   'resume.title': '恢复会话',
   'parallelAgents.title': '并行智能体',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} 完成`,
+  'parallelAgents.failed': (v) => `失败 ${v?.count ?? 0} 个`,
   'skills.actions': 'Skill 操作',
   'skills.disable': '禁用',
   'skills.disabled': 'Skill 已禁用。',

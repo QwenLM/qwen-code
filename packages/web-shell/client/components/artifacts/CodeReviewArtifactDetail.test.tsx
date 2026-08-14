@@ -642,4 +642,35 @@ describe('CodeReviewArtifactDetail', () => {
       'truncated',
     );
   });
+
+  it('routes evidence link clicks through the desktop opener', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    try {
+      const { container } = renderWith(JSON.stringify(reviewDocument));
+      await flush();
+
+      const link = Array.from(container.querySelectorAll('a')).find(
+        (anchor) =>
+          anchor.getAttribute('href') === 'https://example.com/evidence.png',
+      );
+      expect(link).toBeDefined();
+
+      const event = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      act(() => {
+        link!.dispatchEvent(event);
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+        url: 'https://example.com/evidence.png',
+      });
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
+  });
 });

@@ -2753,13 +2753,17 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const session = await client.loadSession('s-1', {
         workspaceCwd: '/work/a',
+        liveReplayMode: 'summary',
         timeoutMs: 0,
       });
 
       expect(session.state).toEqual({ configOptions: [] });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/load');
       expect(calls[0]?.method).toBe('POST');
-      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        cwd: '/work/a',
+        liveReplayMode: 'summary',
+      });
       expect(calls[0]?.signal).toBeNull();
     });
 
@@ -2795,6 +2799,26 @@ describe('DaemonClient', () => {
 
       expect(calls[0]?.url).toBe('http://daemon/session/with%2Fslash/resume');
       expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('omits load-only replay fields from the resume wire body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/w',
+          attached: false,
+          state: {},
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.resumeSession('s-1', {
+        workspaceCwd: '/w',
+        historyPageSize: 100,
+        liveReplayMode: 'summary',
+      });
+
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/resume');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/w' });
     });
 
     it('throws DaemonHttpError on restore failures', async () => {

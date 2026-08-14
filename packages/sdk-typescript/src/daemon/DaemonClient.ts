@@ -581,6 +581,8 @@ export interface RestoreSessionRequest {
   approvalMode?: string;
   /** Latest persisted records to include in the initial load replay. */
   historyPageSize?: number;
+  /** Load-only live-turn replay projection. Omit for the complete journal. */
+  liveReplayMode?: 'full' | 'summary';
   /**
    * Client-side deadline for this restore request. `0` disables the client
    * timer and relies on the daemon's own restore deadline.
@@ -3035,6 +3037,9 @@ export class DaemonClient {
             : {}),
           ...(action === 'load' && req.historyPageSize !== undefined
             ? { historyPageSize: req.historyPageSize }
+            : {}),
+          ...(action === 'load' && req.liveReplayMode !== undefined
+            ? { liveReplayMode: req.liveReplayMode }
             : {}),
         }),
       },

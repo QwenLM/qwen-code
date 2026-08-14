@@ -1284,6 +1284,73 @@ describe('ParallelAgentsGroup activity rendering', () => {
     }
   });
 
+  it('shows a failed count in the collapsed summary', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'done', status: 'completed' }),
+      agent({ callId: 'failed', status: 'failed' }),
+    ]);
+
+    expect(container.textContent).toContain('2/2 done');
+    expect(container.textContent).toContain('1 failed');
+    expect(container.textContent).not.toContain('Failed');
+    expect(
+      groupSummary(container).querySelector('[class*="iconError"]'),
+    ).toBeNull();
+    // The failed count must precede the done counter: summaryText truncates
+    // from the tail, so this order keeps failure evidence visible when the
+    // row is narrow.
+    const summaryText = groupSummary(container).textContent ?? '';
+    expect(summaryText.indexOf('1 failed')).toBeGreaterThanOrEqual(0);
+    expect(summaryText.indexOf('1 failed')).toBeLessThan(
+      summaryText.indexOf('2/2 done'),
+    );
+  });
+
+  it('counts a cancelled agent in the failed count', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'done', status: 'completed' }),
+      agent({
+        callId: 'cancelled',
+        status: 'completed',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'cancelled',
+          reason: 'Cancelled by user',
+        },
+      }),
+    ]);
+
+    expect(container.textContent).toContain('1 failed');
+  });
+
+  it('shows the failed count alongside live progress', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    try {
+      const container = renderExpandedGroup([
+        agent({
+          callId: 'done',
+          status: 'completed',
+          startTime: 1_000,
+          endTime: 5_000,
+        }),
+        agent({
+          callId: 'failed',
+          status: 'failed',
+          startTime: 2_000,
+          endTime: 6_000,
+        }),
+        agent({ callId: 'running', status: 'pending', startTime: 3_000 }),
+      ]);
+
+      expect(container.textContent).toContain('7s');
+      expect(container.textContent).toContain('2/3 done');
+      expect(container.textContent).toContain('1 failed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the header clock monotonic when the earliest agent finishes', () => {
     vi.useFakeTimers();
     vi.setSystemTime(150_000);

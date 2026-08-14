@@ -336,6 +336,7 @@ jobs:
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
       retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
+      review_sender: '${{ github.event.review.user.login }}'
     steps:
       - name: 'Decide phases'
         id: 'decide'
@@ -2178,6 +2179,7 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
+          REVIEW_SENDER: '${{ needs.route.outputs.review_sender }}'
           DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
           # Every lane that reaches this scan is supposed to hold the PAT:
@@ -2573,6 +2575,21 @@ jobs:
             fi
           fi
 
+          # Review-workflow id, resolved ONCE per scan for the review-in-flight
+          # gate below (#8888): during qwen-code-pr-review.yml's 10-minute
+          # delay-automatic-review wait the review-pr JOB (and thus its
+          # check-run in statusCheckRollup) does not exist yet, so the rollup
+          # alone misses a just-triggered review; the runs API sees the run
+          # by head SHA before its job starts. Empty on lookup failure — the
+          # gate then degrades to the rollup check only (fail-open, like
+          # BUSY_PRS).
+          REVIEW_WF_ID="$(gh api "repos/${REPO}/actions/workflows/qwen-code-pr-review.yml" --jq '.id' 2> /dev/null || echo '')"
+          REVIEW_RUNS_JSON='{"workflow_runs":[]}'
+          if [[ -n "${REVIEW_WF_ID}" ]] \
+            && ! REVIEW_RUNS_JSON="$(gh api "repos/${REPO}/actions/workflows/${REVIEW_WF_ID}/runs?per_page=100" 2> /dev/null)"; then
+            REVIEW_RUNS_JSON='{"workflow_runs":[]}'
+          fi
+
           # PRs whose review-address is already RUNNING OR QUEUED in any live
           # autofix run must not be re-targeted. Schedule/dispatch runs execute
           # against main's SHA, so their matrix jobs never appear in the PR's
@@ -2717,6 +2734,52 @@ jobs:
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
             PR_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
 
+            # Review-in-flight gate (#8888): NON_BLOCKING_CHECKS keeps an
+            # in-flight review-pr from blocking the FEEDBACK gate (its
+            # conclusion carries nothing the loop acts on — #7416), but every
+            # head mutation this scan can make (a stale-base update-branch,
+            # infra rerun, or address push later) is a synchronize event that
+            # cancels the in-flight review via qwen-code-pr-review.yml's
+            # cancel-in-progress, discarding up to ~3h of review work — the
+            # self-reinforcing cancellation loop of #8830 (three killed runs
+            # in one PR, two by merge-main). Its findings are also the very
+            # feedback the next round should batch with, so deferring the
+            # WHOLE round until the review lands loses nothing: the watermark
+            # is not advanced on a skip, so the feedback stays visible. This
+            # is deliberately SEPARATE from HAS_PENDING_CHECKS rather than a
+            # NON_BLOCKING_CHECKS revert: that gate ages checks out after
+            # PENDING_STALE_MIN and would also re-block on the review's
+            # conclusion, reintroducing #7416's median-49-minute wait.
+            REVIEW_PR_LIVE="$(jq -r '
+              [ .[]
+                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
+              | length > 0
+            ' <<< "${CHECKS_JSON}")"
+            REVIEW_RUN_STARTED_AT=""
+            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
+              # Delay-window fallback: a review run parked BEFORE its job
+              # starts (the 10-minute environment wait) has no review-pr
+              # check-run yet, but a push now would still cancel it via
+              # synchronize. Only pull_request_target runs are cancelable —
+              # comment/review-triggered runs use per-run concurrency groups
+              # that a synchronize never cancels, so holding the round for
+              # one would defer autofix for nothing (R2-1). The scan fetched
+              # the newest run page once above; match by immutable head SHA or
+              # PR number, never by fork-controlled bare branch name.
+              REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" '
+                [ .workflow_runs[]?
+                  | select((.workflow_id | tostring) == $wf)
+                  | select((.event // "") == "pull_request_target")
+                  | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
+                  | select(((.head_sha // "") == $head) or any(.pull_requests[]?; (.number | tostring) == $pr))
+                  | (.run_started_at // .created_at // "") ]
+                | map(select(. != "")) | sort | last // ""
+              ' <<< "${REVIEW_RUNS_JSON}")"
+              if [[ -n "${REVIEW_RUN_STARTED_AT}" ]]; then
+                REVIEW_PR_LIVE="true"
+              fi
+            fi
+
             # Auto-rerun a check that died on INFRASTRUCTURE, not the code (see
             # INFRA_FAILURE_SIGNATURES). Only reached when the PR has a FAILED
             # check; then, for each, we read its annotations and — if they carry
@@ -2726,7 +2789,7 @@ jobs:
             # marker needed; the attempt counter is the guard, and after a rerun
             # the attempt increments so the next scan skips it. Any API failure
             # here is fail-safe: it just means no rerun.
-            if [[ -n "${PR_HEAD_OID}" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
+            if [[ -n "${PR_HEAD_OID}" && "${REVIEW_PR_LIVE}" != "true" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
               RERAN_INFRA=false
               # Failed check-runs on this head, with their run id and annotation
               # count — fetched once. External statuses (no check-run) are absent
@@ -2781,6 +2844,50 @@ jobs:
               echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
               fleet_row "${PR}" 'waiting' 'active checks in flight'
               continue
+            fi
+            if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
+              echo "🔍 #${PR}: review-pr in flight on this head — holding this round so the push cannot cancel it (#8888)"
+              fleet_row "${PR}" 'review-in-flight' 'review-pr live on head; round deferred'
+              # Ack-on-defer (#8888): a real-time human review routed this
+              # scan straight here, but the gate holds every mutation — from
+              # the human's seat the bot read their review and then did
+              # nothing. Say so once per in-flight review (the marker embeds
+              # the review-pr check's startedAt, so a NEW review re-arms the
+              # ack). The feedback itself needs no ack: the watermark is not
+              # advanced on this skip, so the next scan after the review
+              # lands still sees and addresses it. Cron scans stay silent —
+              # nothing arrived in them that a human is waiting on, and the
+              # fleet table already shows the deferral.
+              if [[ "${EVENT_NAME}" == 'pull_request_review' && "${DRY_RUN}" != "true" && "${REVIEW_SENDER}" != "${REVIEW_BOT}" ]]; then
+                REVIEW_STARTED_AT="$(jq -r '
+                  [ .[]
+                    | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review")))
+                    | (.startedAt // "")
+                    | select(. != "") ] | first // ""' <<< "${CHECKS_JSON}")"
+                [[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"
+                # An empty key (a queued check with no startedAt yet) would
+                # make the marker match EVERY future deferral — skip the ack
+                # this scan rather than arm a permanently-dead dedup.
+                if [[ -z "${REVIEW_STARTED_AT}" ]]; then
+                  echo "🕐 #${PR}: deferred-review ack skipped: live review-pr check has no startedAt yet (queued); a later scan acks once it starts"
+                else
+                  DEFER_ACKS="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                    | jq -r --arg ab "${AUTOFIX_BOT}" '.[] | select((.user.login // "") == $ab) | .body // ""' 2> /dev/null || true)"
+                  if grep -qF "<!-- autofix-review-deferred ${REVIEW_STARTED_AT} -->" <<< "${DEFER_ACKS}"; then
+                    echo "🕐 #${PR}: deferred-review ack already posted for this review run"
+                  else
+                    if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                      SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                    fi
+                    if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                      echo "::warning::#${PR}: deferred-review ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                    else
+                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🕐 Review received — an automatic review of the current head is still running, so this round is held until it lands (a push now would cancel it and discard its work, #8888). Your feedback stays queued for the next eligible round.\n\n<details>\n<summary>中文说明</summary>\n\n🕐 已收到评审 —— 当前 head 上仍有一轮自动 review 在运行，本轮暂缓（现在推送会取消该 review 并丢弃其工作，#8888）。反馈保持排队，等待下一次可运行的轮次处理。\n\n</details>\n\n<!-- autofix-review-deferred %s -->' "${REVIEW_STARTED_AT}")" > /dev/null 2>&1 \
+                        || echo "::warning::#${PR}: deferred-review ack failed — the dedup marker is NOT posted (a later scan may ack again)"
+                    fi
+                  fi
+                fi
+              fi
             fi
             # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
             # cannot predate the PR, and unlike the head commit date this never
@@ -3079,6 +3186,9 @@ jobs:
                   fi
                 fi
               fi
+              continue
+            fi
+            if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
               continue
             fi
             # Auto-update a PR that is red ONLY because of a stale base (see the
