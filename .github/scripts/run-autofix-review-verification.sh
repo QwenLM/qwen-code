@@ -350,6 +350,18 @@ fi
 # "passes". Only the root manifest and DECLARED workspace manifests count
 # (resolver-backed, nested workspaces included): fixture manifests deeper
 # in a src tree are ordinary test data.
+was_workspace_dir() {
+  # Pre-round workspace membership without the on-disk resolver: match the
+  # dir against the workspaces globs recorded in the REF's root manifest.
+  # Used where the tree can no longer answer (deleted manifests/dirs).
+  local ref="${1}" d="${2}" g
+  while IFS= read -r g; do
+    [[ -n "${g}" ]] || continue
+    # shellcheck disable=SC2254
+    case "${d}" in ${g}) return 0 ;; esac
+  done < <(git show "${ref}:package.json" 2> /dev/null | jq -r '.workspaces[]?' 2> /dev/null)
+  return 1
+}
 at_workspace_root() {
   # True when the path sits at the repo root or at a DECLARED workspace's
   # root (resolved through the same trusted resolver the package-test loop
@@ -381,6 +393,7 @@ sensitive_class_of() {
     .github/*) echo 'gh-metadata' ;;
     .husky/*) echo 'git-hooks' ;;
     .qwen/*) echo 'agent-skills' ;;
+    AGENTS.md | CLAUDE.md) echo 'agent-policy' ;;
     scripts/tests/*) ;;
     scripts/*) echo 'repo-scripts' ;;
     .npmrc | .nvmrc | */.npmrc | */.nvmrc) echo 'toolchain-config' ;;
@@ -408,7 +421,7 @@ manifest_scripts_changed() {
   # either side reads as {}.
   local f="${1}" from="${2}" to="${3}" filt a b
   filt='{s: (.scripts // {}), e: (.exports // {}), m: (.main // ""), t: (.types // "")}'
-  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // []), e: (.exports // {}), m: (.main // ""), t: (.types // "")}'
+  [[ "${f}" == 'package.json' ]] && filt='{s: (.scripts // {}), w: (.workspaces // []), e: (.exports // {}), m: (.main // ""), t: (.types // ""), l: (."lint-staged" // {}), c: (.config // {})}'
   a="$(git show "${from}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || a='{}'
   b="$(git show "${to}:${f}" 2> /dev/null | jq -cS "${filt}" 2> /dev/null)" || b='{}'
   [[ "${a}" != "${b}" ]]
@@ -432,9 +445,17 @@ while IFS= read -r -d '' f; do
   c="$(sensitive_class_of "${f}")"
   case "${c}" in
     lint-config | test-config | ts-config)
-      # Round-ADDED configs are the round's own new surface (the manifest
-      # arm has the same exemption via cat-file below).
-      git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null || c='' ;;
+      # Only a config born WITH its round-added workspace is the round's
+      # own surface: added into a pre-existing workspace, it is new
+      # machinery the gate's legs will execute.
+      if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+        d="${f%/*}"; [[ "${f}" != */* ]] && d='.'
+        if [[ "${d}" == '.' ]] || git cat-file -e "origin/${BRANCH}:${d}/package.json" 2> /dev/null; then
+          : # pre-existing home → keep the class
+        else
+          c=''
+        fi
+      fi ;;
   esac
   if [[ -z "${c}" ]]; then
     case "${f}" in
@@ -443,9 +464,16 @@ while IFS= read -r -d '' f; do
         # classify them from pre-round existence instead (deleting a
         # workspace removes command surface the gate dispatched over).
         if [[ ! -e "${f}" ]]; then
+          # Same fixture exemption as the alive arm, answered from the
+          # PRE-ROUND root manifest's workspaces globs (the on-disk
+          # resolver can no longer see a deleted dir): only a deleted
+          # DECLARED workspace manifest is command surface.
           if git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
-            c='manifest-scripts-ws'
-            [[ "${f}" == 'package.json' ]] && c='manifest-scripts-root'
+            if [[ "${f}" == 'package.json' ]]; then
+              c='manifest-scripts-root'
+            elif was_workspace_dir "origin/${BRANCH}" "${f%/package.json}"; then
+              c='manifest-scripts-ws'
+            fi
           fi
           [[ -n "${c}" ]] && ROUND_CLASSES+="${c} ${f}"$'\n'
           continue
@@ -479,6 +507,15 @@ if [[ -n "${ROUND_CLASSES}" ]]; then
     if [[ -z "${c}" ]]; then
       case "${f}" in
         package.json | */package.json)
+          if [[ ! -e "${f}" ]]; then
+            if [[ "${f}" == 'package.json' ]]; then
+              c='manifest-scripts-root'
+            elif was_workspace_dir "${PR_BASE}" "${f%/package.json}"; then
+              c='manifest-scripts-ws'
+            fi
+            [[ -n "${c}" ]] && PR_CLASSES+="${c}"$'\n'
+            continue
+          fi
           at_workspace_root "${f}" || continue
           if manifest_scripts_changed "${f}" "${PR_BASE}" "origin/${BRANCH}"; then
             c='manifest-scripts-ws'
@@ -505,6 +542,14 @@ if [[ -n "${ROUND_CLASSES}" ]]; then
   fi
 fi
 
+# Merge freight (content identical to current main) is not the round's
+# authorship — the same doctrine the class scan applies. Filter it out of
+# every bite input so a base-merging round is judged on its own changes.
+not_merge_freight() {
+  while IFS= read -r -d '' f; do
+    git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null || printf '%s\0' "${f}"
+  done
+}
 # Test-deletion advisory: deleting or shrinking tests is sometimes right
 # (the pinned behavior was wrong, or coverage is duplicated) and the agent
 # is required to justify it in its summary — but the SURFACING must not be
@@ -512,9 +557,21 @@ fi
 # report so a maintainer always sees exactly which tests disappeared,
 # whoever suggested it.
 TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
-DELETED_TESTS="$(git diff --name-only -z --no-renames --diff-filter=D "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" | tr '\0' '\n')"
-NET_TEST_LINES="$(git diff --numstat --no-renames "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
-  awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }')"
+DELETED_TESTS="$(git diff --name-only -z --no-renames --diff-filter=D "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
+  not_merge_freight | tr '\0' '\n')"
+# Per-file sum with the merge-freight skip the class scan applies: a
+# base-merging round must not be charged (or credited) main-side test
+# churn in trusted-voice advisory text. -z numstat records are
+# add<TAB>del<TAB>path NUL-terminated (renames are disabled above).
+NET_TEST_LINES="$(git diff --numstat -z --no-renames "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
+  { total=0
+    while IFS=$'\t' read -r -d '' add del path; do
+      [[ -n "${path}" ]] || continue
+      git diff --quiet origin/main "${BRANCH}" -- "${path}" 2> /dev/null && continue
+      [[ "${add}" != '-' ]] && total=$(( total + add ))
+      [[ "${del}" != '-' ]] && total=$(( total - del ))
+    done
+    echo "${total}"; })"
 rm -f "${WORKDIR}/gate-advisories.md"
 if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
   {
@@ -634,14 +691,6 @@ bite_runner_default() {
   local ws="${1}"
   shift
   npm run test --workspace "${ws}" --if-present -- "$@"
-}
-# Merge freight (content identical to current main) is not the round's
-# authorship — the same doctrine the class scan applies. Filter it out of
-# every bite input so a base-merging round is judged on its own changes.
-not_merge_freight() {
-  while IFS= read -r -d '' f; do
-    git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null || printf '%s\0' "${f}"
-  done
 }
 mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
   -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \
@@ -811,11 +860,14 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
           echo 'If the finding was already fixed by an EARLIER commit on this branch (a re-raised item you re-verified), resolve it in a round of its own without bundling new code changes — re-verification is a no-code claim and is never bite-checked.'
           echo
           echo 'Changed tests measured:'
-          printf -- '- %s\n' "${BITE_FILES[@]}"
+          for bf in "${BITE_FILES[@]}"; do
+            echo "- ${bf//[^A-Za-z0-9._\/ -]/?}"
+          done
           # No fence here: reject_fix wraps this whole tail in its own
           # 4-backtick fence, and CommonMark closes a fence at any inner
-          # run of >= the opener's length.
-          tail -c 1200 "${GATE_LOG}.bite" 2> /dev/null
+          # run of >= the opener's length — so collapse any backtick run in
+          # the branch-controlled runner output below the opener's length.
+          tail -c 1200 "${GATE_LOG}.bite" 2> /dev/null | sed 's/\x60\x60\x60\x60*/```/g'
         } >> "${GATE_LOG}"
         reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'
       elif [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' ]]; then

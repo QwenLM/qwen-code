@@ -8835,6 +8835,14 @@ exit 1
     );
   });
 
+  const freightHelper = () => {
+    const m = reviewVerificationRunner.match(
+      /(not_merge_freight\(\) \{[\s\S]*?\n\})/,
+    )?.[1];
+    expect(m).toBeTruthy();
+    return m;
+  };
+
   it('writes a gate-authored advisory when a round shrinks test coverage', () => {
     const block = reviewVerificationRunner.match(
       /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
@@ -8854,6 +8862,7 @@ exit 1
             'WORKDIR="$2"',
             'GATE_LOG="$(mktemp)"',
             'ROUND_RANGE="origin/feat...feat"',
+            freightHelper(),
             block,
             'echo DONE',
           ].join('\n'),
@@ -8956,6 +8965,7 @@ exit 1
             'GATE_LOG="$2/gate.log"',
             ': > "$GATE_LOG"',
             'ROUND_RANGE="origin/feat...feat"',
+            freightHelper(),
             'BITE_RUNNER="$2/bite-runner"',
             'reject_fix() { echo "REJECT:${1}"; exit 1; }',
             block,
