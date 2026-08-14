@@ -341,7 +341,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(switcher?.textContent).toContain('Pinned task');
     expect(switcher?.textContent).toContain('Archived');
     expect(
-      switcher?.querySelector('button[aria-label="Search"]'),
+      switcher?.querySelector('button[aria-label="Search sessions"]'),
     ).not.toBeNull();
 
     const archivedHeader = Array.from(
@@ -365,6 +365,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(session).not.toBeNull();
 
     act(() => click(session!));
+    await flushSidebar();
 
     expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project');
     const closingSwitcher = document.querySelector<HTMLElement>(
@@ -373,17 +374,17 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(closingSwitcher?.dataset.state ?? 'closed').toBe('closed');
   });
 
-  it('shows the complete session name in a native tooltip', async () => {
+  it('renders the complete session name', async () => {
     renderSidebar();
     await flushSidebar();
 
-    const sessionName = container.querySelector<HTMLElement>(
-      '[title="API review"]',
+    const sessionName = Array.from(container.querySelectorAll('span')).find(
+      (element) => element.textContent === 'API review',
     );
     expect(sessionName?.textContent).toContain('API review');
   });
 
-  it('shows the complete archived session name in a native tooltip', async () => {
+  it('renders the complete archived session name', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
       features: ['session_organization', 'session_archive'],
@@ -406,8 +407,8 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     act(() => click(archivedHeader!));
     await flushSidebar();
 
-    const sessionName = container.querySelector<HTMLElement>(
-      '[title="Archived task"]',
+    const sessionName = Array.from(container.querySelectorAll('span')).find(
+      (element) => element.textContent === 'Archived task',
     );
     expect(sessionName?.textContent).toContain('Archived task');
   });

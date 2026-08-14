@@ -76,17 +76,13 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
 
   const webShellRoot = page.locator('[data-web-shell-root]');
   await page.getByRole('button', { name: 'Toggle menu' }).click();
-  const sessionTitle = page.getByTitle(longTitle);
+  const sessionTitle = webShellRoot.getByText(longTitle, { exact: true });
   await expect(sessionTitle).toBeVisible();
 
-  const sessionRow = sessionTitle.locator('..');
-  await sessionRow.hover();
-  await sessionRow.getByRole('button', { name: 'More actions' }).click();
-  await page.getByRole('menuitem', { name: 'Details' }).hover();
-
-  const details = page.locator('[data-slot="dropdown-menu-sub-content"]');
+  await sessionTitle.hover();
+  const details = page.getByRole('dialog', { name: longTitle });
   const title = details.getByTitle(longTitle);
-  const copyAction = details.getByRole('menuitem', {
+  const copyAction = details.getByRole('button', {
     name: 'Copy session ID',
   });
   await expect(details).toBeVisible();
@@ -103,6 +99,7 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     { width: 520, height: 320 },
   ]) {
     await page.setViewportSize(size);
+    await sessionTitle.hover();
     await expect(details).toBeVisible();
     await expectDetailsInsideRoot(webShellRoot, details);
     await expect(copyAction).toBeVisible();
