@@ -10,11 +10,15 @@ import type {
   ToolEditConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
+  TEXT_CACHE_MAX_ENTRIES,
+  __getTextUtilsCacheSizes,
   escapeAnsiCtrlCodes,
+  getCachedStringWidth,
   sanitizeFilenameForDisplay,
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
   sliceTextByVisualHeight,
+  toCodePoints,
   truncateToWidth,
 } from './textUtils.js';
 
@@ -394,6 +398,45 @@ describe('textUtils', () => {
     it('bounds CJK text by display width, not character count', () => {
       // 5 CJK characters (10 cells) plus the ellipsis fit an 11-cell budget.
       expect(truncateToWidth('目标配置参数设置', 11)).toBe('目标配置参…');
+    });
+  });
+
+  describe('text cache bounds', () => {
+    it('bounds the code points cache and keeps results correct', () => {
+      const probe = (i: number) => `cache-bound-probe-${i}-é`;
+      for (let i = 0; i < TEXT_CACHE_MAX_ENTRIES + 50; i++) {
+        toCodePoints(probe(i));
+      }
+
+      expect(__getTextUtilsCacheSizes().codePoints).toBe(
+        TEXT_CACHE_MAX_ENTRIES,
+      );
+
+      const fresh = 'fresh-é-probe';
+      expect(toCodePoints(fresh)).toEqual(Array.from(fresh));
+      // An evicted key must recompute to the same result.
+      expect(toCodePoints(probe(0))).toEqual(Array.from(probe(0)));
+    });
+
+    it('bounds the string width cache and keeps widths correct', () => {
+      const probe = (i: number) => `width-bound-probe-${i}-é`;
+      for (let i = 0; i < TEXT_CACHE_MAX_ENTRIES + 50; i++) {
+        getCachedStringWidth(probe(i));
+      }
+
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(
+        TEXT_CACHE_MAX_ENTRIES,
+      );
+
+      expect(getCachedStringWidth('héllo')).toBe(5);
+      expect(getCachedStringWidth('目标')).toBe(4);
+    });
+
+    it('does not grow the caches for ASCII fast-path input', () => {
+      const before = __getTextUtilsCacheSizes();
+      getCachedStringWidth('plain-ascii-input');
+      toCodePoints('plain-ascii-input');
+      expect(__getTextUtilsCacheSizes()).toEqual(before);
     });
   });
 });
