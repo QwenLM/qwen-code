@@ -17,6 +17,7 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useDaemonSessionOwnerGuard,
   useStreamingState,
   useTranscriptHistory,
   useTranscriptStore,
@@ -248,6 +249,7 @@ export function ChatPane({
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
@@ -266,6 +268,7 @@ export function ChatPane({
     ? undefined
     : connection.goalState;
   useEffect(() => {
+    setGoalControlBusy(false);
     setGoalEditOpen(false);
     setGoalEditError(null);
   }, [
@@ -592,6 +595,7 @@ export function ChatPane({
       action: 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
       objective?: string,
     ) => {
+      const busyOwner = sessionOwnerGuard.capture();
       setGoalControlBusy(true);
       try {
         const snapshot = (await actions.getGoal()).snapshot;
@@ -625,10 +629,10 @@ export function ChatPane({
           throw error;
         }
       } finally {
-        setGoalControlBusy(false);
+        if (busyOwner.isCurrent()) setGoalControlBusy(false);
       }
     },
-    [actions, t],
+    [actions, sessionOwnerGuard, t],
   );
 
   const runGoalControl = useCallback(
@@ -642,16 +646,20 @@ export function ChatPane({
 
   const handleGoalEditSave = useCallback(
     (objective: string) => {
+      const owner = sessionOwnerGuard.capture();
       setGoalEditError(null);
       void controlGoal('edit', objective)
-        .then(() => setGoalEditOpen(false))
+        .then(() => {
+          if (owner.isCurrent()) setGoalEditOpen(false);
+        })
         .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
           setGoalEditError(
             error instanceof Error ? error.message : String(error),
           );
         });
     },
-    [controlGoal],
+    [controlGoal, sessionOwnerGuard],
   );
 
   const handleSubmit = useCallback(

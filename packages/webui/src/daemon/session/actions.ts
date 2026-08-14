@@ -33,6 +33,7 @@ import {
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
+  selectGoalState,
 } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -1142,6 +1143,7 @@ export function createDaemonSessionActions({
           ...current,
           status: 'connected',
           sessionId: nextSession.sessionId,
+          goalState: undefined,
           ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
@@ -1201,6 +1203,7 @@ export function createDaemonSessionActions({
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
+        goalState: undefined,
         missingSession: false,
         error: undefined,
         errorStatus: undefined,
@@ -1709,7 +1712,13 @@ export function createDaemonSessionActions({
         );
         setConnection((current) =>
           current.sessionId === session.sessionId
-            ? { ...current, goalState: response.snapshot }
+            ? {
+                ...current,
+                goalState: selectGoalState(
+                  current.goalState,
+                  response.snapshot,
+                ),
+              }
             : current,
         );
         return response;
@@ -1737,7 +1746,13 @@ export function createDaemonSessionActions({
         );
         setConnection((current) =>
           current.sessionId === session.sessionId
-            ? { ...current, goalState: response.snapshot }
+            ? {
+                ...current,
+                goalState: selectGoalState(
+                  current.goalState,
+                  response.snapshot,
+                ),
+              }
             : current,
         );
         return response;

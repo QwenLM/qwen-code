@@ -377,6 +377,43 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('keeps one explicit insert in flight across an A-to-B-to-A switch', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, opts) => {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => admission.reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+        return admission.promise;
+      },
+    );
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('insert exactly once'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    render('responding', 'session-2', true, false, true);
+    render('responding', 'session-1', true, false, true);
+
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'insert exactly once', isInserting: true },
+    ]);
+    await act(async () => latest.insertQueuedPrompt(1));
+    expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+    render('idle', 'session-1', false, false, true);
+    expect(signal?.aborted).toBe(true);
+    await act(async () => insertion);
+    expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('submits locally held Goal follow-ups after the Goal stops', () => {
     const { actions } = createActions();
     const { render } = mount('responding', actions, true, false, false, true);
@@ -1096,6 +1133,24 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toMatchObject([
       { text: '下一步', serverState: 'submitting' },
     ]);
+  });
+
+  it('holds an idle admission rejection while a Goal is active', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('wait for the Goal'));
+    render('idle', 'session-1', false, true, true);
+    await act(async () => admission.resolve({ accepted: false }));
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'wait for the Goal' }]);
+    expect(latest.queuedPrompts[0]).not.toHaveProperty('serverState');
+
+    render('idle', 'session-1', false, false, false);
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('freezes mid-turn fallback while a session switch is preparing', async () => {

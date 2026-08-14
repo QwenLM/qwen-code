@@ -170,6 +170,20 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('clears the previous Goal before starting a fresh session', async () => {
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: { v: 2, goal: null, activity: 'idle' },
+      },
+    });
+
+    await actions.newSession();
+
+    expect(getConnection().goalState).toBeUndefined();
+  });
+
   it('rejects a concurrent source-bound branch request', async () => {
     const source = createMockSession('session-a', 'client-a');
     const first = createDeferred<{
@@ -1211,6 +1225,49 @@ describe('createDaemonSessionActions', () => {
     expect(session.goal).toHaveBeenCalledOnce();
     expect(session.controlGoal).toHaveBeenCalledWith(request);
     expect(getConnection().goalState).toBe(snapshot);
+  });
+
+  it('does not let delayed Goal responses regress the current revision', async () => {
+    const session = createMockSession('session-a');
+    const current = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'newer objective',
+        status: 'paused' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const stale = {
+      ...current,
+      activity: 'running' as const,
+      goal: { ...current.goal, revision: 6, status: 'active' as const },
+    };
+    session.goal.mockResolvedValue({ snapshot: stale });
+    session.controlGoal.mockResolvedValue({ snapshot: stale });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        goalState: current,
+      },
+      session,
+    });
+
+    await actions.getGoal();
+    await actions.controlGoal({
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 7,
+    });
+
+    expect(getConnection().goalState).toBe(current);
   });
 
   it('does not restart the event stream when the admitted prompt is stale', async () => {

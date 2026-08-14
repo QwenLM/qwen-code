@@ -8440,16 +8440,20 @@ export function App({
 
   const handleGoalEditSave = useCallback(
     (objective: string) => {
+      const owner = sessionOwnerGuard.capture();
       setGoalEditError(null);
       void controlCurrentGoal('edit', objective)
-        .then(() => setGoalEditOpen(false))
+        .then(() => {
+          if (owner.isCurrent()) setGoalEditOpen(false);
+        })
         .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
           setGoalEditError(
             error instanceof Error ? error.message : String(error),
           );
         });
     },
-    [controlCurrentGoal],
+    [controlCurrentGoal, sessionOwnerGuard],
   );
 
   const hiddenCommands = useMemo(
@@ -11730,7 +11734,6 @@ export function App({
                         }
                         if (!owner.isCurrent()) return false;
                         strandedGoalSessionRef.current = undefined;
-                        onSessionIdChange?.(undefined);
                         setMainView('chat');
                       }}
                       onOpenSession={(sessionId) => {

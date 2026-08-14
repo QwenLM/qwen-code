@@ -281,7 +281,10 @@ export function updateConnectionFromDaemonEvent(
     }
     const goalState = getGoalState(update);
     if (goalState) {
-      setConnection((current) => ({ ...current, goalState }));
+      setConnection((current) => ({
+        ...current,
+        goalState: selectGoalState(current.goalState, goalState),
+      }));
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
@@ -357,6 +360,23 @@ export function updateConnectionFromDaemonEvent(
     default:
       break;
   }
+}
+
+export function selectGoalState(
+  current: GoalSnapshotV2 | undefined,
+  incoming: GoalSnapshotV2,
+): GoalSnapshotV2 {
+  if (
+    current?.goal &&
+    incoming.goal &&
+    current.goal.goalId === incoming.goal.goalId &&
+    incoming.goal.revision < current.goal.revision
+  ) {
+    return current;
+  }
+  // Null and different-goal snapshots have no shared revision domain, so keep
+  // their existing transport arrival-order semantics.
+  return incoming;
 }
 
 function getGoalState(

@@ -79,6 +79,7 @@ const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
 let queuedPromptsMock: any[] = [];
 let queuedTextsMock: string[] = [];
+let ownerVersion = 0;
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
@@ -115,7 +116,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   }),
   useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
   useDaemonSessionOwnerGuard: () => ({
-    capture: () => ({ isCurrent: () => true }),
+    capture: () => {
+      const captured = ownerVersion;
+      return { isCurrent: () => ownerVersion === captured };
+    },
   }),
 }));
 
@@ -318,6 +322,7 @@ beforeEach(() => {
   sendPromptAdmit = undefined;
   queuedPromptsMock = [];
   queuedTextsMock = [];
+  ownerVersion = 0;
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
@@ -435,6 +440,86 @@ describe('ChatPane', () => {
     });
     expect(controlGoal).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['resolve', 'reject'] as const)(
+    'ignores a stale Goal edit %s after the pane session changes',
+    async (outcome) => {
+      const goalA = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: 'goal-a',
+          revision: 5,
+          objective: 'session A objective',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-a' },
+          turnCount: 1,
+          activeTimeMs: 10,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      const goalB = {
+        ...goalA,
+        goal: {
+          ...goalA.goal,
+          goalId: 'goal-b',
+          revision: 1,
+          objective: 'session B objective',
+        },
+      };
+      let resolveEdit!: (value: { snapshot: typeof goalA }) => void;
+      let rejectEdit!: (error: Error) => void;
+      const edit = new Promise<{ snapshot: typeof goalA }>(
+        (resolve, reject) => {
+          resolveEdit = resolve;
+          rejectEdit = reject;
+        },
+      );
+      connectionState.goalState = goalA;
+      getGoal.mockResolvedValue({ snapshot: goalA });
+      controlGoal.mockReturnValueOnce(edit);
+      render();
+
+      const editA = container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editA) throw new Error('session A edit control was not rendered');
+      act(() => editA.click());
+      const saveA = [
+        ...document.querySelectorAll<HTMLButtonElement>('button'),
+      ].find((button) => button.textContent === 'Save');
+      if (!saveA) throw new Error('session A save control was not rendered');
+      act(() => saveA.click());
+      await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledTimes(1));
+
+      act(() => {
+        ownerVersion += 1;
+        connectionState = {
+          ...connectionState,
+          sessionId: 'sess-2',
+          goalState: goalB,
+        };
+        rerender();
+      });
+      const editB = container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editB) throw new Error('session B edit control was not rendered');
+      expect(editB.disabled).toBe(false);
+      act(() => editB.click());
+      expect(document.querySelector('textarea')).not.toBeNull();
+
+      await act(async () => {
+        if (outcome === 'resolve') resolveEdit({ snapshot: goalA });
+        else rejectEdit(new Error('session A edit failed'));
+        await Promise.resolve();
+      });
+
+      expect(document.querySelector('textarea')).not.toBeNull();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+    },
+  );
 
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {

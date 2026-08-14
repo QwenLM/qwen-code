@@ -13468,6 +13468,33 @@ describe('DaemonSessionProvider', () => {
         yield {
           id: 1,
           v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'running',
+                  goal: {
+                    goalId: 'goal-before-close',
+                    revision: 1,
+                    objective: 'must disappear',
+                    status: 'active',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 0,
+                    activeTimeMs: 0,
+                    createdAt: 1,
+                    updatedAt: 1,
+                  },
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 2,
+          v: 1,
           type: 'session_closed',
           data: { reason: 'client_close' },
         };
@@ -13515,6 +13542,7 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(1);
     expect(connection?.status).toBe('disconnected');
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.goalState).toBeUndefined();
     // Teardown set promptStatus to 'idle' — without the explicit
     // setPromptStatus('idle') in the userDeletedSession block, this
     // would remain 'waiting' (sendPrompt's own handler is blocked

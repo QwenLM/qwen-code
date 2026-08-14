@@ -47,17 +47,38 @@ describe('goals workspace actions', () => {
 
   describe('listGoals', () => {
     it('GETs /goals and returns the goals with the dropped count', async () => {
-      fetchMock.mockResolvedValue(
-        ok({ v: 1, goals: [{ sessionId: 's1' }], droppedCount: 2 }),
-      );
+      const goal = {
+        sessionId: 's1',
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      };
+      fetchMock.mockResolvedValue(ok({ v: 1, goals: [goal], droppedCount: 2 }));
 
       const list = await makeActions('tok').listGoals();
 
-      expect(list).toEqual({ goals: [{ sessionId: 's1' }], droppedCount: 2 });
+      expect(list).toEqual({ goals: [goal], droppedCount: 2 });
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('/goals');
       expect(initOf(fetchMock.mock.calls[0]).method ?? 'GET').toBe('GET');
       expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+    });
+
+    it('drops legacy rows without snapshots and counts them', async () => {
+      const current = {
+        sessionId: 'current',
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      };
+      fetchMock.mockResolvedValue(
+        ok({
+          v: 1,
+          goals: [{ sessionId: 'legacy' }, current],
+          droppedCount: 2,
+        }),
+      );
+
+      await expect(makeActions().listGoals()).resolves.toEqual({
+        goals: [current],
+        droppedCount: 3,
+      });
     });
 
     it('normalizes a missing goals array to empty', async () => {

@@ -18837,7 +18837,8 @@ describe('App /goal command', () => {
   });
 
   it('starts a canonical goal in a fresh session from the Goals page', async () => {
-    const { container } = renderApp();
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
     await flush();
 
     testState.prompt = '/goal';
@@ -18862,8 +18863,65 @@ describe('App /goal command', () => {
       objective: 'all tests pass',
     });
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
   });
+
+  it.each(['resolve', 'reject'] as const)(
+    'ignores a stale Goal edit %s after the session changes',
+    async (outcome) => {
+      const goalA = activeGoalSnapshot('session A objective', 5);
+      const goalB = {
+        ...activeGoalSnapshot('session B objective', 1),
+        goal: {
+          ...activeGoalSnapshot('session B objective', 1).goal!,
+          goalId: 'goal-b',
+        },
+      };
+      const pending = deferred<{ snapshot: typeof goalA }>();
+      mockConnection.goalState = goalA;
+      mockSessionActions.getGoal.mockResolvedValue({ snapshot: goalA });
+      mockSessionActions.controlGoal.mockReturnValueOnce(pending.promise);
+      const { container, rerender } = renderApp();
+      await flush();
+
+      const editA = container.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editA) throw new Error('session A edit control was not rendered');
+      act(() => editA.click());
+      const saveA = [
+        ...document.querySelectorAll<HTMLButtonElement>('button'),
+      ].find((button) => button.textContent === 'Save');
+      if (!saveA) throw new Error('session A save control was not rendered');
+      act(() => saveA.click());
+      await vi.waitFor(() => {
+        expect(mockSessionActions.controlGoal).toHaveBeenCalledTimes(1);
+      });
+
+      act(() => {
+        testState.ownerVersion += 1;
+        mockConnection.sessionId = 'session-b';
+        mockConnection.goalState = goalB;
+        rerender({});
+      });
+      const editB = container.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+      );
+      if (!editB) throw new Error('session B edit control was not rendered');
+      act(() => editB.click());
+      expect(document.querySelector('textarea')).not.toBeNull();
+
+      await act(async () => {
+        if (outcome === 'resolve') pending.resolve({ snapshot: goalA });
+        else pending.reject(new Error('session A edit failed'));
+        await Promise.resolve();
+      });
+
+      expect(document.querySelector('textarea')).not.toBeNull();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+    },
+  );
 
   it('keeps the Goals page open when canonical creation is rejected', async () => {
     const { container } = renderApp();

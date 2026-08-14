@@ -298,6 +298,43 @@ describe('updateConnectionFromDaemonEvent', () => {
     });
   });
 
+  it('does not regress the same Goal to an older revision', () => {
+    const goal = {
+      goalId: 'goal-1',
+      revision: 7,
+      objective: 'newer objective',
+      status: 'paused' as const,
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 3,
+      activeTimeMs: 4_000,
+      createdAt: 10,
+      updatedAt: 30,
+    };
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: { v: 2, goal, activity: 'idle' },
+    };
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            goalState: {
+              v: 2,
+              activity: 'running',
+              goal: { ...goal, revision: 6, status: 'active', updatedAt: 20 },
+            },
+          },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(current.goalState);
+  });
+
   it('ignores malformed Goal snapshots', () => {
     const current: DaemonConnectionState = {
       status: 'connected',
