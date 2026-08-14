@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   assertVersionUnreleased,
   getVersion,
   PUBLISHED_PACKAGES,
+  runCli,
 } from '../get-release-version.js';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -619,6 +620,10 @@ describe('assertVersionUnreleased', () => {
     vi.resetAllMocks();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   const notFoundAnywhere = (command) => {
     if (command.includes('npm view')) throw new Error('npm error code E404');
     if (command.includes('git ls-remote')) {
@@ -632,9 +637,10 @@ describe('assertVersionUnreleased', () => {
   };
 
   it('pins the full published-package set', () => {
-    // The release workflow's publish steps and this guard both derive from
-    // this list; adding or removing a package must update the pin here so
-    // every consumer is reviewed together.
+    // The push-time guard derives from this list; the workflow's publish
+    // steps hardcode the same set separately, so adding or removing a
+    // package must update both this pin and the publish steps in
+    // release.yml so every consumer is reviewed together.
     expect(PUBLISHED_PACKAGES).toEqual([
       '@qwen-code/qwen-code',
       '@qwen-code/audio-capture',
@@ -672,7 +678,7 @@ describe('assertVersionUnreleased', () => {
     // included: dropping any of them from PUBLISHED_PACKAGES must fail.
     for (const pkg of PUBLISHED_PACKAGES) {
       vi.mocked(execSync).mockImplementation((command) => {
-        if (command === `npm view ${pkg}@1.2.3 version 2>/dev/null`) {
+        if (command === `npm view ${pkg}@1.2.3 version`) {
           return '1.2.3';
         }
         return notFoundAnywhere(command);
@@ -703,5 +709,62 @@ describe('assertVersionUnreleased', () => {
     for (const bad of [undefined, '', true]) {
       expect(() => assertVersionUnreleased(bad)).toThrow(/requires a version/);
     }
+  });
+
+  it('fails closed when an npm probe errors with anything other than E404', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('npm view')) {
+        throw new Error('npm error code ETIMEDOUT');
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      /Failed to verify .* on npm/,
+    );
+  });
+
+  it('fails closed when ls-remote errors with anything other than no-match', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('git ls-remote')) {
+        throw Object.assign(new Error('fatal: authentication failed'), {
+          status: 128,
+        });
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      /Failed to verify tag v1\.2\.3 on origin/,
+    );
+  });
+
+  it('fails closed when gh release view errors with anything other than not-found', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('gh release view')) {
+        throw new Error('gh: To use GitHub CLI in automation, set GH_TOKEN.');
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      /Failed to verify release v1\.2\.3 on GitHub/,
+    );
+  });
+
+  it('CLI dispatch: annotates and exits 1 when the version has shipped', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('npm view')) return '1.2.3';
+      return notFoundAnywhere(command);
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '::error::Version 1.2.3 has already shipped; refusing to force-push the release branch over it',
+    );
+  });
+
+  it('CLI dispatch: exits 0 when the version has not shipped', () => {
+    vi.mocked(execSync).mockImplementation(notFoundAnywhere);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });

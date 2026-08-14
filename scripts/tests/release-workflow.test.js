@@ -101,11 +101,14 @@ describe('release workflow', () => {
     // dry-run guard, before the push, as an anchored full line (moving it
     // out of the guard, inverting it, or narrowing it fails), and the
     // step must receive RELEASE_VERSION — without it the check aborts
-    // every release. The script-side checks (every published package, the
-    // remote tag, the release, aborting on a hit) are unit-tested in
+    // every release — and GITHUB_TOKEN, which its gh release view probe
+    // needs: without a token the probe errors, and the guard fails closed
+    // on probe errors, so every push would abort. The script-side checks
+    // (every published package, the remote tag, the release, aborting on
+    // a hit, failing closed on a probe error) are unit-tested in
     // get-release-version.test.js.
     expect(workflow).toMatch(
-      /name: 'Commit and Conditionally Push package versions'\n {8}env:\n[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?\n {12}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}"\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
+      /name: 'Commit and Conditionally Push package versions'\n {8}env:\n[\s\S]*?GITHUB_TOKEN: '\$\{\{ github\.token \}\}'[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?\n {12}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}"\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
     );
   });
 

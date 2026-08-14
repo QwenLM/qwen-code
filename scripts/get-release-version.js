@@ -193,26 +193,37 @@ export const PUBLISHED_PACKAGES = [
   '@qwen-code/channel-weixin',
 ];
 
-function doesVersionExist(version, { checkRemoteTags = false } = {}) {
+function doesVersionExist(version, { strict = false } = {}) {
   // Check NPM across all published packages
   for (const pkg of PUBLISHED_PACKAGES) {
     try {
-      const command = `npm view ${pkg}@${version} version 2>/dev/null`;
+      // The best-effort path silences npm's expected E404 noise; strict
+      // mode needs that stderr to tell "absent" from a failed probe.
+      const command = strict
+        ? `npm view ${pkg}@${version} version`
+        : `npm view ${pkg}@${version} version 2>/dev/null`;
       const output = execSync(command).toString().trim();
       if (output === version) {
         console.error(`Version ${version} already exists on NPM (${pkg}).`);
         return true;
       }
-    } catch (_error) {
-      // This is expected if the version doesn't exist on this package.
+    } catch (error) {
+      // E404 means the version is absent from this package. Strict mode
+      // guards the force push, so any other probe failure is "cannot
+      // verify" and must throw instead of passing.
+      if (strict && !error.message?.includes('E404')) {
+        throw new Error(
+          `Failed to verify ${pkg}@${version} on npm: ${error.message}`,
+        );
+      }
     }
   }
 
-  // Check Git tags. Push-time callers pass checkRemoteTags: the local
-  // checkout predates the approval gate, so a tag a concurrent run pushed
-  // in between is not in it.
+  // Check Git tags. Push-time callers pass strict: the checkout at job
+  // start can only know tags that existed when the job began, and the
+  // version may ship between that fetch and this push — check origin.
   try {
-    if (checkRemoteTags) {
+    if (strict) {
       execSync(`git ls-remote --exit-code origin "refs/tags/v${version}"`);
       console.error(`Git tag v${version} already exists on origin.`);
       return true;
@@ -224,9 +235,16 @@ function doesVersionExist(version, { checkRemoteTags = false } = {}) {
       return true;
     }
   } catch (error) {
-    // ls-remote exits 2 when no ref matches; that is "tag absent", not a
-    // failed check.
-    if (!(checkRemoteTags && error.status === 2)) {
+    if (strict) {
+      // ls-remote exits 2 when no ref matches; that is "tag absent". Any
+      // other failure means the check could not run — fail the push
+      // instead of reading a failed check as "unreleased".
+      if (error.status !== 2) {
+        throw new Error(
+          `Failed to verify tag v${version} on origin: ${error.message}`,
+        );
+      }
+    } else {
       console.error(`Failed to check git tags for conflicts: ${error.message}`);
     }
   }
@@ -241,6 +259,11 @@ function doesVersionExist(version, { checkRemoteTags = false } = {}) {
     }
   } catch (error) {
     if (!isExpectedMissingGitHubRelease(error)) {
+      if (strict) {
+        throw new Error(
+          `Failed to verify release v${version} on GitHub: ${error.message}`,
+        );
+      }
       console.error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
       );
@@ -252,7 +275,9 @@ function doesVersionExist(version, { checkRemoteTags = false } = {}) {
 
 /**
  * Push-time re-validation of prepare's doesVersionExist invariant, for the
- * release branch force push. Throws when the version has shipped anywhere.
+ * release branch force push. Throws when the version has shipped anywhere,
+ * or when a probe cannot run — a failed probe must not read as
+ * "unreleased".
  */
 export function assertVersionUnreleased(version) {
   if (typeof version !== 'string' || version.length === 0) {
@@ -260,7 +285,7 @@ export function assertVersionUnreleased(version) {
       'assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
     );
   }
-  if (doesVersionExist(version, { checkRemoteTags: true })) {
+  if (doesVersionExist(version, { strict: true })) {
     throw new Error(
       `Version ${version} has already shipped; refusing to force-push the release branch over it`,
     );
@@ -536,16 +561,28 @@ export function getVersion(options = {}) {
   return result;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const args = getArgs();
+/**
+ * CLI dispatch, exported for tests: `--assert-unreleased=<version>` runs
+ * the push-time guard; anything else prints the version JSON. Returns the
+ * exit code.
+ */
+export function runCli(args) {
   if (args['assert-unreleased'] !== undefined) {
     try {
       assertVersionUnreleased(args['assert-unreleased']);
     } catch (error) {
       console.error(`::error::${error.message}`);
-      process.exit(1);
+      return 1;
     }
-  } else {
-    console.log(JSON.stringify(getVersion(args), null, 2));
+    return 0;
+  }
+  console.log(JSON.stringify(getVersion(args), null, 2));
+  return 0;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const exitCode = runCli(getArgs());
+  if (exitCode !== 0) {
+    process.exit(exitCode);
   }
 }
