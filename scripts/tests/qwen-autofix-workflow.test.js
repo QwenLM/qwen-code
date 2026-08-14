@@ -2917,7 +2917,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(15);
+    expect(workflow.split('--paginate').length - 1).toBe(16);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
@@ -10357,6 +10357,63 @@ exit 1
     expect(fuzz.advisory).toContain('outside the PR footprint');
   });
 
+  it('upserts deferred findings into a per-PR issue that survives the merge', () => {
+    // Wiring: the upsert runs for BOTH outcomes (after each shared
+    // resolve/reply call), the agent file rides the artifact dump and the
+    // repair cleanup, and SKILL documents the fourth disposition.
+    expect(
+      pushAndReportStep.split(
+        'resolve_and_reply_threads\n            upsert_deferred_issue',
+      ).length - 1,
+    ).toBe(2);
+    expect(reviewAddressJob).toContain(
+      'comment-replies.json deferred-findings.json pr.diff',
+    );
+    expect(reviewAddressJob).toContain(
+      '"${WORKDIR}/deferred-findings.json" \\',
+    );
+    const skill = readAutofixSkill();
+    expect(skill).toContain('Defer to follow-up');
+    expect(skill).toContain('deferred-findings.json');
+    expect(skill).toContain('you defer what is worth doing');
+
+    // Shape validation: only a non-empty array of {id:number,
+    // reason:string} passes.
+    const validateJq = pushAndReportStep.match(
+      /jq -e 'type == "array" and length > 0 and all\(\.\[\];[\s\S]*?\(\.reason \| type == "string"\)\)'/,
+    )?.[0];
+    expect(validateJq).toBeTruthy();
+    const prog = validateJq.match(/'([\s\S]*)'/)?.[1];
+    const validates = (json) =>
+      spawnSync('jq', ['-e', prog], { input: json, encoding: 'utf8' })
+        .status === 0;
+    expect(validates('[{"id":1,"reason":"r"}]')).toBe(true);
+    expect(validates('[]')).toBe(false);
+    expect(validates('[{"id":"1","reason":"r"}]')).toBe(false);
+    expect(validates('{"id":1}')).toBe(false);
+
+    // Line building: dedupe against the existing issue body by rc id,
+    // flatten newlines, truncate, and neutralize markers.
+    const linesJq = pushAndReportStep.match(
+      /jq -r --arg body "\$\{existing_body\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/deferred-findings\.json"/,
+    )?.[1];
+    expect(linesJq).toBeTruthy();
+    const lines = (items, body) =>
+      spawnSync('jq', ['-r', '--arg', 'body', body, linesJq], {
+        input: JSON.stringify(items),
+        encoding: 'utf8',
+      }).stdout;
+    const built = lines(
+      [
+        { id: 7, path: 'src/a.ts', reason: 'real\nbut out of\r\nscope' },
+        { id: 8, reason: 'already tracked' },
+      ],
+      'existing…\n- rc:8 `x`: already tracked',
+    );
+    expect(built).toContain('- rc:7 `src/a.ts`: real but out of scope');
+    expect(built).not.toContain('rc:8');
+  });
+
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
     const block = reviewVerificationRunner.match(
       /(# Bite check:[\s\S]*?)\nassert_verification_tree\necho "verified_head/,
@@ -11095,7 +11152,7 @@ exit 1
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL EIGHT agent-derived publish sites
+    // Token-breaking neutralization at ALL TEN agent-derived publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
     // gate-rejection body, the comment-reply body whose content is agent
     // stdout that can echo external comment text, the two
@@ -11110,7 +11167,7 @@ exit 1
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
-    expect(escapeSites).toHaveLength(9);
+    expect(escapeSites).toHaveLength(10);
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }
