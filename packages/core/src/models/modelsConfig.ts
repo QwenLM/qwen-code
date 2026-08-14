@@ -200,8 +200,12 @@ export class ModelsConfig {
       if (initialModel) {
         this.currentRegistryBaseUrl = initialModel.registryBaseUrl ?? null;
       }
+      const runtimeBaseUrl = this._generationConfig.baseUrl;
+      const runtimeEnvKey = this._generationConfig.apiKeyEnvKey;
       if (
         initialModel &&
+        runtimeBaseUrl === undefined &&
+        runtimeEnvKey === undefined &&
         this.modelRegistry.getModalitiesSource(initialModel) === 'catalog' &&
         this.canApplyCatalogModalities()
       ) {
@@ -214,8 +218,8 @@ export class ModelsConfig {
       } else {
         this.applyCatalogModalities(
           initialModelId,
-          initialModel?.registryBaseUrl ?? this._generationConfig.baseUrl,
-          initialModel?.envKey ?? this._generationConfig.apiKeyEnvKey,
+          runtimeBaseUrl ?? initialModel?.registryBaseUrl,
+          runtimeEnvKey ?? initialModel?.envKey,
         );
       }
     }
@@ -1230,7 +1234,18 @@ export class ModelsConfig {
         if (savedBaseUrlSource) {
           this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
         }
-        this.applyCatalogModalities(resolved.id, savedBaseUrl, resolved.envKey);
+        const appliedCatalogModalities = this.applyCatalogModalities(
+          resolved.id,
+          savedBaseUrl,
+          resolved.envKey,
+        );
+        if (!appliedCatalogModalities && this.canApplyCatalogModalities()) {
+          this._generationConfig.modalities = defaultModalities(resolved.id);
+          this.generationConfigSources['modalities'] = {
+            kind: 'computed',
+            detail: 'auto-detected from model',
+          };
+        }
       }
 
       this.strictModelProviderSelection = true;

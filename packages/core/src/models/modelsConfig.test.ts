@@ -1808,6 +1808,44 @@ describe('ModelsConfig', () => {
     );
   });
 
+  it('does not reuse catalog modalities at an unlisted settings endpoint', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'catalog-only-model' }],
+      },
+      generationConfig: {
+        model: 'catalog-only-model',
+        baseUrl: 'https://private-proxy.example.com/v1',
+      },
+      generationConfigSources: {
+        baseUrl: {
+          kind: 'settings',
+          detail: 'security.auth.baseUrl',
+        },
+      },
+      modelMetadataCatalog: {
+        openai: {
+          api: 'https://api.openai.com/v1',
+          models: {
+            'catalog-only-model': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().modalities).toBeUndefined();
+
+    modelsConfig.syncAfterAuthRefresh(
+      AuthType.USE_OPENAI,
+      'catalog-only-model',
+    );
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({});
+  });
+
   it('uses catalog modalities for an initial manually configured provider', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
