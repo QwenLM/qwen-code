@@ -692,6 +692,17 @@ export const useGeminiStream = (
   const activeModelStreamsRef = useRef(0);
   // A continuation may be admitted while an earlier submission is finalizing.
   const submissionActivitiesByGenerationRef = useRef(new Map<number, number>());
+  const settleSubmissionStateIfIdle = useCallback(() => {
+    const currentGeneration = submissionLeaseGenerationRef.current;
+    if (
+      (submissionActivitiesByGenerationRef.current.get(currentGeneration) ??
+        0) === 0 &&
+      activeModelStreamsRef.current === 0
+    ) {
+      setIsResponding(false);
+      setSubmissionInFlight(false);
+    }
+  }, [setSubmissionInFlight]);
   const retainSubmissionActivity = useCallback(
     (generation: number) => {
       submissionActivitiesByGenerationRef.current.set(
@@ -706,19 +717,16 @@ export const useGeminiStream = (
         );
         if (remainingActivities === 0) {
           submissionActivitiesByGenerationRef.current.delete(generation);
-          if (generation === submissionLeaseGenerationRef.current) {
-            setIsResponding(false);
-            setSubmissionInFlight(false);
-          }
         } else {
           submissionActivitiesByGenerationRef.current.set(
             generation,
             remainingActivities,
           );
         }
+        settleSubmissionStateIfIdle();
       };
     },
-    [setSubmissionInFlight],
+    [settleSubmissionStateIfIdle],
   );
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   // Hold the latest history in a ref so handleCompletedTools can read it

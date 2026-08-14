@@ -133,7 +133,11 @@ import {
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
-import { getErrorMessage, getErrorType } from '../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorType,
+  UnauthorizedError,
+} from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import {
   flatMapTextParts,
@@ -3993,6 +3997,15 @@ export class GeminiClient {
     } catch (error) {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
+      }
+      if (
+        error instanceof UnauthorizedError &&
+        messageType !== SendMessageType.Hook &&
+        messageType !== SendMessageType.Steer
+      ) {
+        await this.config
+          .getArenaAgentClient()
+          ?.reportError('Authentication failed');
       }
       throw error;
     } finally {

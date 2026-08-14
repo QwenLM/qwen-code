@@ -12940,6 +12940,85 @@ describe('useGeminiStream', () => {
       }
     });
 
+    it('stays responding when a newer turn finishes before a surviving ?btw stream', async () => {
+      let resolveMain!: () => void;
+      let resolveBtw!: () => void;
+      const mainPending = new Promise<void>((resolve) => {
+        resolveMain = resolve;
+      });
+      const btwPending = new Promise<void>((resolve) => {
+        resolveBtw = resolve;
+      });
+      let callCount = 0;
+      mockSendMessageStream.mockImplementation((_query, signal) => {
+        callCount += 1;
+        if (callCount === 1) {
+          return (async function* () {
+            await mainPending;
+            if (signal.aborted) {
+              yield { type: ServerGeminiEventType.UserCancelled };
+            }
+          })();
+        }
+        if (callCount === 2) {
+          return (async function* () {
+            await btwPending;
+            yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+          })();
+        }
+        return (async function* () {
+          yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+        })();
+      });
+
+      const { result } = renderTestHook();
+      let mainRequest!: Promise<void>;
+      let btwRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('Main query');
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      await act(async () => {
+        btwRequest = result.current.submitQuery('?btw side question');
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+        resolveMain();
+      });
+      await act(async () => {
+        await mainRequest;
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('Replacement query');
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      expect(result.current.streamingState).toBe(StreamingState.Responding);
+      await act(async () => {
+        await result.current.submitQuery('Must remain blocked');
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+
+      act(() => {
+        resolveBtw();
+      });
+      await act(async () => {
+        await btwRequest;
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Idle),
+      );
+    });
+
     it('continues a deferred main tool batch without leaking its mixed ?btw owner', async () => {
       const mainOwner = {};
       const btwOwner = {};

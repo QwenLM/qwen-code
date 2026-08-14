@@ -9255,6 +9255,42 @@ Other open files:
       );
     });
 
+    it('reports authentication failures to Arena when Turn rethrows them', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi.fn().mockResolvedValue(undefined),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockImplementationOnce(async function* () {
+        yield* [];
+        throw new UnauthorizedError('Bearer secret-token');
+      });
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-id-arena-auth-error',
+          ),
+        ),
+      ).rejects.toThrow(UnauthorizedError);
+
+      expect(arenaAgentClient.reportError).toHaveBeenCalledWith(
+        'Authentication failed',
+      );
+      expect(
+        JSON.stringify(arenaAgentClient.reportError.mock.calls),
+      ).not.toContain('secret-token');
+    });
+
     it('should not call checkNextSpeaker when turn.run() yields a value then an error', async () => {
       // Arrange
       const { checkNextSpeaker } = await import(
