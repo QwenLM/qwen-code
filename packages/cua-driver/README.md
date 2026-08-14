@@ -1,220 +1,174 @@
-# Qwen Cua Driver
+# Qwen CUA Driver
 
-Cross-platform background computer-use driver for AI agents. Speaks MCP over stdio; drives native apps without stealing focus.
+Qwen Code's vendored distribution of the cross-platform Cua Driver runtime.
+It provides native desktop and browser automation over MCP, a one-shot CLI,
+and in-process Python and TypeScript SDKs.
 
-Based on [trycua/cua](https://github.com/trycua/cua) with Qwen-specific extensions: relative-coordinate normalization (0–1000 space for Qwen-VL models), vendored patches, and qwen-code integration.
+This tree is based on upstream `cua-driver-rs-v0.17.0`. The upstream snapshot
+is recorded in [`.vendored-from`](.vendored-from); Qwen-owned differences are
+documented in [`.vendored-patches.md`](.vendored-patches.md) and
+[`docs/relative-coordinates-design.md`](docs/relative-coordinates-design.md).
 
-## Installation
+## Install
 
-### macOS / Linux
+macOS and Linux:
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
+CUA_DRIVER_RS_VERSION=0.17.0 \
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 ```
 
-### Windows (PowerShell)
+Windows PowerShell:
 
 ```powershell
+$env:CUA_DRIVER_RS_VERSION = "0.17.0"
 irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
-### Pin a specific version
+Expected: qwen-cua-driver 0.17.0.
+
+The released product uses Qwen-owned identities throughout:
+
+- executable: `qwen-cua-driver` / `qwen-cua-driver.exe`
+- macOS app: `/Applications/QwenCuaDriver.app`
+- bundle identifier: `com.qwencode.cua-driver`
+- state home: `~/.cua-driver`
+- Windows task: `qwen-cua-driver-serve`
+
+Source builds install as the separate `qwen-cua-driver-local` product. The
+Qwen executable, app, service, and local-build identities are distinct from
+upstream CuaDriver. The release state home remains `~/.cua-driver` for
+compatibility with existing Qwen releases, so installing both release
+distributions for the same user is not supported: they can share or overwrite
+that state directory.
+
+## Agent integration
+
+Run the MCP server directly:
 
 ```bash
-# macOS / Linux
-CUA_DRIVER_RS_VERSION=0.7.3 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
+qwen-cua-driver mcp
 ```
 
-```powershell
-# Windows
-$env:CUA_DRIVER_RS_VERSION = "0.7.3"
-irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
-```
-
-> **Note:** After installation, restart your terminal or IDE for PATH changes to take effect.
-
-## Verify installation
+Register it with Qwen Code:
 
 ```bash
-qwen-cua-driver --version
-# Expected: cua-driver 0.7.3
+qwen mcp add cua-driver qwen-cua-driver mcp
 ```
 
-### macOS permissions
+Other MCP clients can use the same executable and arguments. Shell-oriented
+automation can call tools through `qwen-cua-driver call`.
 
-macOS requires Accessibility and Screen Recording permissions:
+## 0.17 runtime and SDK surface
+
+The 0.17 base includes the SDK-owned runtime and versioned C ABI, generated
+Python and TypeScript UniFFI bindings, typed browser automation, permission
+modes, runtime-owned consent adapters, per-session capture scope,
+snapshot-bound element tokens, closed action results, `verify_state`, native
+menu invocation, clipboard tools, window framing, and semantic cursor themes.
+
+Python applications import `cua_driver`. TypeScript applications retain the
+upstream-compatible `@trycua/cua-driver` package name. Both use the same
+in-process native runtime; MCP remains the agent-facing boundary implemented by
+`qwen-cua-driver`.
+
+The stable C ABI is declared in
+[`rust/include/cua_driver_abi.h`](rust/include/cua_driver_abi.h). The contract
+and generated bindings are documented in [`contract/README.md`](contract/README.md).
+
+## Permission modes
+
+`standard` is the promptless default for ordinary automation. `bounded`
+admits only reviewed tools and resources. `unrestricted` requires
+`--dangerously-bypass-approvals`.
+
+Attaching to an existing logged-in Chromium profile remains explicit:
 
 ```bash
-# Grant permissions (launches the driver so the dialog attributes correctly)
-qwen-cua-driver permissions grant
-
-# Check status
-qwen-cua-driver permissions status
+qwen-cua-driver mcp --grant existing-profile
 ```
 
-### Quick functional test
+An embedding application can instead provide `DriverAuthorizationHost` and
+own the permission prompt and grant lifecycle.
+
+## Qwen normalized coordinates
+
+Pixel coordinates remain the default. Set:
 
 ```bash
-# List running apps
-qwen-cua-driver call list_apps '{}'
-
-# List available tools
-qwen-cua-driver list-tools
-```
-
-## MCP Configuration
-
-### Qwen Code
-
-```bash
-qwen mcp add --transport stdio cua-driver -- qwen-cua-driver mcp
-```
-
-With relative-coordinate normalization (recommended for Qwen-VL models):
-
-```bash
-qwen mcp add-json --scope user cua-computer-use '{"command":"qwen-cua-driver","args":["mcp"],"env":{"CUA_DRIVER_RS_COORDINATE_SPACE":"1"}}'
-```
-
-Or add to `.qwen/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "cua-computer-use": {
-      "command": "qwen-cua-driver",
-      "args": ["mcp"],
-      "env": {
-        "CUA_DRIVER_RS_COORDINATE_SPACE": "1"
-      }
-    }
-  }
-}
-```
-
-> **Note:** If you enable the MCP server manually, disable the built-in computer-use to avoid conflicts:
-> ```json
-> {
->   "tools": {
->     "computerUse": {
->       "enabled": false
->     }
->   }
-> }
-> ```
-
-### Claude Code
-
-Standard registration:
-
-```bash
-claude mcp add --transport stdio cua-driver -- qwen-cua-driver mcp
-```
-
-Computer-use compatibility mode (grounds Claude Code's vision flow on cua-driver screenshots):
-
-```bash
-claude mcp add --transport stdio cua-computer-use -- qwen-cua-driver mcp --claude-code-computer-use-compat
-```
-
-Or via JSON (recommended for Windows where arg parsing can lose flags):
-
-```bash
-claude mcp add-json --scope user cua-computer-use '{"command":"qwen-cua-driver","args":["mcp","--claude-code-computer-use-compat"]}'
-```
-
-### Codex (OpenAI)
-
-```bash
-codex mcp add cua-driver -- qwen-cua-driver mcp
-```
-
-### Other clients (Cursor, OpenCode, Hermes, etc.)
-
-Generate a client-specific config snippet:
-
-```bash
-qwen-cua-driver mcp-config --client cursor
-qwen-cua-driver mcp-config --client opencode
-qwen-cua-driver mcp-config --client hermes
-```
-
-Or get the generic `mcpServers` JSON shape:
-
-```bash
-qwen-cua-driver mcp-config
-```
-
-## Model API payload filtering
-
-Some model API routes reject requests whose textual conversation history
-contains known vendor names. To filter those names at the cua-driver MCP
-boundary, set `MCP_MODEL_PAYLOAD_FILTER=1` in the server environment:
-
-```json
-{
-  "mcpServers": {
-    "cua-computer-use": {
-      "command": "qwen-cua-driver",
-      "args": ["mcp"],
-      "env": {
-        "MCP_MODEL_PAYLOAD_FILTER": "1"
-      }
-    }
-  }
-}
-```
-
-The filter is disabled by default. When enabled, it rewrites matching text in
-MCP responses to reversible aliases and decodes those aliases when they are
-passed back to cua-driver. An alias passed to a shell or another MCP server is
-not decoded there.
-
-## Relative-coordinate mode
-
-For models that output normalized 0–1000 coordinates (e.g. Qwen-VL `computer_use`), enable coordinate normalization:
-
-```bash
-# Via environment variable (set before starting the MCP server)
 export CUA_DRIVER_RS_COORDINATE_SPACE=1
-
-# Optional: change full-scale (default 1000, some models use 999)
-export CUA_DRIVER_RS_COORDINATE_SCALE=999
+export CUA_DRIVER_RS_COORDINATE_SCALE=1000 # optional; 1000 is the default
 ```
 
-When enabled:
-- `get_window_state` / `get_desktop_state` report `screenshot_width/height` as 1000
-- `click` / `drag` / `scroll` x/y accept 0–1000 values (auto-converted to pixels)
-- `move_cursor` uses 0–1000 in screen space
-- Tool descriptions are rewritten to mention the normalized coordinate system
+to expose and accept a 0-1000 coordinate grid. Translation happens at the
+canonical tool-registry boundary shared by MCP, CLI, daemon, private worker,
+replay, and direct SDK execution. Window-local actions use the most recent
+snapshot dimensions; screen-space actions use the logical screen dimensions.
+Missing or stale coordinate bases fail closed instead of being guessed.
 
-## Uninstall
+Browser CSS coordinates are deliberately not normalized. In normalized mode,
+use a fresh browser element reference for `browser_click` and
+`browser_pointer`; raw CSS coordinates are rejected.
 
-### macOS / Linux
+## Model-visible payload filtering
+
+Set `MCP_MODEL_PAYLOAD_FILTER=1` to filter affected Qwen-facing textual MCP
+payloads. The filter covers both text and structured content and leaves binary
+image/media payloads opaque. It is off by default and does not change the
+direct SDK contract.
+
+## Telemetry boundary
+
+Telemetry is disabled by default in the Qwen distribution. It can be enabled
+explicitly with `qwen-cua-driver telemetry enable` or the documented
+`CUA_DRIVER_RS_TELEMETRY_ENABLED=1` environment override. Explicit opt-in sends
+the upstream content-free event schema to Cua's PostHog endpoint; no Qwen
+telemetry service or proxy is involved.
+
+Use `qwen-cua-driver telemetry status` to inspect the effective decision and
+`qwen-cua-driver telemetry disable` to turn it off. A normal uninstall
+preserves the preference and pseudonymous installation identifier; use
+`--purge` on Unix or `CUA_DRIVER_RS_UNINSTALL_PURGE=1` on Windows to remove
+them.
+
+## macOS identity and permissions
+
+macOS attributes Accessibility and Screen Recording grants to the responsible
+app identity. Install and grant permissions to `QwenCuaDriver.app`. The
+installed CLI can proxy through that app-owned daemon. `qwen-cua-driver mcp
+--direct` deliberately uses the spawning host's TCC attribution and is not a
+substitute for a certified embedding host.
+
+Do not grant permissions to an arbitrary loose binary path in production.
+Signed and notarized release artifacts are produced only by the Qwen-owned
+release workflow.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `rust/` | Cargo workspace for the CLI, daemon, SDK, platform crates, and tests |
+| `python/` | Python SDK and bundled-runtime wrapper |
+| `typescript/` | TypeScript SDK and native runtime loader |
+| `contract/` | Generated portable contract and fixtures |
+| `tests/fixtures/` | Cross-platform GUI harness applications |
+| `scripts/` | Release/local install, uninstall, generation, and sync helpers |
+| `docs/` | Package-local architecture and behavior notes |
+
+Start with [`rust/README.md`](rust/README.md),
+[`docs/test-matrix.md`](docs/test-matrix.md), and
+[`tests/fixtures/README.md`](tests/fixtures/README.md) when changing runtime
+behavior or test coverage.
+
+## Development
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.sh)"
+cd packages/cua-driver/rust
+cargo fmt --all -- --check
+cargo check -p cua-driver -p cua-driver-core -p cua-driver-sdk
+cargo test -p cua-driver-core
 ```
 
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.ps1 | iex
-```
-
-## Platform support
-
-| Platform | Status | Notes |
-|----------|--------|-------|
-| macOS (Apple Silicon) | Stable | Full AX tree + screenshot + input |
-| macOS (Intel) | Stable | Same as above |
-| Windows x86_64 | Stable | UIA + screenshot + input |
-| Windows ARM64 | Stable | Same as x86_64 |
-| Linux x86_64 | Pre-release | X11 + AT-SPI; Wayland partial |
-| Linux ARM64 | Pre-release | Same limitations as x86_64 |
-
-## Documentation
-
-- [Vendored patches](./.vendored-patches.md)
-- [Relative-coordinate design](./docs/relative-coordinates-design.md)
-- [Upstream docs](https://github.com/trycua/cua/tree/main/libs/cua-driver/rust)
+Generated contract and language bindings must be checked with the package-local
+scripts before release. Signed/notarized macOS, Windows UIAccess, Linux X11 and
+Wayland, and real MCP/model verification remain platform release gates.

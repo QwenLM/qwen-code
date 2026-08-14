@@ -6,10 +6,12 @@
 
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
+import {
+  EXCLUDED_TOOLS_FOR_SUBAGENTS,
+  extractParentToolNames,
+} from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -34,21 +36,30 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   FORK_PLACEHOLDER_RESULT,
+  buildForkExecutionAllowlist,
   buildForkedMessages,
   buildChildMessage,
   buildPinnedWorktreeNotice,
   buildWorktreeNotice,
   normalizeForkTurns,
+  registerForkDisplayImageForCache,
+  resolveForkExecutionAllowedTools,
   runInForkContext,
   selectForkHistory,
+  validateForkToolList,
   type ForkTurns,
 } from './fork-subagent.js';
+import {
+  loadForkProfile,
+  validateForkProfileName,
+  type ForkProfile,
+} from './fork-profile.js';
 import {
   generateAgentWorktreeSlug,
   GitWorktreeService,
@@ -106,7 +117,7 @@ import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
-  getAgentJsonlPath,
+  buildAgentTranscriptAttach,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
   patchAgentMeta,
@@ -117,23 +128,8 @@ import type {
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
-import { getGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
-
-// Memoize git branch per cwd for the agent-launch path. `getGitBranch`
-// shells out to `git rev-parse` synchronously; caching avoids the per-launch
-// execSync on a path that runs every time a subagent (foreground or
-// background) starts. Branches don't change within a process under normal
-// use; the transcript annotation is best-effort audit metadata, so a stale
-// value after a user `git checkout` mid-session is acceptable.
-const gitBranchCache = new Map<string, string | undefined>();
-function getCachedGitBranch(cwd: string): string | undefined {
-  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
-  const branch = getGitBranch(cwd);
-  gitBranchCache.set(cwd, branch);
-  return branch;
-}
 
 function persistBackgroundCancellation(
   metaPath: string,
@@ -207,17 +203,30 @@ function createLocalExternalInputQueue(): {
 export interface AgentParams {
   description: string;
   prompt: string;
+  /** Todo ID this top-level execution implements, when a visible plan exists. */
+  todo_id?: string;
   subagent_type?: string;
+  /** User-defined model grade for this subagent invocation. */
+  model?: string;
   /**
    * Parent conversation turns inherited by a fork. Omitted or `all` inherits
    * everything; a positive integer string inherits that many recent user turns.
    */
   fork_turns?: ForkTurns;
+  /**
+   * Tool names a fork may execute. The fork's current model-visible
+   * declarations remain unchanged so the prompt-cache prefix is preserved.
+   */
+  fork_tools?: string[];
+  /** Project-level named execution profile for a fork. */
+  fork_profile?: string;
   run_in_background?: boolean;
   /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
   name?: string;
   /** Start a named teammate in plan mode and require leader approval. */
   plan_mode_required?: boolean;
+  /** Restrict a named teammate to read-only inspection and coordination tools. */
+  read_only?: boolean;
   /**
    * When set to `'worktree'`, spins up a temporary git worktree under
    * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
@@ -238,27 +247,36 @@ export interface AgentParams {
    * search tools resolve inside the worktree rather than the parent tree.
    * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
    * reach outside, same as `isolation:'worktree'`.) Must resolve to a
-   * worktree registered against this repository, and must live inside it —
-   * pinning rebinds the child's workspace boundary. If `isolation` is also
+   * worktree registered against this repository. Pinning rebinds the child's
+   * workspace boundary. If `isolation` is also
    * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
 }
 
 const debugLogger = createDebugLogger('AGENT');
+const resolvedForkProfiles = new WeakMap<AgentParams, ForkProfile>();
+const FORK_PROFILE_SAFE_MODE_ERROR =
+  'Parameter "fork_profile" is unavailable in safe mode because project profiles are local customizations.';
+const FORK_PROFILE_BARE_MODE_ERROR =
+  'Parameter "fork_profile" is unavailable in bare mode because project profiles are local customizations.';
+
+function getForkProfileModeError(config: Config): string | undefined {
+  if (config.getBareMode()) return FORK_PROFILE_BARE_MODE_ERROR;
+  if (config.isSafeMode()) return FORK_PROFILE_SAFE_MODE_ERROR;
+  return undefined;
+}
 
 /**
  * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
- * caller-owned git worktree that a sub-agent should be pinned to (e.g. the
- * PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
+ * caller-owned git worktree that a sub-agent or teammate should be pinned to
+ * (e.g. the PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
  * `isolation:'worktree'`, the harness neither creates nor tears down this
  * directory — it only rebinds the child Config's cwd surfaces to it.
  *
- * Two checks stop a bad path from aiming the sub-agent somewhere it should not
- * be:
+ * Git's worktree registry stops a bad path from aiming the sub-agent somewhere
+ * it should not be:
  *
- * - It must resolve INSIDE the repository (canonical comparison), because
- *   pinning rebinds the child's `WorkspaceContext` wholesale.
  * - It must be a REGISTERED linked worktree of this repository, enforced by
  *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
  *   point back at it, and it must not be the primary working tree. That
@@ -307,25 +325,6 @@ async function resolveExternalWorktreeDir(
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
 
-  // Containment. A registered worktree may live anywhere on disk, but pinning
-  // rebinds the child's WorkspaceContext wholesale, so a model-supplied path
-  // must not silently move the file tools' boundary outside the repository.
-  // (`isolation: 'worktree'` has this property implicitly — it always
-  // provisions under `<projectRoot>/.qwen/worktrees/`.) Compare canonical
-  // paths so a symlink cannot straddle the boundary.
-  const realRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
-  const realResolved = await fs
-    .realpath(resolvedPath)
-    .catch(() => resolvedPath);
-  const relToRepo = path.relative(realRepoRoot, realResolved);
-  if (relToRepo.startsWith('..') || path.isAbsolute(relToRepo)) {
-    return {
-      error:
-        `working_dir "${resolvedPath}" resolves outside this repository ` +
-        `(${realRepoRoot}). Pass a worktree that lives inside the repository.`,
-    };
-  }
-
   // The single authoritative gate: the path must be a REGISTERED linked
   // worktree of this repository — git's own registry entry for it points back
   // at exactly this path, and it is not the primary working tree. That one
@@ -373,6 +372,14 @@ const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
     'When true, the named teammate starts in plan mode and must call ' +
     'exit_plan_mode to request leader approval before executing. Only valid ' +
     'with a named teammate in an active team.',
+};
+
+const TEAM_AGENT_READ_ONLY_PROPERTY = {
+  type: 'boolean',
+  description:
+    'When true, the named teammate can only inspect the checkout and use ' +
+    'team coordination tools. Shell, file writes, memory, schedules, and ' +
+    'nested agents are blocked by an execution allowlist.',
 };
 
 /**
@@ -665,6 +672,12 @@ export async function createApprovalModeOverride(
   // These own properties intentionally mirror Config's TS-private field names.
   // Config prototype methods read/write them at runtime on this override object.
   override.approvalMode = mode;
+  override.manualPlanExitNoticeEventState = {
+    ...(override.manualPlanExitNoticeEventState ?? {
+      version: 0,
+      kind: 'clear',
+    }),
+  };
   override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =
     mode === ApprovalMode.PLAN
@@ -768,6 +781,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           description: 'The task for the agent to perform',
         },
+        todo_id: {
+          type: 'string',
+          maxLength: 500,
+          description:
+            'ID of the todo this top-level agent execution implements. Use an ID from the current todo list when one exists.',
+        },
         subagent_type: {
           type: 'string',
           description:
@@ -787,16 +806,33 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             'Only valid with subagent_type "fork". Omit it or use "all" to inherit the full parent conversation; use a positive integer string such as "3" to inherit the most recent three real user turns. Tool responses and pure system reminders do not count as turns.',
         },
+        fork_tools: {
+          type: 'array',
+          items: {
+            type: 'string',
+            minLength: 1,
+          },
+          description:
+            'Only valid with subagent_type "fork". Exact tool names and MCP server patterns this fork may execute. Entries cannot have surrounding whitespace; wildcard entries must be "mcp__*" or a trailing MCP tool-prefix pattern such as "mcp__github__read_*". The model-visible tool declarations remain unchanged for prompt-cache sharing, while the task prompt tells the fork about the restriction. Forks can never execute ask_user_question; omit fork_tools to allow every other inherited tool, or use an empty array to reject every tool call.',
+        },
+        fork_profile: {
+          type: 'string',
+          minLength: 2,
+          maxLength: 50,
+          description:
+            'Only valid with subagent_type "fork". Loads a project profile from .qwen/fork-profiles/<name>.md and applies its tools and optional promptHint. Cannot be combined with fork_tools.',
+        },
         run_in_background: {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Caller-owned working_dir launches default to foreground and cannot run in the background.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates may run in the background, but must be shut down before their caller-owned worktree is removed.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
               name: TEAM_AGENT_NAME_PROPERTY,
               plan_mode_required: TEAM_AGENT_PLAN_REQUIRED_PROPERTY,
+              read_only: TEAM_AGENT_READ_ONLY_PROPERTY,
             }
           : {}),
         isolation: {
@@ -808,7 +844,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. If both working_dir and isolation are provided, isolation is ignored and the caller-owned worktree is reused.",
+            "Pin a sub-agent or named teammate to an EXISTING, caller-owned git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up by Agent. Relative file, shell, and search operations resolve inside it. This is a cwd pin, not a filesystem sandbox: explicit absolute paths can still reach outside. The path must be a registered linked worktree of this repository. If both working_dir and isolation are provided, isolation is ignored.",
         },
       },
       required: ['description', 'prompt'],
@@ -878,7 +914,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
     const teamGuidance = this.config.isAgentTeamEnabled()
-      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -886,7 +922,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns.
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. Set \`fork_tools\` to restrict which of the still-visible parent tools the fork may execute, or \`fork_profile\` to load the same restriction from a project profile.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -898,6 +934,7 @@ ${teamGuidance}
 
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
+- When a user-visible todo plan exists, set \`todo_id\` to the ID of the plan node this top-level agent execution implements. Create the todo before launching the agent when practical. Omit \`todo_id\` for work that is not represented by the current plan.
 - Delegate only concrete, bounded tasks that can run independently.
 - Keep immediate critical-path work local when your next action depends on it.
 - Do not duplicate work between the parent and subagents.
@@ -906,12 +943,12 @@ Usage notes:
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.LIST_AGENTS} to inspect the current roster, then call ${ToolNames.SEND_MESSAGE} with its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`; omit it for the full conversation or use a positive integer string such as \`"3"\` for a bounded recent window.
+- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`, \`fork_tools\`, and \`fork_profile\`; omit \`fork_turns\` for the full conversation and omit both restriction parameters to allow every inherited tool except \`${ToolNames.ASK_USER_QUESTION}\`. Regular subagents do not receive that tool either.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches default to foreground and cannot run in the background; named teammates may use one, but must be shut down before it is removed.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ## When to fork
 
@@ -973,8 +1010,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // Update the parameter schema by modifying the existing object
     const schema = this.parameterSchema as {
       properties?: {
+        model?: {
+          type: string;
+          enum: string[];
+          description: string;
+        };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
+        read_only?: typeof TEAM_AGENT_READ_ONLY_PROPERTY;
       };
     };
     if (schema.properties) {
@@ -982,9 +1025,25 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
         schema.properties.plan_mode_required =
           TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
+        schema.properties.read_only = TEAM_AGENT_READ_ONLY_PROPERTY;
       } else {
         delete schema.properties.name;
         delete schema.properties.plan_mode_required;
+        delete schema.properties.read_only;
+      }
+
+      const availableGrades = [
+        ...this.subagentManager.getAvailableModelGrades().keys(),
+      ];
+      if (availableGrades.length > 0) {
+        schema.properties.model = {
+          type: 'string',
+          enum: availableGrades,
+          description:
+            'User-defined model grade for this subagent. Custom agents with an explicit model keep their configured model. Omit it to use the agent default.',
+        };
+      } else {
+        delete schema.properties.model;
       }
     }
   }
@@ -1005,6 +1064,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       params.prompt.trim() === ''
     ) {
       return 'Parameter "prompt" must be a non-empty string.';
+    }
+
+    if (
+      params.todo_id !== undefined &&
+      (typeof params.todo_id !== 'string' ||
+        params.todo_id.trim() === '' ||
+        params.todo_id.length > 500)
+    ) {
+      return 'Parameter "todo_id" must be a non-empty string of at most 500 characters.';
     }
 
     if (params.subagent_type !== undefined) {
@@ -1033,6 +1101,30 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         }
       }
     }
+
+    if (params.model !== undefined) {
+      if (typeof params.model !== 'string' || params.model.trim() === '') {
+        return 'Parameter "model" must be a non-empty model grade when set.';
+      }
+      if (params.subagent_type?.toLowerCase() === FORK_SUBAGENT_TYPE) {
+        return 'Parameter "model" cannot be used with subagent_type "fork".';
+      }
+      if (
+        params.name &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
+        return 'Parameter "model" is not supported for a named teammate.';
+      }
+      const availableGrades = this.subagentManager.getAvailableModelGrades();
+      if (!availableGrades.has(params.model)) {
+        return `Unknown model grade "${params.model}". Available: ${[
+          ...availableGrades.keys(),
+        ].join(', ')}.`;
+      }
+    }
+
     // Some models emit an empty placeholder for the unused optional field.
     // With isolation selected, normalize it away before downstream routing.
     if (
@@ -1060,6 +1152,37 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
+    if (params.fork_tools !== undefined) {
+      if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
+        return 'Parameter "fork_tools" can only be used with subagent_type "fork".';
+      }
+      if (params.name !== undefined) {
+        return 'Parameter "fork_tools" cannot be used when spawning a named teammate.';
+      }
+      const toolsError = validateForkToolList(params.fork_tools);
+      if (toolsError) {
+        return `Parameter "fork_tools" ${toolsError}.`;
+      }
+    }
+
+    if (params.fork_profile !== undefined) {
+      if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
+        return 'Parameter "fork_profile" can only be used with subagent_type "fork".';
+      }
+      if (params.name !== undefined) {
+        return 'Parameter "fork_profile" cannot be used when spawning a named teammate.';
+      }
+      if (params.fork_tools !== undefined) {
+        return 'Parameters "fork_profile" and "fork_tools" cannot be used together.';
+      }
+      const profileNameError = validateForkProfileName(params.fork_profile);
+      if (profileNameError) {
+        return `Parameter "fork_profile" ${profileNameError}.`;
+      }
+      const modeError = getForkProfileModeError(this.config);
+      if (modeError) return modeError;
+    }
+
     if (params.isolation !== undefined) {
       if (params.isolation !== 'worktree') {
         return 'Parameter "isolation" must be "worktree" when set.';
@@ -1073,6 +1196,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
       ) {
         return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
+      }
+      if (
+        params.name &&
+        params.working_dir === undefined &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
+        return 'Parameter "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".';
       }
     }
 
@@ -1091,12 +1223,9 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "working_dir" must be a non-empty string when set.';
       }
-      // A caller-owned worktree has no lifecycle coupling to a background
-      // agent: nothing stops the caller from removing the worktree while a
-      // detached agent is still running in it (ENOENT on its own cwd). The
-      // isolation:'worktree' path is safe in background because the tool owns
-      // and reaps the worktree; working_dir does not.
-      if (params.run_in_background === true) {
+      // Unnamed background agents have no lifecycle coupling to a
+      // caller-owned worktree. Named teammates are team-managed instead.
+      if (params.run_in_background === true && params.name === undefined) {
         return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
       // `working_dir` is the more specific workspace instruction. Some
@@ -1134,6 +1263,27 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
+    if (params.read_only !== undefined) {
+      if (typeof params.read_only !== 'boolean') {
+        return 'Parameter "read_only" must be a boolean when set.';
+      }
+      if (params.read_only) {
+        if (
+          !params.name ||
+          typeof params.name !== 'string' ||
+          params.name.trim() === ''
+        ) {
+          return 'Parameter "read_only" requires a named teammate via "name".';
+        }
+        if (!this.config.getTeamManager()) {
+          return 'Parameter "read_only" requires an active team.';
+        }
+        if (params.plan_mode_required === true) {
+          return 'Parameters "read_only" and "plan_mode_required" cannot be used together.';
+        }
+      }
+    }
+
     return null;
   }
 
@@ -1141,10 +1291,32 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     const invocationParams = params.working_dir
       ? { ...params, isolation: undefined }
       : params;
+    // Tool invocations are built before AUTO-mode classification. Resolve the
+    // profile here so classification and execution consume one launch
+    // snapshot rather than rereading a mutable project file at two phases.
+    // This read is synchronous because the Tool.build() contract is
+    // synchronous.
+    if (invocationParams.fork_profile !== undefined) {
+      const modeError = getForkProfileModeError(this.config);
+      if (modeError) throw new Error(modeError);
+    }
+    const forkProfile =
+      invocationParams.fork_profile !== undefined
+        ? loadForkProfile(
+            this.config.getProjectRoot(),
+            invocationParams.fork_profile,
+          )
+        : undefined;
+    if (forkProfile) {
+      resolvedForkProfiles.set(invocationParams, forkProfile);
+    } else {
+      resolvedForkProfiles.delete(invocationParams);
+    }
     return new AgentToolInvocation(
       this.config,
       this.subagentManager,
       invocationParams,
+      forkProfile,
     );
   }
 
@@ -1154,9 +1326,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // the sub-agent itself received the full text — same shape of attack
     // surface as truncating a shell command. Shell tools forward the full
     // command for the same reason.
+    const forkProfile = resolvedForkProfiles.get(params);
     return {
       subagent_type: params.subagent_type,
       fork_turns: params.fork_turns,
+      fork_tools: params.fork_tools,
+      fork_profile: params.fork_profile,
+      fork_profile_tools: forkProfile?.tools,
+      fork_profile_prompt_hint: forkProfile?.promptHint,
       // Include working_dir: it rebinds the child's cwd to another registered
       // worktree, which the AUTO-mode classifier must be able to see — a
       // launch that looks benign from subagent_type + prompt alone could be
@@ -1254,6 +1431,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     private readonly config: Config,
     private readonly subagentManager: SubagentManager,
     params: AgentParams,
+    private readonly forkProfile?: ForkProfile,
   ) {
     super(params);
   }
@@ -1527,11 +1705,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     subagent: AgentHeadless;
     initialMessages?: Content[];
     taskPrompt: string;
-    promptConfig: PromptConfig;
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
+    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    const parentToolNames = generationConfig?.systemInstruction
+      ? extractParentToolNames(generationConfig)
+      : [];
+    registerForkDisplayImageForCache(agentConfig, parentToolNames);
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
+    const requestedTools = this.forkProfile?.tools ?? this.params.fork_tools;
+    const requestedExecutionAllowedTools =
+      requestedTools === undefined
+        ? undefined
+        : resolveForkExecutionAllowedTools(
+            parentToolNames,
+            buildForkExecutionAllowlist(requestedTools, []),
+          );
+    const profilePromptHint = this.forkProfile?.promptHint;
     let rawHistory: Content[] = [];
     if (geminiClient) {
       // The `all` and numeric paths curate history differently on purpose.
@@ -1585,6 +1776,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const forkedMessages = buildForkedMessages(
           this.params.prompt,
           lastMessage,
+          requestedExecutionAllowedTools,
+          profilePromptHint,
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -1614,7 +1807,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     // Default: directive with fork boilerplate as task_prompt
     if (!taskPrompt) {
-      taskPrompt = buildChildMessage(this.params.prompt);
+      taskPrompt = buildChildMessage(
+        this.params.prompt,
+        requestedExecutionAllowedTools,
+        profilePromptHint,
+      );
     }
 
     // Read the parent's live generationConfig (systemInstruction + tool
@@ -1625,27 +1822,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let promptConfig: PromptConfig;
     let toolConfig: ToolConfig;
 
-    const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
-      // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // (including `agent` and cron tools) so the fork's system prompt,
-      // tools, and history exactly match the parent's and share its
-      // DashScope cache prefix. A fork is a context-sharing extension of
-      // the parent, not an isolated subagent, so the general subagent
-      // exclusion list does not apply. Recursive forks are blocked by the
-      // ALS-based `isInForkExecution()` guard.
-      // However, we still exclude tools that must never be available to
-      // any subagent (agent, cron tools).
-      const parentToolDecls: FunctionDeclaration[] =
-        (
-          generationConfig.tools as Array<{
-            functionDeclarations?: FunctionDeclaration[];
-          }>
-        )
-          ?.flatMap((t) => t.functionDeclarations ?? [])
-          .filter(
-            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
-          ) ?? [];
+      // Keep the parent's current allowlist, but pass names rather than inline
+      // schemas so AgentCore resolves every declaration through the fork's
+      // current ToolRegistry. This preserves the parent's tool surface and
+      // cache prefix when schemas are unchanged without letting a persisted or
+      // stale declaration bypass the live registry.
+      const declaredExecutionToolNames =
+        parentToolNames.length > 0
+          ? parentToolNames
+          : agentConfig
+              .getToolRegistry()
+              .getAllToolNames()
+              .filter(
+                (toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName),
+              );
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -1654,15 +1845,31 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         initialMessages,
       };
       toolConfig = {
-        tools:
-          parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),
+        tools: parentToolNames.length > 0 ? parentToolNames : ['*'],
+        executionAllowedTools: resolveForkExecutionAllowedTools(
+          parentToolNames,
+          buildForkExecutionAllowlist(
+            requestedTools,
+            declaredExecutionToolNames,
+          ),
+        ),
       };
     } else {
+      const registeredToolNames = agentConfig
+        .getToolRegistry()
+        .getAllToolNames()
+        .filter((toolName) => !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName));
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
       };
-      toolConfig = { tools: ['*'] };
+      toolConfig = {
+        tools: ['*'],
+        executionAllowedTools: resolveForkExecutionAllowedTools(
+          parentToolNames,
+          buildForkExecutionAllowlist(requestedTools, registeredToolNames),
+        ),
+      };
     }
 
     const subagent = await AgentHeadless.create(
@@ -1675,7 +1882,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
+    return { subagent, initialMessages, taskPrompt, toolConfig };
   }
 
   // Runs the SubagentStop hook after execution. On a blocking decision, feeds
@@ -2098,6 +2305,30 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
     }
 
+    if (this.params.read_only === true) {
+      if (
+        !this.params.name ||
+        this.params.name.trim() === '' ||
+        isSubagentLikeExecutionContext()
+      ) {
+        const msg =
+          'read_only can only be used when spawning a named teammate from the team leader.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      if (!this.config.getTeamManager()) {
+        const msg = 'read_only requires an active team. Use TeamCreate first.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     // ─── Team routing ────────────────────────────────────
     // A name only means "spawn a teammate" while a team is active. Older
     // prompts may still pass it without a team; treat that as a normal
@@ -2113,16 +2344,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         debugLogger.debug(
           `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
         );
-      } else if (this.params.working_dir !== undefined) {
-        // A teammate spawns via TeamManager with cwd = getCwd() and returns
-        // before the working_dir rebind below is reached, so the pin would be
-        // silently ignored and the teammate would run in the parent working
-        // tree. Refuse rather than give a false sense of isolation. (Same
-        // lifecycle rationale as run_in_background: a persistent teammate has
-        // no coupling to a caller-owned worktree.)
+      } else if (this.params.model !== undefined) {
         return this.buildSpawnBlockedResult(
-          'Error: "working_dir" is not supported for a named teammate — a teammate runs in the parent working tree, so the worktree pin would be silently ignored. Drop "name" to pin a one-shot sub-agent to the worktree, or drop "working_dir".',
-          'working_dir is incompatible with a named teammate',
+          'Error: "model" is not supported for a named teammate.',
+          'model is incompatible with a named teammate',
+        );
+      } else if (this.params.isolation !== undefined) {
+        return this.buildSpawnBlockedResult(
+          'Error: "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".',
+          'isolation is incompatible with a named teammate',
         );
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);
@@ -2419,6 +2649,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           };
         }
         subagentConfig = loadedConfig;
+      }
+      const model = this.subagentManager.resolveModelGrade(
+        this.params.model,
+        subagentConfig,
+      );
+      if (model !== undefined && model !== subagentConfig.model) {
+        subagentConfig = { ...subagentConfig, model };
       }
       // Initialize the current display state
       this.currentDisplay = {
@@ -2815,7 +3052,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let subagent: AgentHeadless;
       let taskPrompt: string;
       let initialMessages: Content[] | undefined;
-      let promptConfig: PromptConfig | undefined;
       let toolConfig: ToolConfig | undefined;
 
       // Per-spawn cleanup the subagent manager returns. The caller MUST
@@ -2834,7 +3070,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
         initialMessages = fork.initialMessages;
-        promptConfig = fork.promptConfig;
         toolConfig = fork.toolConfig;
       } else {
         const result = await this.subagentManager.createAgentHeadless(
@@ -2935,7 +3170,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const bgSubagent = subagent;
         const bgInitialMessages = initialMessages;
         const bgTaskPrompt = taskPrompt;
-        const bgPromptConfig = promptConfig;
         const bgToolConfig = toolConfig;
         const bgSubagentDispose = subagentDispose;
 
@@ -2943,17 +3177,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const projectDir = this.config.storage.getProjectDir();
         const sessionId = this.config.getSessionId();
-        const jsonlPath = getAgentJsonlPath(
-          projectDir,
-          sessionId,
-          hookOpts.agentId,
-        );
+        const { jsonlPath, options: transcriptAttachOptions } =
+          buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            // Seed the JSONL with the launching prompt so the transcript is
+            // self-describing — readers don't need to consult .meta.json to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
+          });
         const metaPath = getAgentMetaPath(
           projectDir,
           sessionId,
           hookOpts.agentId,
         );
-        const projectRoot = this.config.getProjectRoot();
         try {
           // Register before writing the meta sidecar — see the matching
           // foreground call below for the full rationale. Keeping the
@@ -3045,26 +3284,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
           bgEventEmitter,
           jsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId,
-            cwd: projectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(projectRoot),
-            // Seed the JSONL with the launching prompt so the transcript is
-            // self-describing — readers don't need to consult .meta.json to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-            bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            bootstrapSystemInstruction: isFork
-              ? (bgPromptConfig?.renderedSystemPrompt ??
-                bgPromptConfig?.systemPrompt)
-              : undefined,
-            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
-            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
-          },
+          transcriptAttachOptions,
         );
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
@@ -3082,6 +3302,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork &&
+          (this.params.fork_tools !== undefined ||
+            this.forkProfile !== undefined) &&
+          bgToolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...bgToolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
@@ -3745,17 +3973,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const registry = this.config.getBackgroundTaskRegistry();
       const fgProjectDir = this.config.storage.getProjectDir();
       const fgSessionId = this.config.getSessionId();
-      const fgJsonlPath = getAgentJsonlPath(
-        fgProjectDir,
-        fgSessionId,
-        hookOpts.agentId,
-      );
+      const { jsonlPath: fgJsonlPath, options: fgTranscriptAttachOptions } =
+        buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+          agentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          // Seed the JSONL with the launching prompt so the transcript
+          // is self-describing — readers don't need the meta sidecar to
+          // know what the agent was asked to do.
+          initialUserPrompt: this.params.prompt,
+        });
       const fgMetaPath = getAgentMetaPath(
         fgProjectDir,
         fgSessionId,
         hookOpts.agentId,
       );
-      const fgProjectRoot = this.config.getProjectRoot();
       // Declared `let` so the `finally` block can release the writer's
       // listeners + fd even if the attach itself throws partway through.
       // The attach happens inside the `try` below — keeping it outside
@@ -3822,19 +4053,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           this.eventEmitter,
           fgJsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId: fgSessionId,
-            cwd: fgProjectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(fgProjectRoot),
-            // Seed the JSONL with the launching prompt so the transcript
-            // is self-describing — readers don't need the meta sidecar to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-          },
+          fgTranscriptAttachOptions,
         ));
         // Register before writing the meta sidecar: if register() throws
         // (e.g. duplicate agent id), we leave no orphaned 'running' meta
@@ -3872,6 +4091,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
+          ...(isFork &&
+          (this.params.fork_tools !== undefined ||
+            this.forkProfile !== undefined) &&
+          toolConfig?.executionAllowedTools !== undefined
+            ? {
+                executionAllowedTools: [...toolConfig.executionAllowedTools],
+              }
+            : {}),
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
@@ -4092,18 +4319,44 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     });
 
     try {
+      let cwd = this.config.getCwd();
+      if (this.params.working_dir) {
+        const resolved = await resolveExternalWorktreeDir(
+          this.config,
+          this.params.working_dir,
+        );
+        if ('error' in resolved) {
+          return this.buildSpawnBlockedResult(
+            `Error: ${resolved.error}`,
+            'Invalid teammate working_dir',
+          );
+        }
+        cwd = resolved.path;
+      }
+
+      if (signal?.aborted) {
+        return {
+          llmContent: `Teammate spawn aborted before "${name}" was registered.`,
+          returnDisplay: `Teammate spawn aborted.`,
+          error: { message: 'Aborted.' },
+        };
+      }
+
       await teamManager.spawnTeammate({
         name,
         prompt: this.params.prompt,
         agentType: this.params.subagent_type,
-        cwd: this.config.getCwd(),
+        cwd,
         planModeRequired: this.params.plan_mode_required === true,
+        readOnly: this.params.read_only === true,
       });
 
       // Return immediately — teammate runs concurrently.
       const msg =
         `Teammate "${name}" is now running concurrently.` +
         ` Task: ${this.params.description}` +
+        (this.params.read_only ? '\nMode: enforced read-only.' : '') +
+        (this.params.working_dir ? `\nWorktree: ${cwd}` : '') +
         '\n\nYou will receive their messages as they' +
         ' arrive. Do NOT call task_list to check on' +
         ' them — teammates report results via' +

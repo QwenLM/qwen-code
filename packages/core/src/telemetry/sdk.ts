@@ -24,9 +24,10 @@ import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import { initializeMetrics } from './metrics.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { createSessionRootContext } from './tracer.js';
-import { setSessionContext } from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
-import { endInteractionSpan } from './session-tracing.js';
+import { endAllInteractionSpans } from './session-tracing.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
   const debugLogger = createDebugLogger('OTEL');
@@ -55,6 +56,39 @@ let telemetryInitPromise: Promise<void> | undefined;
 let telemetryShutdownPromise: Promise<void> | undefined;
 let activeMetricReader: PeriodicExportingMetricReader | undefined;
 
+const OTEL_EXPORTER_ENV_VARS = [
+  'OTEL_TRACES_EXPORTER',
+  'OTEL_LOGS_EXPORTER',
+  'OTEL_METRICS_EXPORTER',
+] as const;
+
+function startSdkWithExplicitExporters(currentSdk: NodeSDK): void {
+  const previousValues = new Map<
+    (typeof OTEL_EXPORTER_ENV_VARS)[number],
+    string | undefined
+  >();
+  for (const name of OTEL_EXPORTER_ENV_VARS) {
+    previousValues.set(name, process.env[name]);
+    delete process.env[name];
+  }
+
+  try {
+    // qwen-code supplies explicit exporters for every enabled signal. Prevent
+    // sdk-node's OTEL_*_EXPORTER auto-configuration from constructing a second
+    // exporter (the bundled CLI intentionally omits those packages).
+    currentSdk.start();
+  } finally {
+    for (const name of OTEL_EXPORTER_ENV_VARS) {
+      const previousValue = previousValues.get(name);
+      if (previousValue === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = previousValue;
+      }
+    }
+  }
+}
+
 export function isTelemetrySdkInitialized(): boolean {
   return telemetryInitialized;
 }
@@ -82,12 +116,17 @@ export function initializeTelemetry(
       const started = await startTelemetrySdk(config);
       if (!started) return;
       sdk = started.sdk;
-      sdk.start();
+      startSdkWithExplicitExporters(sdk);
       debugLogger.debug('OpenTelemetry SDK started successfully.');
       telemetryInitialized = true;
       activeMetricReader = started.metricReader;
       const sessionId = config.getSessionId();
       setSessionContext(createSessionRootContext(sessionId), sessionId);
+      // Unconditional catch-up: in every init mode `logStartSession` can run
+      // before the SDK settles and get dropped by its initialization gate,
+      // while shutdown still emits `session.end`. The session-events guard
+      // dedupes the race-won case.
+      emitSessionStart(sessionId);
       setShellTracePropagation(
         config.getOutboundCorrelationPropagateTraceContext(),
       );
@@ -139,7 +178,11 @@ export function shutdownTelemetry(): Promise<void> {
       telemetryShutdownPromise = undefined;
       return;
     }
-    endInteractionSpan('cancelled');
+    endAllInteractionSpans('cancelled');
+    const currentSessionId = getCurrentSessionId();
+    if (currentSessionId) {
+      emitSessionEnd(currentSessionId);
+    }
     const currentSdk = sdk;
     const debugLogger = createDebugLogger('OTEL');
     let timer: ReturnType<typeof setTimeout> | undefined;

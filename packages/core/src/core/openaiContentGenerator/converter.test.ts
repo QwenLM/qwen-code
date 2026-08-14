@@ -544,6 +544,77 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('rejects the recorded production unclosed <thinking> content leak (issue #6666)', () => {
+      // Production capture shape (sanitized): a hybrid-thinking model
+      // skipped the reasoning channel entirely and streamed its thinking as
+      // literal <thinking> text inside content — no reasoning_content on
+      // any chunk, no tool calls, and the tag is never closed before stop.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thi' }),
+        stream,
+      );
+      const body = converter.convertOpenAIChunkToGemini(
+        streamChunk('body', {
+          content:
+            'nking>\nThe user wants to query the compute resources for ' +
+            'project space 10088. Let me check the available APIs.',
+        }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(body.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('holds a long confirmed opening tag until its closing tag arrives', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const text = `<thinking>${'x'.repeat(200)}</thinking>`;
+
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('long-balanced', {
+          content: `<thinking>${'x'.repeat(200)}`,
+        }),
+        stream,
+      );
+      const closing = converter.convertOpenAIChunkToGemini(
+        streamChunk('long-balanced', { content: '</thinking>' }, 'stop'),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(closing.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it('leaks the production <thinking> shape without provider provenance', () => {
+      // Control for the test above: without contentOnlyThinkingTagLeaks the
+      // same stream passes through verbatim — the defense is provider-gated,
+      // so endpoints whose provider does not opt in remain exposed.
+      const stream = withStreamParser();
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'literal',
+          {
+            content:
+              '<thinking>\nThe user wants to query the compute resources.',
+          },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([
+        {
+          text: '<thinking>\nThe user wants to query the compute resources.',
+        },
+      ]);
+    });
+
     it.each([
       ['split literal block', ['<thi', 'nk>literal</think>']],
       ['empty block with a separate finish chunk', ['<think>\n\n</think>', '']],
@@ -551,6 +622,7 @@ describe('OpenAIContentConverter', () => {
         'two split valid blocks',
         ['<think>\n\n', '</think><thi', 'nk>literal</think>'],
       ],
+      ['long empty block', [`<thinking>${' '.repeat(128)}</thinking>`, '']],
     ])('preserves content-only %s', (_name, chunks) => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
@@ -570,24 +642,33 @@ describe('OpenAIContentConverter', () => {
       expect(parts.every((part) => part.thought !== true)).toBe(true);
     });
 
-    it('releases a long undecided prefix before the stream finishes', () => {
+    it('releases a long unconfirmed prefix before the stream finishes', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
-      const text = `<think>${' '.repeat(257)}`;
+      const text = `<think${' '.repeat(257)}`;
 
       const response = converter.convertOpenAIChunkToGemini(
         streamChunk('literal', { content: text }),
         stream,
       );
-      const continuation = converter.convertOpenAIChunkToGemini(
-        streamChunk('continuation', { content: 'literal' }, 'stop'),
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it('rejects an unclosed whitespace-only block at stream finish', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('unclosed', {
+          content: `<thinking>${' '.repeat(128)}`,
+        }),
         stream,
       );
 
-      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
-      expect(continuation.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'literal' },
-      ]);
+      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
     });
 
     it('preserves a leak-shaped literal without provider provenance', () => {
@@ -631,17 +712,38 @@ describe('OpenAIContentConverter', () => {
       expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
     });
 
-    it('fails closed when a suspicious prefix exceeds the buffer limit', () => {
+    it('rejects an unclosed outer block containing a balanced nested block', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'nested-unclosed',
+            {
+              content: '<thinking><thinking>inner</thinking>outer text',
+            },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('fails closed for a long suspicious prefix at stream finish', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const content = '<think></think><think>9<think>' + 'x'.repeat(257);
 
-      expect(() =>
-        converter.convertOpenAIChunkToGemini(
-          streamChunk('long-leak', { content }),
-          stream,
-        ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('long-leak', { content }),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
     });
 
     it.each([
@@ -5079,6 +5181,7 @@ describe('OpenAIContentConverter', () => {
 
     it('should handle a single chunk delta with both reasoning_content and content simultaneously', () => {
       const ctx = withStreamParser();
+      ctx.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
       const part =
         converter.convertOpenAIChunkToGemini(
           {
@@ -5215,7 +5318,10 @@ describe('OpenAIContentConverter', () => {
             },
           ],
         } as unknown as OpenAI.Chat.ChatCompletion,
-        requestContext,
+        {
+          ...requestContext,
+          responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
+        },
       );
 
       expect(response.candidates?.[0]?.content?.parts).toEqual([
@@ -7391,20 +7497,24 @@ describe('modality filtering', () => {
     expect(parts[0].text).toContain('does not support image input');
   });
 
-  it('keeps image when image modality is enabled', () => {
+  it('keeps BMP image data when image modality is enabled', () => {
     const conv = OpenAIContentConverter;
     const request = makeRequest([
       {
-        inlineData: { mimeType: 'image/png', data: 'abc123' },
+        inlineData: { mimeType: 'image/bmp', data: 'abc123' },
       } as unknown as Part,
     ]);
     const messages = conv.convertGeminiRequestToOpenAI(
       request,
       makeRequestContext('gpt-4o', { image: true }),
     );
-    const parts = getUserContentParts(messages);
+    const parts = getUserContentParts(messages) as Array<{
+      type: string;
+      image_url?: { url: string };
+    }>;
     expect(parts).toHaveLength(1);
     expect(parts[0].type).toBe('image_url');
+    expect(parts[0].image_url?.url).toBe('data:image/bmp;base64,abc123');
   });
 
   it('replaces PDF with placeholder when pdf modality is disabled', () => {

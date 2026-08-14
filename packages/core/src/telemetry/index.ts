@@ -32,9 +32,11 @@ export {
 } from './config.js';
 export {
   logStartSession,
+  logSessionEnd,
   logUserPrompt,
   logUserRetry,
   logToolCall,
+  logRepeatedToolFailureGuard,
   logApiRequest,
   logApiError,
   logApiCancel,
@@ -51,6 +53,7 @@ export {
   logExtensionDisable,
   logExtensionUpdateEvent,
   logRipgrepFallback,
+  logRipgrepRuntimeRecovery,
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
@@ -81,6 +84,7 @@ export {
   KittySequenceOverflowEvent,
   ToolOutputTruncatedEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   NextSpeakerCheckEvent,
   AuthEvent,
   SkillLaunchEvent,
@@ -93,6 +97,7 @@ export {
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  RepeatedToolFailureGuardEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type {
@@ -110,6 +115,8 @@ export * from './api-activity-tracker.js';
 export {
   // Core metrics functions
   recordToolCallMetrics,
+  recordToolExecutionMetrics,
+  recordRepeatedToolFailureGuardMetrics,
   recordTokenUsageMetrics,
   recordApiResponseMetrics,
   recordApiErrorMetrics,
@@ -168,6 +175,7 @@ export {
   endSubagentSpan,
   runInSubagentSpanContext,
   getActiveInteractionSpan,
+  recordInteractionActivity,
   truncateSpanError,
 } from './session-tracing.js';
 export type {
@@ -233,6 +241,9 @@ export {
   registerAcpEventLoopLagGauge,
 } from './event-loop-lag-metrics.js';
 export {
+  addAgentInputMessageAttributes,
+  addAgentOutputMessageAttributes,
+  AgentOutputMessageCapture,
   addUserPromptAttributes,
   addSystemPromptAttributes,
   addToolSchemaAttributes,

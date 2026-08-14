@@ -74,6 +74,15 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('identifies UserPromptSubmit hook context as distinct from user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Text inside a `<qwen:user-prompt-submit-context>` tag is model context added by a configured `UserPromptSubmit` hook, not user input.',
+    );
+  });
+
   it.each([
     [
       'interactive',
@@ -167,6 +176,12 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('Keep it short and outcome-oriented');
     expect(prompt).toContain(
       'rather than one item per error, file, command, or minor edit',
+    );
+    expect(prompt).toContain(
+      'When an active Todo plan covers work delegated through top-level Agent calls',
+    );
+    expect(prompt).not.toContain(
+      'For complex work delegated through top-level Agent calls, create the relevant todo first',
     );
     expect(prompt).not.toContain('VERY frequently');
     expect(prompt).not.toContain('EXTREMELY helpful');
@@ -568,6 +583,35 @@ describe('Model-specific tool call formats', () => {
     vi.stubEnv('SANDBOX', undefined);
   });
 
+  it.each([
+    ['generic', 'gpt-4'],
+    ['qwen-coder', 'qwen3-coder-7b'],
+    ['qwen-vl', 'qwen-vl-max'],
+    ['gemma4', 'gemma-4'],
+  ])(
+    'reads the write target before establishing absence in the %s tool-call example',
+    (_style, model) => {
+      vi.mocked(isGitRepository).mockReturnValue(false);
+      const prompt = getCoreSystemPrompt(undefined, model);
+      const exampleStart = prompt.indexOf('user: Write tests for someFile.ts');
+      const exampleEnd = prompt.indexOf('</example>', exampleStart);
+      const example = prompt.slice(exampleStart, exampleEnd);
+      const targetPath = example.indexOf('/path/to/someFile.test.ts');
+      const targetReadCall = example.lastIndexOf('read_file', targetPath);
+      const absenceResult = example.indexOf(
+        'After read_file reports that /path/to/someFile.test.ts does not exist',
+      );
+      const writeCall = example.indexOf('write_file');
+
+      expect(exampleStart).toBeGreaterThanOrEqual(0);
+      expect(exampleEnd).toBeGreaterThan(exampleStart);
+      expect(targetReadCall).toBeGreaterThanOrEqual(0);
+      expect(targetPath).toBeGreaterThan(targetReadCall);
+      expect(absenceResult).toBeGreaterThan(targetPath);
+      expect(writeCall).toBeGreaterThan(absenceResult);
+    },
+  );
+
   it('should use XML format for qwen3-coder model', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const prompt = getCoreSystemPrompt(undefined, 'qwen3-coder-7b');
@@ -792,19 +836,19 @@ describe('getManualPlanExitSystemReminder', () => {
   it('should name the new mode and forbid exit_plan_mode', () => {
     const result = getManualPlanExitSystemReminder('default');
 
-    expect(result).toMatch(/^<system-reminder>[\s\S]*<\/system-reminder>$/);
-    expect(result).toContain('manually switched out of plan mode');
-    expect(result).toContain('current approval mode: default');
-    expect(result).toContain('Do NOT call exit_plan_mode');
-    expect(result).toContain('no longer apply');
+    expect(result).toBe(`<system-reminder>
+The approval mode changed outside the approved exit_plan_mode flow.
+The current approval mode is: default.
+Plan mode is no longer active. This notice supersedes any earlier reminder that Plan mode is active. Do not call exit_plan_mode; no plan approval is pending. Continue under the current mode's permissions and confirmation requirements.
+</system-reminder>`);
   });
 
   it('should render whichever mode the user switched to', () => {
     expect(getManualPlanExitSystemReminder('yolo')).toContain(
-      'current approval mode: yolo',
+      'current approval mode is: yolo',
     );
     expect(getManualPlanExitSystemReminder('auto-edit')).toContain(
-      'current approval mode: auto-edit',
+      'current approval mode is: auto-edit',
     );
   });
 });

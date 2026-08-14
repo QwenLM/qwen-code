@@ -2,7 +2,7 @@
 
 ## Problem
 
-Tool output is currently shortened at several independent layers. Shell output is shortened near 30K characters and marked as truncated, generic tool output is shortened near 2K characters, and a Core scheduler batch can offload output when the aggregate exceeds the configured batch budget. These layers do not share structured state.
+Tool output is currently shortened at several independent layers. By default, Shell output is shortened near 30K characters and marked as truncated; an explicitly configured `truncateToolOutputThreshold` overrides that producer trigger. Generic tool output is shortened near 2K characters, and a Core scheduler batch can offload output when the aggregate exceeds the configured batch budget. These layers do not share structured state.
 
 The scheduler treats an existing truncation marker as proof that no more work is needed. Consequently, several individually shortened Shell results can still exceed the aggregate budget. Headless mode makes the gap larger because it creates one scheduler per tool call and concatenates their responses outside those schedulers. Interactive mode similarly appends duplicate and synthetic responses after scheduler finalization. ACP, agent, and speculative execution have their own aggregation boundaries.
 
@@ -34,7 +34,7 @@ The field is not included in hook serialization, ACP payloads, JSON output, tele
 
 Producer truncation controls the normal model preview and persists complete output once.
 
-- Shell keeps the current 30K trigger but returns an approximately 4K head-and-tail preview so exit information remains visible.
+- Shell uses a 30K trigger by default, allows an explicitly configured `truncateToolOutputThreshold` to override it, and returns an approximately 4K head-and-tail preview so exit information remains visible.
 - MCP keeps its current large-output trigger, retains the full transformed result for user-facing display, and uses an approximately 2K model preview.
 - Generic persistence returns the actual written path for both the primary and fallback writer.
 
@@ -55,7 +55,7 @@ The finalizer recomputes `contentLength` from the returned parts. Infinite or di
 - Core scheduler finalizes before `PostToolBatch` hooks to bound hook input and again after the hook to bound hook output.
 - Interactive mode merges executable, duplicate, and synthetic responses in original ordinal order, then performs the outer finalization before recording and submission.
 - Headless mode collects the whole turn, including duplicate, skipped, cancelled, and executed calls, then finalizes once before recording and submission.
-- ACP collects the complete tool-call turn, finalizes it before transcript recording, and returns the same parts for the next message. Immediate ACP display events remain unchanged.
+- ACP collects the complete tool-call turn, finalizes it before transcript recording, and returns the same parts for the next message. Canonical and model-facing parts remain unchanged, while eligible textual fields in immediate ACP display events may be projected to a fixed JSON UTF-8 byte budget at the transport boundary.
 - Agent runtime and speculative follow-up finalize their aggregate before emitting model-facing results or appending history.
 - The chat send boundary applies a no-I/O safety cap to tool-response fields only. It should normally be a no-op and protects future callers that miss an outer aggregation boundary.
 

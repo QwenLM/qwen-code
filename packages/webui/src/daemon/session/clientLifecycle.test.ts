@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   detachDaemonClient,
+  getPersistedClientId,
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
@@ -80,6 +81,23 @@ describe('persistStableClientId', () => {
     expect(
       window.sessionStorage.getItem('qwen-code-webui-client-id'),
     ).toBeNull();
+  });
+});
+
+describe('getPersistedClientId', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  it('returns the persisted client ID for a session', () => {
+    persistStableClientId('client-a', 'session-a');
+    expect(getPersistedClientId('session-a')).toBe('client-a');
+  });
+
+  it('returns undefined (never generates) when nothing is persisted', () => {
+    // Unlike getStableClientId, a miss must NOT mint a fresh id: callers act on
+    // behalf of a non-current session and a generated id is not attached to it.
+    expect(getPersistedClientId('session-missing')).toBeUndefined();
   });
 });
 

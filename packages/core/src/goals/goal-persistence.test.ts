@@ -207,7 +207,7 @@ describe('recoverGoalFromRecords', () => {
 });
 
 describe('legacy migration', () => {
-  it('creates a fresh active payload at the lifecycle record boundary', () => {
+  it('creates a fresh paused payload at the lifecycle record boundary', () => {
     expect(
       createMigratedGoalState({
         objective: 'ship it',
@@ -225,7 +225,7 @@ describe('legacy migration', () => {
           goalId: 'new-goal',
           revision: 1,
           objective: 'ship it',
-          status: 'active',
+          status: 'paused',
           evidenceCursor: { recordId: 'migration-record' },
           turnCount: 0,
           activeTimeMs: 0,

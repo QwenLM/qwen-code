@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import stripAnsi from 'strip-ansi';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { getPlainTextLength, RenderInline } from './InlineMarkdownRenderer.js';
 import { HYPERLINK_ENV_KEYS } from './osc8.js';
@@ -67,14 +68,42 @@ describe('<RenderInline />', () => {
     expect(output).not.toContain('$x$');
   });
 
-  it('preserves escaped inline math and inline code', () => {
+  it('renders escaped dollars as prose while keeping inline code verbatim', () => {
     const { lastFrame } = renderWithProviders(
-      <RenderInline text={'Literal \\$xy$ and code `$xy$`'} enableInlineMath />,
+      <RenderInline
+        text={'Literal \\$xy$ and code `$xy$ and \\$xy$`'}
+        enableInlineMath
+      />,
     );
 
     expect((lastFrame() ?? '').replace(/\n/g, '')).toContain(
-      'Literal \\$xy$ and code$xy$',
+      'Literal $xy$ and code$xy$ and \\$xy$',
     );
+  });
+
+  it('renders escaped dollars inside and next to inline math', () => {
+    const text = String.raw`$x^2$ is valid math
+it costs $5 and $10
+$5-$10
+literal \$x$
+formula $x + \$5$
+literal then math: \$$x^2$
+math then literal: $x^2\$$`;
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text={text} enableInlineMath />,
+    );
+
+    const output = (lastFrame() ?? '').replace(/\n/g, '');
+    expect(output).toContain('x² is valid math');
+    expect(output).toContain('it costs $5 and $10');
+    expect(output).toContain('$5-$10');
+    expect(output).toContain('literal $x$');
+    expect(output).toContain('x + $5');
+    expect(output).toContain('literal then math:');
+    expect(output).toContain('$x²');
+    expect(output).toContain('math then literal:');
+    expect(output).toContain('x²$');
+    expect(output).not.toContain('\\$');
   });
 
   it('keeps math literal inside multi-backtick code spans', () => {
@@ -100,6 +129,15 @@ describe('<RenderInline />', () => {
     expect(getPlainTextLength('code `$xy$`', true)).toBe('code $xy$'.length);
     expect(getPlainTextLength('code ``a `$xy$` b``', true)).toBe(
       'code a `$xy$` b'.length,
+    );
+    expect(getPlainTextLength(String.raw`literal \$x$`, true)).toBe(
+      'literal $x$'.length,
+    );
+    expect(getPlainTextLength(String.raw`formula $x + \$5$`, true)).toBe(
+      'formula x + $5'.length,
+    );
+    expect(getPlainTextLength(String.raw`even \\$x$`, true)).toBe(
+      'even \\x'.length,
     );
   });
 
@@ -209,6 +247,45 @@ describe('<RenderInline />', () => {
       // OSC 8 target is the URL without the trailing period.
       expect(out).toContain(`\x1b]8;;${url}\x07`);
       expect(out).not.toContain(`\x1b]8;;${url}.\x07`);
+    });
+
+    it('stops the bare-URL hyperlink at glued-on full-width CJK punctuation', () => {
+      enableHyperlinks();
+      const url = 'https://github.com/QwenLM/qwen-code/pull/8742';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`PR：${url}（2 commits，等 CI）`} />,
+      );
+
+      const out = lastFrame() ?? '';
+      // OSC 8 target is exactly the URL — the （2 run is not swallowed into
+      // the link (https://github.com/QwenLM/qwen-code/issues/8750).
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      expect(out).not.toContain(`\x1b]8;;${url}（`);
+      // The glued-on punctuation renders as plain text after the link.
+      expect(out.replace(/\s+/g, ' ')).toContain('（2 commits，等 CI）');
+    });
+
+    it('does not treat underscores around a later URL as emphasis', () => {
+      enableHyperlinks();
+      const firstUrl = 'https://a.com/x';
+      const secondUrl = 'https://b.com/y';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`见 ${firstUrl}（说明_1）和 ${secondUrl}_。`} />,
+      );
+
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${firstUrl}\x07`);
+      expect(out).toContain(`\x1b]8;;${secondUrl}\x07`);
+      expect(out.replace(/\s+/g, ' ')).toContain('（说明_1）和');
+      expect(stripAnsi(out)).toContain(`${secondUrl}_`);
+    });
+
+    it('preserves dunder identifiers as visible text', () => {
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text="Python 的 __init__ 方法" />,
+      );
+
+      expect(stripAnsi(lastFrame() ?? '')).toContain('__init__');
     });
 
     it('leaves bare URLs unwrapped when unsupported', () => {

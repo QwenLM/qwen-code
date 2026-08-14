@@ -62,6 +62,7 @@ const RAW_PROTECTED_WRITE_COMMANDS =
 export const SAFE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set<string>([
   // Read-only file / search
   ToolNames.READ_FILE,
+  ToolNames.ZOOM_IMAGE,
   ToolNames.GREP,
   ToolNames.GLOB,
   ToolNames.LS,
@@ -154,6 +155,7 @@ const SELF_MODIFICATION_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /(^|\/)\.qwen\/agents(?:\/|$)/,
   /(^|\/)\.qwen\/skills(?:\/|$)/,
   /(^|\/)\.qwen\/hooks(?:\/|$)/,
+  /(^|\/)\.qwen\/fork-profiles(?:\/|$)/,
   /(^|\/)\.mcp\.json$/,
 ]);
 
@@ -225,7 +227,9 @@ function matchesQwenHomeSurface(normalizedPath: string): boolean {
       /^settings(?:\.[^/]*)?\.json$/.test(relativePath) ||
       /^qwen\.local\.md$/.test(relativePath) ||
       /^\.mcp\.json$/.test(relativePath) ||
-      /^(rules|commands|agents|skills|hooks)(?:\/|$)/.test(relativePath)
+      /^(rules|commands|agents|skills|hooks|fork-profiles)(?:\/|$)/.test(
+        relativePath,
+      )
     ) {
       return true;
     }

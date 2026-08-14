@@ -28,6 +28,7 @@ import {
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
+import { validateAgentPluginStdioRuntimePaths } from '../extension/agent-plugins-v1/mcp.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
@@ -232,7 +233,18 @@ export function createStreamableHttpCompatibilityFetch(
   mcpServerConfig?: MCPServerConfig,
 ): typeof fetch {
   return async (input, init) => {
-    const response = await fetchFn(input, init);
+    const requestHeaders = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    const stopAgentPluginRedirect =
+      mcpServerConfig?.agentPluginV1 === true &&
+      ((mcpServerConfig.headers !== undefined &&
+        Object.keys(mcpServerConfig.headers).length > 0) ||
+        requestHeaders.has('authorization'));
+    const effectiveInit = stopAgentPluginRedirect
+      ? { ...init, redirect: 'manual' as const }
+      : init;
+    const response = await fetchFn(input, effectiveInit);
     if (
       response.status === 401 &&
       mcpServerConfig &&
@@ -245,7 +257,7 @@ export function createStreamableHttpCompatibilityFetch(
       );
     }
     if (
-      !isStreamableHttpGetSseRequest(init) ||
+      !isStreamableHttpGetSseRequest(effectiveInit) ||
       !STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES.has(response.status)
     ) {
       return response;
@@ -1159,7 +1171,11 @@ export async function discoverMcpTools(
 ): Promise<void> {
   mcpDiscoveryState = MCPDiscoveryState.IN_PROGRESS;
   try {
-    mcpServers = populateMcpServerCommand(mcpServers, mcpServerCommand);
+    mcpServers = populateMcpServerCommand(
+      mcpServers,
+      mcpServerCommand,
+      cliConfig.getTargetDir(),
+    );
 
     const discoveryPromises = Object.entries(mcpServers).map(
       ([mcpServerName, mcpServerConfig]) =>
@@ -1183,20 +1199,42 @@ export async function discoverMcpTools(
 export function populateMcpServerCommand(
   mcpServers: Record<string, MCPServerConfig>,
   mcpServerCommand: string | undefined,
+  cwd?: string,
 ): Record<string, MCPServerConfig> {
+  let result = mcpServers;
   if (mcpServerCommand) {
     const cmd = mcpServerCommand;
     const args = parse(cmd, process.env) as string[];
     if (args.some((arg) => typeof arg !== 'string')) {
       throw new Error('failed to parse mcpServerCommand: ' + cmd);
     }
-    // use generic server name 'mcp'
-    mcpServers['mcp'] = {
-      command: args[0],
-      args: args.slice(1),
+    result = {
+      ...result,
+      mcp: {
+        command: args[0],
+        args: args.slice(1),
+        cwd,
+      },
     };
   }
-  return mcpServers;
+  if (cwd === undefined) return result;
+  // Stamp the session cwd onto implicit stdio servers so a worktree
+  // relocation rebinds them (cwd is part of the pool fingerprint). The
+  // predicate mirrors mcpTransportOf's order — tcp before command — so a
+  // config carrying both stays a websocket server and is not stamped.
+  return Object.fromEntries(
+    Object.entries(result).map(([name, server]) => [
+      name,
+      server.command !== undefined &&
+      server.httpUrl === undefined &&
+      server.url === undefined &&
+      server.tcp === undefined &&
+      server.type !== 'sdk' &&
+      server.cwd === undefined
+        ? { ...server, cwd }
+        : server,
+    ]),
+  );
 }
 
 /**
@@ -2202,6 +2240,7 @@ export async function createTransport(
   }
 
   if (mcpServerConfig.command) {
+    validateAgentPluginStdioRuntimePaths(mcpServerConfig);
     if (mcpServerConfig.cwd && !existsSync(mcpServerConfig.cwd)) {
       throw new Error(
         `MCP server '${mcpServerName}': configured cwd does not exist: ${mcpServerConfig.cwd}`,

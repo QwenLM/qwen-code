@@ -7,12 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { LoadedSettings } from '../../config/settings.js';
-
-vi.mock('../utils/restoreGoal.js', () => ({
-  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
-}));
 
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
@@ -26,7 +21,9 @@ describe('useBranchCommand', () => {
   let finalize: ReturnType<typeof vi.fn>;
   let flush: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
+  let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
+  let clearPendingState: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
   let loadHistory: ReturnType<typeof vi.fn>;
@@ -35,6 +32,7 @@ describe('useBranchCommand', () => {
   let addItem: ReturnType<typeof vi.fn>;
   let backgroundTaskRegistry: {
     hasRunningTasks: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   let monitorRegistry: {
@@ -43,11 +41,14 @@ describe('useBranchCommand', () => {
   };
   let backgroundShellRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   let workflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -58,6 +59,7 @@ describe('useBranchCommand', () => {
     settings: mockSettings,
     historyManager: { clearItems, loadHistory, addItem },
     startNewSession: startNewSessionUI,
+    clearPendingState,
     setSessionName,
     remount,
   });
@@ -78,7 +80,6 @@ describe('useBranchCommand', () => {
   });
 
   beforeEach(() => {
-    vi.mocked(restoreGoalFromHistory).mockClear();
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
@@ -95,7 +96,9 @@ describe('useBranchCommand', () => {
     flush = vi.fn().mockResolvedValue(undefined);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     startNewSessionConfig = vi.fn();
+    getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
+    clearPendingState = vi.fn();
     clearItems = vi.fn();
     loadHistory = vi.fn();
     setSessionName = vi.fn();
@@ -103,6 +106,7 @@ describe('useBranchCommand', () => {
     addItem = vi.fn();
     backgroundTaskRegistry = {
       hasRunningTasks: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
     };
     monitorRegistry = {
@@ -111,11 +115,14 @@ describe('useBranchCommand', () => {
     };
     backgroundShellRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
     };
     workflowRunRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
+      abortAll: vi.fn(),
     };
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
@@ -133,12 +140,22 @@ describe('useBranchCommand', () => {
       getBackgroundShellRegistry: () => backgroundShellRegistry,
       getWorkflowRunRegistry: () => workflowRunRegistry,
       startNewSession: startNewSessionConfig,
+      getGoalRuntimeReady,
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
   });
 
   it('refuses to branch while background work is running', async () => {
     backgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
+    backgroundTaskRegistry.getAll.mockReturnValue([
+      {
+        agentId: 'bg_ab12cd34',
+        isBackgrounded: true,
+        status: 'running',
+        description: 'long-running research',
+        startTime: Date.now(),
+      },
+    ]);
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -148,13 +165,14 @@ describe('useBranchCommand', () => {
     expect(finalize).not.toHaveBeenCalled();
     expect(forkSession).not.toHaveBeenCalled();
     expect(startNewSessionConfig).not.toHaveBeenCalled();
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: expect.stringContaining('running background tasks'),
-      }),
-      expect.any(Number),
-    );
+    expect(addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain('running background tasks');
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
   it('clears terminal background state after the branch initializes', async () => {
@@ -167,6 +185,10 @@ describe('useBranchCommand', () => {
     expect(monitorRegistry.reset).toHaveBeenCalledOnce();
     expect(backgroundShellRegistry.reset).toHaveBeenCalledOnce();
     expect(workflowRunRegistry.reset).toHaveBeenCalledOnce();
+    expect(clearPendingState).toHaveBeenCalledOnce();
+    expect(clearPendingState.mock.invocationCallOrder[0]).toBeLessThan(
+      loadHistory.mock.invocationCallOrder[0]!,
+    );
     expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
       backgroundTaskRegistry.reset.mock.invocationCallOrder[0]!,
     );
@@ -201,6 +223,10 @@ describe('useBranchCommand', () => {
       return true;
     });
     startNewSessionConfig.mockImplementation(() => order.push('config.start'));
+    getGoalRuntimeReady.mockImplementation(async () => {
+      order.push('goal.ready');
+      return {};
+    });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -216,6 +242,7 @@ describe('useBranchCommand', () => {
       'rename',
       'load', // final load after title persistence
       'config.start',
+      'goal.ready',
     ]);
   });
 
@@ -250,20 +277,35 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('re-arms /goal against the forked sessionId after the UI swap', async () => {
-    // The branched JSONL is a verbatim copy of the parent's, so an active
-    // goal sentinel rides along. Without this restore call the forked
-    // session inherits the goal in transcript only — store stays empty,
-    // footer pill shows nothing, and the Stop hook never fires under the
-    // new sessionId. Same root cause as the /resume gap; pin it here.
+  it('waits for the forked session Goal runtime exactly once', async () => {
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
-    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
-      expect.any(Array),
-      config,
-      addItem,
+    expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls core back when the fork contains malformed Goal state', async () => {
+    getGoalRuntimeReady.mockRejectedValueOnce(
+      new Error('unsupported Goal lifecycle record'),
+    );
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(2);
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(clearItems).not.toHaveBeenCalled();
+    expect(loadHistory).not.toHaveBeenCalled();
+    expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/unsupported Goal lifecycle record/),
+      }),
+      expect.any(Number),
     );
   });
 

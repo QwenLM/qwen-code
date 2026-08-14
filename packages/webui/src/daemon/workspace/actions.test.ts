@@ -55,6 +55,32 @@ describe('workspace actions', () => {
     expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
   });
 
+  it('allows the SDK archive timeout to run before the wrapper timeout', async () => {
+    vi.useFakeTimers();
+    const installExtensionArchive = vi.fn(() => new Promise<never>(() => {}));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ installExtensionArchive }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    const result = actions
+      .installExtensionArchive({
+        archive: new Blob(['archive']),
+        filename: 'demo.zip',
+        consent: true,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    await vi.advanceTimersByTimeAsync(130_000);
+
+    await expect(result).resolves.toMatchObject({
+      message: 'Install extension timed out after 130000ms',
+    });
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));
@@ -318,6 +344,11 @@ describe('workspace actions', () => {
         createdAt: 1,
       },
     };
+    const pairingApprovals = { senderIds: ['sender-1', 'sender-2'] };
+    const pairingRevocation = {
+      revoked: 'sender-1',
+      senderIds: ['sender-2'],
+    };
     const workspace = {
       workspaceChannelTypes: vi.fn().mockResolvedValue(catalog),
       workspaceChannels: vi.fn().mockResolvedValue(snapshot),
@@ -329,6 +360,12 @@ describe('workspace actions', () => {
       restartWorkspaceChannel: vi.fn().mockResolvedValue(mutation),
       workspaceChannelPairingRequests: vi.fn().mockResolvedValue(pairing),
       approveWorkspaceChannelPairing: vi.fn().mockResolvedValue(approval),
+      workspaceChannelPairingApprovals: vi
+        .fn()
+        .mockResolvedValue(pairingApprovals),
+      revokeWorkspaceChannelPairingApproval: vi
+        .fn()
+        .mockResolvedValue(pairingRevocation),
     };
     const workspaceByCwd = vi.fn(() => workspace);
     const actions = createDaemonWorkspaceActions({
@@ -358,6 +395,15 @@ describe('workspace actions', () => {
     await expect(
       actions.channelPairing.approve('bot', 'abcdefgh'),
     ).resolves.toBe(approval);
+    await expect(actions.channelPairing.approvals('bot')).resolves.toBe(
+      pairingApprovals,
+    );
+    await expect(
+      actions.channelPairing.revoke('bot', { senderId: 'sender-1' }),
+    ).resolves.toBe(pairingRevocation);
+    await expect(
+      actions.channelPairing.revoke('bot', { groupId: 'group-1' }),
+    ).resolves.toBe(pairingRevocation);
 
     expect(workspaceByCwd).toHaveBeenNthCalledWith(1, '/workspace-a');
     expect(workspaceByCwd).toHaveBeenLastCalledWith('/workspace-b');
@@ -379,6 +425,15 @@ describe('workspace actions', () => {
       'bot',
       { code: 'abcdefgh' },
     );
+    expect(workspace.workspaceChannelPairingApprovals).toHaveBeenCalledWith(
+      'bot',
+    );
+    expect(
+      workspace.revokeWorkspaceChannelPairingApproval,
+    ).toHaveBeenCalledWith('bot', { senderId: 'sender-1' });
+    expect(
+      workspace.revokeWorkspaceChannelPairingApproval,
+    ).toHaveBeenCalledWith('bot', { groupId: 'group-1' });
   });
 
   it('rejects Channel management without a selected workspace', async () => {
@@ -393,5 +448,60 @@ describe('workspace actions', () => {
       'Daemon workspace is not connected',
     );
     expect(workspaceByCwd).not.toHaveBeenCalled();
+  });
+
+  it('forwards the directory picker to the daemon client', async () => {
+    const pickerResult = {
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    };
+    const workspaceDirectoryPicker = vi.fn().mockResolvedValue(pickerResult);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ workspaceDirectoryPicker }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.pickWorkspaceDirectory()).resolves.toEqual(
+      pickerResult,
+    );
+    expect(workspaceDirectoryPicker).toHaveBeenCalledOnce();
+  });
+
+  it('applies the 320s timeout to the directory picker', async () => {
+    vi.useFakeTimers();
+    const workspaceDirectoryPicker = vi.fn(() => new Promise<never>(() => {}));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ workspaceDirectoryPicker }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    const result = actions.pickWorkspaceDirectory().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(320_000);
+
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({
+      message: 'Open directory picker timed out after 320000ms',
+    });
+  });
+
+  it('rejects the directory picker without a connected client', async () => {
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => undefined,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.pickWorkspaceDirectory()).rejects.toThrow(
+      'Open directory picker failed: DaemonClient is not connected',
+    );
   });
 });

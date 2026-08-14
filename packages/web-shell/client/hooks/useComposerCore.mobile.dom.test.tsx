@@ -47,10 +47,14 @@ function Harness({
   composerInput,
   onSubmit,
   onInputTextChange,
+  sessionId,
+  atWorkspaceCwd,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
+  sessionId?: string;
+  atWorkspaceCwd?: string;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -59,23 +63,29 @@ function Harness({
     editorTheme: {},
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
+    sessionId,
+    atWorkspaceCwd,
   });
   latest = composer;
 
   // Mirrors the ChatEditor render seam: the mobile backend renders a plain
   // controlled textarea at the single mount point, desktop keeps the
   // CodeMirror container div.
-  return composer.mobileComposer ? (
-    <textarea
-      ref={composer.mobileComposer.textareaRef}
-      value={composer.mobileComposer.value}
-      onChange={composer.mobileComposer.onChange}
-      onPaste={composer.mobileComposer.onPaste}
-      placeholder={composer.mobileComposer.placeholder}
-      data-web-shell-composer-editor
-    />
-  ) : (
-    <div ref={composer.containerRef} data-web-shell-composer-editor />
+  return (
+    <div {...composer.imageTransferHandlers} data-web-shell-composer-surface>
+      {composer.mobileComposer ? (
+        <textarea
+          ref={composer.mobileComposer.textareaRef}
+          value={composer.mobileComposer.value}
+          onChange={composer.mobileComposer.onChange}
+          onBlur={composer.mobileComposer.onBlur}
+          placeholder={composer.mobileComposer.placeholder}
+          data-web-shell-composer-editor
+        />
+      ) : (
+        <div ref={composer.containerRef} data-web-shell-composer-editor />
+      )}
+    </div>
   );
 }
 
@@ -83,10 +93,14 @@ async function mount({
   composerInput,
   onSubmit = vi.fn(),
   onInputTextChange,
+  sessionId,
+  atWorkspaceCwd,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   onInputTextChange?: (text: string) => void;
+  sessionId?: string;
+  atWorkspaceCwd?: string;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -99,6 +113,8 @@ async function mount({
             composerInput={composerInput}
             onSubmit={onSubmit}
             onInputTextChange={onInputTextChange}
+            sessionId={sessionId}
+            atWorkspaceCwd={atWorkspaceCwd}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -120,6 +136,15 @@ afterEach(() => {
   container?.remove();
   localStorage.removeItem('qwen-web-shell-history');
   localStorage.removeItem('qwen-web-shell-command-history');
+  for (let index = localStorage.length - 1; index >= 0; index--) {
+    const key = localStorage.key(index);
+    if (
+      key?.startsWith('qwen-web-shell-session-draft:') ||
+      key?.startsWith('qwen-web-shell-pending-task-draft:')
+    ) {
+      localStorage.removeItem(key);
+    }
+  }
   document.getElementById('web-shell-tooltip-styles')?.remove();
   root = null;
   container = null;
@@ -135,6 +160,7 @@ afterEach(() => {
     delete (navigator as unknown as Record<string, unknown>)['maxTouchPoints'];
   }
   window.history.replaceState({}, '', '/');
+  vi.restoreAllMocks();
 });
 
 describe('useComposerCore mobile textarea backend', () => {
@@ -172,6 +198,29 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(onInputTextChange).toHaveBeenCalledWith('hello');
     typeText('');
     expect(latest!.hasContent).toBe(false);
+  });
+
+  it('reads the textarea height cap once instead of on every input', async () => {
+    mockTouchDevice();
+    const getComputedStyle = window.getComputedStyle.bind(window);
+    let textareaStyleReads = 0;
+    const styleSpy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockImplementation((element, pseudoElement) => {
+        if (element instanceof HTMLTextAreaElement) {
+          textareaStyleReads += 1;
+        }
+        return getComputedStyle(element, pseudoElement);
+      });
+
+    await mount();
+    const initialStyleReads = textareaStyleReads;
+    typeText('one');
+    typeText('one two');
+    typeText('one two three');
+
+    expect(textareaStyleReads).toBe(initialStyleReads);
+    styleSpy.mockRestore();
   });
 
   it('submits through the shared pipeline and clears the draft', async () => {
@@ -327,17 +376,23 @@ describe('useComposerCore mobile textarea backend', () => {
     await mount();
     const preventDefault = vi.fn();
     const imageItem = {
+      kind: 'file',
       type: 'image/png',
       getAsFile: () =>
         new File([new Uint8Array([137, 80, 78, 71])], 'x.png', {
           type: 'image/png',
         }),
     };
+    const imageEvent = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(imageEvent, 'clipboardData', {
+      value: { files: [], items: [imageItem], types: ['Files'] },
+    });
     await act(async () => {
-      latest!.mobileComposer!.onPaste({
-        clipboardData: { items: [imageItem] },
-        preventDefault,
-      } as unknown as React.ClipboardEvent<HTMLTextAreaElement>);
+      imageEvent.preventDefault = preventDefault;
+      container!.querySelector('textarea')!.dispatchEvent(imageEvent);
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     expect(preventDefault).toHaveBeenCalled();
@@ -345,14 +400,48 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.pastedImages[0].media_type).toBe('image/png');
 
     const textPreventDefault = vi.fn();
+    const textEvent = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(textEvent, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+      },
+    });
     act(() => {
-      latest!.mobileComposer!.onPaste({
-        clipboardData: {
-          items: [{ type: 'text/plain', getAsFile: () => null }],
-        },
-        preventDefault: textPreventDefault,
-      } as unknown as React.ClipboardEvent<HTMLTextAreaElement>);
+      textEvent.preventDefault = textPreventDefault;
+      container!.querySelector('textarea')!.dispatchEvent(textEvent);
     });
     expect(textPreventDefault).not.toHaveBeenCalled();
+  });
+
+  it('saves the draft immediately on blur before the debounce timer fires', async () => {
+    mockTouchDevice();
+    vi.useFakeTimers();
+    await mount({
+      sessionId: 'mobile-session',
+      atWorkspaceCwd: '/workspace/mobile',
+    });
+    typeText('mobile draft text');
+    expect(
+      localStorage.getItem(
+        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
+      ),
+    ).toBeNull();
+
+    act(() => {
+      container!
+        .querySelector('textarea')!
+        .dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(
+      localStorage.getItem(
+        'qwen-web-shell-session-draft:' + encodeURIComponent('mobile-session'),
+      ),
+    ).toBe('mobile draft text');
+    vi.useRealTimers();
   });
 });

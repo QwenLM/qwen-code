@@ -16,10 +16,12 @@ import type {
   AnyDeclarativeTool,
   Config,
   ConversationRecord,
+  GoalSnapshotV2,
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import type { HistoryItem } from '../types.js';
+import { MAX_INLINE_IMAGES_PER_ITEM } from './inline-image-parts.js';
 
 const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
   ({
@@ -42,6 +44,200 @@ describe('resumeHistoryUtils', () => {
       description: 'Replace text',
       build: vi.fn().mockReturnValue(mockInvocation),
     } as unknown as AnyDeclarativeTool;
+  });
+
+  it('restores lifecycle cards without per-turn Goal bookkeeping', () => {
+    const goal: NonNullable<GoalSnapshotV2['goal']> = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the feature',
+      status: 'active',
+      evidenceCursor: { recordId: 'goal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const goalRecord = (
+      uuid: string,
+      cause: 'create' | 'turn_finished' | 'complete' | 'clear',
+      snapshotGoal: GoalSnapshotV2['goal'],
+    ) => ({
+      uuid,
+      type: 'system' as const,
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause,
+        snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+      },
+    });
+    const completeGoal = {
+      ...goal,
+      status: 'complete' as const,
+      turnCount: 2,
+      lastReason: 'verified',
+    };
+    const conversation = {
+      messages: [
+        goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-turn', 'turn_finished', { ...goal, turnCount: 1 }),
+        goalRecord('goal-complete', 'complete', completeGoal),
+        goalRecord('goal-clear', 'clear', null),
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items).toMatchObject([
+      { id: 101, type: 'goal_state', cause: 'create' },
+      {
+        id: 102,
+        type: 'goal_state',
+        cause: 'complete',
+        snapshot: { goal: { status: 'complete', lastReason: 'verified' } },
+      },
+      {
+        id: 103,
+        type: 'goal_state',
+        cause: 'clear',
+        snapshot: { goal: null },
+      },
+    ]);
+  });
+
+  it('suppresses checkpoint bookkeeping cards after a verifier rejection', () => {
+    const goal: NonNullable<GoalSnapshotV2['goal']> = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the feature',
+      status: 'active',
+      evidenceCursor: { recordId: 'goal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const goalRecord = (
+      uuid: string,
+      cause:
+        | 'create'
+        | 'turn_finished'
+        | 'verifier_reject'
+        | 'checkpoint'
+        | 'usage_limited',
+      snapshotGoal: GoalSnapshotV2['goal'],
+    ) => ({
+      uuid,
+      type: 'system' as const,
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause,
+        snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+      },
+    });
+    const turned = {
+      ...goal,
+      turnCount: 1,
+      activeTimeMs: 10,
+      updatedAt: 2,
+    };
+    const rejected = {
+      ...turned,
+      lastReason: 'More work remains',
+      activeTimeMs: 20,
+      updatedAt: 3,
+    };
+    const checkpointed = {
+      ...rejected,
+      evidenceCursor: { recordId: 'checkpoint-1' },
+      evidenceCheckpoint: {
+        checkpointId: 'checkpoint-1',
+        createdAt: 4,
+        claims: [
+          {
+            id: 'checkpoint-1:1',
+            proofKind: 'delivered_output' as const,
+            claim: 'The feature was delivered.',
+            sourceRefs: ['assistant-1'],
+          },
+        ],
+      },
+      activeTimeMs: 30,
+      updatedAt: 4,
+    };
+    const limited = {
+      ...checkpointed,
+      status: 'usage_limited' as const,
+      lastReason: 'provider failed',
+      activeTimeMs: 40,
+      updatedAt: 5,
+    };
+    const conversation = {
+      messages: [
+        goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-turn', 'turn_finished', turned),
+        goalRecord('goal-reject', 'verifier_reject', rejected),
+        goalRecord('goal-reject-checkpoint', 'verifier_reject', checkpointed),
+        goalRecord('goal-checkpoint', 'checkpoint', checkpointed),
+        goalRecord('goal-limited', 'usage_limited', limited),
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items).toMatchObject([
+      { id: 101, type: 'goal_state', cause: 'create' },
+      {
+        id: 102,
+        type: 'goal_state',
+        cause: 'verifier_reject',
+        snapshot: { goal: { lastReason: 'More work remains' } },
+      },
+      {
+        id: 103,
+        type: 'goal_state',
+        cause: 'usage_limited',
+        snapshot: { goal: { status: 'usage_limited' } },
+      },
+    ]);
+  });
+
+  it('does not replay internal Goal runtime prompts as user history', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          subtype: 'goal_runtime',
+          uuid: 'goal-runtime',
+          message: {
+            parts: [{ text: 'Continue working on the active Goal.' }],
+          },
+        },
+        {
+          type: 'user',
+          uuid: 'user',
+          message: { parts: [{ text: 'real user prompt' }] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    expect(
+      buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        100,
+      ),
+    ).toMatchObject([{ type: 'user', text: 'real user prompt' }]);
   });
 
   it('inserts a history-gap divider before the gap child record', () => {
@@ -116,6 +312,212 @@ describe('resumeHistoryUtils', () => {
     expect(items.some((i) => i.type === 'tool_group')).toBe(false);
     const userItem = items.find((i) => i.type === 'user') as { text: string };
     expect(userItem.text).toBe('post-gap message');
+  });
+
+  it('does not suppress a post-gap Goal lifecycle card with the pre-gap baseline', () => {
+    // The gap swallowed the pause record, so the post-gap resume snapshot is
+    // shape-equal to the pre-gap create snapshot; the gap boundary must reset
+    // the displayed baseline so the resume card is not treated as
+    // bookkeeping.
+    const goal: NonNullable<GoalSnapshotV2['goal']> = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the feature',
+      status: 'active',
+      evidenceCursor: { recordId: 'goal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const goalRecord = (
+      uuid: string,
+      cause: 'create' | 'resume',
+      snapshotGoal: GoalSnapshotV2['goal'],
+    ) => ({
+      uuid,
+      type: 'system' as const,
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause,
+        snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+      },
+    });
+    const conversation = {
+      messages: [
+        goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-resume', 'resume', goal),
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      {
+        conversation,
+        historyGaps: [
+          { childUuid: 'goal-resume', missingParentUuid: 'goal-pause' },
+        ],
+      } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items.filter((item) => item.type === 'goal_state')).toMatchObject([
+      { cause: 'create' },
+      { cause: 'resume' },
+    ]);
+  });
+
+  describe('UserPromptSubmit hook context provenance', () => {
+    const tagged =
+      '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    const buildUserItems = (record: Record<string, unknown>) => {
+      const conversation = {
+        messages: [record],
+      } as unknown as ConversationRecord;
+      const session: ResumedSessionData = {
+        conversation,
+      } as ResumedSessionData;
+      return buildResumedHistoryItems(session, makeConfig({}), 1_000);
+    };
+
+    it('prefers recorded displayText over the augmented parts', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
+        systemPayload: {
+          displayText: 'my prompt',
+          hookContext: 'injected hook context',
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('does not fall back to hidden text when displayText is empty', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'internal channel instructions' }] },
+        systemPayload: { displayText: '', hookContext: '' },
+      });
+      expect(items).toEqual([]);
+    });
+
+    it('prefers displayText over the tag-strip fallback', () => {
+      // Fixture where the two branches disagree: without displayText the
+      // tag-strip path would expose the middle "expanded extra" part.
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [
+            { text: 'my prompt' },
+            { text: 'expanded extra' },
+            { text: tagged },
+          ],
+        },
+        systemPayload: {
+          displayText: 'my prompt',
+          hookContext: 'injected hook context',
+        },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('strips a trailing whole-part tagged block when no displayText is recorded', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+    });
+
+    it('keeps user-authored text that merely contains the tag', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: `quote: ${tagged} end` }] },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: `quote: ${tagged} end` },
+      ]);
+    });
+
+    it('keeps a sole part that matches the tag shape (user-authored)', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: { parts: [{ text: tagged }] },
+      });
+      expect(items).toEqual([{ id: 1_001, type: 'user', text: tagged }]);
+    });
+
+    it('falls back to raw concatenation for legacy bare-injected records', () => {
+      const items = buildUserItems({
+        type: 'user',
+        message: {
+          parts: [{ text: 'my prompt' }, { text: 'bare injected context' }],
+        },
+      });
+      expect(items).toEqual([
+        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+      ]);
+    });
+
+    it('prefers at_command userText even when the paired user record has a trailing tagged part', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              userText: '@file.ts summarize this',
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: {
+              parts: [{ text: 'expanded model prompt' }, { text: tagged }],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as { text: string };
+      expect(userItem.text).toBe('@file.ts summarize this');
+      expect(userItem.text).not.toContain('qwen:user-prompt-submit-context');
+    });
+
+    it('strips a trailing tagged part when at_command userText is absent', () => {
+      const conversation = {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'at_command',
+            systemPayload: {
+              filesRead: ['/tmp/file.ts'],
+              status: 'success',
+            },
+          },
+          {
+            type: 'user',
+            message: {
+              parts: [{ text: 'my prompt' }, { text: tagged }],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        1_000,
+      );
+      const userItem = items.find((i) => i.type === 'user') as { text: string };
+      expect(userItem.text).toBe('my prompt');
+    });
   });
 
   it('converts conversation into history items with incremental ids', () => {
@@ -230,6 +632,171 @@ describe('resumeHistoryUtils', () => {
       text: 'save logs',
       sentToModel: false,
     });
+  });
+
+  it('restores ordinary user messages from clean display text', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'expanded model prompt' } as Part,
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 30);
+
+    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+  });
+
+  it('projects the user turn when legacy @-command metadata has no userText', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'at_command',
+          systemPayload: { filesRead: [], status: 'success' },
+        },
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'expanded model prompt' } as Part,
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items.find((item) => item.type === 'user')).toMatchObject({
+      text: 'expanded model prompt',
+    });
+    expect(JSON.stringify(items)).not.toContain('hook-only context');
+  });
+
+  it('strips a complete final hook-context part without metadata', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'user prompt' } as Part,
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([{ id: 31, type: 'user', text: 'user prompt' }]);
+  });
+
+  it('keeps legacy bare hook context when no reliable boundary exists', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              { text: 'user prompt' } as Part,
+              { text: 'legacy bare hook context' } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'user prompt\nlegacy bare hook context',
+      },
+    ]);
+  });
+
+  it('does not fall back to model-facing text for empty display metadata', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          message: {
+            parts: [
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              } as Part,
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            hookContext: 'hook-only context',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      30,
+    );
+
+    expect(items).toEqual([]);
   });
 
   it('marks tool results as error, omits thought text, and falls back when tool is missing', () => {
@@ -496,6 +1063,55 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('skips hidden slash command invocations but replays their results on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/model',
+            sentToModel: false,
+            hiddenInvocation: true,
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/model',
+            outputHistoryItems: [
+              { type: 'info', text: 'Kept model as qwen3-max' },
+            ],
+          },
+        },
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 40);
+
+    expect(items).toEqual([
+      { id: 41, type: 'info', text: 'Kept model as qwen3-max' },
+      {
+        id: 42,
+        type: 'gemini',
+        text: 'Follow-up',
+        timestamp: new Date('2026-01-15T19:00:00.000Z').getTime(),
+      },
+    ]);
+  });
+
   it('preserves local-only slash command metadata on resume', () => {
     const conversation = {
       messages: [
@@ -571,6 +1187,166 @@ describe('resumeHistoryUtils', () => {
     expect(items[0]).not.toHaveProperty('sentToModel');
   });
 
+  // The current Core recorder flattens assistant output before persistence.
+  // This fixture covers the parser for records written by a compatible writer.
+  it('parses persisted assistant text and images in their original order', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: {
+            parts: [
+              { text: 'before' } as Part,
+              {
+                inlineData: {
+                  data: 'aW1hZ2U=',
+                  mimeType: 'image/png',
+                  displayName: 'chart.png',
+                },
+              } as Part,
+              { text: 'after' } as Part,
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items).toEqual([
+      {
+        id: 101,
+        type: 'gemini',
+        text: 'before',
+        timestamp: new Date('2026-01-15T19:00:00.000Z').getTime(),
+      },
+      {
+        id: 102,
+        type: 'gemini_content',
+        text: '',
+        images: [
+          {
+            data: 'aW1hZ2U=',
+            mimeType: 'image/png',
+          },
+        ],
+      },
+      { id: 103, type: 'gemini_content', text: 'after' },
+    ]);
+  });
+
+  it('caps persisted assistant images and retains the overflow count', () => {
+    const images = Array.from(
+      { length: MAX_INLINE_IMAGES_PER_ITEM + 2 },
+      (_, index) => ({
+        data: Buffer.from(`restored-image-${index}`).toString('base64'),
+        mimeType: 'image/png',
+      }),
+    );
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          timestamp: '2026-01-15T19:00:00.000Z',
+          message: {
+            parts: images.map((inlineData) => ({ inlineData })),
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+    ).filter(
+      (item) => item.type === 'gemini' || item.type === 'gemini_content',
+    );
+
+    expect(items.flatMap((item) => item.images ?? [])).toEqual(
+      images.slice(0, MAX_INLINE_IMAGES_PER_ITEM),
+    );
+    expect(items.at(-1)).toMatchObject({
+      type: 'gemini_content',
+      text: '',
+      omittedImageCount: 2,
+    });
+  });
+
+  it('restores images nested in persisted tool response parts', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'assistant',
+          message: {
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-image',
+                  name: 'replace',
+                  args: {},
+                },
+              } as unknown as Part,
+            ],
+          },
+        },
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'call-image',
+            resultDisplay: 'Generated chart',
+            status: 'success',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'call-image',
+                  name: 'replace',
+                  response: { output: 'Generated chart' },
+                  parts: [
+                    {
+                      inlineData: {
+                        data: 'dG9vbC1pbWFnZQ==',
+                        mimeType: 'image/webp',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({ replace: mockTool }),
+      200,
+    );
+
+    expect(items).toEqual([
+      {
+        id: 201,
+        type: 'tool_group',
+        tools: [
+          expect.objectContaining({
+            callId: 'call-image',
+            images: [
+              {
+                data: 'dG9vbC1pbWFnZQ==',
+                mimeType: 'image/webp',
+              },
+            ],
+          }),
+        ],
+      },
+    ]);
+  });
+
   describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
     type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
     const firstTool = (items: HistoryItem[]) =>
@@ -615,6 +1391,7 @@ describe('resumeHistoryUtils', () => {
         toolCallResult: {
           callId: 'call-1',
           resultDisplay: 'Read 1 file',
+          visionBridgeNotice: 'Converted image via qwen3-vl-plus.',
           status: 'success',
           responseParts: [
             {
@@ -629,6 +1406,9 @@ describe('resumeHistoryUtils', () => {
       });
       const tool = firstTool(items);
       expect(tool?.resultDisplay).toBe('Read 1 file');
+      expect(tool?.visionBridgeNotice).toBe(
+        'Converted image via qwen3-vl-plus.',
+      );
       expect(tool?.detailedDisplay).toBe('FULL FILE CONTENTS');
     });
 

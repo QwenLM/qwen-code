@@ -61,6 +61,14 @@ export enum AuthType {
   USE_ANTHROPIC = 'anthropic',
 }
 
+export type PromptCacheSharingParameters = GenerateContentParameters & {
+  /**
+   * Marks reusable history before a non-reusable trailing directive. The
+   * final message is deliberately excluded from cache breakpoints.
+   */
+  promptCacheSharing?: boolean;
+};
+
 /**
  * Supported input modalities for a model.
  * Omitted or false fields mean the model does not support that input type.
@@ -87,16 +95,39 @@ export type ContentGeneratorConfig = {
   // The SDK `timeout` only covers connect + first response, so a stream that
   // returns 200 then goes silent is otherwise unbounded. `<= 0` disables it.
   streamIdleTimeoutMs?: number;
+  // Total-lifetime cap for one streaming response, NOT refreshed by chunk
+  // arrival: a drip-fed stream resets the idle watchdog forever while never
+  // completing the message (issue #8597), so that shape needs a bound the
+  // chunks cannot reset. `<= 0` disables it. Honored only by the
+  // OpenAI-compatible pipeline today — the Anthropic/Gemini generators do not
+  // implement it, so on those auth types the drip-fed shape stays unbounded.
+  streamMaxLifetimeMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
   retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
-  enableCacheControl?: boolean; // Enable cache control for DashScope providers
+  enableCacheControl?: boolean; // Enable provider prompt-cache controls
   // Force `scope: 'global'` on Anthropic cache_control entries even when the
   // base URL is not an Anthropic-native origin (e.g. proxy providers like
   // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
   // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
   forceGlobalCacheScope?: boolean;
+  /**
+   * Default Anthropic `cache_control` retention for every cache anchor
+   * (system text, last tool, trailing user message) unless overridden
+   * per-anchor by {@link cacheRetentionByBlock}. `'ephemeral'` (default)
+   * omits `ttl` on the wire (spec default is 5m); `'1h'` requests the
+   * extended cache tier (`ttl: '1h'`).
+   */
+  cacheRetention?: 'ephemeral' | '1h';
+  /**
+   * Per-anchor override of {@link cacheRetention}. Keys are the three
+   * cache anchors the Anthropic converter places `cache_control` on;
+   * missing keys inherit the top-level `cacheRetention`.
+   */
+  cacheRetentionByBlock?: Partial<
+    Record<'system' | 'tool' | 'user.last', 'ephemeral' | '1h'>
+  >;
   samplingParams?: {
     top_p?: number;
     top_k?: number;
@@ -370,6 +401,7 @@ function wrapProviderLoadError(error: unknown, authType: AuthType): unknown {
 
 class LazyContentGenerator implements ContentGenerator {
   private generatorPromise?: Promise<ContentGenerator>;
+  private preloadedOnly = false;
 
   constructor(
     private readonly loader: () => Promise<ContentGenerator>,
@@ -381,18 +413,39 @@ class LazyContentGenerator implements ContentGenerator {
     return this.generatorPromise;
   }
 
+  private getGeneratorForUse(): Promise<ContentGenerator> {
+    this.preloadedOnly = false;
+    return this.getGenerator();
+  }
+
+  preload(): Promise<ContentGenerator> {
+    if (!this.generatorPromise) {
+      this.preloadedOnly = true;
+    }
+    return this.getGenerator();
+  }
+
+  resetPreload(): void {
+    if (!this.preloadedOnly) return;
+    this.preloadedOnly = false;
+    this.generatorPromise = undefined;
+  }
+
   async generateContent(
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    return (await this.getGenerator()).generateContent(request, userPromptId);
+    return (await this.getGeneratorForUse()).generateContent(
+      request,
+      userPromptId,
+    );
   }
 
   async generateContentStream(
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    return (await this.getGenerator()).generateContentStream(
+    return (await this.getGeneratorForUse()).generateContentStream(
       request,
       userPromptId,
     );
@@ -401,17 +454,35 @@ class LazyContentGenerator implements ContentGenerator {
   async countTokens(
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
-    return (await this.getGenerator()).countTokens(request);
+    return (await this.getGeneratorForUse()).countTokens(request);
   }
 
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
-    return (await this.getGenerator()).embedContent(request);
+    return (await this.getGeneratorForUse()).embedContent(request);
   }
 
   useSummarizedThinking(): boolean {
     return this.summarizedThinking;
+  }
+}
+
+/** @internal */
+export async function preloadContentGenerator(
+  generator: ContentGenerator,
+): Promise<void> {
+  if (generator instanceof LazyContentGenerator) {
+    await generator.preload();
+  }
+}
+
+/** @internal */
+export function resetPreloadedContentGenerator(
+  generator: ContentGenerator | undefined,
+): void {
+  if (generator instanceof LazyContentGenerator) {
+    generator.resetPreload();
   }
 }
 
