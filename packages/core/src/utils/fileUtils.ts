@@ -36,7 +36,11 @@ import {
 } from './pdf.js';
 import { VISION_BRIDGE_MAX_IMAGES } from '../services/visionBridge/vision-bridge-constants.js';
 import type { VisionBridgePdfContinuation } from '../services/visionBridge/vision-bridge-service.js';
-import { looksLikeText, sniffFileKind } from './binary-content.js';
+import {
+  extensionForMimeType,
+  looksLikeText,
+  sniffFileKind,
+} from './binary-content.js';
 import { readNotebookWithMetadata } from './notebook.js';
 import {
   readTextRange,
@@ -816,10 +820,21 @@ async function classifyImageContent(
     if (bytes.length === 0) return 'image';
 
     const sniffed = sniffFileKind(bytes, mimeType, '', `file://${filePath}`);
+    let result: FileType;
     if (sniffed.magicMatched) {
-      return sniffed.mimeType === mimeType ? 'image' : 'binary';
+      result =
+        sniffed.extension === extensionForMimeType(mimeType)
+          ? 'image'
+          : 'binary';
+    } else {
+      result = detectBOM(bytes) || looksLikeText(bytes) ? 'text' : 'binary';
     }
-    return looksLikeText(bytes) ? 'text' : 'binary';
+    if (result !== 'image') {
+      debugLogger.debug(
+        `classifyImageContent: ${filePath} -> ${result} (mime ${mimeType})`,
+      );
+    }
+    return result;
   } catch (error) {
     debugLogger.debug(
       `Unable to sniff image content for ${filePath}; preserving extension classification`,

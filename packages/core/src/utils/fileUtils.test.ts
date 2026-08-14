@@ -1320,6 +1320,42 @@ describe('fileUtils', () => {
       );
     });
 
+    it('rejects ZIP containers behind an image extension', async () => {
+      const zipPath = path.join(tempRootDir, 'archive.png');
+      await fsPromises.writeFile(
+        zipPath,
+        Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      );
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(zipPath, mockConfig);
+
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain(
+        'Skipped binary file: archive.png',
+      );
+    });
+
+    it('rejects unrecognized binary content behind an image extension', async () => {
+      const binaryPath = path.join(tempRootDir, 'garbage.png');
+      await fsPromises.writeFile(
+        binaryPath,
+        Buffer.from([0x00, 0x01, 0x02, 0x03]),
+      );
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(binaryPath, mockConfig);
+
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain(
+        'Skipped binary file: garbage.png',
+      );
+    });
+
     it('reads text content behind a PNG extension as text', async () => {
       const jsonBytes = Buffer.from(
         '{"meta":{"format":"png"},"data":"not-a-real-image"}',
@@ -1331,6 +1367,25 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(screenshotPath, mockConfig);
 
       expect(result.llmContent).toBe(jsonBytes.toString());
+      expect(result.returnDisplay).toBe('');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('reads BOM-prefixed UTF-16 text behind a PNG extension as text', async () => {
+      const text = 'text saved with the wrong extension';
+      const pngPath = path.join(tempRootDir, 'notes.png');
+      await fsPromises.writeFile(
+        pngPath,
+        Buffer.concat([
+          Buffer.from([0xff, 0xfe]),
+          Buffer.from(text, 'utf16le'),
+        ]),
+      );
+      mockMimeGetType.mockReturnValue('image/png');
+
+      const result = await processSingleFileContent(pngPath, mockConfig);
+
+      expect(result.llmContent).toBe(text);
       expect(result.returnDisplay).toBe('');
       expect(result.error).toBeUndefined();
     });

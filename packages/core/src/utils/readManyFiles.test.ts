@@ -721,6 +721,22 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.content).toContain('Unsupported image file');
     });
 
+    it('reads text content behind an image extension as text', async () => {
+      const relativePath = 'screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const jsonContent = '{"json": true}';
+      await fs.writeFile(absolutePath, Buffer.from(jsonContent));
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      expect(findInlineDataPart(result.contentParts)).toBeUndefined();
+      expect(contentToString(result.contentParts)).toContain('json');
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.content).toBe(jsonContent);
+      expect(result.files[0]!.error).toBeUndefined();
+    });
+
     it('references large PDFs instead of inlining extracted text for @ attachments', async () => {
       const relativePath = 'paper.pdf';
       const absolutePath = path.join(tempRootDir, relativePath);
