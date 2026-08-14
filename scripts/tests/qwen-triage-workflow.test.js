@@ -5982,3 +5982,71 @@ describe('triage job budget', () => {
     }
   });
 });
+
+describe('triage skill non-functional routing (#7411)', () => {
+  // Stage 1f routes behavior-neutral maintenance PRs to a triage-only
+  // outcome. A false skip silently loses review coverage, so the contract
+  // words the conservative fallback, the unattended-only scope, the
+  // exclusions, and the maintainer override — pin all of them.
+  function stage1f() {
+    const start = prSkill.indexOf('**1f. Non-functional change routing');
+    expect(start).toBeGreaterThan(-1);
+    const end = prSkill.indexOf('Post a single Stage 1 comment', start);
+    expect(end).toBeGreaterThan(start);
+    // The prose wraps mid-sentence; normalise whitespace so assertions are
+    // robust to rewrapping.
+    return prSkill.slice(start, end).replace(/\s+/g, ' ');
+  }
+
+  it('fails closed: doubt always takes the full path', () => {
+    const section = stage1f();
+    expect(section).toContain('when in doubt, take the full path');
+    expect(section).toContain('100% certainty required');
+    // Classification evidence is the diff, never the metadata.
+    expect(section).toContain('Title, description, and line count are not');
+  });
+
+  it('applies only to unattended runs; explicit asks always get a review', () => {
+    const section = stage1f();
+    expect(section).toContain('Applies only to unattended CI runs');
+    expect(section).toContain('GITHUB_EVENT_NAME=issues');
+    expect(section).toContain('always take the full path');
+  });
+
+  it('keeps risky surfaces out of the triage-only route', () => {
+    const section = stage1f();
+    for (const excluded of [
+      'fix',
+      '.github/workflows/**',
+      'lockfiles',
+      'schema/generated files',
+      'model-visible text',
+      'CLI help strings',
+      'broken-link changes',
+      'high-risk path',
+    ]) {
+      expect(section, excluded).toContain(excluded);
+    }
+    expect(section).toContain('at most 100 production logic lines');
+  });
+
+  it('reuses the existing on-hold label and stops before Stage 2', () => {
+    const section = stage1f();
+    expect(section).toContain(
+      'gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label \'status/on-hold\'',
+    );
+    expect(section).toContain('never create one');
+    expect(section).toContain('no Stage 2, no Stage 3, no approval');
+    // Maintainer override stays available and is named explicitly.
+    expect(section).toContain('@qwen-code /review');
+    expect(section).toContain('explicit triggers bypass the label check');
+  });
+
+  it('lists the triage-only route as a Stage 1 terminal exit', () => {
+    const exits = prSkill.slice(
+      prSkill.indexOf('Terminal exits — stop here if any applies'),
+      prSkill.indexOf('### Stage 2: Review + Test'),
+    );
+    expect(exits).toContain('Non-functional triage-only route (Stage 1f)');
+  });
+});

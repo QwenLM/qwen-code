@@ -456,6 +456,8 @@ jobs:
         id: 'context'
         env:
           TRIGGER_BODY: "${{ github.event.comment.body || github.event.review.body || '' }}"
+          # Read-only label lookup for the triage-only skip below.
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
         run: |-
           set -euo pipefail
           DEFAULT_TIMEOUT_MINUTES=180
@@ -508,6 +510,26 @@ jobs:
           else
             echo "Unsupported event: ${{ github.event_name }}" >&2
             exit 1
+          fi
+
+          # Triage-only route (#7411): the triage skill routes PRs it
+          # classifies as behavior-neutral maintenance (renames, formatting,
+          # comment/JSDoc-only) to a triage summary instead of the full
+          # review, marking them with `status/on-hold` (pr-workflow.md,
+          # Stage 1f). The automatic lane honours that mark; check the LIVE
+          # labels, not the event payload — the label lands after the event
+          # fires, and this step runs again after the review delay. Explicit
+          # asks (/review comments, review_requested, dispatch) never reach
+          # this check, and removing the label re-enables the automatic lane
+          # on the next push. A failed label read skips the optimisation and
+          # lets the review run (fail open: the worst case is one extra full
+          # review, never a silently skipped one).
+          if [ "$AUTO_REVIEW" = "true" ]; then
+            if gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels?per_page=100" --paginate --jq '.[].name' | grep -Fxq 'status/on-hold'; then
+              echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
           if [ -n "$TRIGGER_COMMAND" ]; then

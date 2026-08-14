@@ -2517,3 +2517,140 @@ describe('bot comment markers', () => {
     expect(ackLine).toContain('"$RUN_URL"');
   });
 });
+
+describe('qwen pr review triage-only skip (#7411)', () => {
+  // Executes the real 'Resolve PR context' bash with the expression
+  // placeholders resolved for one trigger shape and a stub `gh` whose label
+  // answer is scripted — the skip must come from LIVE labels, never from the
+  // event payload, and only on the automatic lane.
+  function runContextStep({
+    eventName,
+    action = 'opened',
+    labels = [],
+    ghFails = false,
+    triggerBody = '',
+  }) {
+    const doc = parse(workflow);
+    const step = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Resolve PR context',
+    );
+    let run = step.run;
+    const subs = {
+      '${{ github.event_name }}': eventName,
+      '${{ github.event.action }}': action,
+      '${{ github.event.pull_request.number }}': '4242',
+      '${{ github.event.issue.number }}': '4242',
+      '${{ github.event.inputs.pr_number }}': '4242',
+      '${{ github.event.inputs.review_mode }}': 'dry-run',
+      "${{ github.event.inputs.timeout_minutes || '180' }}": '180',
+    };
+    for (const [expr, value] of Object.entries(subs)) {
+      run = run.split(expr).join(value);
+    }
+    expect(run).not.toContain('${{');
+
+    const dir = mkdtempSync(join(tmpdir(), 'pr-review-context-'));
+    const callsFile = join(dir, 'gh-calls');
+    const ghPath = join(dir, 'gh');
+    writeFileSync(
+      ghPath,
+      ghFails
+        ? ['#!/usr/bin/env bash', 'echo "API error" >&2', 'exit 1', ''].join(
+            '\n',
+          )
+        : [
+            '#!/usr/bin/env bash',
+            'echo "$@" >> "$CONTEXT_GH_CALLS"',
+            "printf '%s\\n' $CONTEXT_LABELS",
+            '',
+          ].join('\n'),
+    );
+    chmodSync(ghPath, 0o755);
+    const outputFile = join(dir, 'output');
+    const summaryFile = join(dir, 'summary');
+    writeFileSync(outputFile, '');
+    writeFileSync(summaryFile, '');
+    execFileSync('bash', ['-c', run], {
+      env: {
+        PATH: [dir, process.env.PATH].join(':'),
+        GITHUB_OUTPUT: outputFile,
+        GITHUB_STEP_SUMMARY: summaryFile,
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        GH_TOKEN: 'test-token',
+        TRIGGER_BODY: triggerBody,
+        CONTEXT_LABELS: labels.join(' '),
+        CONTEXT_GH_CALLS: callsFile,
+      },
+    });
+    return {
+      output: readFileSync(outputFile, 'utf8'),
+      summary: readFileSync(summaryFile, 'utf8'),
+      ghCalls: existsSync(callsFile) ? readFileSync(callsFile, 'utf8') : '',
+      dir,
+    };
+  }
+
+  it('skips the automatic review when the LIVE labels carry status/on-hold', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['type/bug', 'status/on-hold'],
+    });
+    expect(r.output).toContain('should_run=false');
+    expect(r.output).not.toContain('should_run=true');
+    // The check must query the labels endpoint, not trust the event payload:
+    // the label is applied AFTER the triggering event fires.
+    expect(r.ghCalls).toContain('issues/4242/labels');
+    expect(r.summary).toContain('status/on-hold');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('matches the label exactly — a lookalike label must not skip', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold-extended'],
+    });
+    expect(r.output).toContain('should_run=true');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('still reviews automatically when the label is absent', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['type/bug'],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.output).toContain('auto_review=true');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('fails open: an unreadable label list never silently skips the review', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      ghFails: true,
+    });
+    expect(r.output).toContain('should_run=true');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('never skips an explicit /review ask, whatever the labels say', () => {
+    const r = runContextStep({
+      eventName: 'issue_comment',
+      labels: ['status/on-hold'],
+      triggerBody: '@qwen-code /review',
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.ghCalls).not.toContain('labels');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('never skips a maintainer review_requested, whatever the labels say', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      action: 'review_requested',
+      labels: ['status/on-hold'],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.ghCalls).not.toContain('labels');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+});

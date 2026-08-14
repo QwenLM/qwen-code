@@ -250,6 +250,98 @@ If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs 
 
 This signal is NOT a terminal gate — it does not stop the review or close the PR. It escalates review depth and flags risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
 
+**1f. Non-functional change routing (triage-only outcome):**
+
+Behavior-neutral maintenance PRs — internal renames, formatting, comment/JSDoc
+fixes — burn the full multi-stage review while carrying no observable risk
+(#7411). Route them to a lightweight triage-only outcome instead, so review
+capacity goes to PRs that can break something. The classifier must be
+conservative: **when in doubt, take the full path.** A false skip (a risky
+change classified as neutral) silently loses review coverage — that is the
+dangerous failure mode here.
+
+**Applies only to unattended CI runs** (`GITHUB_EVENT_NAME=issues` or
+`pull_request_target`). Explicit re-runs (`issue_comment`,
+`workflow_dispatch`) and local invocations always take the full path — a
+human asked for a review, so give them one.
+
+**Preconditions — every one must hold before this route is even considered:**
+
+- Stages 0 and 1a–1e pass without escalation, and 1e matched no high-risk path;
+- the title is not a `fix` type — a fix claims a behaviour change by definition;
+- no core module paths (Stage 0 list), no `.github/workflows/**`, no package
+  manifests or lockfiles, no schema/generated files, no prompts/system
+  instructions or other model-visible text, no user-facing documentation or
+  CLI help strings, no broken-link changes;
+- at most 100 production logic lines (Stage 0 size calculation).
+
+**Classification — 100% certainty required.** Every hunk must be exactly one of:
+
+1. a source-comment or JSDoc-only edit;
+2. a whitespace/formatting change with no token-level semantic change;
+3. an internal identifier rename (variable, field, local function) where every
+   occurrence is updated consistently within the diff and no external contract
+   changes — no exported symbol, CLI flag, config key, serialized field, or
+   snapshot/test expectation.
+
+A hunk that touches a string literal, a number, control flow, a dependency,
+configuration, or anything you cannot certify as behaviour-neutral sends the
+whole PR to the full path. Title, description, and line count are not
+classification evidence — read the diff.
+
+**Triage-only outcome (terminal — no review submitted):**
+
+1. Apply the existing label (never create one):
+
+```bash
+gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
+```
+
+2. Post the Stage 1 comment using the triage-only variant below.
+3. Stop — no Stage 2, no Stage 3, no approval, no CHANGES_REQUESTED.
+
+The automated review workflow checks the live `status/on-hold` label before
+invoking the model and skips the automatic lane while it is present
+(`qwen-code-pr-review.yml`, 'Resolve PR context'). Maintainers pull a full
+review at any time with `@qwen-code /review` — explicit triggers bypass the
+label check — and removing the label re-enables the automatic lane on the next
+push. Nothing here blocks merging or closes the PR.
+
+```markdown
+<!-- qwen-triage stage=1 -->
+
+Thanks for the PR!
+
+Template looks good ✓
+
+This looks like a behaviour-neutral maintenance change (<one line of evidence,
+e.g. "comment/JSDoc fixes only, across N files">), so it takes the lightweight
+triage-only path instead of the full automated review: `status/on-hold` is
+applied and no review verdict will post automatically. Nothing is blocked — a
+maintainer can start a full review at any time with `@qwen-code /review`, and
+removing the label re-enables the automatic lane. If this cleanup pairs
+naturally with a substantive change, consider folding it in there.
+
+<details>
+<summary>中文说明</summary>
+
+感谢贡献！
+
+模板完整 ✓
+
+这是一个行为中性的维护性改动（<一句话证据，如"仅 N 个文件的注释/JSDoc 修正">），
+因此走轻量 triage-only 路径，不再自动进入完整评审：已添加 `status/on-hold`
+标签，不会自动发布评审结论。合并不受阻塞——maintainer 可随时用
+`@qwen-code /review` 发起完整评审；移除该标签后，下次推送会恢复自动评审。
+如果这项清理适合随某个实质性改动一起提交，也可以考虑合并进去。
+
+</details>
+
+— _Qwen Code · qwen3.7-max_
+
+<sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
+```
+
 Post a single Stage 1 comment. Be direct — say what you actually think, not what's polite:
 
 ```markdown
@@ -305,6 +397,7 @@ Save this comment's ID. Terminal exits — stop here if any applies:
 - Template failure (Stage 1a) → stopped.
 - Problem does not exist (Stage 1b) → request changes, do not proceed to Stage 2.
 - Direction escalated (Stage 1c) → stop here.
+- Non-functional triage-only route (Stage 1f) → `status/on-hold` applied and triage summary posted, do not proceed to Stage 2.
 
 ### Stage 2: Review + Test
 
