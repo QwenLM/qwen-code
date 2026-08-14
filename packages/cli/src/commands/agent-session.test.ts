@@ -27,10 +27,12 @@ const mockSupervisor = vi.hoisted(() => ({
   })),
   stop: vi.fn(async (id: string) => ({ command: 'stop', id })),
   kill: vi.fn(async (id: string) => ({ command: 'kill', id })),
-  respawn: vi.fn(async (target?: string) => ({
-    command: 'respawn',
-    target: target ?? 'all',
-  })),
+  respawn: vi.fn(
+    async (target?: string): Promise<Record<string, unknown>> => ({
+      command: 'respawn',
+      target: target ?? 'all',
+    }),
+  ),
   remove: vi.fn(async (id: string) => ({ command: 'rm', id })),
 }));
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
@@ -182,6 +184,11 @@ describe('agent session commands', () => {
     await parseCommand('rm 12345678');
 
     expect(mockSupervisor.remove).toHaveBeenCalledWith('12345678');
+
+    mockSupervisor.attach.mockClear();
+    await parseCommand('attach 12345678');
+
+    expect(mockSupervisor.attach).toHaveBeenCalledWith('12345678');
   });
 
   it('routes respawn --all to the supervisor and prints JSON', async () => {
@@ -216,5 +223,33 @@ describe('agent session commands', () => {
     );
 
     await expect(parseCommand('respawn --all')).rejects.toThrow('daemon gone');
+  });
+
+  it('fails respawn --all when every session was skipped', async () => {
+    mockSupervisor.respawn.mockResolvedValueOnce({
+      all: true,
+      results: [
+        { id: 'session-1', skipped: true, reason: 'state is not exited' },
+        { id: 'session-2', skipped: true, reason: 'state is not exited' },
+      ],
+    });
+
+    await parseCommand('respawn --all');
+
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('succeeds respawn --all when at least one session respawned', async () => {
+    mockSupervisor.respawn.mockResolvedValueOnce({
+      all: true,
+      results: [
+        { id: 'session-1', skipped: true, reason: 'state is not exited' },
+        { id: 'session-2', respawned: true },
+      ],
+    });
+
+    await parseCommand('respawn --all');
+
+    expect(process.exitCode).toBeUndefined();
   });
 });

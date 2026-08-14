@@ -12,6 +12,10 @@ import type { AgentViewLaunchFile } from './protocol.js';
 export const DEFAULT_AGENT_VIEW_PTY_OUTPUT_BYTES = 1024 * 1024;
 const INTERNAL_ONLY_WORKER_ENV_KEYS = new Set([
   PTY_HOST_AUTH_TOKEN_ENV,
+  // The supervisor startup-gate marker (INTERNAL_AGENT_VIEW_SUPERVISOR_ENV):
+  // workers must not carry it, or an agent-run `qwen` whose argv mentions
+  // the internal flag could re-enter supervisor mode from inside a session.
+  'QWEN_AGENT_VIEW_SUPERVISOR',
   'TMUX',
   'TMUX_PANE',
   'STY',

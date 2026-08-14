@@ -97,6 +97,7 @@ describe('routeManagedAgentViewResume', () => {
     await expect(
       routeManagedAgentViewResume('session-1', {
         QWEN_AGENT_VIEW_WORKER: '1',
+        QWEN_AGENT_VIEW_SESSION_ID: 'session-1',
       }),
     ).resolves.toBe(false);
 

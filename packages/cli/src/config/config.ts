@@ -80,7 +80,10 @@ export { isValidSessionId } from './session-id.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  drainStdioBeforeExit,
+  writeStderrLine,
+} from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
   validateMaxToolCalls,
@@ -990,7 +993,7 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['background'] && !hasPositionalQuery) {
             return 'Cannot use --bg/--background without a positional prompt';
           }
-          if (argv['background'] && argv['prompt']) {
+          if (argv['background'] && argv['prompt'] !== undefined) {
             return 'Cannot use --bg/--background with --prompt (-p)';
           }
           if (argv['background'] && argv['promptInteractive'] !== undefined) {
@@ -1016,17 +1019,17 @@ export async function parseArguments(): Promise<CliArgs> {
             argv['background'] &&
             (argv['resume'] !== undefined ||
               argv['continue'] ||
-              argv['sessionId'])
+              argv['sessionId'] !== undefined)
           ) {
             return 'Cannot use --bg/--background with --resume, --continue, or --session-id';
           }
-          if (argv['background'] && argv['worktree']) {
+          if (argv['background'] && argv['worktree'] !== undefined) {
             return 'Cannot use --bg/--background with --worktree';
           }
-          if (argv['background'] && argv['model']) {
+          if (argv['background'] && argv['model'] !== undefined) {
             return 'Cannot use --bg/--background with --model';
           }
-          if (argv['background'] && argv['approvalMode']) {
+          if (argv['background'] && argv['approvalMode'] !== undefined) {
             return 'Cannot use --bg/--background with --approval-mode';
           }
           if (argv['background'] && argv['includeDirectories']) {
@@ -1038,10 +1041,10 @@ export async function parseArguments(): Promise<CliArgs> {
           if (
             argv['background'] &&
             (argv['sandbox'] ||
-              argv['sandboxImage'] ||
-              argv['systemPrompt'] ||
-              argv['appendSystemPrompt'] ||
-              argv['mcpConfig'] ||
+              argv['sandboxImage'] !== undefined ||
+              argv['systemPrompt'] !== undefined ||
+              argv['appendSystemPrompt'] !== undefined ||
+              argv['mcpConfig'] !== undefined ||
               argv['extensions'] ||
               argv['allowedTools'] ||
               argv['allowedMcpServerNames'])
@@ -1070,6 +1073,36 @@ export async function parseArguments(): Promise<CliArgs> {
               argv['maxSubagentDepth'] !== undefined)
           ) {
             return 'Cannot use --bg/--background with --max-wall-time, --max-session-turns, --max-tool-calls, or --max-subagent-depth';
+          }
+          if (
+            argv['background'] &&
+            (argv['safeMode'] ||
+              argv['proxy'] !== undefined ||
+              argv['insecure'] ||
+              argv['chatRecording'] ||
+              argv['openaiLogging'] ||
+              argv['openaiLoggingDir'] !== undefined ||
+              argv['openaiApiKey'] !== undefined ||
+              argv['openaiBaseUrl'] !== undefined ||
+              argv['screenReader'] ||
+              argv['bare'] ||
+              argv['debug'])
+          ) {
+            return 'Cannot use --bg/--background with --safe-mode, --proxy, --insecure, --chat-recording, --openai-logging, --openai-logging-dir, --openai-api-key, --openai-base-url, --screen-reader, --bare, or --debug';
+          }
+          if (
+            argv['background'] &&
+            (argv['telemetry'] ||
+              argv['telemetryTarget'] !== undefined ||
+              argv['telemetryOtlpEndpoint'] !== undefined ||
+              argv['telemetryOtlpProtocol'] !== undefined ||
+              argv['telemetryLogPrompts'] ||
+              argv['telemetryOutfile'] !== undefined ||
+              argv['channel'] !== undefined ||
+              argv['listExtensions'] ||
+              argv['sandboxSessionId'] !== undefined)
+          ) {
+            return 'Cannot use --bg/--background with telemetry flags, --channel, --list-extensions, or --sandbox-session-id';
           }
           if (argv['background'] && !process.stdin.isTTY) {
             // The positional-prompt gate above already ran, so the prompt
@@ -1226,6 +1259,10 @@ export async function parseArguments(): Promise<CliArgs> {
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
+    // Drain first: on POSIX pipes stdout flushes asynchronously, so a bare
+    // process.exit would discard buffered output beyond the pipe buffer
+    // (e.g. `qwen agents logs <id> | tee` for a large scrollback).
+    await drainStdioBeforeExit();
     process.exit(process.exitCode ?? 0);
   }
 
@@ -2104,6 +2141,20 @@ export async function loadCliConfig(
 
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
+      // --continue --fork-session: the continue guard in gemini.tsx runs
+      // after this fork and would check the fresh fork UUID, so gate the
+      // source here — a live managed session must never be forked into a
+      // second foreground runtime.
+      if (argv.continue) {
+        const {
+          isManagedAgentViewContinueBlocked,
+          MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+        } = await import('../startup/agent-view-resume-guard.js');
+        if (await isManagedAgentViewContinueBlocked(sourceSessionId)) {
+          writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+          process.exit(1);
+        }
+      }
       const forkedSessionId = randomUUID();
       try {
         await sessionService.forkSession(sourceSessionId, forkedSessionId);

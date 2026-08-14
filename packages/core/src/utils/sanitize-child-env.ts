@@ -37,6 +37,10 @@ export const INTERNAL_SECRET_ENV_VARS: readonly string[] = [
   'QWEN_AGENT_VIEW_SIDEBAND',
   'QWEN_AGENT_VIEW_TOKEN',
   'QWEN_AGENT_VIEW_ACTIVE_CWD',
+  // The Agent View supervisor startup-gate marker: an agent-run child that
+  // inherits it could re-enter supervisor mode when its argv mentions the
+  // internal flag, so it never leaves the daemon process tree.
+  'QWEN_AGENT_VIEW_SUPERVISOR',
   PRIVATE_ACP_CAPABILITY_ENV,
 ];
 

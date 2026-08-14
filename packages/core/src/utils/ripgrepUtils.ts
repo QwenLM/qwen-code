@@ -234,6 +234,9 @@ export async function ensureRipgrepHealthy(
       ['--version'],
       {
         timeout: RIPGREP_TEST_TIMEOUT_MS,
+        // Same env scrub as the search invocation itself, so the health
+        // probe never bypasses the child-env sanitization.
+        env: sanitizeChildEnv(process.env),
       },
     );
     probeOutput = stdout;

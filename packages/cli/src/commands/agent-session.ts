@@ -36,6 +36,20 @@ function writeJsonResult(result: unknown): void {
   writeStdoutLine(JSON.stringify(result, null, 2));
 }
 
+// True when `respawn --all` produced results but respawned nothing, so
+// `respawn --all || alert` fires instead of silently succeeding.
+function isAllRespawnSkipped(result: unknown): boolean {
+  if (typeof result !== 'object' || result === null) return false;
+  const { results } = result as { results?: unknown };
+  if (!Array.isArray(results) || results.length === 0) return false;
+  return results.every(
+    (entry) =>
+      typeof entry === 'object' &&
+      entry !== null &&
+      (entry as { skipped?: unknown }).skipped === true,
+  );
+}
+
 function sessionCommand(
   command: string,
   describe: string,
@@ -76,8 +90,9 @@ export const attachCommand: CommandModule<unknown, SessionArgs> = {
   builder: (yargs: Argv) =>
     yargs.positional('id', { type: 'string', demandOption: true }),
   handler: async (argv) => {
-    const supervisor = await getSessionSupervisor();
     try {
+      // Supervisor errors are reported like RPC failures below.
+      const supervisor = await getSessionSupervisor();
       await supervisor.attach(argv['id']);
     } catch (error) {
       writeStderrLineSafe(
@@ -132,7 +147,11 @@ export const respawnCommand: CommandModule<unknown, RespawnArgs> = {
     const supervisor = await getSessionSupervisor();
     if (argv.all === true) {
       try {
-        writeJsonResult(await supervisor.respawn());
+        const result = await supervisor.respawn();
+        writeJsonResult(result);
+        if (isAllRespawnSkipped(result)) {
+          process.exitCode = 1;
+        }
       } catch (error) {
         // The server fulfills {all: true} as an unbounded sequential loop;
         // a timeout means the respawn is still in flight, not that it failed.

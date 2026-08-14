@@ -61,6 +61,7 @@ const mockConfigConstructorParams = vi.hoisted(() => vi.fn());
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
+  drainStdioBeforeExit: vi.fn(async () => {}),
   clearScreen: vi.fn(),
 }));
 
@@ -559,6 +560,56 @@ describe('parseArguments', () => {
     [
       ['--bg', 'background task', '--output-format', 'stream-json'],
       'Cannot use --bg/--background with JSON output',
+    ],
+    // Bare string flags parse to '' from yargs; the gates must key on
+    // presence, not truthiness.
+    [
+      ['--bg', 'background task', '--worktree'],
+      'Cannot use --bg/--background with --worktree',
+    ],
+    [
+      ['--bg', 'background task', '--model'],
+      'Cannot use --bg/--background with --model',
+    ],
+    [
+      ['--bg', 'background task', '--session-id'],
+      'Cannot use --bg/--background with --resume, --continue, or --session-id',
+    ],
+    [
+      ['--bg', 'background task', '--safe-mode'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
+      ['--bg', 'background task', '--proxy'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
+      ['--bg', 'background task', '--chat-recording'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
+      ['--bg', 'background task', '--screen-reader'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
+      ['--bg', 'background task', '--debug'],
+      'Cannot use --bg/--background with --safe-mode',
+    ],
+    [
+      ['--bg', 'background task', '--telemetry'],
+      'Cannot use --bg/--background with telemetry flags',
+    ],
+    [
+      ['--bg', 'background task', '--telemetry-target', 'local'],
+      'Cannot use --bg/--background with telemetry flags',
+    ],
+    [
+      ['--bg', 'background task', '--list-extensions'],
+      'Cannot use --bg/--background with telemetry flags',
+    ],
+    [
+      ['--bg', 'background task', '--channel', 'CI'],
+      'Cannot use --bg/--background with telemetry flags',
     ],
   ])('rejects %s', async (args, message) => {
     process.argv = ['node', 'script.js', ...args];

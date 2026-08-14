@@ -67,6 +67,21 @@ export const writeStderrLineSafe = (message: string): void => {
 };
 
 /**
+ * Wait until any pending stdout/stderr writes have flushed.
+ *
+ * On POSIX pipes `process.stdout.write` flushes asynchronously, so a
+ * `process.exit()` right after writing silently discards buffered output
+ * (beyond the ~80KB pipe buffer). Call this before a deliberate early exit
+ * that follows user-facing writes (e.g. `qwen agents` subcommands, `--bg`).
+ */
+export const drainStdioBeforeExit = (): Promise<void> =>
+  new Promise((resolve) => {
+    process.stdout.write('', () => {
+      process.stderr.write('', () => resolve());
+    });
+  });
+
+/**
  * Clears the terminal screen.
  * Use instead of console.clear() to satisfy no-console lint rules.
  */

@@ -89,7 +89,11 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
-import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import {
+  drainStdioBeforeExit,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -462,6 +466,10 @@ export async function main() {
       './commands/agents.js'
     );
     await handleAgentViewBackgroundPrompt(prompt);
+    // Drain before exiting: on POSIX pipes stdout flushes asynchronously, so
+    // a bare process.exit(0) could discard the --bg handoff block for large
+    // outputs piped elsewhere (e.g. `qwen --bg ... | tee log`).
+    await drainStdioBeforeExit();
     process.exit(0);
   }
 
