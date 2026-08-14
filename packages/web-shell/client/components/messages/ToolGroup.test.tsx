@@ -490,7 +490,7 @@ describe('tool group summary logic', () => {
     expect(container.textContent).toContain('Dashboard ready');
   });
 
-  it('does not mount an MCP App while a summary-only row is collapsed', () => {
+  it('keeps an MCP App open in a summary-only row', () => {
     const container = renderToolLine(
       makeTool({
         toolName: 'mcp__demo__show_dashboard',
@@ -507,13 +507,6 @@ describe('tool group summary logic', () => {
       { summaryOnly: true },
     );
 
-    expect(container.textContent).not.toContain('Dashboard ready');
-    const line = container.querySelector(
-      '[class*="lineExpandable"]',
-    ) as HTMLElement;
-    act(() => {
-      line.click();
-    });
     expect(container.textContent).toContain('Dashboard ready');
   });
 

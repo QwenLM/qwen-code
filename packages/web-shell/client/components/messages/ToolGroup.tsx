@@ -1103,10 +1103,12 @@ export const ToolLine = memo(function ToolLine({
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
+  const mcpApp = getMcpAppDisplay(tool.rawOutput);
+  const isForcedExpanded = forceExpanded || Boolean(mcpApp);
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [expanded, setExpanded] = useState(
-    () => forceExpanded || shouldAutoExpand(tool),
+    () => isForcedExpanded || shouldAutoExpand(tool),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
   // Set once the user explicitly toggles this row, so auto-collapse-on-
@@ -1115,14 +1117,14 @@ export const ToolLine = memo(function ToolLine({
 
   useEffect(
     () => {
-      setExpanded(forceExpanded || shouldAutoExpand(tool));
+      setExpanded(isForcedExpanded || shouldAutoExpand(tool));
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
       // A new tool identity resets the manual latch.
       userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [forceExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
+    [isForcedExpanded, monitorDetailsAvailable, tool.callId, tool.toolName],
   );
   const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
@@ -1145,14 +1147,14 @@ export const ToolLine = memo(function ToolLine({
   // error output remains visible.
   useEffect(() => {
     if (
-      !forceExpanded &&
+      !isForcedExpanded &&
       !isAgent &&
       tool.status === 'completed' &&
       !userToggledRef.current
     ) {
       setExpanded(false);
     }
-  }, [forceExpanded, isAgent, tool.status]);
+  }, [isForcedExpanded, isAgent, tool.status]);
 
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
@@ -1261,7 +1263,6 @@ export const ToolLine = memo(function ToolLine({
 
   const fullDescription = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const summaryShell = summaryOnly && isShellToolName(tool.toolName);
   const description = summaryShell
     ? getToolSummaryDescription(tool, workspaceCwd)
@@ -1297,7 +1298,7 @@ export const ToolLine = memo(function ToolLine({
   // wrapped block below, so the header drops its single-line copy.
   const descExpandable = !isTodo && isDescriptionExpandable(description);
   const expandable =
-    !forceExpanded &&
+    !isForcedExpanded &&
     (forceExpandable ||
       (isTodo ? hasTodoList : hasExpandableContent(tool) || descExpandable));
   const interactive = opensMonitorDetails || expandable;
@@ -1727,37 +1728,30 @@ export const ToolGroup = memo(function ToolGroup({
         >
           <div className={styles.chatSummaryContentInner}>
             <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
-              {tools.map((tool) => {
-                const toolHasMcpApp = Boolean(getMcpAppDisplay(tool.rawOutput));
-                return (
-                  <Fragment key={tool.callId}>
-                    {thoughts
-                      ?.filter(
-                        (thought) => thought.beforeToolCallId === tool.callId,
-                      )
-                      .map((thought, index) => (
-                        <ThoughtLine
-                          key={`thought-${tool.callId}-${index}`}
-                          content={thought.content}
-                          isStreaming={thought.isStreaming}
-                          generateContent={generateContent}
-                        />
-                      ))}
-                    <ToolLine
-                      tool={tool}
-                      approval={pendingApproval}
-                      workspaceCwd={workspaceCwd}
-                      summaryOnly={
-                        (!singleTool || compactToolLines) && !toolHasMcpApp
-                      }
-                      forceExpanded={
-                        toolHasMcpApp || (!!singleTool && !compactToolLines)
-                      }
-                      hideHeader={!!singleTool && !compactToolLines}
-                    />
-                  </Fragment>
-                );
-              })}
+              {tools.map((tool) => (
+                <Fragment key={tool.callId}>
+                  {thoughts
+                    ?.filter(
+                      (thought) => thought.beforeToolCallId === tool.callId,
+                    )
+                    .map((thought, index) => (
+                      <ThoughtLine
+                        key={`thought-${tool.callId}-${index}`}
+                        content={thought.content}
+                        isStreaming={thought.isStreaming}
+                        generateContent={generateContent}
+                      />
+                    ))}
+                  <ToolLine
+                    tool={tool}
+                    approval={pendingApproval}
+                    workspaceCwd={workspaceCwd}
+                    summaryOnly={!singleTool || compactToolLines}
+                    forceExpanded={!!singleTool && !compactToolLines}
+                    hideHeader={!!singleTool && !compactToolLines}
+                  />
+                </Fragment>
+              ))}
               {thoughts
                 ?.filter((thought) => thought.beforeToolCallId === undefined)
                 .map((thought, index) => (
