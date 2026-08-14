@@ -4406,6 +4406,27 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(ledger.findings[0]?.title).toBe('whole-PR blocker');
   });
 
+  it('keeps the carried id when the finding text starts on the line after the marker', () => {
+    // A re-report draft '**[Critical]**\nR1-2: still leaking' must not lose
+    // its id to renumbering.
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/a.ts',
+          line: 3,
+          body: '**[Critical]**\nR1-2: still leaking',
+        },
+      ],
+    });
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings[0]?.id).toBe('R1-2');
+    expect(ledger.findings[0]?.title).toBe('still leaking');
+  });
+
   it('attribution off still appends the ledger marker — it is how the next round recovers this round', () => {
     // The footer is gone in this mode; the invisible ledger is the only
     // recovery channel left, so it must ride the body regardless.

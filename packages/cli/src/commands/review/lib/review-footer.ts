@@ -69,7 +69,7 @@ export function commentMarkerSeverity(
 export function stripCommentMarkerLines(body: string): string {
   if (!body.includes('<!-- qwen-review')) return body;
   return mapLinesAware(body, (line) =>
-    /^[ \t]{0,3}<!-- qwen-review (?:critical|suggestion)? -->[ \t]*\r?$/.test(
+    /^[ \t]{0,3}(?:>[ \t]*)?<!-- qwen-review (?:critical|suggestion)? -->[ \t]*\r?$/.test(
       line,
     )
       ? null
@@ -89,9 +89,13 @@ const FOOTER_SPAN_RE =
   /_— [^\n]{0,400}? via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?[ \t]*/g;
 
 export function stripFooterSpans(text: string): string {
-  return text.includes(FOOTER_MARKER)
-    ? text.replace(FOOTER_SPAN_RE, '').trim()
-    : text;
+  if (!text.includes(FOOTER_MARKER)) return text;
+  if (!text.includes('\n')) {
+    const stripped = text.replace(FOOTER_SPAN_RE, '');
+    return stripped === text ? text : stripped.trim();
+  }
+  // Multi-line: the line-map keeps fenced/indented quotations intact.
+  return mapLinesAware(text, (line) => line.replace(FOOTER_SPAN_RE, ''));
 }
 
 /** The footer naming the reviewing model and the CLI version it ran under. */
@@ -172,28 +176,59 @@ function mapLinesAware(
   body: string,
   map: (line: string) => string | null,
 ): string {
-  let inFence = false;
+  // The opening fence, tracked faithfully: CommonMark closes a fence only
+  // on the same delimiter character, at a run length at least the opener's,
+  // with no info string — a bare boolean inverts parity on nested/mixed
+  // quotes, which is exactly the 'quoting an earlier round' shape these
+  // strips exist for.
+  let fence: { char: string; len: number } | null = null;
   let inHtml = false;
   let changed = false;
   const out: string[] = [];
   for (const line of body.split('\n')) {
     const trimmed = line.trimStart();
     if (inHtml) {
-      if (trimmed === '') inHtml = false;
+      if (trimmed === '') {
+        inHtml = false;
+        out.push(line);
+        continue;
+      }
+      // HTML-block content renders VISIBLY on GitHub, so it is never a
+      // shield against the map — the state exists only to stop a
+      // fence-shaped line inside one from toggling fence state.
+      const mapped = map(line);
+      if (mapped === null) {
+        changed = true;
+        continue;
+      }
+      if (mapped !== line) changed = true;
+      out.push(mapped);
+      continue;
+    }
+    if (fence !== null) {
+      const close = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/.exec(line);
+      if (
+        close !== null &&
+        close[1]![0] === fence.char &&
+        close[1]!.length >= fence.len
+      ) {
+        fence = null;
+      }
       out.push(line);
       continue;
     }
-    if (/^<[A-Za-z][^>]*>?[ \t]*\r?$/.test(trimmed) && !inFence) {
+    if (/^<[A-Za-z][^>]*>?[ \t]*\r?$/.test(trimmed)) {
       inHtml = true;
       out.push(line);
       continue;
     }
-    if (/^[ \t]{0,3}(```|~~~)/.test(line)) {
-      inFence = !inFence;
+    const open = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+    if (open !== null) {
+      fence = { char: open[1]![0]!, len: open[1]!.length };
       out.push(line);
       continue;
     }
-    if (inFence || /^[ \t]{4}/.test(line)) {
+    if (/^[ \t]{4}/.test(line)) {
       out.push(line);
       continue;
     }
@@ -211,6 +246,28 @@ function mapLinesAware(
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^\n+/, '')
     .trimEnd();
+}
+
+/**
+ * Whether what remains would render as NOTHING on GitHub: whitespace,
+ * format characters (Cf, e.g. zero-width spaces — `.trim()` does not see
+ * them), HTML comments, hollowed fence delimiters, and forged-footer lines
+ * are not content. The emptiness gates must project through this before
+ * comparing to '', or a scaffolded-but-invisible comment posts, counts
+ * toward the verdict, and re-promotes as an unanswerable blocker. This is
+ * a judgment projection, not a sanitizer, so it is deliberately fence-blind:
+ * a quotation of scaffolding is still not a finding.
+ */
+export function rendersAsNothing(text: string): boolean {
+  const stripped = text
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\p{Cf}/gu, '')
+    .split('\n')
+    .filter((l) => !/^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/.test(l))
+    .filter((l) => !FORGED_FOOTER_LINE_RE.test(l))
+    .join('')
+    .trim();
+  return stripped === '';
 }
 
 /**

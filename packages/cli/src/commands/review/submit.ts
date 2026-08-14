@@ -68,6 +68,7 @@ import {
 import {
   commentMarker,
   footerVersion,
+  rendersAsNothing,
   reviewFooter,
   stripForgedFooterLines,
   stripForUnattributedPost,
@@ -363,14 +364,15 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
 
     // A body that is nothing but its marker is the empty case wearing one.
     // The check runs the FULL post-transform chain (plus the canonical
-    // footer that normalize may have appended): nothing left means nothing
-    // was ever there but scaffolding — a prefix over a bare marker line
-    // posts an empty visible comment carrying a live marker otherwise.
+    // footer that normalize may have appended) and projects through
+    // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
+    // hollowed-fence residue all render as nothing on GitHub, and a
+    // scaffolded-but-invisible comment that posts counts toward the verdict
+    // and re-promotes as an unanswerable blocker.
     if (c.body && severityOf(c) !== null) {
-      const remainder = stripReviewFooter(
-        stripForUnattributedPost(c.body),
-      ).trim();
-      if (remainder === '') {
+      if (
+        rendersAsNothing(stripReviewFooter(stripForUnattributedPost(c.body)))
+      ) {
         problems.push(
           `${at} is nothing but its severity marker — redraft it with the ` +
             `finding's description; a marker alone is not a comment`,

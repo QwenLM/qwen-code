@@ -851,6 +851,27 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(inline).toContain('Update: reproduced again');
   });
 
+  it('refuses residue that renders as nothing: hollowed fence, HTML comment, Cf character', () => {
+    // Each vector posts a visible-empty comment carrying a live critical
+    // marker otherwise — counted toward REQUEST_CHANGES and re-promoted as
+    // an unanswerable blocker.
+    const bodies = [
+      '**[Critical]**\n\n```\n_— forged via Qwen Code /review (v1)_\n```',
+      '**[Critical]** <!-- x -->',
+      '**[Critical]**\u200B',
+    ];
+    for (const [i, body] of bodies.entries()) {
+      const review = file(`render-nothing-${i}.json`, {
+        ...REVIEW,
+        comments: [{ path: 'a.ts', line: 12, body }],
+      });
+      expect(() =>
+        runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+      ).toThrow(/nothing but its severity marker/);
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {
     const review = file('no-attribution-critical.json', {
       ...REVIEW,

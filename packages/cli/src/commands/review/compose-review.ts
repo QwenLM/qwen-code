@@ -76,6 +76,7 @@ import {
 import {
   footerVersion,
   isFooterSafeModelId,
+  rendersAsNothing,
   reviewFooter,
   stripForUnattributedPost,
   stripReviewFooter,
@@ -600,16 +601,13 @@ function composeReviewBody(
   const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
     .map(stripReviewFooter)
     .filter((entry) => entry.trim() !== '');
-  // A body Critical that is nothing but its marker renders nothing (the
-  // marker goes with the mode's strip) yet would still count toward
-  // REQUEST_CHANGES — the inline-comment path refuses this shape at
-  // submit's gate; refuse it here too, while the draft is still cheap to
-  // fix.
+  // A body Critical that is nothing but scaffolding renders nothing yet
+  // would still count toward REQUEST_CHANGES — the inline-comment path
+  // refuses this shape at submit's gate; refuse it here too, projected
+  // through the same full chain the render applies plus the render-nothing
+  // test, while the draft is still cheap to fix.
   for (const entry of bodyCriticals) {
-    if (
-      severityOf({ body: entry }) !== null &&
-      stripSeverityPrefix(entry) === ''
-    ) {
+    if (rendersAsNothing(stripForUnattributedPost(entry))) {
       throw new Error(
         'compose-review: a body Critical is nothing but its severity ' +
           "marker — redraft it with the finding's description; a marker " +
@@ -628,10 +626,7 @@ function composeReviewBody(
     .map(stripReviewFooter)
     .filter((entry) => entry.trim() !== '');
   for (const entry of cannotTell) {
-    if (
-      severityOf({ body: entry }) !== null &&
-      stripSeverityPrefix(entry) === ''
-    ) {
+    if (rendersAsNothing(stripForUnattributedPost(entry))) {
       throw new Error(
         'compose-review: a cannot-tell entry is nothing but its severity ' +
           "marker — redraft it with the finding's description; a marker " +
@@ -2503,8 +2498,11 @@ export function buildLedger(
     // The title strips through the same fixpoint chain the post transform
     // uses — markers, forged footer lines, footer spans, in any order —
     // because the ledger rides the posted body as an HTML comment the
-    // autofix grep reads.
-    const { id: carried, title } = titleOf(stripForUnattributedPost(body));
+    // autofix grep reads. `trimStart` first: a marker followed by a newline
+    // puts the title text on the SECOND line, and titleOf reads the first.
+    const { id: carried, title } = titleOf(
+      stripForUnattributedPost(body).trimStart(),
+    );
     const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({
       id: idFor(carried),
@@ -2521,7 +2519,11 @@ export function buildLedger(
     // The title strips through the same fixpoint chain the visible list
     // uses — the ledger marker rides the posted body as an HTML comment,
     // and the autofix grep reads the whole body, comments included.
-    const { id: carried, title } = titleOf(stripForUnattributedPost(b));
+    // `trimStart` first: a marker followed by a newline puts the title
+    // text on the SECOND line, and titleOf reads the first.
+    const { id: carried, title } = titleOf(
+      stripForUnattributedPost(b).trimStart(),
+    );
     findings.push({
       id: idFor(carried),
       sev: 'C',

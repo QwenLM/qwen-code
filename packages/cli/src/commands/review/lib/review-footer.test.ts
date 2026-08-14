@@ -12,8 +12,10 @@ import {
   commentMarkerSeverity,
   footerVersion,
   isFooterSafeModelId,
+  rendersAsNothing,
   reviewFooter,
   stripCommentMarkerLines,
+  stripForUnattributedPost,
   stripForgedFooterLines,
   stripReviewFooter,
 } from './review-footer.js';
@@ -204,12 +206,48 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('x\n\n    ```');
     });
 
-    it('does not toggle fence state inside an HTML block', () => {
+    it('tracks the fence delimiter faithfully: char, length, no info string on the closer', () => {
+      // A ``` line inside a ~~~ fence is content, not a toggle.
+      const mixed = '~~~\n```\n<!-- qwen-review critical -->\n```\n~~~';
+      expect(stripCommentMarkerLines(mixed)).toBe(mixed);
+      // A closing fence shorter than the opener is content too.
+      const long = '`````\n```\n_— m via Qwen Code /review (v1)_\n`````';
+      expect(stripForgedFooterLines(long)).toBe(long);
+      // …and a footer AFTER the mismatched quote still strips.
+      expect(
+        stripForgedFooterLines(
+          '~~~\n```\n~~~\n\n_— m via Qwen Code /review (v1)_',
+        ),
+      ).toBe('~~~\n```\n~~~');
+    });
+
+    it('does not toggle fence state inside an HTML block, but still strips what it renders', () => {
       expect(
         stripForgedFooterLines(
           '<div>\n```\n</div>\n\n_— m via Qwen Code /review (v1)_',
         ),
       ).toBe('<div>\n```\n</div>');
+      // HTML content is visible on GitHub — a prefix inside a div strips.
+      expect(
+        stripForUnattributedPost('<div>\n**[Critical]**: null deref\n</div>'),
+      ).not.toContain('**[Critical]**');
+    });
+
+    it('the full chain leaves a fenced quoted footer intact', () => {
+      const quoted =
+        'the earlier comment said:\n\n```\n_— model via Qwen Code /review (v1.2.3)_\n```\n\nand it was wrong';
+      expect(stripForUnattributedPost(quoted)).toBe(quoted);
+    });
+  });
+
+  describe('rendersAsNothing — the render-nothing projection', () => {
+    it('sees through Cf characters, HTML comments, and hollowed fences', () => {
+      expect(
+        rendersAsNothing('**[Critical]**\u200B'.replace('**[Critical]**', '')),
+      ).toBe(true);
+      expect(rendersAsNothing('<!-- x -->')).toBe(true);
+      expect(rendersAsNothing('```\n\n```')).toBe(true);
+      expect(rendersAsNothing('real text')).toBe(false);
     });
   });
 
