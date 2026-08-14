@@ -2013,10 +2013,9 @@ jobs:
               # failure carries "HTTP <status>" in the error text. 404 =
               # already off (landed); any other HTTP error = the release did
               # NOT land and the needs-human removal below must NOT run
-              # (R4-32) — or the PR keeps the takeover label while losing
-              # its escalation label, and the release ack posted here would
-              # latch RELEASE_ACKED, blocking every automated path that
-              # could re-apply it. The flag is keyed on the EXIT STATUS, not
+              # (R4-32) — or the PR keeps the takeover label (still capped,
+              # nothing manages it now) while losing the only filterable
+              # escalation state. The flag is keyed on the EXIT STATUS, not
               # the output text: a 200 success carries the remaining-labels
               # body and a network error carries no "HTTP" token, so any
               # text sniff fails one direction or the other (R6-1/R6-19).
@@ -2205,6 +2204,16 @@ jobs:
             fi
             HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
             PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
+          fi
+          # R2-4: a delayed release ack can run AFTER takeover was
+          # re-applied and the new cycle paused again — a live takeover
+          # label means this ack's premise is stale. Post nothing and
+          # touch nothing: the new cycle's own events produce their own
+          # acks, while a stale run here would delete the new cycle's
+          # needs-human and claim a release while takeover is live.
+          if [[ "${ACK}" == 'released' && "$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")" == "true" ]]; then
+            echo "⚠️ released ack skipped on #${PR}: ${TAKEOVER_LABEL} re-applied since the release (stale ack)"
+            exit 0
           fi
           if [[ "${ACK}" == 'base-refused' ]]; then
             BODY="$(printf '🚫 Takeover not engaged: the loop only manages PRs that target `main`, and this one targets `%s`. A stacked PR moves whenever its base branch does, so "new feedback since the last round" and base-conflict resolution are not well defined until the base lands. Two ways forward: retarget this PR to `main` once the base PR merges — the `%s` label is left in place and the scan lists by label, so the next scan engages it with no re-labelling — or take over the base PR instead.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：循环只管理以 `main` 为 base 的 PR，而本 PR 的 base 是 `%s`。堆叠 PR 会随 base 分支移动，因此“自上一轮以来的新反馈”与 base 冲突处理都无法良定义。两条路：待 base 的 PR 合入后把本 PR 改为面向 `main` —— `%s` 标签予以保留，扫描按标签枚举，下一次扫描即会自动接管，无需重新打标签；或改为接管 base 那个 PR。\n\n</details>\n\n<!-- takeover-ack base-refused -->' "${ACK_BASE}" "${TAKEOVER_LABEL}" "${ACK_BASE}" "${TAKEOVER_LABEL}")"

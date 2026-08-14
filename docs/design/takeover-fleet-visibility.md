@@ -50,6 +50,13 @@ Removal is best-effort with a warning on failure, mirroring the existing
 behind by a failed removal is cosmetically wrong but harmless; the next
 cap-stop reapplies it anyway.
 
+A PR closed or merged while paused keeps `needs-human` — deliberately. No
+closure removal path exists (the route drops commands on non-open PRs, every
+enumeration is `--state open`, and there is no `pull_request: closed`
+trigger), and the residue is inert: all consumers filter on open state, so
+the label only marks the resolved escalation in the closed PR's own history.
+All-state label queries should pair the label with a state filter.
+
 Label creation follows the existing convention: `gh label create` (idempotent,
 fixed color) before the first REST add, so a missing label never gets a random
 color.
@@ -121,12 +128,15 @@ re-checked immediately before the mutation, mirroring every existing lever.
   and no permission check is mirrored into the shepherd — the route's
   collaborator check is the authorization gate, and a mirrored copy would
   only drift.
-- **The release lever's population comes from the needs-human enumeration**
-  (needs-human ∩ takeover), not the takeover display window, so window
-  saturation can never make a paused PR unreleasable. Both enumerations cap
-  at 100 with loud saturation warnings, and an enumeration failure degrades
-  to an error row — the dashboard write (which carries the liveness
-  watermark) always runs.
+- **The release lever gets its own enumeration** of the paused population
+  (needs-human ∩ takeover, stalest-first) — not the takeover display window
+  and not the needs-human display window: released PRs keep `needs-human`
+  and age back into that display window, so feeding the lever from it would
+  truncate exactly the fresh pauses that become release-eligible. All three
+  enumerations cap at 100 with loud saturation warnings; a display
+  enumeration failure degrades to an error row, and a paused-enumeration
+  failure skips the lever for that tick — the dashboard write (which
+  carries the liveness watermark) always runs.
 - **The summary posts before the label removal**, dedup'd by its own marker
   scoped to the current pause cycle (only markers newer than the latest cap
   notice count), so a failed comment leaves both labels in place and the

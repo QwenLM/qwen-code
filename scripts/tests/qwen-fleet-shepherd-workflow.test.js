@@ -217,20 +217,31 @@ describe('fleet shepherd workflow', () => {
     // must not exit either (B5): the takeover/needs-human processing runs
     // off its OWN enumerations, so the fleet failure degrades to a loud
     // error row and the tick falls through to the dashboard write (which
-    // carries the liveness watermark). No `exit` after the warning.
-    expect(workflow).toContain(
+    // carries the liveness watermark). Pin the WHOLE failure branch — an
+    // exit statement BEFORE the warning escapes a forward-only scan
+    // (R8-11).
+    const fleetFetch = workflow.match(
+      /if ! gh pr list --repo "\$\{REPO\}" --state open --author "\$\{AUTOFIX_BOT\}" --base main[\s\S]*?\n {10}else\n {12}FLEET_OK=true/,
+    )?.[0];
+    expect(fleetFetch).toBeTruthy();
+    expect(fleetFetch).not.toMatch(/\n\s*exit( 0| 1)?\s*($|;)/m);
+    expect(fleetFetch).toContain(
       'fleet enumeration failed; the bot-fleet table shows an error row this tick',
     );
-    expect(workflow).not.toMatch(
-      /fleet enumeration failed[\s\S]{0,200}exit( 0| 1)?\b/,
-    );
-    expect(workflow).toContain(
+    expect(fleetFetch).toContain(
       '⚠️ fleet enumeration unreadable this tick | fail closed — fleet levers skipped',
     );
-    // The fleet walk is gated on FLEET_OK so the error row is the only row.
-    expect(workflow).toContain('FLEET_OK=false');
+    expect(fleetFetch).toContain('FLEET_OK=false');
+    // The fleet walk is gated on FLEET_OK so the error row is the only row
+    // — the success side assigns true, and the gate CLOSES before the
+    // takeover section, so a fleet fetch failure can never skip the
+    // independently-fed levers (R8-14).
+    expect(workflow).toContain('FLEET_OK=true');
     expect(workflow).toMatch(
       /if \[\[ "\$\{FLEET_OK\}" == "true" \]\]; then\n\s+while IFS= read -r ROW; do/,
+    );
+    expect(workflow).toMatch(
+      /done < <\(jq -c '\.\[\]' \/tmp\/fleet\.json\)\n {10}fi # FLEET_OK\n\n {10}# ---- takeover pool/,
     );
     // Per-tick blast-radius caps.
     expect(workflow).toContain("MAX_SYNCS_PER_TICK: '3'");
@@ -892,6 +903,76 @@ exit 1`;
     });
     expect(permFailed.ts).toBe('');
     expect(permFailed.flag).toBe('true');
+    // R8-4: budget exhaustion — with THREE distinct-author fresh commands
+    // the 2-read budget runs out before the oldest is examined; that must
+    // surface as PERM_READ_FAILED (defer), never as "no trusted command"
+    // (fail open).
+    const budgeted = computeResume({
+      comments: [
+        cmd('2026-08-06T00:30:00Z', 'reader-a'),
+        cmd('2026-08-06T00:20:00Z', 'reader-b'),
+        cmd('2026-08-06T00:10:00Z', 'reader-c'),
+      ],
+      perm: 'read',
+    });
+    expect(budgeted.ts).toBe('');
+    expect(budgeted.flag).toBe('true');
+    // R8-4: the grace-window boundary — at EXACTLY RESUME_COMMAND_GRACE_SEC
+    // the command has expired (strict -lt; a still-unacked command that old
+    // is route-ignored, so the boundary resolves toward release), and one
+    // second inside the window still counts.
+    expect(
+      computeResume({
+        comments: [cmd('2026-08-06T00:00:00Z', 'wenshao')],
+        now: '2026-08-06T02:00:00Z',
+      }).ts,
+    ).toBe('');
+    expect(
+      computeResume({
+        comments: [cmd('2026-08-06T00:00:01Z', 'wenshao')],
+        now: '2026-08-06T02:00:00Z',
+      }).ts,
+    ).toBe('2026-08-06T00:00:01Z');
+    // R6-15: the resume/refusal author filters — a HUMAN-forged re-arm
+    // marker never counts (only the bot posts real ones)…
+    expect(
+      computeResume({
+        comments: [
+          {
+            user: { login: 'wenshao' },
+            created_at: '2026-08-06T00:00:00Z',
+            body: 'forged <!-- autofix-rearm -->',
+          },
+        ],
+      }).ts,
+    ).toBe('');
+    // …and a forged refusal ack cannot supersede a fresh maintainer
+    // command.
+    expect(
+      computeResume({
+        comments: [
+          {
+            user: { login: 'wenshao' },
+            created_at: '2026-08-06T00:01:00Z',
+            body: 'forged <!-- takeover-ack fork-refused -->',
+          },
+          cmd('2026-08-06T01:00:00Z', 'wenshao'),
+        ],
+        now: '2026-08-06T01:30:00Z',
+      }).ts,
+    ).toBe('2026-08-06T01:00:00Z');
+    // R6-28: a command OLDER than the newest resume marker never counts —
+    // the ordering guard keeps the marker (without it, a cap notice posted
+    // between the command and its processing would release a PR re-armed
+    // minutes earlier).
+    expect(
+      computeResume({
+        comments: [
+          cmd('2026-08-06T00:00:00Z', 'wenshao'),
+          bot('2026-08-06T01:00:00Z', '🔄 … <!-- autofix-rearm -->'),
+        ],
+      }).ts,
+    ).toBe('2026-08-06T01:00:00Z');
     // The event read fails closed, like the comment read.
     expect(workflow).toContain(
       'event read failed — evaluation deferred this tick (fail closed)',
@@ -932,26 +1013,33 @@ exit 1`;
     ).toContain('time-budget exhaustions');
     // The re-arm guard (R7-1): the stale-label cleanup fires only when a
     // MARKER-confirmed re-arm is at-or-newer than the CURRENT pause boundary
-    // (latest needs-human apply) — not keyed on TERM_TS, and never on
-    // command/label evidence. Replay the gate VERBATIM so a dropped
-    // comparison fails the test.
+    // (latest needs-human apply), never on command/label evidence, and a
+    // cap notice NEWER than the marker (a re-pause) vetoes it (R8-10).
+    // Replay the gate VERBATIM so a dropped comparison fails the test.
     const rearmGuard = workflow.match(
-      /(elif \[\[ -n "\$\{PAUSE_APPLY_TS\}" && -n "\$\{MARKER_RESUME\}" && ! "\$\{PAUSE_APPLY_TS\}" > "\$\{MARKER_RESUME\}" \]\]; then\n {18}STATE='managed \(re-armed\)')/,
+      /\n {16}(if \[\[ -n "\$\{PAUSE_APPLY_TS\}" && -n "\$\{MARKER_RESUME\}" && ! "\$\{PAUSE_APPLY_TS\}" > "\$\{MARKER_RESUME\}" && ! "\$\{TERM_TS\}" > "\$\{MARKER_RESUME\}" \]\]; then\n {18}STATE='managed \(re-armed\)')/,
     )?.[1];
     expect(rearmGuard).toBeTruthy();
-    const guard = (marker, apply) =>
+    const guard = (marker, apply, term = '') =>
       execFileSync(
         'bash',
         [
           '-c',
-          `if false; then echo UNREADABLE\n${rearmGuard.replace(/\n {18}/g, '\n')}\necho REARMED\nelse echo RELEASE-ELIGIBLE\nfi`,
+          `${rearmGuard.replace(/\n {18}/g, '\n')}\necho REARMED\nelse\necho RELEASE-ELIGIBLE\nfi`,
         ],
         {
-          env: { ...process.env, MARKER_RESUME: marker, PAUSE_APPLY_TS: apply },
+          env: {
+            ...process.env,
+            MARKER_RESUME: marker,
+            PAUSE_APPLY_TS: apply,
+            TERM_TS: term,
+          },
           encoding: 'utf8',
         },
       ).trim();
-    // Marker-confirmed re-arm newer than the current pause apply → re-armed.
+    // Marker-confirmed re-arm newer than the current pause apply → re-armed
+    // — also with NO cap notice: a lost notice must not make the cleanup
+    // unreachable (R8-1).
     expect(guard('2026-08-06T00:00:00Z', '2026-08-05T00:00:00Z')).toBe(
       'REARMED',
     );
@@ -967,6 +1055,25 @@ exit 1`;
     // No marker at all → not re-armed (command-grace evidence alone never
     // triggers this cleanup).
     expect(guard('', '2026-08-05T00:00:00Z')).toBe('RELEASE-ELIGIBLE');
+    // No pause anchor → cannot correlate → not re-armed (fail closed).
+    expect(guard('2026-08-06T00:00:00Z', '')).toBe('RELEASE-ELIGIBLE');
+    // A notice OLDER than the marker does not veto the cleanup.
+    expect(
+      guard(
+        '2026-08-06T00:00:00Z',
+        '2026-08-05T00:00:00Z',
+        '2026-08-04T00:00:00Z',
+      ),
+    ).toBe('REARMED');
+    // R8-10: a cap notice NEWER than the marker means the PR re-paused
+    // after the re-arm — the fresh pause wins, no cleanup.
+    expect(
+      guard(
+        '2026-08-06T00:00:00Z',
+        '2026-08-05T00:00:00Z',
+        '2026-08-07T00:00:00Z',
+      ),
+    ).toBe('RELEASE-ELIGIBLE');
     // The release gates run in blast-radius order: per-tick budget BEFORE
     // the PAT-backed live read, then the shared live_skip veto (fail closed
     // on an unreadable read; skip wins — both worded by skip_note), then the
@@ -1028,7 +1135,7 @@ exit 1`;
       ),
     ).toBe('1');
     expect(workflow).toMatch(
-      /if act "#\$\{PR\}: post auto-release summary"[\s\S]{0,1800}if act "#\$\{PR\}: auto-release takeover/,
+      /if act "#\$\{PR\}: post auto-release summary"[\s\S]{0,3200}if act "#\$\{PR\}: auto-release takeover/,
     );
     // The budget is consumed BEFORE the first external write (R4-C3): a
     // release ATTEMPT is bounded, so a DELETE outage can't mutate many PRs
@@ -1073,7 +1180,30 @@ exit 1`;
     // label-apply event), so a stale unlabel from an EARLIER cycle can't
     // heal this cycle's label, and an absent anchor skips the cleanup
     // (fail closed).
-    expect(workflow).toContain('"${CLEANUPS}" -ge "${MAX_CLEANUPS_PER_TICK}"');
+    // R8-3: BOTH cleanup levers carry the budget → live_skip veto chain
+    // BEFORE their DELETE — a dropped veto would strip needs-human from a
+    // skip-frozen PR that nothing manages (the R4-3 invariant, on the
+    // cleanup side). R8-7: and both DELETE failure branches surface the
+    // failure the same way, so the dashboard distinguishes an outage from
+    // steady state.
+    expect(
+      workflow.match(/"\$\{CLEANUPS\}" -ge "\$\{MAX_CLEANUPS_PER_TICK\}"/g),
+    ).toHaveLength(2);
+    expect(workflow).toMatch(
+      /NOTE='resumed; stale-label cleanup budget reached this tick'\n\s+elif live_skip "\$\{PR\}"; then\n\s+NOTE="\$\(skip_note cleanup\)"[\s\S]{0,300}clear stale \$\{NEEDS_HUMAN_LABEL\} \(re-armed\)/,
+    );
+    expect(workflow).toMatch(
+      /NOTE='cleanup budget reached this tick'\n\s+elif live_skip "\$\{PR\}"; then\n\s+NOTE="\$\(skip_note cleanup\)"[\s\S]{0,700}clear stale \$\{NEEDS_HUMAN_LABEL\} \(manual release/,
+    );
+    expect(
+      workflow.match(/stale-label cleanup failed — will retry next tick/g),
+    ).toHaveLength(2);
+    // R6-16: the heal arm's R5-8 live re-apply check sits between the skip
+    // veto and the heal DELETE — a mid-tick re-engagement cancels the
+    // cleanup instead of deleting a re-managed PR's escalation label.
+    expect(workflow).toMatch(
+      /skip_note cleanup\)"[\s\S]{0,600}takeover label re-applied since the snapshot — cleanup cancelled'[\s\S]{0,300}clear stale \$\{NEEDS_HUMAN_LABEL\} \(manual release/,
+    );
     const nhApplyJq = workflow.match(
       /NH_APPLY_TS="\$\(jq -r --arg nl "\$\{NEEDS_HUMAN_LABEL\}" '([\s\S]*?)' \/tmp\/tk-ev\.json\)"/,
     )?.[1];
@@ -1082,6 +1212,13 @@ exit 1`;
     )?.[1];
     expect(nhApplyJq).toBeTruthy();
     expect(unlabelJq).toBeTruthy();
+    // R8-19: the absent-anchor guard is pinned — without it UNLABEL_ACTOR
+    // would be computed against an empty anchor and admit every human
+    // takeover-unlabel in the window (a needs-human apply past the ~90-day
+    // events lookback must skip the heal, not admit everything).
+    expect(workflow).toMatch(
+      /UNLABEL_ACTOR=''\n\s+if \[\[ -n "\$\{NH_APPLY_TS\}" \]\]; then/,
+    );
     const runUnlabel = (events) => {
       const ll = execFileSync(
         'jq',
@@ -1175,6 +1312,22 @@ exit 1`;
         },
       ]),
     ).toBe('');
+    // R6-27: a two-cycle history pins the LATEST anchor (`| max`): the
+    // human unlabel healed cycle 1 — it must NOT heal cycle 2's fresh
+    // label (a `min` mutant anchors on cycle 1 and admits the stale
+    // unlabel).
+    expect(
+      runUnlabel([
+        nhLabeled('2026-08-01T00:00:00Z'),
+        {
+          event: 'unlabeled',
+          label: { name: 'autofix/takeover' },
+          actor: { login: 'wenshao' },
+          created_at: '2026-08-02T00:00:00Z',
+        },
+        nhLabeled('2026-08-03T00:00:00Z'),
+      ]),
+    ).toBe('');
     // A human unlabel of an UNRELATED label must not count (pins the
     // `.label.name == $tl` select).
     expect(
@@ -1242,6 +1395,18 @@ exit 1`;
     expect(loop3).toMatch(
       /\n {14}fi\n(?: {14}#[^\n]*\n)* {14}echo "🐑 #\$\{PR\} \[/,
     );
+    // R8-15: the post-action routing — a successful release sets
+    // ROUTE='awaiting' so the row lands in Awaiting human, and loop 3 both
+    // defaults to awaiting and guards its append on ROUTE != none (a heal
+    // drops the row entirely).
+    expect(workflow).toMatch(
+      /ROUTE='awaiting'\n\s+NOTE="auto-released after \$\{PAUSE_D\}d paused"/,
+    );
+    expect(workflow).toMatch(
+      /elif \[\[ "\$\{ROUTE\}" == 'awaiting' \]\]; then\n\s+HUMAN_ROWS=/,
+    );
+    expect(loop3).toContain("ROUTE='awaiting'");
+    expect(loop3).toContain('[[ "${ROUTE}" != \'none\' ]]');
   });
 
   it('pins the marker/headline contracts against qwen-autofix.yml — drift fails here, not in production', () => {
@@ -1267,6 +1432,15 @@ exit 1`;
         [...p.matchAll(/contains\("(<!-- [^"]+ -->)"\)/g)].map((m) => m[1]),
       );
     expect(markerSet(rearmKey)).toEqual(markerSet(resumeTs));
+    // R5-16: conflict_paused carries a THIRD copy of the resume-marker set
+    // — compare its resume jq against the same resume set so a marker added
+    // to only one side fails here too, never as a silent dispatch
+    // suppression.
+    const conflictResumeJq = workflow.match(
+      /resume="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" '([\s\S]*?)' \/tmp\/cf-ic\.json\)"/,
+    )?.[1];
+    expect(conflictResumeJq).toBeTruthy();
+    expect(markerSet(conflictResumeJq)).toEqual(markerSet(resumeTs));
     // 1b. The label constants the whole integration keys on (R2-11).
     expect(autofix).toContain("NEEDS_HUMAN_LABEL: 'autofix/needs-human'");
     expect(autofix).toContain("TAKEOVER_LABEL: 'autofix/takeover'");
@@ -1281,6 +1455,14 @@ exit 1`;
     expect(autofix).toContain("RETRY_COMMAND: '@qwen-code /retry'");
     expect(workflow).toContain("TAKEOVER_COMMAND: '@qwen-code /takeover'");
     expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
+    // R8-6: the env constant is the ONLY literal command text in this file
+    // — the auto-release summary interpolates TAKEOVER_COMMAND like every
+    // ack body on the producer side, so a command-syntax rename can never
+    // strand a hardcoded instruction.
+    expect(workflow.match(/@qwen-code \/takeover/g)).toHaveLength(1);
+    expect(workflow).toContain(
+      'comment `%s` to re-engage with a fresh round window',
+    );
     const cmdTs = workflow.match(
       /cands="\$\(jq -r --arg tc "\$\{TAKEOVER_COMMAND\}" --arg rc "\$\{RETRY_COMMAND\}" '([\s\S]*?)' "\$\{ic\}"\)"/,
     )?.[1];
@@ -1402,7 +1584,9 @@ exit 1`;
     )?.[0];
     expect(loop1).toBeTruthy();
     expect(loop1).toContain('continue # loop 2 renders this paused PR');
-    expect(loop1).toContain('pause evaluation unavailable this tick');
+    expect(loop1).toContain(
+      'pause evaluation unavailable this tick (truncated or unreadable paused enumeration)',
+    );
     // R2-16: the needs-human skip filter is byte-identical to the pinned
     // takeover filter (an inverted population ships red, not green). The
     // [^']+ capture cannot span across call sites (the lazy [\s\S]*? form
@@ -1415,8 +1599,8 @@ exit 1`;
       /jq --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([^']+)' \\\n\s+\/tmp\/takeover-raw\.json/,
     )?.[1];
     expect(humanFilter).toBe(takeoverFilterP);
-    // R2-24/R2-28: the needs-human enumeration (the lever's population)
-    // carries the stale-first sort and the labels payload.
+    // R2-24/R2-28: the needs-human enumeration (the awaiting DISPLAY
+    // population) carries the stale-first sort and the labels payload.
     const humanEnum = workflow.match(
       /--label "\$\{NEEDS_HUMAN_LABEL\}"[\s\S]*?\/tmp\/human-raw\.json/,
     )?.[0];
@@ -1424,6 +1608,27 @@ exit 1`;
     expect(humanEnum).toContain("--search 'sort:updated-asc'");
     expect(humanEnum).toContain(
       '--json number,author,updatedAt,mergeable,labels',
+    );
+    // R8-12: the release lever's OWN paused enumeration (R5-7) is pinned on
+    // the same axes as its siblings: the skip filter, the stale-first sort,
+    // the labels payload, the saturation warning, and loop 2's feed + gate.
+    const pausedEnum = workflow.match(
+      /--label "\$\{TAKEOVER_LABEL\}" --label "\$\{NEEDS_HUMAN_LABEL\}"[\s\S]*?\/tmp\/paused-raw\.json/,
+    )?.[0];
+    expect(pausedEnum).toBeTruthy();
+    expect(pausedEnum).toContain("--search 'sort:updated-asc'");
+    expect(pausedEnum).toContain(
+      '--json number,author,updatedAt,mergeable,labels',
+    );
+    expect(workflow).toContain(
+      'paused-takeover pool at the 100-PR enumeration limit',
+    );
+    const pausedFilter = workflow.match(
+      /jq --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([^']+)' \\\n\s+\/tmp\/paused-raw\.json/,
+    )?.[1];
+    expect(pausedFilter).toBe(takeoverFilterP);
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{PAUSED_OK\}" == "true" \]\]; then\n\s+while IFS= read -r ROW; do[\s\S]*?done < <\(jq -c '\.\[\]' \/tmp\/paused\.json\)/,
     );
     // R2-22: neither enumeration failure may terminate the tick — any
     // spelling of exit — because the dashboard write carries the liveness
@@ -1439,11 +1644,62 @@ exit 1`;
     // R4-28: pin the page-MERGE program too — GitHub returns comments
     // oldest-first, so `.[0] // []` would anchor TERM_TS to a stale page-1
     // cycle while the current cycle's re-arm marker sits on page 2.
-    expect(workflow).toMatch(
-      /issues\/\$\{PR\}\/events" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ev\.json/,
-    );
+    // R8-16: the events fetch exists TWICE — loop 3's heal read shares the
+    // shape; pin both occurrences, and pin loop 3's site INSIDE its own
+    // extraction so dropping --paginate only there (loop 3's population is
+    // the long-lived one that outgrows a page first) fails.
+    expect(
+      workflow.match(
+        /issues\/\$\{PR\}\/events" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ev\.json/g,
+      ),
+    ).toHaveLength(2);
     expect(workflow).toMatch(
       /issues\/\$\{PR\}\/comments" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ic\.json/,
+    );
+    const loop3Pag = workflow.match(
+      /# Loop 3: needs-human-ONLY PRs[\s\S]*?done < <\(jq -c '\.\[\]' \/tmp\/human\.json\)/,
+    )?.[0];
+    expect(loop3Pag).toBeTruthy();
+    expect(loop3Pag).toMatch(
+      /issues\/\$\{PR\}\/events" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ev\.json/,
+    );
+    // R2-3: a re-arm landing BETWEEN the summary post and the DELETE is
+    // caught by a final evidence re-fetch immediately before the removal —
+    // the re-arm's label re-apply is a no-op while the label still rides
+    // the PR, so no live label read can catch it. Pin the shape and the
+    // veto's ordering ahead of the DELETE.
+    expect(workflow).toMatch(
+      /issues\/\$\{PR\}\/comments" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ic3\.json[\s\S]{0,200}issues\/\$\{PR\}\/events" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ev3\.json/,
+    );
+    expect(workflow).toContain(
+      're-arm landed during the release — takeover kept',
+    );
+    // R6-8: the pre-write re-fetches paginate too — a page-1-only re-check
+    // reads the OLDEST comments and would miss a just-landed re-arm marker
+    // on exactly the high-comment paused population. R6-14: and the
+    // re-check's fail-closed arm, its veto comparison, and the cancellation
+    // NOTE are pinned (both re-check sites share the fail-closed wording).
+    expect(workflow).toMatch(
+      /issues\/\$\{PR\}\/comments" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ic2\.json/,
+    );
+    expect(workflow).toMatch(
+      /issues\/\$\{PR\}\/events" --paginate 2> \/dev\/null \| jq -s 'add \/\/ \[\]' > \/tmp\/tk-ev2\.json/,
+    );
+    expect(
+      workflow.match(
+        /evidence re-check unreadable — release deferred \(fail closed\)/g,
+      ),
+    ).toHaveLength(2);
+    expect(workflow).toContain(
+      'resume evidence appeared during evaluation — release cancelled',
+    );
+    expect(
+      workflow.match(
+        /\[\[ -n "\$\{RESUME_NOW\}" && ! "\$\{TERM_TS\}" > "\$\{RESUME_NOW\}" \]\]/g,
+      ),
+    ).toHaveLength(2);
+    expect(workflow).toMatch(
+      /re-arm landed during the release — takeover kept'[\s\S]{0,400}auto-release takeover \(paused/,
     );
     // R2-19: the release scope check requires BOTH labels — the --arg
     // bindings are the load-bearing part. R3-12: the pin runs through the
@@ -1461,19 +1717,25 @@ exit 1`;
     expect(workflow).toMatch(
       /if \[\[ -n "\$\{evt\}" && ! "\$\{resume\}" > "\$\{evt\}" \]\]; then\n\s+resume="\$\{evt\}"/,
     );
-    // R2-21: the compute_resume_ts call runs BEFORE the evaluation chain
-    // consumes RESUME_TS — and the R5-6 pre-write recompute exists. Both
-    // call sites use the global-return form (a `$(...)` subshell would drop
-    // PERM_READ_FAILED — the R5-4 defer would be dead code).
-    expect(workflow).toMatch(
-      /compute_resume_ts \/tmp\/tk-ic\.json \/tmp\/tk-ev\.json\n\s+RESUME_TS="\$\{RESUME_OUT\}"[\s\S]*?if \[\[ -z "\$\{TERM_TS\}" \]\]/,
-    );
+    // R2-21/R8-5: the resume evidence is computed only at RELEASE time —
+    // the pre-summary recompute (R5-6) and the pre-DELETE re-check (R2-3)
+    // — in the global-return form (a `$(...)` subshell would drop
+    // PERM_READ_FAILED, making the R5-4 defer dead code). The old
+    // loop-entry call left a dead RESUME_TS store and spent discarded
+    // permission reads every tick; it must not return.
     expect(workflow).toContain(
       'compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json; RESUME_NOW="${RESUME_OUT}"',
     );
     expect(workflow).not.toContain('$(compute_resume_ts');
+    expect(workflow).not.toContain('RESUME_TS=');
+    // R8-1: the re-armed cleanup branch PRECEDES the empty-TERM_TS
+    // deferral, so a lost cap notice cannot make it unreachable.
+    expect(workflow).toMatch(
+      /STATE='managed \(re-armed\)'[\s\S]*?elif \[\[ -z "\$\{TERM_TS\}" \]\]; then/,
+    );
     // R5-4: a failed permission read defers the release (fail closed),
-    // pinned at both evaluation points.
+    // pinned at BOTH release-time evaluation points (the pre-summary veto
+    // and the pre-DELETE R2-3 re-check).
     expect(
       workflow.match(/command-permission read failed — release deferred/g)
         ?.length,

@@ -3368,6 +3368,13 @@ describe('qwen-autofix workflow', () => {
     expect(unreadableIdx).toBeLessThan(
       reviewScanJob.indexOf('if [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "*'),
     );
+    // R8-17: the fail-closed gate actually SKIPS the writes — the
+    // `continue` is load-bearing (without it an unreadable state falls
+    // through the consent gate, whose empty-string disjuncts are both
+    // false, and POSTs over a concurrently added skip).
+    expect(reviewScanJob).toMatch(
+      /if \[\[ -z "\$\{LIVE_LABELS_JSON\}" \]\]; then\n\s+echo "🧭 cap notice skipped: label state unreadable \(fail closed\) on #\$\{PR\}"\n\s+continue/,
+    );
     // Candidates drain newest-first, and the free busy skip never consumes
     // inspection budget.
     expect(reviewScanJob).toContain('sort_by(-.number)');
@@ -3503,16 +3510,35 @@ describe('qwen-autofix workflow', () => {
       ),
     ).toBe('0');
     expect(runRelAck([{ event: 'labeled' }], '2026-08-05T00:00:00Z')).toBe('0');
+    // R6-6: same-second boundary — a release at EXACTLY the window key
+    // counts (>= tie-toward-released: a completed release must never be
+    // re-escalated, R5-9).
+    expect(
+      runRelAck(
+        [
+          {
+            event: 'unlabeled',
+            label: { name: 'autofix/takeover' },
+            created_at: '2026-08-05T00:00:00Z',
+          },
+        ],
+        '2026-08-05T00:00:00Z',
+      ),
+    ).toBe('1');
     // R4-24: the gate's control-flow nesting is replayed — the label POST
     // must fire ONLY in the outer else arm (RELEASE_ACKED=0 or bot author),
-    // never in the released arm. R7-3: releasedIdx anchors on the released
-    // echo and elseIdx on the OUTER else (16-space indent — the inner else
-    // at 18 spaces introduces the released echo, not the POST arm).
+    // never in the released arm. R7-3: elseIdx anchors on the OUTER else
+    // (16-space indent — the inner else at 18 spaces introduces the
+    // released echo, not the POST arm). R8-18: releasedIdx anchors on the
+    // FULL released echo — the shared prefix alone resolves to the earlier
+    // 'release history unreadable' echo, silently migrating the anchor.
     const gateBlock = reviewScanJob.match(
       /if \[\[ "\$\{SCAN_BOT_ACTOR\}" != "\$\{AUTOFIX_BOT\}" \]\]; then[\s\S]*?cap label\/notice skipped[\s\S]*?\n {16}fi/,
     )?.[0];
     expect(gateBlock).toBeTruthy();
-    const releasedIdx = gateBlock.indexOf('cap label/notice skipped');
+    const releasedIdx = gateBlock.indexOf(
+      'cap label/notice skipped: PR was released after its last re-arm',
+    );
     const elseIdx = gateBlock.indexOf(
       '\n' + ' '.repeat(16) + 'else',
       releasedIdx,
@@ -3743,7 +3769,7 @@ describe('qwen-autofix workflow', () => {
             // the block's two failure policies instead of the stub
             // universally exiting 0.
             `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
-            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" ]]; then printf '%s' '[]'; fi`,
+            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" ]]; then printf '%s' '[{"name":"Tracks HTTP 5xx flakes"}]'; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
@@ -3995,12 +4021,27 @@ describe('qwen-autofix workflow', () => {
     expect(releaseFailed.log).toContain('::warning::');
     expect(releaseFailed.log).toContain('removal failed');
     expect(releaseFailed.log).toContain('HTTP 500');
-    // R5-1: …but a failed takeover release keeps needs-human — REMOVED_OK is
-    // derived from the captured stream ("HTTP " non-404 = did not land), and
-    // the stub emits the remaining-labels body on success to model the real
-    // API contract.
+    // R5-1: …but a failed takeover release keeps needs-human — landed vs
+    // not-landed is keyed on the DELETE's EXIT STATUS (404 counts as
+    // landed; any other non-zero does not — R6-1's transport failures and
+    // R6-19's "HTTP "-bearing success bodies both mislead a text sniff),
+    // and the stub's success body carries a label name containing "HTTP "
+    // to model the real remaining-labels API contract.
     expect(releaseFailed.writes).not.toContain('labels/autofix%2Fneeds-human');
     expect(releaseFailed.log).toContain('release did not land');
+    // R6-9: a transport-level failure carries no "HTTP " token anywhere —
+    // the exit-status derivation still classifies it as not-landed (the
+    // class the old text sniff missed, R6-1).
+    const releaseTransportFailed = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'gh: dial tcp 140.82.121.4:443: connect: connection refused',
+    });
+    expect(releaseTransportFailed.writes).toContain('takeover-ack released');
+    expect(releaseTransportFailed.writes).not.toContain(
+      'labels/autofix%2Fneeds-human',
+    );
+    expect(releaseTransportFailed.log).toContain('release did not land');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A
@@ -5433,7 +5474,13 @@ exit 1
       .join('\n');
     expect(ackBlock).toBeTruthy();
 
-    const runAck = ({ ack, base = '', prViewOk = true, labels = [] }) => {
+    const runAck = ({
+      ack,
+      base = '',
+      prViewOk = true,
+      labels = [],
+      deleteFails = '',
+    }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ack-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
@@ -5443,12 +5490,18 @@ exit 1
           '#!/usr/bin/env bash',
           `echo "$@" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
           `if [[ "$1" == 'api' && "$2" == 'user' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
-          // Other api calls (the needs-human DELETE) succeed silently but are
-          // recorded above — the ack-job conditional removal is observable.
-          `if [[ "$1" == 'api' ]]; then exit 0; fi`,
+          // Other api calls (the needs-human DELETE) succeed silently but
+          // are recorded above — the ack-job conditional removal is
+          // observable. R6-33: with a failure knob — a non-404 must
+          // warn-and-continue onto the ack comment, and the harness's
+          // bash -e discriminates an aborting guard-strip mutant.
+          `if [[ "$1" == 'api' ]]; then if [[ -n "${deleteFails}" ]]; then echo "${deleteFails}" >&2; exit 1; fi; exit 0; fi`,
           `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then : > ${JSON.stringify(join(dir, 'pr-view-called'))}; ${
             prViewOk
-              ? `printf '%s' '${JSON.stringify({ labels, author: { login: 'wenshao' } })}'; exit 0`
+              ? // R6-22: serve the payload only for the EXACT field list
+                // the ack job requests (--json labels,author) — a drifted
+                // field selection gets an empty object, like production.
+                `if [[ "$*" == *'--json labels,author'* ]]; then printf '%s' '${JSON.stringify({ labels, author: { login: 'wenshao' } })}'; else printf '%s' '{}'; fi; exit 0`
               : 'exit 1'
           }; fi`,
           `if [[ "$1" == 'pr' && "$2" == 'comment' ]]; then printf '%s' "$7" > ${JSON.stringify(join(dir, 'comment.md'))}; exit 0; fi`,
@@ -5477,6 +5530,7 @@ exit 1
       const callsPath = join(dir, 'calls.log');
       const result = {
         status: proc.status,
+        stdout: proc.stdout ?? '',
         body: existsSync(commentPath) ? readFileSync(commentPath, 'utf8') : '',
         calls: existsSync(callsPath) ? readFileSync(callsPath, 'utf8') : '',
         readPr: existsSync(join(dir, 'pr-view-called')),
@@ -5530,6 +5584,13 @@ exit 1
       runAck({ ack: 'released' }).calls.match(/api -X DELETE/gm) ?? [],
     ).toHaveLength(1);
     expect(runAck({ ack: 'released' }).calls).toContain(nhDelete);
+    // R6-11: …and the cleanup runs BEFORE the unguarded final ack comment —
+    // a transient comment failure aborting under bash -e must not strand
+    // the stale label.
+    const releasedOrder = runAck({ ack: 'released' });
+    expect(releasedOrder.calls.indexOf('api -X DELETE')).toBeLessThan(
+      releasedOrder.calls.indexOf('pr comment'),
+    );
     expect(
       runAck({ ack: 'engaged', labels: [{ name: 'autofix/skip' }] }).calls,
     ).not.toContain(nhDelete);
@@ -5561,6 +5622,34 @@ exit 1
         labels: [{ name: 'autofix/skip' }],
       }).calls.match(/api -X DELETE/gm) ?? [],
     ).toHaveLength(0);
+    // R2-4: a DELAYED release ack that lands after takeover was re-applied
+    // is stale — it must not touch the new cycle's needs-human and posts
+    // nothing (the new cycle's own events produce their own acks).
+    const staleRelease = runAck({
+      ack: 'released',
+      labels: [{ name: 'autofix/takeover' }, { name: 'autofix/needs-human' }],
+    });
+    expect(staleRelease.status).toBe(0);
+    expect(staleRelease.calls).not.toContain('api -X DELETE');
+    expect(staleRelease.body).toBe('');
+    expect(staleRelease.stdout).toContain('stale ack');
+    // R6-33: a non-404 needs-human DELETE failure warns and STILL posts the
+    // ack (bash -e must not abort before the comment)…
+    const relDeleteFailed = runAck({
+      ack: 'released',
+      deleteFails: 'HTTP 502: Bad Gateway',
+    });
+    expect(relDeleteFailed.status).toBe(0);
+    expect(relDeleteFailed.stdout).toContain('removal failed');
+    expect(relDeleteFailed.body).toContain('<!-- takeover-ack released -->');
+    // …while a 404 (the never-paused common case) is silently tolerated.
+    const relDelete404 = runAck({
+      ack: 'released',
+      deleteFails: 'HTTP 404: Not Found',
+    });
+    expect(relDelete404.status).toBe(0);
+    expect(relDelete404.stdout).not.toContain('removal failed');
+    expect(relDelete404.body).toContain('<!-- takeover-ack released -->');
     // R4-16: fork-refused and skip-blocked acks — management never resumed,
     // zero DELETEs (with total-count assertions, not just toContain).
     expect(runAck({ ack: 'fork-refused' }).calls).not.toContain(nhDelete);
@@ -11229,7 +11318,9 @@ exit 1
           join(dir, 'gh'),
           [
             '#!/bin/bash',
-            `echo "$@" >> '${join(dir, 'calls.log')}'`,
+            // One line per call even when an argument (the re-arm body)
+            // carries newlines — the R6-34 allowlist walks call lines.
+            `printf '%s\\n' "\${*//$'\\n'/ }" >> '${join(dir, 'calls.log')}'`,
             'if [[ "$1" == "api" && "$2" == "user" ]]; then',
             `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
             `  printf '%s' "${actor}"`,
@@ -11243,7 +11334,10 @@ exit 1
             `  if [[ "${viewFail}" == "true" ]]; then echo "GraphQL: Something went wrong" >&2; exit 1; fi`,
             // R4-22: only serve the labels payload when the caller actually
             // asked for it — a field-selection drift must fail the guard.
-            '  if [[ "$*" == *"--json labels"* ]]; then',
+            // R6-12/R2-7: the gate matches the EXACT production field list;
+            // a drifted `--json labels` (no author) must not be served the
+            // author metadata production would omit.
+            '  if [[ "$*" == *"--json labels,author"* ]]; then',
             `    printf '%s' '{"labels":${labels},"author":{"login":"${prAuthor}"}}'`,
             '  else',
             `    printf '%s' '{"number":7354}'`,
@@ -11300,8 +11394,13 @@ exit 1
     expect(ok.calls.match(/^api -X DELETE/gm) ?? []).toHaveLength(1);
     // R4-23: …and it is the only label WRITE of any verb — the full api-call
     // census is `api user` + the one DELETE (a stray label POST would make
-    // this 3).
+    // this 3). R6-34: …and the census is not verb-blind: EVERY recorded
+    // call must match the allowlist, so a stray `pr edit --remove-label` or
+    // `label create` write fails too.
     expect(ok.calls.match(/^api /gm) ?? []).toHaveLength(2);
+    for (const call of ok.calls.trim().split('\n')) {
+      expect(call).toMatch(/^(api user|api -X DELETE|pr view|pr comment)/);
+    }
     // R4-19: the marker comment posts BEFORE the cleanup DELETE — under
     // `bash -eo pipefail` a comment failure then aborts before the DELETE,
     // keeping the escalation label (the reverse order would drop the label
@@ -11362,6 +11461,18 @@ exit 1
     expect(orphan.calls).toContain('pr comment');
     expect(orphan.calls).not.toContain('api -X DELETE');
     expect(orphan.stdout).toContain('nothing manages it until re-engaged');
+    // R6-7: a HUMAN-authored takeover PR — the managed-PR guard's takeover
+    // disjunct deletes the stale label (a mutant killing that disjunct
+    // keeps every other fixture green).
+    const humanTakeover = runRearm({
+      actor: BOT,
+      prAuthor: 'wenshao',
+      labels: '[{"name":"autofix/takeover"},{"name":"autofix/needs-human"}]',
+    });
+    expect(humanTakeover.status).toBe(0);
+    expect(humanTakeover.calls).toContain(
+      'api -X DELETE repos/QwenLM/qwen-code/issues/7354/labels/autofix%2Fneeds-human',
+    );
 
     // Actor mismatch: the PAT authenticates as someone else -> the guard exits
     // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
