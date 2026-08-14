@@ -44,7 +44,10 @@ import {
   registerChannelWorkerPromptAuthorization,
   revokeChannelWorkerPromptAuthorization,
 } from './channel-worker-prompt-authorization.js';
-import { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/channel-base';
+import {
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
 import {
   resolveWebShellDir,
   isDocumentNavigation,
@@ -12647,6 +12650,61 @@ describe('createServeApp', () => {
           );
           expect(call.req._meta ?? {}).not.toHaveProperty(
             CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+          );
+        }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('accepts channel-prompt classification only from the workspace worker', async () => {
+      // `qwen.channel.prompt` opts a turn out of loop-detected rejection;
+      // a forged key from an unauthorized caller must be dropped at the
+      // route (and again at the bridge admission strip), never reaching
+      // the trusted prompt context.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const workspace = realpathSync(process.cwd());
+      const token = 'channel-worker-classification-token';
+      registerChannelWorkerPromptAuthorization(token, workspace);
+      try {
+        const forged = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          });
+        const forgedWithBadToken = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+        const trusted = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+
+        expect(forged.status).toBe(202);
+        expect(forgedWithBadToken.status).toBe(202);
+        expect(trusted.status).toBe(202);
+        expect(bridge.promptCalls[0]?.context?.channelPrompt).toBeUndefined();
+        expect(bridge.promptCalls[1]?.context?.channelPrompt).toBeUndefined();
+        expect(bridge.promptCalls[2]?.context?.channelPrompt).toBe(true);
+        for (const call of bridge.promptCalls) {
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_PROMPT_META_KEY,
           );
         }
       } finally {
