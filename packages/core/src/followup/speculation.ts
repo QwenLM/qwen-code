@@ -18,6 +18,7 @@
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { GeminiClient } from '../core/client.js';
+import type { ToolArtifact } from '../tools/tools.js';
 import { StreamEventType } from '../core/geminiChat.js';
 import {
   convertToFunctionErrorResponse,
@@ -422,10 +423,22 @@ async function runSpeculativeLoop(
             state.abortController!.signal,
           );
           state.toolUseCount++;
+          let resultArtifacts: ToolArtifact[] | undefined;
+          let resultPersistedOutputFiles: string[] | undefined;
+          try {
+            resultArtifacts = result.artifacts;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+          try {
+            resultPersistedOutputFiles = result.persistedOutputFiles;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
 
           observeProducer({
-            persistedOutputFiles: result.persistedOutputFiles,
-            artifacts: result.artifacts,
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
             values: () => [
               ...toolResultPartDiagnosticValues(result.llmContent),
               ...(typeof result.returnDisplay === 'string'
@@ -465,8 +478,8 @@ async function runSpeculativeLoop(
             callId: persistenceCallId,
             toolName: name,
             responseParts,
-            persistedOutputFiles: result.persistedOutputFiles,
-            artifacts: result.artifacts,
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
           });
         } catch (error: unknown) {
           const responsePart: Part = {

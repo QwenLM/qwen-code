@@ -22879,6 +22879,56 @@ describe('Session', () => {
       );
     });
 
+    it('ignores throwing optional metadata on a successful tool result', async () => {
+      const toolResult = {
+        llmContent: 'completed',
+        returnDisplay: 'completed',
+      } as core.ToolResult;
+      Object.defineProperties(toolResult, {
+        artifacts: {
+          get: () => {
+            throw new Error('artifacts unavailable');
+          },
+        },
+        persistedOutputFiles: {
+          get: () => {
+            throw new Error('persisted output unavailable');
+          },
+        },
+      });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(
+          'throwing_metadata_tool',
+          vi.fn().mockResolvedValue(toolResult),
+        ),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-metadata', [
+        {
+          id: 'throwing_metadata_call',
+          name: 'throwing_metadata_tool',
+          args: {},
+        },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'completed',
+      });
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        result.parts,
+        expect.objectContaining({
+          callId: 'throwing_metadata_call',
+          status: 'success',
+          artifacts: undefined,
+          persistedOutputFiles: undefined,
+        }),
+      );
+    });
+
     it('classifies postprocessing failures independently from a settled soft error', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')

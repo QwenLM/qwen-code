@@ -9015,7 +9015,10 @@ export class Session implements SessionContext {
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
         stopAfterPermissionCancel?: boolean;
-        settledResult?: ToolResult;
+        settledMetadata?: {
+          artifacts?: ToolArtifact[];
+          persistedOutputFiles?: string[];
+        };
       },
     ) => {
       executionStatus = opts.executionStatus;
@@ -9030,7 +9033,7 @@ export class Session implements SessionContext {
       );
       if (toolName !== ToolNames.TODO_WRITE) {
         try {
-          if (opts.settledResult) {
+          if (opts.settledMetadata) {
             await this.toolCallEmitter.emitResult({
               callId,
               toolName,
@@ -9038,8 +9041,8 @@ export class Session implements SessionContext {
               message: errorParts,
               error,
               success: false,
-              artifacts: opts.settledResult.artifacts,
-              persistedOutputFiles: opts.settledResult.persistedOutputFiles,
+              artifacts: opts.settledMetadata.artifacts,
+              persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
             });
           } else {
             await this.toolCallEmitter.emitError(callId, toolName, error);
@@ -9059,10 +9062,10 @@ export class Session implements SessionContext {
           toolCallId: callId,
           toolName,
           artifacts: [
-            opts.settledResult
+            opts.settledMetadata
               ? toolResultBoundaryArtifact(
-                  opts.settledResult.persistedOutputFiles,
-                  opts.settledResult.artifacts,
+                  opts.settledMetadata.persistedOutputFiles,
+                  opts.settledMetadata.artifacts,
                 )
               : toolResultBoundaryArtifact([], []),
           ],
@@ -9074,7 +9077,7 @@ export class Session implements SessionContext {
         callId,
         toolName,
         responseParts: errorParts,
-        persistedOutputFiles: opts.settledResult?.persistedOutputFiles,
+        persistedOutputFiles: opts.settledMetadata?.persistedOutputFiles,
         policyToolName: guardContext.policyToolName,
         toolType,
         executionErrorType:
@@ -9086,7 +9089,7 @@ export class Session implements SessionContext {
           status: opts.status,
           executionStatus,
           resultDisplay: undefined,
-          artifacts: opts.settledResult?.artifacts,
+          artifacts: opts.settledMetadata?.artifacts,
           error: opts.status === 'error' ? error : undefined,
           errorType: opts.status === 'error' ? opts.errorType : undefined,
         },
@@ -10303,6 +10306,8 @@ export class Session implements SessionContext {
                   },
                 }
               : undefined;
+          let settledArtifacts: ToolArtifact[] | undefined;
+          let settledPersistedOutputFiles: string[] | undefined;
           const sleepInhibitorHandle = acquireSleepInhibitor(
             this.config,
             `Qwen Code is executing tool ${toolName}`,
@@ -10334,6 +10339,16 @@ export class Session implements SessionContext {
                 onToolProgress,
               );
               executeReturned = true;
+              try {
+                settledArtifacts = toolResult.artifacts;
+              } catch {
+                // Optional result metadata must not affect execution.
+              }
+              try {
+                settledPersistedOutputFiles = toolResult.persistedOutputFiles;
+              } catch {
+                // Optional result metadata must not affect execution.
+              }
               parentAbortedAtExecutionSettle = activeToolAbortSignal.aborted;
               isExecutionTimeout =
                 toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
@@ -10402,31 +10417,35 @@ export class Session implements SessionContext {
             sleepInhibitorHandle.release();
           }
 
-          observeToolResultBoundary({
-            stage: 'producer',
-            sessionId: this.sessionId,
-            promptId,
-            toolCallId: callId,
-            toolName,
-            artifacts: [
-              toolResultBoundaryArtifact(
-                toolResult.persistedOutputFiles,
-                toolResult.artifacts,
-              ),
-            ],
-            values: () => [
-              ...toolResultPartDiagnosticValues(toolResult.llmContent),
-              ...(typeof toolResult.returnDisplay === 'string'
-                ? [
-                    {
-                      representation: 'display' as const,
-                      value: toolResult.returnDisplay,
-                    },
-                  ]
-                : []),
-            ],
-          });
           producerObserved = true;
+          try {
+            observeToolResultBoundary({
+              stage: 'producer',
+              sessionId: this.sessionId,
+              promptId,
+              toolCallId: callId,
+              toolName,
+              artifacts: [
+                toolResultBoundaryArtifact(
+                  settledPersistedOutputFiles,
+                  settledArtifacts,
+                ),
+              ],
+              values: () => [
+                ...toolResultPartDiagnosticValues(toolResult.llmContent),
+                ...(typeof toolResult.returnDisplay === 'string'
+                  ? [
+                      {
+                        representation: 'display' as const,
+                        value: toolResult.returnDisplay,
+                      },
+                    ]
+                  : []),
+              ],
+            });
+          } catch {
+            // Diagnostics must not affect tool execution.
+          }
 
           // Clean up event listeners
           cleanupAgentToolResources();
@@ -10519,7 +10538,10 @@ export class Session implements SessionContext {
                   status: 'cancelled',
                   errorType: undefined,
                   executionStatus,
-                  settledResult: toolResult,
+                  settledMetadata: {
+                    artifacts: settledArtifacts,
+                    persistedOutputFiles: settledPersistedOutputFiles,
+                  },
                 },
               );
             }
@@ -10537,7 +10559,10 @@ export class Session implements SessionContext {
                 status: 'error',
                 errorType: ToolErrorType.EXECUTION_DENIED,
                 executionStatus,
-                settledResult: toolResult,
+                settledMetadata: {
+                  artifacts: settledArtifacts,
+                  persistedOutputFiles: settledPersistedOutputFiles,
+                },
               });
             }
 
@@ -10673,8 +10698,8 @@ export class Session implements SessionContext {
                 resultDisplay: toolResult.returnDisplay,
                 error: responseError,
                 success: succeeded,
-                artifacts: toolResult.artifacts,
-                persistedOutputFiles: toolResult.persistedOutputFiles,
+                artifacts: settledArtifacts,
+                persistedOutputFiles: settledPersistedOutputFiles,
               });
             } catch (emitError) {
               debugLogger.debug(
@@ -10717,7 +10742,7 @@ export class Session implements SessionContext {
             callId,
             toolName,
             responseParts,
-            persistedOutputFiles: toolResult.persistedOutputFiles,
+            persistedOutputFiles: settledPersistedOutputFiles,
             policyToolName,
             toolType,
             executionErrorType:
@@ -10730,7 +10755,7 @@ export class Session implements SessionContext {
               ...(visionBridgeNotice !== undefined
                 ? { visionBridgeNotice }
                 : {}),
-              artifacts: toolResult.artifacts,
+              artifacts: settledArtifacts,
               error:
                 status === 'error' && toolResult.error
                   ? new Error(toolResult.error.message)
