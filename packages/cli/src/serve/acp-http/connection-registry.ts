@@ -455,9 +455,6 @@ export class AcpConnection {
   /** Send a frame on the connection-scoped stream (buffer until it attaches). */
   sendConn(frame: unknown, receipt?: DeliveryReceipt): Promise<DeliveryResult> {
     const trackedReceipt = this.trackReceipt(receipt);
-    if (this.connStream && !this.connStream.isClosed) {
-      return this.sendLive(this.connStream, frame, undefined, trackedReceipt);
-    }
     return this.prepareAndBuffer(
       this.connBuffer,
       frame,
@@ -465,6 +462,7 @@ export class AcpConnection {
       undefined,
       trackedReceipt,
       undefined,
+      true,
     );
   }
 
@@ -508,10 +506,17 @@ export class AcpConnection {
   attachConnStream(stream: TransportStream): void {
     // A reconnect cancels any pending grace-period reap.
     this.clearGraceTimer();
-    // Close any prior connection stream so its heartbeat interval + socket
-    // don't leak when a client reconnects the connection-scoped GET.
-    if (this.connStream && this.connStream !== stream) this.connStream.close();
+    const previousStream = this.connStream;
     this.connStream = stream;
+    // Move unresolved replies off the old stream before closing it. A queued
+    // SSE write can otherwise resolve `closed` without ever reaching the wire.
+    if (previousStream && previousStream !== stream) {
+      if (!this.requeuePendingConnectionFrames(previousStream)) {
+        previousStream.close();
+        return;
+      }
+      previousStream.close();
+    }
     for (const prepared of this.connBuffer.splice(0)) {
       this.deliverPrepared(stream, prepared);
     }
@@ -1207,6 +1212,34 @@ export class AcpConnection {
     return true;
   }
 
+  private requeuePendingConnectionFrames(
+    previousStream: TransportStream,
+  ): boolean {
+    const requeued = [...this.pendingDeliveries].filter(
+      (prepared) =>
+        prepared.binding === undefined &&
+        prepared.deliveryStream === previousStream &&
+        prepared.requeueOnStreamReplacement,
+    );
+    for (const prepared of requeued) {
+      if (!this.reservePreparedForBuffer(prepared)) return false;
+    }
+    for (const prepared of requeued) {
+      if (
+        prepared.binding !== undefined ||
+        prepared.deliveryStream !== previousStream ||
+        !prepared.requeueOnStreamReplacement
+      ) {
+        continue;
+      }
+      prepared.deliveryAttempt = (prepared.deliveryAttempt ?? 0) + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(this.connBuffer, prepared);
+    }
+    return true;
+  }
+
   private settlePreparedAttempt(
     prepared: PreparedFrame,
     attempt: number,
@@ -1215,6 +1248,22 @@ export class AcpConnection {
     if (prepared.deliveryAttempt !== attempt) return;
     const binding = prepared.binding;
     const stream = prepared.deliveryStream;
+    if (
+      outcome === 'closed' &&
+      prepared.requeueOnStreamReplacement &&
+      !binding &&
+      stream &&
+      stream.isClosed &&
+      !this.destroyed &&
+      this.connStream === stream
+    ) {
+      if (!this.reservePreparedForBuffer(prepared)) return;
+      prepared.deliveryAttempt = attempt + 1;
+      prepared.deliveryStream = undefined;
+      this.pendingDeliveries.delete(prepared);
+      this.insertPrepared(this.connBuffer, prepared);
+      return;
+    }
     if (
       outcome !== 'delivered' &&
       prepared.requeueOnStreamReplacement &&
@@ -1239,10 +1288,13 @@ export class AcpConnection {
 
   private reservePreparedForBuffer(
     prepared: PreparedFrame,
-    binding: SessionBinding,
+    binding?: SessionBinding,
   ): boolean {
     if (prepared.lease) return true;
-    if (binding.ownedFrames >= ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM) {
+    if (
+      (binding ? binding.ownedFrames : this.connOwnedFrames) >=
+      ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM
+    ) {
       this.settlePrepared(prepared, 'failed');
       this.failOwner(binding, 'ACP pre-attach frame limit');
       return false;
@@ -1266,8 +1318,12 @@ export class AcpConnection {
     prepared.lease = lease;
     this.ownedFrames += 1;
     this.ownedBytes += prepared.payload.byteLength;
-    binding.ownedFrames += 1;
-    binding.ownedBytes += prepared.payload.byteLength;
+    if (binding) {
+      binding.ownedFrames += 1;
+      binding.ownedBytes += prepared.payload.byteLength;
+    } else {
+      this.connOwnedFrames += 1;
+    }
     return true;
   }
 

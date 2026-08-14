@@ -832,6 +832,55 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('requeues a connection reply when its live stream closes before delivery', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      const first = new ControlledStream();
+      conn.attachConnStream(first);
+      const delivered = vi.fn();
+      const discarded = vi.fn();
+      const frame = { id: 42, result: { ok: true } };
+      const delivery = conn.sendConn(frame, { delivered, discarded });
+
+      first.close();
+      first.complete('closed');
+      await vi.waitFor(() =>
+        expect(registry.getSnapshot().bufferedConnectionFrames).toBe(1),
+      );
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        usedBytes: Buffer.byteLength(JSON.stringify(frame)),
+      });
+      expect(delivered).not.toHaveBeenCalled();
+      expect(discarded).not.toHaveBeenCalled();
+
+      const replacement = new FakeStream('sse');
+      conn.attachConnStream(replacement);
+      await expect(delivery).resolves.toBe('delivered');
+      expect(replacement.sent).toEqual([
+        { message: { id: 42, result: { ok: true } }, id: undefined },
+      ]);
+      expect(delivered).toHaveBeenCalledOnce();
+      expect(discarded).not.toHaveBeenCalled();
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('settles a pending delivery against its original session binding', async () => {
     const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
     const registry = new ConnectionRegistry(
