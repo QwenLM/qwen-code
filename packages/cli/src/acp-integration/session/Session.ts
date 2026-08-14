@@ -10158,6 +10158,13 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                // Same identity and execution scope `CoreToolScheduler`
+                // supplies. This is the path daemon ACP sessions actually
+                // take, so without them a host policy that falls back to the
+                // session — or reasons about where the tool runs — sees
+                // neither on every call made here.
+                sessionId: this.config.getSessionId(),
+                cwd: this.config.getTargetDir(),
                 ...(invocationContext ? { invocationContext } : {}),
               },
             );
