@@ -24,7 +24,6 @@ import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
-  goalLimitKindForReason,
   isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
@@ -149,17 +148,6 @@ export interface GoalRuntime {
   ): GoalProposalReceipt;
   takePendingTerminalProposal(): GoalPendingProposal | undefined;
   dispose(): void;
-}
-
-/**
- * The typed limit to persist beside a `usage_limited` reason.
- *
- * Spreads to nothing for the operational failures that also land on
- * `usage_limited`, so only the enumerated bounds get a `limitKind`.
- */
-function limitKindFor(reason: string): { limitKind?: GoalLimitKind } {
-  const limitKind = goalLimitKindForReason(reason);
-  return limitKind === undefined ? {} : { limitKind };
 }
 
 function normalizeRecoveredBlockedAudit(
@@ -507,7 +495,11 @@ export function createGoalRuntime(
     attempt: VerificationAttempt,
     outcome:
       | { kind: 'decision'; result: GoalVerificationResult }
-      | { kind: 'usage_limited'; reason: string },
+      | {
+          kind: 'usage_limited';
+          reason: string;
+          limitKind?: GoalLimitKind;
+        },
   ): Promise<CheckpointAttempt | undefined> =>
     enqueue(async () => {
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
@@ -565,7 +557,9 @@ export function createGoalRuntime(
             activeTimeMs: elapsedActiveTime(snapshot.goal, now),
             updatedAt: now,
             lastReason: outcome.reason,
-            ...limitKindFor(outcome.reason),
+            ...(outcome.limitKind === undefined
+              ? {}
+              : { limitKind: outcome.limitKind }),
           },
           activity: 'idle',
         };
@@ -669,7 +663,11 @@ export function createGoalRuntime(
 
     let outcome:
       | { kind: 'decision'; result: GoalVerificationResult }
-      | { kind: 'usage_limited'; reason: string };
+      | {
+          kind: 'usage_limited';
+          reason: string;
+          limitKind?: GoalLimitKind;
+        };
     try {
       await evidenceSource.flush();
       if (attempt.controller.signal.aborted) return;
@@ -692,7 +690,11 @@ export function createGoalRuntime(
       if (error instanceof InvalidGoalEvidenceReferenceError) {
         outcome =
           error.code === 'catalog_truncated'
-            ? { kind: 'usage_limited', reason: error.message }
+            ? {
+                kind: 'usage_limited',
+                reason: error.message,
+                limitKind: 'evidence_catalog',
+              }
             : {
                 kind: 'decision',
                 result: { decision: 'reject', reason: error.message },
@@ -757,6 +759,7 @@ export function createGoalRuntime(
   const recordCheckpointFailure = async (
     attempt: CheckpointAttempt,
     reason: string,
+    limitKind?: GoalLimitKind,
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
@@ -769,7 +772,7 @@ export function createGoalRuntime(
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
           lastReason: reason,
-          ...limitKindFor(reason),
+          ...(limitKind === undefined ? {} : { limitKind }),
         },
         activity: 'idle',
       };
@@ -860,6 +863,7 @@ export function createGoalRuntime(
         await recordCheckpointFailure(
           attempt,
           GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+          'evidence_catalog',
         );
         return;
       }
@@ -895,6 +899,7 @@ export function createGoalRuntime(
           await recordCheckpointFailure(
             attempt,
             GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+            'checkpoint_request',
           );
           return;
         }
