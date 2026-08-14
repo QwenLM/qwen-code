@@ -150,12 +150,36 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--worktree', '--', '--help'])).toBe(
       'default',
     );
+    // Array options consume at most one token (matching yargs' command-
+    // detection pass), so the second value reads as a positional and demotes
+    // these to the slow path, which prints the identical top-level page.
     expect(
       resolveBootstrapRoute(['--extensions', 'ext1', 'ext2', '--help']),
-    ).toBe('help');
+    ).toBe('default');
     expect(
       resolveBootstrapRoute(['--include-directories', 'one', 'two', '--help']),
-    ).toBe('help');
+    ).toBe('default');
+  });
+
+  it('does not swallow command tokens after array-option values', () => {
+    // yargs detects commands in an earlier pass where these options are
+    // unknown and consume at most one token; the scanner must match, or a
+    // command sitting after array values misfires the top-level help path.
+    expect(resolveBootstrapRoute(['--extensions=a', 'serve', '--help'])).toBe(
+      'default',
+    );
+    expect(
+      resolveBootstrapRoute(['--extensions', 'a', 'serve', '--help']),
+    ).toBe('default');
+    expect(resolveBootstrapRoute(['-e', 'a', 'serve', '--help'])).toBe(
+      'default',
+    );
+    expect(
+      resolveBootstrapRoute(['--include-directories', 'x', 'mcp', '--help']),
+    ).toBe('default');
+    expect(
+      resolveBootstrapRoute(['--fallback-model', 'm1', 'serve', '--help']),
+    ).toBe('default');
   });
 
   it('consumes hidden value options and =-form values before route detection', () => {
@@ -164,9 +188,12 @@ describe('resolveBootstrapRoute', () => {
     expect(
       resolveBootstrapRoute(['--sandbox-session-id', 'uuid', '--help']),
     ).toBe('help');
-    // Array `--flag=a b c` keeps consuming after the `=` token.
+    // The `=` form carries its value inside the token and consumes nothing
+    // further, so `b` reads as a positional and demotes to the slow path;
+    // the full parser then greedily collects [a, b, c] into the array and
+    // prints the same top-level help.
     expect(resolveBootstrapRoute(['--extensions=a', 'b', 'c', '--help'])).toBe(
-      'help',
+      'default',
     );
     // Non-array `--flag=value` keeps its value inside the token: the next
     // token must NOT be consumed (consuming it would misroute this to

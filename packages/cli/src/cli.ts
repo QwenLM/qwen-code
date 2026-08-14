@@ -91,12 +91,6 @@ const VALUE_FLAGS = new Set(
 // becomes the first positional and defeats a later --help/--version fast path.
 VALUE_FLAGS.add('--sandbox-session-id');
 
-const ARRAY_VALUE_FLAGS = new Set(
-  TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
-    config.type === 'array' ? optionFlagNames(option, config) : [],
-  ),
-);
-
 function isValueToken(arg: string | undefined): arg is string {
   return arg !== undefined && arg !== '--' && !arg.startsWith('-');
 }
@@ -104,7 +98,11 @@ function isValueToken(arg: string | undefined): arg is string {
 // Known scanner limitations (all direction-safe — they demote the fast path
 // to the slow path, never misfire it): short-option clusters are matched as
 // whole tokens, so `-vh`/`-sh` and clusters ending in a value-taking short
-// (e.g. `-sm gpt-4`) are not recognized and boot the full CLI graph.
+// (e.g. `-sm gpt-4`) are not recognized and boot the full CLI graph; and
+// value-taking options consume at most ONE following token (none for the
+// `--flag=value` form), so multi-value array invocations such as
+// `--extensions a b --help` demote to the slow path, which prints the
+// identical page via the full parser.
 function skipOptionValues(argv: readonly string[], index: number): number {
   const raw = argv[index]!;
   const eq = raw.indexOf('=');
@@ -112,16 +110,13 @@ function skipOptionValues(argv: readonly string[], index: number): number {
   if (!VALUE_FLAGS.has(flag)) {
     return index;
   }
-  if (!ARRAY_VALUE_FLAGS.has(flag)) {
-    // `--flag=value` carries its value inside the token; only the
-    // space-separated form consumes the next token.
-    return eq === -1 && isValueToken(argv[index + 1]) ? index + 1 : index;
-  }
-  let next = index + 1;
-  while (isValueToken(argv[next])) {
-    next++;
-  }
-  return next - 1;
+  // At most one token: yargs detects commands in an early pass where these
+  // options are still unknown (they are declared in the default command's
+  // builder), and an unknown option takes at most one value there — a
+  // `--flag=value` token carries its value inside itself and consumes none.
+  // Consuming greedily would swallow a command token sitting after the
+  // values and misfire the top-level help fast path on it.
+  return eq === -1 && isValueToken(argv[index + 1]) ? index + 1 : index;
 }
 
 function writeStdoutLine(line: string): void {
