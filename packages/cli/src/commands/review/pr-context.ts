@@ -14,7 +14,7 @@
 // comments, and issue comments.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -674,7 +674,7 @@ const COMMIT_SHA_RE = /^[0-9a-f]{40,64}$/;
 export function latestOwnLedger(
   reviews: RawReview[],
   login: string | null,
-): { ledger: Ledger; commitId: string | null } | null {
+): RecoveredLedger | null {
   if (!login) return null;
   let best: {
     at: string;
@@ -700,7 +700,80 @@ export function latestOwnLedger(
       };
     }
   }
-  return best ? { ledger: best.ledger, commitId: best.commitId } : null;
+  return best
+    ? { ledger: best.ledger, commitId: best.commitId, reviewId: best.id }
+    : null;
+}
+
+/** What ledger recovery hands the side-file writer. */
+export interface RecoveredLedger {
+  ledger: Ledger;
+  commitId: string | null;
+  /**
+   * The winning review's own id — persisted so Step 6 can find WHICH body's
+   * not-reviewed disclosures bind the code-age rule: with several summaries
+   * on the PR, "check the previous round's review body" is ambiguous, and
+   * checking the wrong one suppresses a finding on code the true previous
+   * round declared unread.
+   */
+  reviewId: number;
+}
+
+/**
+ * Persist (or degrade) the prev-ledger side file for this run's recovery.
+ *
+ * Recovered: the ledger's own fields plus `commitId`/`reviewId` — the age
+ * reference and its provenance for Step 6's convergence posture. Readers of
+ * the ledger shape (compose-review's round count, Step 1's recovered-anchor
+ * check) ignore the extra keys.
+ *
+ * NOT recovered while the reviews were readable: the stale side file keeps
+ * its round counter — a monotonic id space is the safe direction — but loses
+ * `commitId` (and `reviewId` with it): an age reference the PR's current
+ * reviews no longer vouch for can suppress a first-time finding on code
+ * changed-and-reverted since the true previous round (snapshot diffs are not
+ * monotonic over intervals), while dropping it merely fails open to full
+ * posting. Best-effort on both paths — a side-file hiccup must never fail
+ * the command.
+ */
+export function persistRecoveredLedger(
+  sideFilePath: string,
+  recovered: RecoveredLedger | null,
+): void {
+  if (recovered) {
+    try {
+      mkdirSync(dirname(sideFilePath), { recursive: true });
+      writeFileSync(
+        sideFilePath,
+        JSON.stringify(
+          {
+            ...recovered.ledger,
+            ...(recovered.commitId ? { commitId: recovered.commitId } : {}),
+            reviewId: recovered.reviewId,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch {
+      // No side file: compose-review starts the round count over, nothing else.
+    }
+    return;
+  }
+  try {
+    const stale = JSON.parse(readFileSync(sideFilePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    if ('commitId' in stale || 'reviewId' in stale) {
+      delete stale['commitId'];
+      delete stale['reviewId'];
+      writeFileSync(sideFilePath, JSON.stringify(stale, null, 2));
+    }
+  } catch {
+    // No stale side file (the normal case), or an unreadable one — either
+    // way there is nothing age-sensitive to strip.
+  }
 }
 
 /** Render the previous round's ledger for the context file. */
@@ -992,7 +1065,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // posted review, and persist it beside the context file: compose-review reads
   // the side file for the round number, and Step 6 owes each entry a ruling.
   // Best-effort — offline/unauthenticated just means no ledger, never a failure.
-  let prevRecovered: { ledger: Ledger; commitId: string | null } | null = null;
+  let prevRecovered: RecoveredLedger | null = null;
   try {
     // `currentUser()` is a network round-trip; with no reviews on the PR there
     // is nothing for its answer to match against, so it is not made.
@@ -1003,35 +1076,15 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     prevRecovered = null;
   }
   const prevLedger = prevRecovered?.ledger ?? null;
-  if (prevRecovered) {
-    // mkdir FIRST and guard: this write precedes the one below that creates the
-    // directory, and an unguarded ENOENT would fail the whole command over a
-    // best-effort carry-forward.
-    try {
-      mkdirSync(dirname(out), { recursive: true });
-      writeFileSync(
-        join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
-        // The ledger's own fields plus `commitId` — the previous round's
-        // reviewed head, Step 6's age reference for the convergence posture.
-        // Readers of the ledger shape (compose-review's round count, Step 1's
-        // recovered-anchor check) ignore the extra key.
-        JSON.stringify(
-          prevRecovered.commitId
-            ? { ...prevRecovered.ledger, commitId: prevRecovered.commitId }
-            : prevRecovered.ledger,
-          null,
-          2,
-        ),
-      );
-    } catch {
-      // No side file: compose-review starts the round count over, nothing else.
-    }
-  }
-  // No `else` clearing a stale side file, deliberately. A recovery that failed
-  // transiently — auth, network, a review page not fetched — would otherwise
-  // reset the round counter to 1 and re-issue ids the PR already carries.
-  // Keeping the stale copy only ever advances the count, which is the safe
-  // direction for an id space.
+  // The side file's two-speed degradation lives in the helper: a recovery
+  // writes it whole; no recovery keeps a stale file's ROUND COUNTER (a
+  // transient failure must not reset the id space) but strips its
+  // age-sensitive `commitId`/`reviewId` — a reference this run's reviews no
+  // longer vouch for must not date code for the posture.
+  persistRecoveredLedger(
+    join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+    prevRecovered,
+  );
 
   const md = buildMarkdown(
     prNumber,

@@ -4504,6 +4504,49 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     expect(deterministic.deferredCount).toBe(1);
   });
 
+  it('classifies by the SOURCE position — a title mentioning [test] still owes a verifier', () => {
+    // Probe-confirmed fail-open: a whole-entry tag scan classified
+    // `… — [review] mishandles [test] configuration files` deterministic off
+    // its title and skipped the verifier floor for an unverified claim. The
+    // tag must sit immediately after the entry's first em-dash.
+    const planPath = coveredPlan(['reverse-audit']);
+    const titled = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      deferredSuggestions: [
+        'a.ts:1 — [review] mishandles [test] configuration files',
+      ],
+    });
+    expect(titled.cappedBy).toContain('unreviewed-dimension');
+    expect(titled.event).toBe('COMMENT');
+  });
+
+  it('refuses a deferral carrying a Critical marker — a Critical is never deferred', () => {
+    // The channel is model-written free text that casts no vote on `C`; a
+    // Critical routed here composed an APPROVE over `Critical:
+    // authentication bypass` in a probe. Marker forms only — a title like
+    // "critical-path latency" is not a marker and passes.
+    expect(() =>
+      composeReview(
+        base({ deferredSuggestions: ['a.ts:1 — **[Critical]** auth bypass'] }),
+      ),
+    ).toThrow(/never deferred/);
+    expect(() =>
+      composeReview(
+        base({
+          deferredSuggestions: ['a.ts:1 — Critical: authentication bypass'],
+        }),
+      ),
+    ).toThrow(/never deferred/);
+    const benign = composeReview(
+      base({ deferredSuggestions: ['a.ts:1 — critical-path latency nit'] }),
+    );
+    expect(benign.deferredCount).toBe(1);
+  });
+
   it('refuses a present field of the wrong shape', () => {
     expect(() =>
       composeReview(base({ deferredSuggestions: 'a.ts' as never })),

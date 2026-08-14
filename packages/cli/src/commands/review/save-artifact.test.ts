@@ -303,19 +303,22 @@ describe('saveReviewArtifact', () => {
     },
   );
 
-  it('reads an absent deferredCount as zero — a pre-posture composed file must still save', () => {
+  it('reads an absent or null deferredCount as zero — a pre-posture composed file must still save', () => {
+    // Null rides the same absence semantics compose-review's own toCount
+    // boundary gives this field's siblings.
     const paths = fixture();
     const { deferredCount: _absent, ...prePosture } = verdict;
-    writeJson(paths.composed, prePosture);
-
-    saveReviewArtifact({
-      ...paths,
-      target: 'local',
-      effort: 'medium',
-    });
-    expect(
-      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
-    ).toBe(0);
+    for (const composed of [prePosture, { ...verdict, deferredCount: null }]) {
+      writeJson(paths.composed, composed);
+      saveReviewArtifact({
+        ...paths,
+        target: 'local',
+        effort: 'medium',
+      });
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
+      ).toBe(0);
+    }
   });
 
   it.each(['findings', 'composed', 'report'] as const)(

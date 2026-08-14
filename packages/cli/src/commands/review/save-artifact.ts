@@ -223,11 +223,12 @@ function validateVerdict(value: unknown): PersistedVerdict {
       }
     }
   }
-  // Absent means zero, not malformed: a composed JSON written by a build
-  // predating the convergence posture carries no deferredCount, and a
-  // mid-upgrade save must not fail over a count that only affects display.
-  // A PRESENT value of the wrong shape is still refused like every other
-  // field here.
+  // Absent or null means zero, not malformed — the same absence semantics
+  // compose-review's own `toCount` boundary applies to this field's siblings:
+  // a composed JSON written by a build predating the convergence posture
+  // carries no deferredCount, and a mid-upgrade save must not fail over a
+  // count that only affects display. A PRESENT value of any other wrong
+  // shape is refused like every other field here.
   const deferredCount = verdict['deferredCount'] ?? 0;
   if (
     typeof deferredCount !== 'number' ||

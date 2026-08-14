@@ -113,6 +113,17 @@ const MAX_DEFERRED_SUGGESTION_CHARS = 240;
 const DETERMINISTIC_TAG_RE = /\[(?:build|test|probe)\]/i;
 
 /**
+ * The deferral entry's deterministic classification — SOURCE POSITION only.
+ * The entry format is `file:line — [source] title`, and the tag must sit
+ * immediately after the first em-dash: scanning the whole entry classified
+ * `a.ts:1 — [review] mishandles [test] configuration files` deterministic
+ * off its TITLE, which skipped the verifier floor for an unverified claim
+ * (probe-confirmed fail-open). An entry with no em-dash matches nothing and
+ * stays non-deterministic — the fail-closed direction.
+ */
+const DETERMINISTIC_DEFERRAL_RE = /^[^—]*—\s*\[(?:build|test|probe)\]/i;
+
+/**
  * Reads a PR's description body, given its `owner/repo` and number. The one
  * production implementation calls `gh pr view`; the bilingual fallback uses it
  * to recover the Han signal from the live PR when the plan does not carry it.
@@ -657,6 +668,23 @@ function composeReviewBody(
   )
     .map(stripReviewFooter)
     .filter((entry) => entry.trim() !== '');
+  // A Critical is never deferred — the SKILL rule, given a deterministic
+  // tripwire because this channel is model-written free text that casts no
+  // vote on `C`: a Critical routed here would compose an APPROVE over a
+  // blocker. Marker forms only (`[Critical]`, or `Critical:` after the
+  // em-dash), so a title like "critical-path latency" passes; full
+  // reconciliation against the findings artifact is a structural follow-up,
+  // and this kills the cheap shape today.
+  const criticalDeferral = deferredSuggestions.find((x) =>
+    /\[critical\]|(?:^|—)\s*critical\s*:/i.test(x),
+  );
+  if (criticalDeferral !== undefined) {
+    throw new TypeError(
+      `compose-review: deferredSuggestions must not carry a Critical — a Critical is never deferred, it posts: ${JSON.stringify(
+        criticalDeferral,
+      )}`,
+    );
+  }
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
@@ -1029,7 +1057,8 @@ function composeReviewBody(
         criticalsInline +
         suggestionsInline +
         nonDeterministicBodyCriticals +
-        deferredSuggestions.filter((x) => !DETERMINISTIC_TAG_RE.test(x)).length;
+        deferredSuggestions.filter((x) => !DETERMINISTIC_DEFERRAL_RE.test(x))
+          .length;
       const verification = verificationGaps(
         input.planPath,
         { postsFindings: findingsToVerify > 0 },

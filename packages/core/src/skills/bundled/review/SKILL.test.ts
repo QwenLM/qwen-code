@@ -236,6 +236,12 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'a first-time Suggestion in code nobody read must post like any round-1 finding',
     );
+    // The age rule is auto-only: an explicit `suggestion` floor is the
+    // operator saying "post everything", and the age gate deferring under it
+    // would contradict the override (round-2 review finding).
+    expect(body).toContain(
+      'never under an explicit `--severity-floor suggestion`',
+    );
     // Deferral is a posting decision: the finding stays in the artifact, and
     // the deferred list must never become ledger work for the next round.
     expect(body).toContain(

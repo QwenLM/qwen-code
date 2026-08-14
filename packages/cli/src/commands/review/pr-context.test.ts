@@ -5,7 +5,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Argv, CommandModule } from 'yargs';
@@ -24,6 +31,7 @@ import {
   type PrMetadata,
   type RawComment,
   latestOwnLedger,
+  persistRecoveredLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
@@ -1079,6 +1087,7 @@ describe('latestOwnLedger', () => {
         },
         {
           ...review('bot', '2026-01-02T00:00:00Z', marker(2)),
+          id: 77,
           commit_id: head,
         },
         {
@@ -1090,6 +1099,9 @@ describe('latestOwnLedger', () => {
     );
     expect(recovered?.ledger.round).toBe(2);
     expect(recovered?.commitId).toBe(head);
+    // The winning review's own id rides along: Step 6's not-reviewed check
+    // must know WHICH body's disclosures bind the age rule.
+    expect(recovered?.reviewId).toBe(77);
     const invalid = latestOwnLedger(
       [
         {
@@ -1116,6 +1128,70 @@ describe('latestOwnLedger', () => {
         'bot',
       ),
     ).toBeNull();
+  });
+});
+
+describe('persistRecoveredLedger', () => {
+  // The serialization seam the helper tests could not reach before the
+  // extraction: a regression dropping a field here disabled rounds-2-5
+  // code-age behavior while every latestOwnLedger test stayed green.
+  const ledger: Ledger = {
+    v: 1,
+    round: 3,
+    findings: [{ id: 'R3-1', sev: 'S', file: 'a.ts', title: 't' }],
+  };
+
+  it('persists the ledger with its age reference and provenance', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'nested', 'qwen-review-pr-1-prev-ledger.json');
+    try {
+      persistRecoveredLedger(side, {
+        ledger,
+        commitId: 'a'.repeat(40),
+        reviewId: 42,
+      });
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written).toEqual({
+        ...ledger,
+        commitId: 'a'.repeat(40),
+        reviewId: 42,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a no-recovery run strips the stale age reference but keeps the round counter', () => {
+    // A transient failure must not reset the id space; it must also not
+    // leave an age reference the PR's current reviews no longer vouch for —
+    // code changed-and-reverted since the true previous round would look
+    // unchanged against the stale head and a first-time finding would be
+    // wrongly deferred (snapshot diffs are not monotonic over intervals).
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
+      );
+      persistRecoveredLedger(side, null);
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written).toEqual(ledger);
+      expect(written.round).toBe(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a no-recovery run with no side file writes nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(side, null);
+      expect(existsSync(side)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
