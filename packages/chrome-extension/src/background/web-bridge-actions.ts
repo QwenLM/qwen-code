@@ -226,6 +226,7 @@ async function navigate(args: Args): Promise<unknown> {
           pageLoadTimeout(),
         ]);
         target = nextReloadLoader ?? target;
+        frameId = target.frameId;
       } else {
         refsByTab.get(currentTabId)?.delete(sessionKey(args));
         directNavigationStarted = true;
@@ -948,7 +949,9 @@ async function currentTab(
       'No current tab for this session; call navigate or find_tab first',
     );
   }
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await chrome.tabs.get(tabId).catch(() => {
+    throw new Error('No active tab found');
+  });
   if (!tab || tab.id === undefined) throw new Error('No active tab found');
   return tab as chrome.tabs.Tab & { id: number };
 }

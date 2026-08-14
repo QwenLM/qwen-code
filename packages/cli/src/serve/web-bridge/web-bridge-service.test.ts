@@ -37,6 +37,32 @@ describe('WebBridgeService', () => {
     });
   });
 
+  it('passes owned tabs to close_session', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 42 })
+      .mockResolvedValueOnce({ success: true, closed: 1 });
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test', newTab: true },
+      session: 'research',
+    });
+    await service.execute({
+      action: 'close_session',
+      args: {},
+      session: 'research',
+    });
+
+    expect(call).toHaveBeenLastCalledWith('close_session', {
+      _session: 'research',
+      _tabId: 42,
+      _tabIds: [42],
+    });
+  });
+
   it('serializes commands across sessions', async () => {
     const registry = new WebBridgeRegistry();
     let release!: () => void;
@@ -526,7 +552,7 @@ describe('WebBridgeService', () => {
           expect((await stat(filePath)).mode & 0o777).toBe(0o600);
         }
       } finally {
-        if (filePath) {
+        if (filePath && filePath.includes('qwen-webbridge')) {
           await rm(path.dirname(filePath), { force: true, recursive: true });
         }
       }

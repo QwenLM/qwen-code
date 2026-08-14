@@ -478,6 +478,7 @@ describe('CDP bridge', () => {
     bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 2 }), send);
 
     await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls[1]?.[0]).not.toHaveProperty('error');
     expect(chromeHarness.detach).toHaveBeenCalledWith(
       { tabId: 7 },
       expect.any(Function),

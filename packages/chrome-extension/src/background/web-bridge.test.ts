@@ -92,6 +92,11 @@ describe('WebBridge protocol', () => {
 
     expect(send.mock.calls[0][0].payload.chunk).toHaveLength(1024 * 1024);
     expect(send.mock.calls[8][0].payload.chunk).toBe('x');
+    for (const [frame] of send.mock.calls.slice(0, 9)) {
+      expect(Buffer.byteLength(JSON.stringify(frame), 'utf8')).toBeLessThan(
+        10_000_000,
+      );
+    }
     expect(send.mock.calls[9][0]).toEqual({
       type: 'webbridge_result',
       responseToRequestId: 'request-2',

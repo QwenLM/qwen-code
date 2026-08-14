@@ -372,6 +372,7 @@ describe('WebBridge actions', () => {
       17,
     );
     await expect(pending).resolves.toMatchObject({
+      frameId: 'frame-1',
       url: 'https://example.test',
     });
   });
@@ -965,6 +966,17 @@ describe('WebBridge actions', () => {
       'No current tab for this session',
     );
     expect(chrome.tabs.query).not.toHaveBeenCalled();
+  });
+
+  it('reports a closed current tab with an actionable error', async () => {
+    (chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('No tab with id: 17'),
+    );
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('snapshot', { _tabId: 17 }),
+    ).rejects.toThrow('No active tab found');
   });
 
   it('bounds captured network request metadata', async () => {
