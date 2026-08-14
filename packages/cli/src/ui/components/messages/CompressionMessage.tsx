@@ -58,6 +58,8 @@ export function CompressionMessage({
         return t(
           'Could not compress chat history due to a token counting error.',
         );
+      case CompressionStatus.COMPRESSION_FAILED_API_ERROR:
+        return t('Could not compress chat history due to an API error.');
       case CompressionStatus.NOOP:
         return 'Nothing to compress.';
       default:

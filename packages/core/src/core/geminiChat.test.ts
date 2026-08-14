@@ -3424,8 +3424,7 @@ describe('GeminiChat', async () => {
         info: {
           originalTokenCount: 100_000,
           newTokenCount: 100_000,
-          compressionStatus:
-            CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
         },
       });
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
