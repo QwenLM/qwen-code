@@ -960,6 +960,55 @@ describe('--round — the CLI bakes the round into the identity line and the key
     }
   });
 
+  it('takes the round cap from the plan’s topology on the chunkless path', () => {
+    // 3A is the topology that actually runs this path — one auditor a round,
+    // the whole diff — and it is the one the tier raises. Both arms use the
+    // same round 6 off the same builder: admitted under the 3A tier, refused
+    // under the 3B one. A flat cap cannot produce both.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-cap-tier-'));
+    try {
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- x');
+      const handler = agentPromptCommand.handler as (a: unknown) => void;
+      delete process.env[DEADLINE_ENV];
+      const stderr = () =>
+        (writeStderrLine as unknown as Mock).mock.calls
+          .map((c) => c[0])
+          .join('\n');
+
+      const small = join(dir, 'small.json');
+      writeFileSync(
+        small,
+        JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({ plan: small, role: 'reverse-audit', findings, round: 6 });
+      expect(process.exitCode).toBeUndefined();
+      expect(readRecordedPrompts(small).size).toBe(1);
+
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({ plan: small, role: 'reverse-audit', findings, round: 11 });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 10');
+
+      const large = join(dir, 'large.json');
+      writeFileSync(
+        large,
+        JSON.stringify({ ...PLAN, srcDiffLines: 900, diffLines: 900 }),
+      );
+      process.exitCode = undefined;
+      (writeStderrLine as unknown as Mock).mockClear();
+      handler({ plan: large, role: 'reverse-audit', findings, round: 6 });
+      expect(process.exitCode).toBe(4);
+      expect(stderr()).toContain('round cap is 5');
+      expect(readRecordedPrompts(large).size).toBe(0);
+    } finally {
+      process.exitCode = undefined;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('carries the round through --all-chunks: every key and every identity line', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-round-batch-'));
     try {
@@ -3932,6 +3981,10 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
   it('the default 5-round cap is enforced by the builder, not just prose', () => {
     // Pins the general ROUND CAP enforcement: the mutation `round > cap`
     // → `round > cap && cap === 1` (a sixth round builds) fails here.
+    //
+    // Five because `PLAN` carries no `srcDiffLines`/`diffLines`, so the tier
+    // read is the unsized fallback — deliberately the large tier, which is
+    // what every plan got before tiering. The sized 3A case is the next test.
     answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
     answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
     answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
@@ -3947,6 +4000,36 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(msg).toContain('ROUND CAP');
     expect(msg).toContain('round cap is 5');
+  });
+
+  it('a 3A-sized plan runs to ten rounds, not five', () => {
+    // The gate reads the plan's topology tier, so a small diff — where a
+    // round is one auditor, not one per chunk — keeps auditing where the 3B
+    // number would have stopped it. Round 6 is the whole change: it is
+    // refused in the test above and admitted here off the same builder, so a
+    // revert to a single flat cap fails on the admission, not just on the
+    // number in the refusal text.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 100 }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    for (const r of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      answerRound(r, { 13: YIELD, 14: YIELD, 15: YIELD });
+      expect(process.exitCode).toBeUndefined();
+    }
+    expect(keysOf(6)).not.toHaveLength(0);
+
+    const out = runRound(11);
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    expect(keysOf(11)).toHaveLength(0);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).toContain('round cap is 10');
   });
 
   it('all retired and none due: exit 5, CONVERGED, nothing built, nothing stamped', () => {

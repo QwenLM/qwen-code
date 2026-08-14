@@ -546,15 +546,18 @@ describe('stripBudgetGapLines — the receipt judged without its disclosures', (
 });
 
 describe('reviewBudget — the reverse-audit round cap', () => {
-  it('runs the full five rounds below the huge floor, three at it and above', () => {
-    // A reverse-audit round re-reads the whole diff against a growing
-    // findings list (~90 min on a 4,000-line PR); five rounds cannot finish
-    // the huge PRs that timed out to zero, so a huge diff caps at three —
+  it('gives each topology its own cap: ten on 3A, five on 3B, three when huge', () => {
+    // The cap prices a ROUND, and a round costs two orders of magnitude more
+    // in one topology than another: one auditor on 3A, one per non-retired
+    // chunk on 3B, ~90 min on a huge PR (five of which cannot finish the PRs
+    // that timed out to zero). Hence three tiers rather than one number —
+    // ten on 3A because the marginal round there is a single agent on a diff
+    // small enough to hold in one context, three when huge because that is
     // one audit round above the convergence floor of two (the all-dry
     // rounds-1-and-2 shape converges under any cap of two or more).
     expect(
       reviewBudget({ srcDiffLines: 100, diffLines: 100 }).reverseAuditRounds,
-    ).toBe(5);
+    ).toBe(10);
     expect(
       reviewBudget({ srcDiffLines: 2999, diffLines: 2999 }).reverseAuditRounds,
     ).toBe(5);
@@ -564,6 +567,27 @@ describe('reviewBudget — the reverse-audit round cap', () => {
     expect(
       reviewBudget({ srcDiffLines: 10_000, diffLines: 12_000 })
         .reverseAuditRounds,
+    ).toBe(3);
+  });
+
+  it('switches tiers on the topology gate, not on a second set of numbers', () => {
+    // The 3A/3B boundary is `isTerritoryFanOut`'s — src ≤ 500 AND total ≤
+    // 3200 — and this is what pins that the cap reads that predicate rather
+    // than a copy of its constants that could drift from it. Both clauses:
+    // either one crossing moves the plan to the 3B cap.
+    expect(
+      reviewBudget({ srcDiffLines: 500, diffLines: 3200 }).reverseAuditRounds,
+    ).toBe(10);
+    expect(
+      reviewBudget({ srcDiffLines: 501, diffLines: 3200 }).reverseAuditRounds,
+    ).toBe(5);
+    expect(
+      reviewBudget({ srcDiffLines: 500, diffLines: 3201 }).reverseAuditRounds,
+    ).toBe(5);
+    // …and the huge floor wins over the topology gate: a 3B diff at 3000
+    // effective lines caps at three, not five.
+    expect(
+      reviewBudget({ srcDiffLines: 3000, diffLines: 3200 }).reverseAuditRounds,
     ).toBe(3);
   });
 
@@ -590,21 +614,78 @@ describe('reviewBudget — the reverse-audit round cap', () => {
 });
 
 describe('reverseAuditRoundCap — the one reader of the plan field', () => {
-  it('passes a valid cap through and defaults everything else to the max', () => {
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 3 })).toBe(3);
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 5 })).toBe(5);
-    // Absent, out-of-band and garbled all read as the full cap: an old or
-    // hand-edited plan errs toward more auditing, never less. The range is
-    // floored at HUGE_REVERSE_AUDIT_ROUNDS (3) — the smallest cap the CLI
-    // writes — so 1 and 2 read as the full cap, not as themselves.
+  const SMALL = { srcDiffLines: 100, diffLines: 100 };
+  const LARGE = { srcDiffLines: 600, diffLines: 1000 };
+  const HUGE = { srcDiffLines: 5000, diffLines: 5000 };
+
+  it('passes a value the plan owns through, at every tier', () => {
+    expect(
+      reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: 10 } }),
+    ).toBe(10);
+    expect(
+      reverseAuditRoundCap({ ...LARGE, budget: { reverseAuditRounds: 5 } }),
+    ).toBe(5);
+    expect(
+      reverseAuditRoundCap({ ...HUGE, budget: { reverseAuditRounds: 3 } }),
+    ).toBe(3);
+    // Below its tier but in band is honoured — nothing here inflates a cap
+    // the plan itself wrote smaller.
+    expect(
+      reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: 5 } }),
+    ).toBe(5);
+  });
+
+  it('clamps to the plan’s own tier, so a hand edit cannot cross topologies', () => {
+    // The field is CLI-written and nothing here is the caller's to override.
+    // A single global upper bound of ten would have honoured all three of
+    // these; the tier is what makes them buy nothing.
+    expect(
+      reverseAuditRoundCap({ ...HUGE, budget: { reverseAuditRounds: 10 } }),
+    ).toBe(3);
+    expect(
+      reverseAuditRoundCap({ ...LARGE, budget: { reverseAuditRounds: 10 } }),
+    ).toBe(5);
+    expect(
+      reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: 11 } }),
+    ).toBe(10);
+  });
+
+  it('reads absent, out-of-band and garbled values as the tier', () => {
+    // The range is floored at HUGE_REVERSE_AUDIT_ROUNDS (3) — the smallest
+    // cap the CLI writes — so 1 and 2 read as the tier, not as themselves:
+    // honouring them would force a non-converged round-cap stop where the
+    // full loop would have kept auditing.
+    for (const bad of [0, 1, 2, 2.5, '1', null] as unknown[]) {
+      expect(
+        reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: bad } }),
+      ).toBe(10);
+      expect(
+        reverseAuditRoundCap({ ...HUGE, budget: { reverseAuditRounds: bad } }),
+      ).toBe(3);
+    }
+    // A plan written before the budget existed gets its topology's tier, not
+    // another topology's number: an old plan errs toward more auditing.
+    expect(reverseAuditRoundCap(SMALL)).toBe(10);
+    expect(reverseAuditRoundCap({ ...SMALL, budget: {} })).toBe(10);
+    expect(reverseAuditRoundCap(HUGE)).toBe(3);
+  });
+
+  it('reads a plan with no usable size as the large tier — today’s value', () => {
+    // The skew case cannot be sized, and an unsized plan could be the
+    // 5,800-line one. Falling back to the large tier means such a plan is
+    // never handed MORE rounds than every plan already runs with.
     expect(reverseAuditRoundCap(undefined)).toBe(5);
     expect(reverseAuditRoundCap({})).toBe(5);
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 0 })).toBe(5);
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 1 })).toBe(5);
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 2 })).toBe(5);
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 6 })).toBe(5);
-    expect(reverseAuditRoundCap({ reverseAuditRounds: 2.5 })).toBe(5);
-    expect(reverseAuditRoundCap({ reverseAuditRounds: '1' })).toBe(5);
+    expect(reverseAuditRoundCap({ budget: { reverseAuditRounds: 10 } })).toBe(
+      5,
+    );
+    expect(
+      reverseAuditRoundCap({
+        srcDiffLines: 'x',
+        diffLines: 10,
+        budget: { reverseAuditRounds: 10 },
+      }),
+    ).toBe(5);
   });
 });
 

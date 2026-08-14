@@ -98,25 +98,29 @@ export interface ReviewBudget {
    */
   agentToolBudget: number;
   /**
-   * The reverse-audit loop's round cap: the full `MAX_REVERSE_AUDIT_ROUNDS`
-   * normally, or a reduced `HUGE_REVERSE_AUDIT_ROUNDS` for a diff large
-   * enough that the full loop cannot finish inside any budget.
+   * The reverse-audit loop's round cap, **one value per topology**
+   * (`reverseAuditRoundTier`): `SMALL_REVERSE_AUDIT_ROUNDS` on a 3A diff,
+   * `LARGE_REVERSE_AUDIT_ROUNDS` on a 3B one, and a reduced
+   * `HUGE_REVERSE_AUDIT_ROUNDS` for a diff large enough that the full loop
+   * cannot finish inside any budget.
    *
-   * A reverse-audit round re-reads the whole diff against a growing
-   * findings list, so its cost scales with the diff — measured at ~90
-   * minutes a round on a 4,000-line PR, where the full five rounds alone
-   * (450 min) exceed the six-hour CI ceiling before the fan-out and tail
-   * are even counted. In a time-budgeted CI run the deadline gate already
-   * refuses a round that will not fit; this static cap is the belt it works
-   * under and the ONLY bound a local run (no deadline) has. Reduced to
-   * three, not two — not because two cannot converge (the all-dry
+   * A reverse-audit round re-reads the diff against a growing findings
+   * list, so its cost scales with the diff — one auditor on 3A, one per
+   * non-retired chunk on 3B, and ~90 minutes a round on a 4,000-line PR,
+   * where five rounds alone (450 min) exceed the six-hour CI ceiling before
+   * the fan-out and tail are even counted. That spread is why this is not
+   * one number: the same cap cannot price a single agent and a 19-way
+   * fan-out. In a time-budgeted CI run the deadline gate already refuses a
+   * round that will not fit; this static cap is the belt it works under and
+   * the ONLY bound a local run (no deadline) has. The huge tier is reduced
+   * to three, not two — not because two cannot converge (the all-dry
    * rounds-1-and-2 shape reaches CONVERGED at the round-3 build under any
    * cap of two or more, since the convergence check runs before the cap
    * gate) but to buy hot chunks one extra audit round before the cap.
    *
    * The budget tunes how many rounds the loop runs, never whether it runs:
    * the reverse audit is a dimension of the high-effort contract. The CLI
-   * only ever writes three or five here.
+   * only ever writes one of the three tier values here.
    */
   reverseAuditRounds: number;
 }
@@ -128,11 +132,28 @@ export interface ReviewBudget {
 const SWEEP_FLOOR = 25;
 
 /**
- * The reverse-audit loop's full round cap (SKILL.md Step 5's "stop at the
- * plan's `reverseAuditRounds` cap"). The normal value; a huge diff gets
- * `HUGE_REVERSE_AUDIT_ROUNDS` instead. `compose-review` imports it directly.
+ * The reverse-audit round cap for a **3A** diff (SKILL.md Step 5's "stop at
+ * the plan's `reverseAuditRounds` cap").
+ *
+ * Ten, because on 3A a round is **one auditor reading the whole diff** — the
+ * marginal round is a single agent on a diff small enough to hold in one
+ * context, against a whole review of 17-28 calls (17-23 before this tier, so
+ * the five extra rounds are five calls). Five was never a 3A price:
+ * it is the 3B arithmetic (`rounds × chunks`) applied to a topology where
+ * that arithmetic does not hold, and it stopped loops that were still
+ * confirming Criticals for a saving of ~5 calls. The loop's real terminator
+ * is two consecutive dry rounds; every cap here is the belt under it.
  */
-export const MAX_REVERSE_AUDIT_ROUNDS = 5;
+export const SMALL_REVERSE_AUDIT_ROUNDS = 10;
+
+/**
+ * The reverse-audit round cap for a **3B** diff — the historical value, and
+ * still the right one where a round costs one auditor per non-retired chunk
+ * (`19 × 5 = 95` on PR #6457's shape, before retirement trims the odd
+ * rounds). `compose-review` imports it directly as the cap it names when a
+ * stop marker arrives without one.
+ */
+export const LARGE_REVERSE_AUDIT_ROUNDS = 5;
 
 /**
  * The reduced cap for a huge diff — three, one audit round above the
@@ -155,6 +176,71 @@ export const HUGE_REVERSE_AUDIT_ROUNDS = 3;
  * finishability gate.
  */
 const HUGE_DIFF_FLOOR = 3000;
+
+/**
+ * The topology gate's two numbers — the same pair the skill's prose turns on
+ * (SKILL.md Step 3: "`srcDiffLines` ≤ 500 and `diffLines` ≤ 3200 — use the
+ * dimension fan-out in Step 3A").
+ */
+const FAN_OUT_SRC_FLOOR = 500;
+const FAN_OUT_TOTAL_FLOOR = 3200;
+
+/** A plan, as far as a size-derived decision needs it. */
+export interface DiffSize {
+  srcDiffLines?: unknown;
+  diffLines?: unknown;
+}
+
+/**
+ * The topology gate, in code.
+ *
+ * The same two numbers the skill's prose turns on. It is here so the roster,
+ * the reader and the round cap cannot disagree about which fan-out was owed —
+ * a disagreement that would show up as a review being told it forgot eleven
+ * agents it was never supposed to launch. It lives in `budget.ts` rather than
+ * in `roster.ts` because it is a *size* ruling and this module is where size
+ * rulings live; `roster.ts` imports it back (this module has no imports of its
+ * own, so the direction cannot cycle).
+ */
+export function isTerritoryFanOut(plan: DiffSize): boolean {
+  const src = Number(plan?.srcDiffLines ?? 0);
+  const total = Number(plan?.diffLines ?? 0);
+  return !(src <= FAN_OUT_SRC_FLOOR && total <= FAN_OUT_TOTAL_FLOOR);
+}
+
+/**
+ * The reverse-audit round cap this diff's **topology** earns.
+ *
+ * One number per topology, because the thing being capped costs two orders of
+ * magnitude more in one than in another: a 3A round is one auditor (minutes),
+ * a 3B round is one auditor per non-retired chunk, and a huge-diff round is
+ * ~90 minutes. A single cap is therefore either useless at one end or
+ * crippling at the other, and five was both — too loose to bound the huge
+ * case (the 6-hour CI reviews that posted nothing) and tight enough on 3A to
+ * stop loops that were still confirming Criticals.
+ *
+ * The huge tier is checked first and wins: it is a *finishability* ruling, and
+ * a huge diff is territory-fanned-out by construction anyway.
+ *
+ * A plan carrying no usable size — an older CLI's, or a garbled one — reads as
+ * the LARGE tier, which is what every plan gets today. The skew case is
+ * therefore never handed more rounds than it already runs with, which is the
+ * safe direction for a bound (the rest of this module's fallbacks err toward
+ * more *coverage*; this one errs toward less *cost*, because an unsized plan
+ * could be the 5,800-line one).
+ */
+export function reverseAuditRoundTier(size: DiffSize): number {
+  const src = Number(size?.srcDiffLines);
+  const total = Number(size?.diffLines);
+  if (!Number.isFinite(src) || !Number.isFinite(total)) {
+    return LARGE_REVERSE_AUDIT_ROUNDS;
+  }
+  const effective = Math.max(sane(src), Math.floor(sane(total) / 8));
+  if (effective >= HUGE_DIFF_FLOOR) return HUGE_REVERSE_AUDIT_ROUNDS;
+  return isTerritoryFanOut(size)
+    ? LARGE_REVERSE_AUDIT_ROUNDS
+    : SMALL_REVERSE_AUDIT_ROUNDS;
+}
 
 /** Below this, "one domain dominates the diff" is not a finding about the diff. */
 const SPECIALIST_FLOOR = 80;
@@ -223,38 +309,49 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
       MIN_AGENT_TOOL_BUDGET,
       MAX_AGENT_TOOL_BUDGET,
     ),
-    reverseAuditRounds:
-      effective >= HUGE_DIFF_FLOOR
-        ? HUGE_REVERSE_AUDIT_ROUNDS
-        : MAX_REVERSE_AUDIT_ROUNDS,
+    reverseAuditRounds: reverseAuditRoundTier({
+      srcDiffLines: src,
+      diffLines: total,
+    }),
   };
 }
 
 /**
- * The reverse-audit round cap a plan's budget carries, for every reader
- * that enforces or narrates it (the admission gate and the cold-check
- * note, both in `agent-prompt`; the retirement scheduler deliberately
- * ignores the cap — whether a scheduled cold check is allowed is the note
- * composer's question, not the schedule's). A plan without the field — an
- * older CLI — or a garbled value reads as the full cap: an old plan errs
- * toward more auditing, never less, exactly like every other budget
- * fallback.
+ * The reverse-audit round cap a **plan** carries, for every reader that
+ * enforces or narrates it (the admission gate and the cold-check note, both
+ * in `agent-prompt`; the retirement scheduler deliberately ignores the cap —
+ * whether a scheduled cold check is allowed is the note composer's question,
+ * not the schedule's).
  *
- * The accepted range is floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the
- * smallest cap the CLI ever writes. A value of one or two is out of band
- * (a hand-edited plan): honouring it would force a non-converged round-cap
- * stop where the full loop would have kept auditing, so it too falls back
- * to the full cap — never less.
+ * It takes the whole plan, not `plan.budget`, because the accepted range is
+ * now the plan's **own topology tier** rather than a global band. That buys
+ * two things one band could not:
+ *
+ *  - **A plan without the field** — an older CLI's — reads as its tier, so a
+ *    3A plan written before tiering gets the ten rounds its topology earns
+ *    instead of a 3B number. The pre-existing promise holds: an old plan errs
+ *    toward more auditing, never less.
+ *  - **A hand-edited plan cannot cross tiers.** The field is CLI-written and
+ *    nothing here is the caller's to override; clamping to the tier means a
+ *    `reverseAuditRounds: 10` typed into a 5,800-line plan buys nothing,
+ *    which a single upper bound of ten would have honoured.
+ *
+ * The range stays floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the smallest cap
+ * the CLI ever writes. A value of one or two is out of band (a hand-edited
+ * plan): honouring it would force a non-converged round-cap stop where the
+ * full loop would have kept auditing, so it too falls back to the tier —
+ * never less.
  */
-export function reverseAuditRoundCap(budget: unknown): number {
-  const v = (budget as { reverseAuditRounds?: unknown } | undefined)
-    ?.reverseAuditRounds;
+export function reverseAuditRoundCap(plan: unknown): number {
+  const tier = reverseAuditRoundTier((plan ?? {}) as DiffSize);
+  const v = (plan as { budget?: { reverseAuditRounds?: unknown } } | undefined)
+    ?.budget?.reverseAuditRounds;
   return typeof v === 'number' &&
     Number.isInteger(v) &&
     v >= HUGE_REVERSE_AUDIT_ROUNDS &&
-    v <= MAX_REVERSE_AUDIT_ROUNDS
+    v <= tier
     ? v
-    : MAX_REVERSE_AUDIT_ROUNDS;
+    : tier;
 }
 
 /**

@@ -2166,7 +2166,7 @@ function runAllChunks(
     !admitReverseAuditRound(
       planPath,
       round,
-      reverseAuditRoundCap(report.budget),
+      reverseAuditRoundCap(report),
       chunks.length,
     )
   ) {
@@ -2222,7 +2222,7 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
-  const planRoundCap = reverseAuditRoundCap(report.budget);
+  const planRoundCap = reverseAuditRoundCap(report);
   const retirementNote =
     skipped.length === 0
       ? []
@@ -2585,7 +2585,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(
       args.plan,
       args.round,
-      reverseAuditRoundCap(report.budget),
+      reverseAuditRoundCap(report),
       1,
     )
   ) {
@@ -2668,7 +2668,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       !admitReverseAuditRound(
         args.plan,
         args.round,
-        reverseAuditRoundCap(report.budget),
+        reverseAuditRoundCap(report),
         planChunkIds.length,
       )
     )
