@@ -51,7 +51,7 @@ const GLOBS = [
   'packages/*',
   'packages/channels/base',
   'packages/channels/telegram',
-  '!packages/desktop',
+  '!packages/desktop-shell',
 ];
 
 describe('isWorkspaceMember', () => {
@@ -77,22 +77,30 @@ describe('isWorkspaceMember', () => {
   });
 
   it('honours a negated glob', () => {
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', GLOBS)).toBe(
-      false,
-    );
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', GLOBS),
+    ).toBe(false);
   });
 
   it('honours workspace-glob ORDER — a positive after a negation re-includes', () => {
     // npm evaluates the list in order. Filtering all negations first let a
     // negation win wherever it sat, which would file a false `unreachable`.
-    const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', globs)).toBe(
-      true,
-    );
-    const reordered = ['packages/*', 'packages/desktop', '!packages/desktop'];
-    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', reordered)).toBe(
-      false,
-    );
+    const globs = [
+      'packages/*',
+      '!packages/desktop-shell',
+      'packages/desktop-shell',
+    ];
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', globs),
+    ).toBe(true);
+    const reordered = [
+      'packages/*',
+      'packages/desktop-shell',
+      '!packages/desktop-shell',
+    ];
+    expect(
+      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', reordered),
+    ).toBe(false);
   });
 
   it('does not match a sibling directory by prefix', () => {

@@ -11,7 +11,7 @@
     "composite": false,
     // The root turns `noPropertyAccessFromIndexSignature` on, which forced
     // bracket-access rewrites in production SDK sources just to satisfy this
-    // test program (packages/desktop already sets it false). Relax it here so
+    // test program. Relax it here so
     // packages keep their own compiler regime and the tests keep dot access.
     "noPropertyAccessFromIndexSignature": false,
     // Matches packages/cli. The suite drives browser-side code in

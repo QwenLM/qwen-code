@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Desktop Pet Spritesheet Generator for OpenWork.
+Desktop Pet Spritesheet Generator for Qwen Code.
 
 Generates a 1536×1872 pixel-art chibi spritesheet (8 cols × 9 rows, 192×208 px cells)
 customized via a JSON config describing colors, headgear, and features.
