@@ -15,6 +15,7 @@ import {
 } from './SettingsMessage';
 import type { ModelManagementProps } from './ModelManagementSection';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
+import type { WebShellHostSettingsCategory } from '../../hostSettings';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -155,6 +156,7 @@ function renderPanel(
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
     modelManagement: ModelManagementProps;
+    hostSettings: readonly WebShellHostSettingsCategory[];
   }> = {},
 ): HTMLElement {
   return render(
@@ -168,6 +170,7 @@ function renderPanel(
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagement={overrides.modelManagement}
+        hostSettings={overrides.hostSettings}
       />
     </I18nProvider>,
   );
@@ -198,6 +201,39 @@ function switchButton(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('SettingsMessage user-scope editing', () => {
+  it('renders and updates application-owned host settings', async () => {
+    const onChange = vi.fn(async () => {});
+    const container = renderPanel(makeState([boolSetting()], vi.fn()), {
+      hostSettings: [
+        {
+          id: 'desktop-pet',
+          label: 'Desktop Pet',
+          scopeLabel: 'Desktop',
+          items: [
+            {
+              key: 'pet.enabled',
+              label: 'Show desktop pet',
+              kind: 'boolean',
+              value: true,
+            },
+          ],
+          onChange,
+        },
+      ],
+    });
+    const category = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.includes('Desktop Pet'));
+
+    act(() => category?.click());
+    expect(container.textContent).toContain('Desktop');
+    await act(async () => {
+      switchButton(container).click();
+    });
+
+    expect(onChange).toHaveBeenCalledWith('pet.enabled', false);
+  });
+
   it('persists a boolean toggle to the user scope from the User tab', async () => {
     const setValue = vi.fn(
       (scope: 'workspace' | 'user', key: string, value: unknown) =>

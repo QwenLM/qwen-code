@@ -15,6 +15,24 @@ const testState = vi.hoisted(() => ({
   props: undefined as CapturedWorkspaceSessionProps | undefined,
 }));
 
+const hostWindow = window as unknown as {
+  qwenCodeHost?: {
+    loadSettings: (language: string) => Promise<
+      Array<{
+        id: string;
+        label: string;
+        items: Array<{
+          key: string;
+          label: string;
+          kind: 'boolean';
+          value: boolean;
+        }>;
+      }>
+    >;
+    setSetting: (key: string, value: boolean | number) => Promise<void>;
+  };
+};
+
 vi.mock('react-dom/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react-dom/client')>()),
   default: { createRoot: () => ({ render: vi.fn() }) },
@@ -43,6 +61,7 @@ describe('StandaloneApp', () => {
 
   beforeEach(() => {
     testState.props = undefined;
+    delete hostWindow.qwenCodeHost;
     window.history.replaceState(null, '', '/');
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -52,6 +71,7 @@ describe('StandaloneApp', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    delete hostWindow.qwenCodeHost;
   });
 
   it('keeps the controlled session target in sync with URL changes', () => {
@@ -71,6 +91,37 @@ describe('StandaloneApp', () => {
     expect(window.location.pathname).toBe('/session/session-created');
     expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
       'workspace-1',
+    );
+  });
+
+  it('adopts a desktop host bridge that becomes ready after render', async () => {
+    act(() => root.render(<StandaloneApp daemonToken="token" />));
+    expect(testState.props?.webShellProps.hostSettings).toBeUndefined();
+    hostWindow.qwenCodeHost = {
+      loadSettings: vi.fn(async () => [
+        {
+          id: 'desktop-pet',
+          label: 'Desktop Pet',
+          items: [
+            {
+              key: 'pet.enabled',
+              label: 'Show desktop pet',
+              kind: 'boolean',
+              value: true,
+            },
+          ],
+        },
+      ]),
+      setSetting: vi.fn(async () => {}),
+    };
+
+    await act(async () => {
+      window.dispatchEvent(new Event('qwen-code-host-ready'));
+      await Promise.resolve();
+    });
+
+    expect(testState.props?.webShellProps.hostSettings?.[0]?.id).toBe(
+      'desktop-pet',
     );
   });
 });

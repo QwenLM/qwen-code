@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "web-shell-desktop-host",
+  "description": "Allows the active loopback Web Shell to receive desktop-owned setting updates.",
+  "local": false,
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-desktop-host-settings",
+    "allow-set-desktop-host-setting",
+    "allow-report-pet-streaming-state",
+    "allow-report-pet-session-change"
+  ]
+}

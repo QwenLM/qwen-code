@@ -2,11 +2,13 @@
 
 mod desktop_state;
 mod local_control;
+mod pet;
 mod runtime;
 
 use command_group::GroupChild;
 use desktop_state::{default_window_size, restore_window, SettingsStore};
 use local_control::{LocalControlInfo, LocalControlSession};
+use pet::{HostSettingsCategory, PetState, SessionChangeReport};
 use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -16,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, SubmenuBuilder};
-use tauri::webview::{DownloadEvent, NewWindowResponse, WebviewWindowBuilder};
+use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewWindowBuilder};
 use tauri::{
     AppHandle, Emitter, Listener, Manager, RunEvent, State, WebviewUrl, WebviewWindow,
     WindowEvent,
@@ -87,6 +89,10 @@ struct ApplicationState {
     window_dirty: AtomicBool,
     start_generation: AtomicU64,
     starting: AtomicU64,
+    pet_activity: Mutex<PetState>,
+    pet_base_activity: Mutex<PetState>,
+    pet_transient_active: AtomicBool,
+    pet_transient_generation: AtomicU64,
 }
 
 fn main() {
@@ -115,6 +121,13 @@ fn main() {
             open_logs,
             restart_runtime,
             install_update,
+            desktop_host_settings,
+            set_desktop_host_setting,
+            report_pet_streaming_state,
+            report_pet_session_change,
+            pet_bootstrap,
+            start_pet_dragging,
+            close_desktop_pet,
         ])
         .setup(setup_app);
 
@@ -177,6 +190,14 @@ fn main() {
         RunEvent::WindowEvent { label, event, .. } if label == "local-control" => {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
                 stop_local_control(app_handle);
+            }
+        }
+        RunEvent::WindowEvent { label, event, .. } if label == "pet" => {
+            if let WindowEvent::Moved(position) = event {
+                let _ = app_handle
+                    .state::<ApplicationState>()
+                    .settings
+                    .save_pet_position(position);
             }
         }
         RunEvent::Exit | RunEvent::ExitRequested { .. } => {
@@ -247,6 +268,15 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .title("Qwen Code")
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
+        .initialization_script(include_str!("web-shell-host.js"))
+        .on_page_load(|window, payload| {
+            if payload.event() == PageLoadEvent::Finished
+                && payload.url().scheme() == "http"
+                && payload.url().host_str() == Some("127.0.0.1")
+            {
+                let _ = window.eval(include_str!("web-shell-host.js"));
+            }
+        })
         .on_navigation(move |url| is_allowed_navigation(url, &navigation_origin))
         .on_new_window(|url, _features| {
             if is_safe_external_url(&url) {
@@ -285,7 +315,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         window_dirty: AtomicBool::new(false),
         start_generation: AtomicU64::new(0),
         starting: AtomicU64::new(0),
+        pet_activity: Mutex::new(PetState::Idle),
+        pet_base_activity: Mutex::new(PetState::Idle),
+        pet_transient_active: AtomicBool::new(false),
+        pet_transient_generation: AtomicU64::new(0),
     });
+
+    let pet_settings = handle.state::<ApplicationState>().settings.pet();
+    pet::ensure_window(&handle, &pet_settings).map_err(std::io::Error::other)?;
 
     match initial_workspace(&handle) {
         Ok((workspace, create_if_missing)) => {
@@ -473,6 +510,133 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
         .await
         .map_err(|error| format!("Failed to install update: {error}"))?;
     app.request_restart();
+    Ok(())
+}
+
+#[tauri::command]
+fn desktop_host_settings(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+    language: String,
+) -> Result<Vec<HostSettingsCategory>, String> {
+    require_runtime_origin(&webview, &state)?;
+    Ok(pet::host_settings(&state.settings.pet(), &language))
+}
+
+#[tauri::command]
+fn set_desktop_host_setting(
+    webview: WebviewWindow,
+    app: AppHandle,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let state = app.state::<ApplicationState>();
+    require_runtime_origin(&webview, &state)?;
+    let settings = pet::apply_host_setting(state.settings.pet(), &key, value)?;
+    state.settings.set_pet(settings.clone())?;
+    if settings.enabled {
+        pet::ensure_window(&app, &settings)?;
+    } else {
+        pet::destroy_window(&app);
+    }
+    pet::emit_settings(&app, &settings);
+    Ok(())
+}
+
+#[tauri::command]
+fn report_pet_streaming_state(
+    webview: WebviewWindow,
+    app: AppHandle,
+    state: String,
+) -> Result<(), String> {
+    let application = app.state::<ApplicationState>();
+    require_runtime_origin(&webview, &application)?;
+    let activity = pet::streaming_state(&state);
+    *lock(&application.pet_base_activity) = activity;
+    if !application.pet_transient_active.load(Ordering::SeqCst) {
+        *lock(&application.pet_activity) = activity;
+        pet::emit_activity(&app, activity);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn report_pet_session_change(
+    webview: WebviewWindow,
+    app: AppHandle,
+    event: SessionChangeReport,
+) -> Result<(), String> {
+    let application = app.state::<ApplicationState>();
+    require_runtime_origin(&webview, &application)?;
+    let (activity, transient_ms) = pet::session_state(&event);
+    let generation = application
+        .pet_transient_generation
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    *lock(&application.pet_base_activity) = if transient_ms.is_some() {
+        PetState::Idle
+    } else {
+        activity
+    };
+    application
+        .pet_transient_active
+        .store(transient_ms.is_some(), Ordering::SeqCst);
+    *lock(&application.pet_activity) = activity;
+    pet::emit_activity(&app, activity);
+    if let Some(duration) = transient_ms {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(duration));
+            let application = app.state::<ApplicationState>();
+            if application.pet_transient_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            application
+                .pet_transient_active
+                .store(false, Ordering::SeqCst);
+            let base = *lock(&application.pet_base_activity);
+            *lock(&application.pet_activity) = base;
+            pet::emit_activity(&app, base);
+        });
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PetBootstrap {
+    settings: desktop_state::PetSettings,
+    activity: PetState,
+}
+
+#[tauri::command]
+fn pet_bootstrap(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+) -> Result<PetBootstrap, String> {
+    require_pet_origin(&webview)?;
+    Ok(PetBootstrap {
+        settings: state.settings.pet(),
+        activity: *lock(&state.pet_activity),
+    })
+}
+
+#[tauri::command]
+fn start_pet_dragging(webview: WebviewWindow) -> Result<(), String> {
+    require_pet_origin(&webview)?;
+    webview
+        .start_dragging()
+        .map_err(|error| format!("Failed to drag desktop pet: {error}"))
+}
+
+#[tauri::command]
+fn close_desktop_pet(webview: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    require_pet_origin(&webview)?;
+    let application = app.state::<ApplicationState>();
+    let mut settings = application.settings.pet();
+    settings.enabled = false;
+    application.settings.set_pet(settings.clone())?;
+    pet::emit_settings(&app, &settings);
+    pet::destroy_window(&app);
     Ok(())
 }
 
@@ -792,6 +956,34 @@ fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
         Ok(())
     } else {
         Err("This command is only available from the desktop shell.".to_string())
+    }
+}
+
+fn require_runtime_origin(webview: &WebviewWindow, state: &ApplicationState) -> Result<(), String> {
+    if webview.label() != "main" {
+        return Err("This command is only available from the main Web Shell.".to_string());
+    }
+    let url = webview
+        .url()
+        .map_err(|error| format!("Failed to read calling webview URL: {error}"))?;
+    if lock(&state.origin)
+        .as_ref()
+        .is_some_and(|origin| is_same_origin(&url, origin))
+    {
+        Ok(())
+    } else {
+        Err("This command is only available from the active desktop runtime.".to_string())
+    }
+}
+
+fn require_pet_origin(webview: &WebviewWindow) -> Result<(), String> {
+    let url = webview
+        .url()
+        .map_err(|error| format!("Failed to read calling webview URL: {error}"))?;
+    if webview.label() == "pet" && is_bootstrap_url(&url) {
+        Ok(())
+    } else {
+        Err("This command is only available from the desktop pet.".to_string())
     }
 }
 

@@ -40,6 +40,10 @@ import {
   webShellThemeToSettingValue,
   type WebShellTheme,
 } from '../../themeContext';
+import type {
+  WebShellHostSettingItem,
+  WebShellHostSettingsCategory,
+} from '../../hostSettings';
 import {
   ModelManagementSection,
   type ModelManagementProps,
@@ -80,6 +84,7 @@ type ChatWidthMode = '1000' | 'wide';
 
 interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
+  hostSettings?: readonly WebShellHostSettingsCategory[];
   onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
   onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -246,11 +251,17 @@ interface CategoryGroup {
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
   | { type: 'local'; localKey: 'chatWidth' }
-  | { type: 'live' };
+  | { type: 'live' }
+  | {
+      type: 'host';
+      category: WebShellHostSettingsCategory;
+      item: WebShellHostSettingItem;
+    };
 
 interface SettingsPageCategory {
   id: string;
   label: string;
+  scopeLabel?: string;
   items: SettingsPageItem[];
 }
 
@@ -409,6 +420,7 @@ export function nextSettingIdx(
 
 export function SettingsMessage({
   settingsState,
+  hostSettings,
   onLanguageChange,
   onSubDialog,
   onThemeChange,
@@ -479,8 +491,21 @@ export function SettingsMessage({
         });
       }
     }
+    for (const category of hostSettings ?? []) {
+      if (category.items.length === 0) continue;
+      groups.push({
+        id: `host:${category.id}`,
+        label: category.label,
+        scopeLabel: category.scopeLabel,
+        items: category.items.map((item) => ({
+          type: 'host' as const,
+          category,
+          item,
+        })),
+      });
+    }
     return groups;
-  }, [liveSetup, settings, t]);
+  }, [hostSettings, liveSetup, settings, t]);
 
   useEffect(() => {
     if (categories.length === 0) return;
@@ -664,6 +689,49 @@ export function SettingsMessage({
     );
   };
 
+  const renderHostSettingControl = (
+    category: WebShellHostSettingsCategory,
+    setting: WebShellHostSettingItem,
+  ) => {
+    const busyToken = `host:${category.id}:${setting.key}`;
+    const disabled = setting.disabled === true || busyKey === busyToken;
+    const commit = (value: unknown) => {
+      if (typeof value !== 'boolean' && typeof value !== 'number') {
+        return;
+      }
+      setMessage(null);
+      setBusyKey(busyToken);
+      Promise.resolve()
+        .then(() => category.onChange(setting.key, value))
+        .catch((err: unknown) => {
+          setMessage(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => setBusyKey(null));
+    };
+
+    if (setting.kind === 'boolean') {
+      return (
+        <Switch
+          checked={setting.value === true}
+          disabled={disabled}
+          onCheckedChange={commit}
+          aria-label={setting.label}
+        />
+      );
+    }
+    return (
+      <SettingInput
+        name={setting.key}
+        label={setting.label}
+        type="number"
+        value={setting.value}
+        disabled={disabled}
+        onCommit={commit}
+        onInvalid={() => setMessage(t('settings.invalidNumber'))}
+      />
+    );
+  };
+
   return (
     <div
       className={
@@ -703,12 +771,16 @@ export function SettingsMessage({
         }}
       >
         <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
-          <TabsList className="p-0">
-            <TabsTrigger value="workspace">
-              {t('settings.scope.workspace')}
-            </TabsTrigger>
-            <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
-          </TabsList>
+          {activeGroup?.scopeLabel ? (
+            <Badge variant="secondary">{activeGroup.scopeLabel}</Badge>
+          ) : (
+            <TabsList className="p-0">
+              <TabsTrigger value="workspace">
+                {t('settings.scope.workspace')}
+              </TabsTrigger>
+              <TabsTrigger value="user">{t('settings.scope.user')}</TabsTrigger>
+            </TabsList>
+          )}
           {restartPending && (
             <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
           )}
@@ -816,6 +888,28 @@ export function SettingsMessage({
                               <LiveVoiceSettingsCard setup={liveSetup} />
                             </div>
                           ) : null;
+                        }
+                        if (item.type === 'host') {
+                          const busyToken = `host:${item.category.id}:${item.item.key}`;
+                          return (
+                            <div key={item.item.key}>
+                              {separator}
+                              <SettingsRow
+                                title={item.item.label}
+                                description={item.item.description}
+                                control={
+                                  busyKey === busyToken ? (
+                                    <Spinner />
+                                  ) : (
+                                    renderHostSettingControl(
+                                      item.category,
+                                      item.item,
+                                    )
+                                  )
+                                }
+                              />
+                            </div>
+                          );
                         }
 
                         const setting = item.setting;

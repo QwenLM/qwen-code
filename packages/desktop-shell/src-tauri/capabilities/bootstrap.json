@@ -3,5 +3,16 @@
   "identifier": "bootstrap",
   "description": "Allows the local bootstrap page to subscribe to desktop lifecycle events.",
   "windows": ["main", "local-control"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-bootstrap-state",
+    "allow-choose-workspace",
+    "allow-restart-runtime",
+    "allow-local-control-status",
+    "allow-enable-local-control",
+    "allow-disable-local-control",
+    "allow-open-logs",
+    "allow-install-update"
+  ]
 }

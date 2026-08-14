@@ -10,6 +10,9 @@ const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 820;
 const MIN_WIDTH: u32 = 900;
 const MIN_HEIGHT: u32 = 600;
+pub const DEFAULT_PET_SIZE: u32 = 96;
+pub const MIN_PET_SIZE: u32 = 64;
+pub const MAX_PET_SIZE: u32 = 240;
 const DISABLE_SETTINGS_PERSISTENCE_ENV: &str = "QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE";
 static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -18,6 +21,31 @@ static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 pub struct DesktopSettings {
     pub workspace: Option<PathBuf>,
     pub window: Option<WindowState>,
+    pub pet: PetSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PetSettings {
+    pub enabled: bool,
+    pub size: u32,
+    pub position: Option<PetPosition>,
+}
+
+impl Default for PetSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            size: DEFAULT_PET_SIZE,
+            position: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PetPosition {
+    pub x: i32,
+    pub y: i32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -60,6 +88,23 @@ impl SettingsStore {
 
     pub fn window(&self) -> Option<WindowState> {
         self.with_settings(|settings| settings.window.clone())
+    }
+
+    pub fn pet(&self) -> PetSettings {
+        self.with_settings(|settings| normalize_pet_settings(settings.pet.clone()))
+    }
+
+    pub fn set_pet(&self, pet: PetSettings) -> Result<(), String> {
+        self.update(|settings| settings.pet = normalize_pet_settings(pet))
+    }
+
+    pub fn save_pet_position(&self, position: PhysicalPosition<i32>) -> Result<(), String> {
+        self.update(|settings| {
+            settings.pet.position = Some(PetPosition {
+                x: position.x,
+                y: position.y,
+            });
+        })
     }
 
     pub fn save_window(&self, window: &WebviewWindow) -> Result<(), String> {
@@ -152,6 +197,11 @@ fn parse_settings(contents: &str) -> DesktopSettings {
     serde_json::from_str(contents).unwrap_or_default()
 }
 
+fn normalize_pet_settings(mut pet: PetSettings) -> PetSettings {
+    pet.size = pet.size.clamp(MIN_PET_SIZE, MAX_PET_SIZE);
+    pet
+}
+
 fn saved_window_state(
     previous: Option<&WindowState>,
     position: PhysicalPosition<i32>,
@@ -220,8 +270,9 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_settings, saved_window_state, settings_persistence_disabled_value, write_atomic,
-        DesktopSettings, WindowState,
+        normalize_pet_settings, parse_settings, saved_window_state,
+        settings_persistence_disabled_value, write_atomic, DesktopSettings, PetSettings,
+        WindowState, DEFAULT_PET_SIZE, MAX_PET_SIZE,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -232,6 +283,8 @@ mod tests {
         let settings: DesktopSettings = serde_json::from_str("{}").expect("settings");
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
+        assert!(settings.pet.enabled);
+        assert_eq!(settings.pet.size, DEFAULT_PET_SIZE);
     }
 
     #[test]
@@ -239,6 +292,16 @@ mod tests {
         let settings = parse_settings("{");
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
+        assert_eq!(settings.pet.size, DEFAULT_PET_SIZE);
+    }
+
+    #[test]
+    fn pet_size_is_normalized_before_use() {
+        let normalized = normalize_pet_settings(PetSettings {
+            size: u32::MAX,
+            ..PetSettings::default()
+        });
+        assert_eq!(normalized.size, MAX_PET_SIZE);
     }
 
     #[test]
