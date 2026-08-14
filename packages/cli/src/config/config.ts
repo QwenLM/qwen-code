@@ -1499,20 +1499,46 @@ function assertKnownOmniSettingKeys(settings: Settings): void {
   const schemaOmni = getSettingsSchema()['omni'] as
     | { properties?: Record<string, unknown> }
     | undefined;
-  const allowed = new Set(Object.keys(schemaOmni?.properties ?? {}));
   // No schema properties resolved (unexpected): stay silent rather than
   // rejecting every valid key.
-  if (allowed.size === 0) return;
-  const unknown = Object.keys(omni).filter((key) => !allowed.has(key));
-  if (unknown.length > 0) {
-    throw new Error(
-      `Invalid settings: unknown key(s) under "omni": ` +
-        `${unknown.map((k) => `"${k}"`).join(', ')}. ` +
-        `Allowed: ${[...allowed].sort().join(', ')}. ` +
-        `An unrecognized omni section would be silently ignored, leaving ` +
-        `the session running with defaults instead of your configuration.`,
-    );
-  }
+  if (Object.keys(schemaOmni?.properties ?? {}).length === 0) return;
+
+  // Walk nested object settings too: the deletion-controlling knobs live
+  // at `omni.storage.*`, and a typo there would silently leave the GC on
+  // defaults. Free-form map nodes (fixedPolicies, policyTools — schema
+  // nodes without `properties`) stop the walk: their keys are
+  // user-defined.
+  const walk = (
+    value: unknown,
+    schemaNode: { properties?: Record<string, unknown> } | undefined,
+    label: string,
+  ): void => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return;
+    }
+    const props = schemaNode?.properties;
+    if (!props || Object.keys(props).length === 0) return;
+    const allowed = new Set(Object.keys(props));
+    const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Invalid settings: unknown key(s) under "${label}": ` +
+          `${unknown.map((k) => `"${k}"`).join(', ')}. ` +
+          `Allowed: ${[...allowed].sort().join(', ')}. ` +
+          `An unrecognized ${label} entry would be silently ignored, ` +
+          `leaving the session running with defaults instead of your ` +
+          `configuration.`,
+      );
+    }
+    for (const [key, child] of Object.entries(value)) {
+      walk(
+        child,
+        props[key] as { properties?: Record<string, unknown> } | undefined,
+        `${label}.${key}`,
+      );
+    }
+  };
+  walk(omni, schemaOmni, 'omni');
 }
 
 export async function loadCliConfig(
@@ -2256,6 +2282,8 @@ export async function loadCliConfig(
     omniQuarantineRetentionDays:
       settings.omni?.storage?.quarantine?.retentionDays,
     omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
+    omniStorageRetentionDays: settings.omni?.storage?.retentionDays,
+    omniStorageMaxTotalBytes: settings.omni?.storage?.maxTotalBytes,
     omniMemory: settings.omni?.memory as Record<string, unknown> | undefined,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
     // through the CDP tunnel (far lighter than the OS-level computer-use

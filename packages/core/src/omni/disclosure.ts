@@ -19,12 +19,58 @@
  * this prefix to keep the disclosure adjacent to its media part. */
 export const OMNI_DISCLOSURE_TEXT_PREFIX = '【媒体降质】';
 
+/**
+ * The annotation grammar separates the display name from the payload with
+ * a full-width colon — but a display name (a basename) may itself contain
+ * one. Writers escape the name so a reader can split at the first
+ * UNESCAPED separator instead of guessing; names without the separator
+ * pass through unchanged, so the model-visible text is identical in the
+ * common case.
+ */
+export function escapeAnnotationName(name: string): string {
+  return name.replaceAll('\\', '\\\\').replaceAll('：', '\\：');
+}
+
+/** Inverse of {@link escapeAnnotationName}. */
+export function unescapeAnnotationName(escaped: string): string {
+  return escaped.replace(/\\([\s\S])/g, '$1');
+}
+
+/**
+ * Split an annotation body `<escaped-name>：<payload>` at the first
+ * unescaped separator. Returns undefined when no unescaped separator
+ * exists (not an annotation body).
+ */
+export function splitAnnotationBody(
+  body: string,
+): { name: string; payload: string } | undefined {
+  let escaped = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '：') {
+      return {
+        name: unescapeAnnotationName(body.slice(0, i)),
+        payload: body.slice(i + 1),
+      };
+    }
+  }
+  return undefined;
+}
+
 /** Model-facing disclosure text for one degraded resource. */
 export function formatDisclosureText(
   displayName: string,
   disclosure: string,
 ): string {
-  return `${OMNI_DISCLOSURE_TEXT_PREFIX}${displayName}：${disclosure}`;
+  return `${OMNI_DISCLOSURE_TEXT_PREFIX}${escapeAnnotationName(displayName)}：${disclosure}`;
 }
 
 /** Whether a text is a disclosure emitted by {@link formatDisclosureText}. */
@@ -42,7 +88,7 @@ export function formatOmissionText(
   displayName: string,
   reason: string,
 ): string {
-  return `${OMNI_OMISSION_TEXT_PREFIX}${displayName}：${reason}`;
+  return `${OMNI_OMISSION_TEXT_PREFIX}${escapeAnnotationName(displayName)}：${reason}`;
 }
 
 /** Marks a text Part as a media transcript: a text derivative (upstream P
@@ -56,7 +102,7 @@ export function formatTranscriptText(
   displayName: string,
   transcript: string,
 ): string {
-  return `${OMNI_TRANSCRIPT_TEXT_PREFIX}${displayName}：${transcript}`;
+  return `${OMNI_TRANSCRIPT_TEXT_PREFIX}${escapeAnnotationName(displayName)}：${transcript}`;
 }
 
 /** Marks a text Part as a session resource-handle annotation: the opaque
@@ -71,7 +117,7 @@ export function formatResourceHandleText(
   displayName: string,
   resourceId: string,
 ): string {
-  return `${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}${displayName}：${resourceId}`;
+  return `${OMNI_RESOURCE_HANDLE_TEXT_PREFIX}${escapeAnnotationName(displayName)}：${resourceId}`;
 }
 
 /** Extract the resourceId from a handle annotation emitted by

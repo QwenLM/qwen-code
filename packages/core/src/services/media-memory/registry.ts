@@ -82,6 +82,18 @@ export class MediaResourceRegistry {
     }
     return undefined;
   }
+
+  /** Every locator this session currently has a handle for. GC treats
+   * these as roots alongside the memory snapshot: a resource delivered
+   * THIS turn may be bound here before its memory commit lands, and the
+   * sweep must not win that race. */
+  activeFileRefs(): string[] {
+    const refs = new Set<string>();
+    for (const binding of this.byVersionId.values()) {
+      refs.add(binding.fileRef);
+    }
+    return [...refs];
+  }
 }
 
 /** Structural view of the Config accessor (same pattern as

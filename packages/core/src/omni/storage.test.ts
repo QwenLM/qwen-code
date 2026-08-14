@@ -70,6 +70,23 @@ describe('OmniObjectStore', () => {
     expect(objectFiles).toEqual([path.basename(first.objectPath)]);
   });
 
+  it('a dedup hit refreshes the object mtime (touch-on-reference)', async () => {
+    // Every new memory reference is preceded by a putFile of the same
+    // bytes; the dedup touch re-arms the GC retention grace so a
+    // concurrent sweep whose snapshot predates the commit cannot delete
+    // freshly re-referenced old bytes on age.
+    const a = await makeSource('old-bytes');
+    const { objectPath } = await store.putFile(a.sourcePath, a.sha256, '.bin');
+    const old = new Date(Date.now() - 30 * 24 * 3600_000);
+    await fs.utimes(objectPath, old, old);
+
+    const second = await store.putFile(a.sourcePath, a.sha256, '.bin');
+
+    expect(second.deduped).toBe(true);
+    const st = await fs.lstat(objectPath);
+    expect(st.mtimeMs).toBeGreaterThan(Date.now() - 60_000);
+  });
+
   it('writes a self-ignoring .gitignore once', async () => {
     const { sourcePath, sha256 } = await makeSource('x');
     await store.putFile(sourcePath, sha256, '.mp4');

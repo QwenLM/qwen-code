@@ -290,6 +290,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'omni_recall'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -1613,6 +1614,28 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving slash command record:', error);
+    }
+  }
+
+  /**
+   * Records the omni passive media-memory recall payload injected into the
+   * model-bound request (memory design M §9.3, D10 sideQuery mode). The
+   * reminder is assembled AFTER the user record is persisted, so without
+   * this record the transcript would never show what memory the model was
+   * given — the trajectory exporter reads it back as `turn.recall`.
+   */
+  recordOmniRecallReminder(payload: unknown): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'omni_recall',
+        systemPayload: payload as ChatRecord['systemPayload'],
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving omni recall record:', error);
     }
   }
 

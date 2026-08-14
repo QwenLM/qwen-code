@@ -405,6 +405,69 @@ export class MediaMemoryService {
   }
 
   /**
+   * The GC root set (storage design §6.2): every object hash any memory
+   * record still references. Three distinct reference kinds exist and ALL
+   * count — `entries[].artifactRef.managedId` (policy outputs),
+   * managed-protocol `versions[].source.locator` (tool media anchor
+   * their file identity in the object store), and versions of files
+   * whose `fileRef` points INTO the object store while their source
+   * keeps a different protocol (URL media: `source.locator` is the
+   * original URL, but the staging download is deleted the turn it
+   * lands, so the store copy named by the file's `fileRef` is the only
+   * persistent bytes). The last kind is rooted by content hash: each
+   * such version's bytes live in the store under its own sha256.
+   *
+   * Returns null when the store exists but cannot be read — the caller
+   * must treat that as "roots unknown" and delete NOTHING (fail-closed:
+   * an unreadable ledger must never read as an empty one). A store that
+   * has never been written returns an empty set: nothing was ever
+   * recorded, so nothing is referenced.
+   */
+  async collectManagedRefs(): Promise<Set<string> | null> {
+    const UNREADABLE = null;
+    // The store copy lives under `<omniRoot>/objects/` — matching on the
+    // objects prefix (not exact equality with objectPathFor) keeps this
+    // robust to extension differences.
+    const objectsPrefix = this.store.omniObjectsPrefix();
+    try {
+      return await this.store.read<Set<string> | null>(
+        UNREADABLE,
+        (snapshot) => {
+          const refs = new Set<string>();
+          const add = (locator: string | undefined) => {
+            if (locator?.startsWith('sha256/')) {
+              refs.add(locator.slice('sha256/'.length));
+            }
+          };
+          for (const entry of Object.values(snapshot.entries)) {
+            if (entry.artifactRef?.storage === 'managed') {
+              add(entry.artifactRef.managedId);
+            }
+          }
+          for (const version of Object.values(snapshot.versions)) {
+            if (version.source.protocol === 'managed') {
+              add(version.source.locator);
+            }
+            // A file anchored in the object store (URL/tool media whose
+            // staging copy is gone) roots every ledger-vouched version's
+            // bytes by content hash.
+            const file = snapshot.files[version.fileId];
+            if (file?.fileRef.startsWith(objectsPrefix)) {
+              refs.add(version.sha256);
+            }
+          }
+          return refs;
+        },
+      );
+    } catch (err) {
+      debugLogger.debug(
+        `collectManagedRefs failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Read-side lookup for callers that hold bytes but no identity (the
    * reactive degradation ladder re-recognizes a stored object without
    * knowing which memory version it is). Returns the binding of the

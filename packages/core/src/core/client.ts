@@ -2955,6 +2955,12 @@ export class GeminiClient {
             systemReminders.push(
               formatOmniMemorySideQueryReminder(omniRecall.result),
             );
+            // The user record was persisted before this reminder existed —
+            // record the payload so the transcript (and the trajectory
+            // exporter) shows what memory the model was actually given.
+            this.config
+              .getChatRecordingService()
+              ?.recordOmniRecallReminder(omniRecall.result);
           } else if (omniRecall?.reason) {
             // A degraded passive recall is invisible by construction: the
             // turn proceeds normally, just without the memory it was

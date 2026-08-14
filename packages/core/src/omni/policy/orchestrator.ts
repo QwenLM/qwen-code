@@ -32,6 +32,7 @@ import {
   computePolicyFingerprint,
   OmniDegradationCache,
 } from './degradation-cache.js';
+import { isOmniDerivationSuspended, settleOmniGc } from '../gc.js';
 import { DEFAULT_OMNI_PROCESSING_LIMITS } from './config.js';
 import { resolvePolicyToolSettings } from './tools/media-policy-tool.js';
 import type {
@@ -875,6 +876,26 @@ async function executePolicy(
     // (GC, manual deletion) or its bytes no longer match the entry. Drop
     // every entry pointing at it and re-transcode.
     await cache.removeByDegradedSha256(hit.degradedSha256);
+  }
+
+  // Budget-stop (storage design §6.2 / policy design §8.4): when the GC
+  // found the store over budget with only referenced objects left, no NEW
+  // bytes may be derived. Reuse and cache hits stay allowed — both paths
+  // above return before this point and produce nothing new. Fail the
+  // policy rather than silently skip: a policy that was configured to run
+  // and didn't must say why (its failure routes through the existing
+  // required/optional semantics). The startup GC is fire-and-forget, so
+  // settle it first — otherwise the first derivation of a fresh process
+  // races past the flag before the sweep can raise it.
+  await settleOmniGc(store.getOmniRootDir());
+  if (isOmniDerivationSuspended(store.getOmniRootDir())) {
+    throw new Error(
+      `omni object store is over its byte budget with only ` +
+        `memory-referenced objects left; new policy derivations are ` +
+        `suspended. Raise omni.storage.maxTotalBytes or delete memory ` +
+        `records you no longer need, then start a new session — the ` +
+        `budget is re-evaluated once per process.`,
+    );
   }
 
   const invocationId = randomBytes(8).toString('hex');
