@@ -1530,6 +1530,7 @@ export const ToolGroup = memo(function ToolGroup({
     ? getMcpAppDisplay(singleTool.rawOutput)
     : undefined;
   const singleMcpAppResourceUri = singleMcpApp?.resourceUri;
+  const hasMcpApp = tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
   const hasForegroundActiveTool = tools.some(
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
@@ -1550,10 +1551,10 @@ export const ToolGroup = memo(function ToolGroup({
     monitorDetailsRequestRef.current = null;
   }, [monitorDetailsAvailable, singleMonitor?.callId]);
   useEffect(() => {
-    if (singleMcpAppResourceUri) {
+    if (singleMcpAppResourceUri || hasMcpApp) {
       setChatExpanded(true);
     }
-  }, [singleMcpAppResourceUri]);
+  }, [singleMcpAppResourceUri, hasMcpApp]);
 
   const tryOpenMonitorDetails = () => {
     if (!singleMonitor || !monitorDetails) return;
@@ -1632,17 +1633,20 @@ export const ToolGroup = memo(function ToolGroup({
         >
           <div className={styles.chatSummaryContentInner}>
             <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
-              {tools.map((tool) => (
-                <ToolLine
-                  key={tool.callId}
-                  tool={tool}
-                  approval={pendingApproval}
-                  workspaceCwd={workspaceCwd}
-                  summaryOnly={!singleTool}
-                  forceExpanded={!!singleTool}
-                  hideHeader={!!singleTool}
-                />
-              ))}
+              {tools.map((tool) => {
+                const toolHasMcpApp = Boolean(getMcpAppDisplay(tool.rawOutput));
+                return (
+                  <ToolLine
+                    key={tool.callId}
+                    tool={tool}
+                    approval={pendingApproval}
+                    workspaceCwd={workspaceCwd}
+                    summaryOnly={!singleTool && !toolHasMcpApp}
+                    forceExpanded={!!singleTool || toolHasMcpApp}
+                    hideHeader={!!singleTool}
+                  />
+                );
+              })}
             </div>
           </div>
         </div>

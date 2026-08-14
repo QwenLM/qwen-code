@@ -20,6 +20,20 @@ describe('MCP App host helpers', () => {
     ).toMatchObject({ resourceUri: 'ui://demo/app' });
   });
 
+  it('rejects compacted displays with empty html', () => {
+    expect(
+      getMcpAppDisplay({
+        type: 'mcp_app',
+        serverName: 'demo',
+        resourceUri: 'ui://demo/app',
+        html: '',
+        toolResult: {},
+        toolArguments: {},
+        fallbackText: 'Demo result',
+      }),
+    ).toBeUndefined();
+  });
+
   it('uses the daemon origin and swaps the hostname when needed', () => {
     expect(
       resolveMcpAppSandboxUrl(

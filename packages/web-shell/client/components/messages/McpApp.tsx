@@ -33,6 +33,7 @@ export function getMcpAppDisplay(value: unknown): McpAppDisplay | undefined {
     typeof value['serverName'] !== 'string' ||
     typeof value['resourceUri'] !== 'string' ||
     typeof value['html'] !== 'string' ||
+    value['html'] === '' ||
     typeof value['fallbackText'] !== 'string' ||
     !isRecord(value['toolResult']) ||
     !isRecord(value['toolArguments'])
