@@ -14,7 +14,7 @@ The command keeps the primary daemon on loopback, starts one selected LAN listen
 
 `--local-control` is an opt-in shortcut over the existing daemon and Web Shell. It leaves the daemon's runtime token, configured origins, and resolved port intact, adds one LAN listener on a selected private IPv4 address, allowlists that advertised origin while the session is active, and puts the pairing token in the URL fragment before rendering the QR code.
 
-The terminal remains the visible enabled indicator. `Ctrl+C` turns Local Control off, closes the LAN listener, invalidates the pairing token, and releases the existing cross-platform sleep inhibitor.
+The terminal remains the visible enabled indicator. `Ctrl+C` ends the whole daemon, not just Local Control: the graceful drain closes the LAN listener, invalidates the pairing token, and releases the existing cross-platform sleep inhibitor before the process exits. Turning Local Control off while the daemon keeps running is done from the Web Shell Settings card, which is also the only in-process re-enable path.
 
 The mode rejects a non-default `--hostname` and `--no-web` instead of silently creating incomplete configurations. It composes with `--token`, `--allow-origin`, and ephemeral port `0`; `--local-control-address` selects the LAN address when several candidates exist. Existing explicit `qwen serve` deployments are unchanged.
 

@@ -71,9 +71,14 @@ describe('LocalControlService', () => {
     expect(attached).toHaveLength(1);
     expect(attached[0].maxConnections).toBe(64);
     expect(attached[0].headersTimeout).toBe(10_000);
-    expect(attached[0].requestTimeout).toBe(30_000);
+    // No whole-request budget: it would 408 a phone trickling a large upload
+    // over Wi-Fi (the LAN listener serves the upload routes too).
+    expect(attached[0].requestTimeout).toBe(0);
     expect(attached[0].keepAliveTimeout).toBe(5_000);
-    expect(attached[0].listenerCount('error')).toBeGreaterThan(0);
+    // Exactly one: the persistent logging handler. The temporary `once('error')`
+    // used while waiting for `listening` must be removed once listening
+    // resolves, or it lingers on the running server for its whole lifetime.
+    expect(attached[0].listenerCount('error')).toBe(1);
     expect(origins.allows(`http://127.0.0.1:${port}`)).toBe(true);
 
     const oldToken = new URL(first.url!).hash.slice('#token='.length);
@@ -162,5 +167,47 @@ describe('LocalControlService', () => {
 
     expect((await service.enable()).sleepInhibited).toBe(false);
     await service.disable();
+  });
+
+  it('detaches the temporary listening handler when listen fails', async () => {
+    // Occupy the port so `listen()` rejects with EADDRINUSE. The pending
+    // `once('listening')` handler must be removed on the error path; if it
+    // lingered, a retry on the same server could resolve via the stale handler.
+    const blocker = createServer();
+    await new Promise<void>((resolve) =>
+      blocker.listen(0, '127.0.0.1', resolve),
+    );
+    const busyPort = (blocker.address() as AddressInfo).port;
+
+    const attached: Server[] = [];
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: (server) => attached.push(server),
+      detachWebSocket: vi.fn(),
+      getPort: () => busyPort,
+    });
+
+    await expect(service.enable()).rejects.toThrow();
+    expect(service.active).toBe(false);
+    expect(attached).toHaveLength(1);
+
+    // Node attaches its own internal 'listening' listener during listen(), so
+    // compare against a control server that failed the same way without any of
+    // the service's handlers: a leftover temporary handler would show up as +1.
+    const control = createServer();
+    await new Promise<void>((resolve) => {
+      control.once('error', () => resolve());
+      control.listen(busyPort, '127.0.0.1');
+    });
+    expect(attached[0].listenerCount('listening')).toBe(
+      control.listenerCount('listening'),
+    );
+
+    await new Promise<void>((resolve) => blocker.close(() => resolve()));
   });
 });

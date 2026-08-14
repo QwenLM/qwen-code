@@ -135,4 +135,25 @@ describe('Local Control routes', () => {
     expect(response.body.url).toBe(oversizedUrl);
     expect(response.body.qrText).toBeUndefined();
   });
+
+  it('renders the QR block for an in-capacity pairing URL', async () => {
+    // Happy path must stay covered: the QR block is the primary phone-pairing
+    // affordance, and a regression that silently stops assigning `qrText`
+    // (encoder upgrade, refactor) should not ship with green tests.
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).get('/workspace/local-control');
+
+    expect(response.status).toBe(200);
+    expect(typeof response.body.qrText).toBe('string');
+    expect(response.body.qrText.length).toBeGreaterThan(0);
+  });
 });

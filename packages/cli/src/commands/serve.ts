@@ -105,14 +105,15 @@ async function startLocalControl(
     writeStdoutLine(code.trimEnd());
   });
   writeStdoutLine(
-    '\nKeep this terminal open. Re-enable after changing networks. ' +
+    '\nKeep this terminal open. ' +
       (status.sleepInhibited
         ? 'Sleep is inhibited while this session is active. '
         : 'Sleep inhibition is unavailable here, so the host may sleep. ') +
       (status.encrypted
         ? 'Traffic is encrypted.'
         : 'Traffic is unencrypted — use it only on a network you trust.') +
-      ' Press Ctrl+C to turn Local Control off.',
+      ' Turn Local Control off from the Web Shell Settings card, or press ' +
+      'Ctrl+C to exit the daemon.',
   );
 }
 
@@ -358,7 +359,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: false,
         description:
-          'Share the Web Shell on the local IPv4 network with its own revocable pairing token, terminal QR code, and best-effort sleep inhibition. Press Ctrl+C to turn it off.',
+          'Share the Web Shell on the local IPv4 network with its own revocable pairing token, terminal QR code, and best-effort sleep inhibition. Ctrl+C turns it off by ending the whole daemon; the Web Shell Settings card turns it off while the daemon keeps running.',
       })
       .option('local-control-address', {
         type: 'string',

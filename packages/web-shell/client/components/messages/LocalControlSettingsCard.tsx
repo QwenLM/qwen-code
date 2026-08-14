@@ -65,6 +65,20 @@ function getLocalControlTarget(): string {
   return `${url.pathname}${url.search}`;
 }
 
+// Re-run on every status update, not just mount: enable/disable responses
+// carry a fresh candidate list, and the selector only renders with 2+
+// candidates — so a selection that outlived a network change (same adapter,
+// new DHCP address) would otherwise be silently re-sent with no way to fix it.
+function reconcileSelection(
+  interfaces: LanCandidate[] | undefined,
+  current: string,
+): string {
+  if (!interfaces) return current;
+  if (interfaces.length === 1) return interfaces[0]!.address;
+  if (current && !interfaces.some((c) => c.address === current)) return '';
+  return current;
+}
+
 export function LocalControlSettingsCard() {
   const { t } = useI18n();
   const { baseUrl, token } = useWorkspace();
@@ -77,10 +91,9 @@ export function LocalControlSettingsCard() {
     requestLocalControl(baseUrl, token, 'GET', '/workspace/local-control')
       .then((next) => {
         setStatus(next);
-        const interfaces = next.interfaces ?? [];
-        if (interfaces.length === 1) {
-          setSelectedAddress(interfaces[0]!.address);
-        }
+        setSelectedAddress((current) =>
+          reconcileSelection(next.interfaces, current),
+        );
       })
       .catch((failure: unknown) =>
         setError(failure instanceof Error ? failure.message : String(failure)),
@@ -101,7 +114,17 @@ export function LocalControlSettingsCard() {
             address: selectedAddress || undefined,
             target: getLocalControlTarget(),
           };
-      setStatus(await requestLocalControl(baseUrl, token, 'POST', path, body));
+      const next = await requestLocalControl(
+        baseUrl,
+        token,
+        'POST',
+        path,
+        body,
+      );
+      setStatus(next);
+      setSelectedAddress((current) =>
+        reconcileSelection(next.interfaces, current),
+      );
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -112,7 +135,10 @@ export function LocalControlSettingsCard() {
   const needsSelection = (status?.interfaces?.length ?? 0) > 1;
 
   return (
-    <div className="flex flex-col gap-4 px-5 py-4 max-md:px-4">
+    <div
+      className="flex flex-col gap-4 px-5 py-4 max-md:px-4"
+      aria-live="polite"
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 font-medium">
@@ -187,7 +213,11 @@ export function LocalControlSettingsCard() {
         </div>
       )}
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
 
       <Button
         type="button"
