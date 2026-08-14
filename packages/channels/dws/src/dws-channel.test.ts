@@ -533,6 +533,24 @@ describe('DwsChannel', () => {
     }
   });
 
+  it('caps retryable initial event subscription delay', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      vi.spyOn(client, 'subscribeToIm').mockRejectedValueOnce(
+        new DwsEventProcessError('try much later', true, 7 * 24 * 60 * 60_000),
+      );
+
+      const connecting = readyChannel(client);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await expect(connecting).resolves.toBeInstanceOf(DwsChannel);
+
+      expect(client.subscribeToIm).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resets restart allowance when a replacement stream becomes ready', async () => {
     vi.useFakeTimers();
     try {
@@ -699,6 +717,31 @@ describe('DwsChannel', () => {
       'doc-1',
       commentKey,
       'the code is 42',
+    );
+  });
+
+  it('parses document mention URLs followed by Chinese punctuation', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const card = documentMentionCard('doc-1', 'comment-1').replace(
+      /\[(https:[^\]]+)\]\([^)]+\)/u,
+      '$1，尽快',
+    );
+
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'notification-1', card),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ chatId: 'doc-1', threadId: 'comment-1' }),
+    ]);
+    channel.responseThreadId = 'comment-1';
+    await channel.respond('doc-1', 'response');
+    expect(client.replyToComment).toHaveBeenCalledWith(
+      'doc-1',
+      'comment-1',
+      'response',
     );
   });
 
@@ -1041,6 +1084,65 @@ describe('DwsChannel', () => {
 
     await channel.poll();
     expect(client.readDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs off persisted document notification delivery failures', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-15T00:00:00Z'));
+      const client = new FakeDwsClient();
+      const config = makeConfig({ senderPolicy: 'pairing' });
+      const name = 'backed-off-document-dws';
+      const { channel, bridge } = await readyPolicyChannel(
+        client,
+        config,
+        name,
+      );
+      client.directMessages = [
+        message(
+          'user_im_message_receive_o2o_all',
+          'pending-document',
+          documentMentionCard('doc-pending', 'comment-pending'),
+        ),
+      ];
+
+      await channel.poll();
+      const pairingText = client.replyToComment.mock.calls[0]?.[2];
+      const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
+      expect(code).toBeDefined();
+      expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
+      client.directMessages = [];
+      client.replyToComment.mockRejectedValue(
+        new DwsCommandError('comment deleted', 'not_sent'),
+      );
+
+      await channel.poll();
+      await channel.poll();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await channel.poll();
+      expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      channel.disconnect();
+
+      const restartedClient = new FakeDwsClient();
+      restartedClient.replyToComment.mockRejectedValue(
+        new DwsCommandError('comment deleted', 'not_sent'),
+      );
+      const restarted = await readyPolicyChannel(restartedClient, config, name);
+      await restarted.channel.poll();
+      expect(restarted.bridge.prompt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await restarted.channel.poll();
+      expect(restarted.bridge.prompt).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await restarted.channel.poll();
+      expect(restarted.bridge.prompt).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows a working eyes reaction on the notification while a document task runs', async () => {

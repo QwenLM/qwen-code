@@ -80,6 +80,8 @@ interface PersistedDocumentNotification {
   conversationId: string;
   senderId: string;
   senderName: string;
+  retryAttempts?: number;
+  nextRetryAt?: number;
 }
 
 interface DwsCursor {
@@ -135,7 +137,7 @@ function parseDocumentMentionNotification(
   content: string,
 ): DwsDocumentMentionNotification | undefined {
   const links = content.matchAll(
-    /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\s\])]+/gu,
+    /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\s\])\p{Script=Han}，。！？；：、”’）【】》〈]+/gu,
   );
   for (const match of links) {
     try {
@@ -225,15 +227,22 @@ function isPendingDocumentNotification(
     return false;
   }
   const pending = value as PersistedDocumentNotification;
-  return [
-    pending.documentId,
-    pending.commentKey,
-    pending.request,
-    pending.messageId,
-    pending.conversationId,
-    pending.senderId,
-    pending.senderName,
-  ].every((item) => typeof item === 'string' && Boolean(item));
+  return (
+    [
+      pending.documentId,
+      pending.commentKey,
+      pending.request,
+      pending.messageId,
+      pending.conversationId,
+      pending.senderId,
+      pending.senderName,
+    ].every((item) => typeof item === 'string' && Boolean(item)) &&
+    (pending.retryAttempts === undefined ||
+      (Number.isSafeInteger(pending.retryAttempts) &&
+        pending.retryAttempts >= 0)) &&
+    (pending.nextRetryAt === undefined ||
+      (Number.isSafeInteger(pending.nextRetryAt) && pending.nextRetryAt >= 0))
+  );
 }
 
 function stableTodoValue(value: unknown, key = ''): unknown {
@@ -323,9 +332,12 @@ function retryLimit(error: Error): number {
 }
 
 function retryDelay(error: Error): number {
-  return Math.max(
-    EVENT_RESTART_DELAY_MS,
-    error instanceof DwsEventProcessError ? (error.retryAfterMs ?? 0) : 0,
+  return Math.min(
+    EVENT_RESTART_MAX_DELAY_MS,
+    Math.max(
+      EVENT_RESTART_DELAY_MS,
+      error instanceof DwsEventProcessError ? (error.retryAfterMs ?? 0) : 0,
+    ),
   );
 }
 
@@ -1327,6 +1339,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     ]) {
       if (signal.aborted || !this.connected) return;
       if (!this.gate.isAllowed(pending.senderId)) continue;
+      if ((pending.nextRetryAt ?? 0) > Date.now()) continue;
       const notification: DwsDocumentMentionNotification = {
         documentId: pending.documentId,
         commentKey: pending.commentKey,
@@ -1349,8 +1362,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         );
       } catch (error) {
         if (signal.aborted || !this.connected) return;
+        const delay = this.deferPendingDocumentNotification(
+          documentNotificationKey(pending),
+        );
         process.stderr.write(
-          `[Channel:${this.name}] failed to replay pending DWS document notification: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          `[Channel:${this.name}] pending DWS document notification is degraded; retrying in ${delay}ms: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
         );
       }
     }
@@ -1386,6 +1402,27 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.cursor.pendingDocumentNotifications = (
       this.cursor.pendingDocumentNotifications ?? []
     ).filter((pending) => documentNotificationKey(pending) !== notificationKey);
+  }
+
+  private deferPendingDocumentNotification(notificationKey: string): number {
+    let delay = EVENT_RESTART_DELAY_MS;
+    this.cursor.pendingDocumentNotifications = (
+      this.cursor.pendingDocumentNotifications ?? []
+    ).map((pending) => {
+      if (documentNotificationKey(pending) !== notificationKey) return pending;
+      const retryAttempts = (pending.retryAttempts ?? 0) + 1;
+      delay = Math.min(
+        EVENT_RESTART_MAX_DELAY_MS,
+        EVENT_RESTART_DELAY_MS * 2 ** Math.min(retryAttempts - 1, 8),
+      );
+      return {
+        ...pending,
+        retryAttempts,
+        nextRetryAt: Date.now() + delay,
+      };
+    });
+    this.saveCursor();
+    return delay;
   }
 
   private async sendWithEchoTracking(
