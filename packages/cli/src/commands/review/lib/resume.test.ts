@@ -25,6 +25,7 @@ const prev = () => ({
 const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   prNumber: '42',
   worktreeHeadSha: SHA,
+  worktreeClean: true,
   diffSha256OnDisk: DIFF_SHA,
   liveHeadSha: SHA,
   resumeCount: 0,
@@ -127,11 +128,71 @@ describe('assessResume', () => {
     ).toEqual({ ok: false, reason: 'diff-hash-mismatch' });
   });
 
-  it('refuses with diff-hash-mismatch when the diff file is unreadable', () => {
+  it('names a missing diff capture apart from a changed one', () => {
+    // Local state loss and upstream input change are different facts.
     expect(assessResume(prev(), probes({ diffSha256OnDisk: null }))).toEqual({
       ok: false,
-      reason: 'diff-hash-mismatch',
+      reason: 'diff-unreadable',
     });
+  });
+
+  it('refuses with worktree-dirty on uncommitted changes at the right SHA', () => {
+    // This pipeline's own probe and build/test agents mutate worktrees; a
+    // death between an apply and its revert leaves exactly this state, and
+    // the HEAD SHA plus the diff hash both still match.
+    expect(assessResume(prev(), probes({ worktreeClean: false }))).toEqual({
+      ok: false,
+      reason: 'worktree-dirty',
+    });
+  });
+
+  it('treats an unrunnable cleanliness probe as dirty', () => {
+    expect(assessResume(prev(), probes({ worktreeClean: null }))).toEqual({
+      ok: false,
+      reason: 'worktree-dirty',
+    });
+  });
+
+  it('reports the FIRST broken link when several are broken at once', () => {
+    // The reason is what an operator acts on, so a later check must not
+    // shadow an earlier one — a test that breaks exactly one link is by
+    // construction insensitive to that ordering.
+    expect(
+      assessResume(
+        prev(),
+        probes({
+          worktreeHeadSha: 'other',
+          worktreeClean: false,
+          diffSha256OnDisk: null,
+          liveHeadSha: 'moved',
+          resumeCount: 99,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: 'worktree-sha-mismatch' });
+    expect(
+      assessResume(
+        prev(),
+        probes({
+          worktreeClean: false,
+          diffSha256OnDisk: null,
+          liveHeadSha: 'moved',
+          resumeCount: 99,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: 'worktree-dirty' });
+    expect(
+      assessResume(
+        prev(),
+        probes({
+          diffSha256OnDisk: null,
+          liveHeadSha: 'moved',
+          resumeCount: 99,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: 'diff-unreadable' });
+    expect(
+      assessResume(prev(), probes({ liveHeadSha: 'moved', resumeCount: 99 })),
+    ).toEqual({ ok: false, reason: 'head-moved' });
   });
 
   it('refuses with head-moved when the live head advanced', () => {

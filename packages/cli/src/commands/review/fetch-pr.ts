@@ -658,9 +658,14 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // unspent cap while the ledger still names every session that ran. The
   // ledger's first entry is the original run's own session, not a resume.
   const ledgerResumes = Math.max(0, priorSessionIds(out).length - 1);
+  // `--porcelain` prints nothing on a clean tree. A null (the command could
+  // not run at all) is treated as dirty by `assessResume`: an unverifiable
+  // tree is not a clean one.
+  const status = gitOpt('-C', wt, 'status', '--porcelain');
   const ruling = assessResume(prev, {
     prNumber,
     worktreeHeadSha: gitOpt('-C', wt, 'rev-parse', 'HEAD'),
+    worktreeClean: status === null ? null : status.trim() === '',
     diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     liveHeadSha,
     resumeCount: Math.max(marker.resumes.length, ledgerResumes),
@@ -669,7 +674,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   if (!ruling.ok) {
     return {
       resumed: false,
-      reason: ruling.reason as ResumeRefusal,
+      reason: ruling.reason,
       priorFetchedSha:
         prev !== null && typeof prev.fetchedSha === 'string'
           ? prev.fetchedSha
@@ -687,7 +692,10 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   clearRoundStamps(out);
   appendRunSession(out);
   recordResume(out);
-  const attempt = marker.resumes.length + 1;
+  // Read the marker back: `recordResume` deduplicates by session, so a
+  // second `--resume` in the SAME session is the same resume, and deriving
+  // the number from the pre-write count would announce attempt 2 for it.
+  const attempt = Math.max(1, readResumeMarker(out).resumes.length);
   // `restartsSpent` is the resume marker's ONE consumer beyond idempotency:
   // the resumed session initialises Step 7's once-per-review restart bound
   // from it — without a reader here, the recorded restart would silently
