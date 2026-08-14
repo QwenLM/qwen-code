@@ -124,6 +124,13 @@ export function WorkspaceSessionProvider({
     );
   }
   const transactional = transactionalRef.current === true;
+  // Legacy daemons remount DaemonSessionProvider whenever the controlled
+  // target identity changes. These refs suppress that remount when the host
+  // is merely catching up to a session the mounted provider itself created:
+  // remounting mid-admission would detach the session that the in-flight
+  // attach/prompt chain is still adopting and drop the prompt.
+  const observedLegacySessionIdRef = useRef<string | undefined>(undefined);
+  const lastLegacyProviderKeyRef = useRef<string | undefined>(undefined);
   const desiredKey = `${effectiveSessionId ?? ''}\0${effectiveWorkspaceCwd ?? effectiveWorkspaceId ?? ''}`;
   const [, setCommittedTarget] = useState<CommittedSessionTarget>();
   const committedTargetRef = useRef<CommittedSessionTarget | undefined>(
@@ -196,15 +203,15 @@ export function WorkspaceSessionProvider({
   }, [onSessionIdChange, workspace.capabilities?.workspaces]);
   const observeSessionState = useCallback(
     (connection: DaemonConnectionState) => {
-      if (
-        transactional &&
-        connection.status === 'connected' &&
-        connection.sessionId
-      ) {
-        installCommittedTarget({
-          sessionId: connection.sessionId,
-          workspaceCwd: connection.workspaceCwd,
-        });
+      if (connection.status === 'connected' && connection.sessionId) {
+        if (transactional) {
+          installCommittedTarget({
+            sessionId: connection.sessionId,
+            workspaceCwd: connection.workspaceCwd,
+          });
+        } else {
+          observedLegacySessionIdRef.current = connection.sessionId;
+        }
       }
       const transition = connection.sessionTransition;
       if (
@@ -266,6 +273,21 @@ export function WorkspaceSessionProvider({
     (registeredLockedWorkspace?.cwd === visibleWorkspaceCwd
       ? registeredLockedWorkspace
       : undefined);
+
+  const legacyProviderKeyCandidate = `${targetWorkspace?.id ?? effectiveWorkspaceId ?? 'primary'}:${effectiveSessionId ?? 'new'}`;
+  const suppressLegacyCatchUpRemount =
+    transactionalRef.current === false &&
+    effectiveSessionId !== undefined &&
+    observedLegacySessionIdRef.current === effectiveSessionId;
+  const legacyProviderKey = suppressLegacyCatchUpRemount
+    ? (lastLegacyProviderKeyRef.current ?? legacyProviderKeyCandidate)
+    : legacyProviderKeyCandidate;
+  if (legacyProviderKey !== lastLegacyProviderKeyRef.current) {
+    // A real target switch: the mounted provider is left behind, so its
+    // observed session no longer describes the next provider instance.
+    observedLegacySessionIdRef.current = undefined;
+    lastLegacyProviderKeyRef.current = legacyProviderKey;
+  }
 
   useEffect(() => {
     if (!lockWorkspaceCwd || !workspace.capabilities || pathWorkspace) return;
@@ -413,7 +435,7 @@ export function WorkspaceSessionProvider({
       key={
         transactionalRef.current !== false
           ? 'transactional-main-session'
-          : `${targetWorkspace?.id ?? effectiveWorkspaceId ?? 'primary'}:${effectiveSessionId ?? 'new'}`
+          : legacyProviderKey
       }
       sessionId={providerSessionId}
       workspaceCwd={providerWorkspaceCwd}

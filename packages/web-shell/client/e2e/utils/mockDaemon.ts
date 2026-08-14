@@ -8,7 +8,6 @@ import {
   type DaemonChannelTypeCatalog,
   type DaemonEvent,
   type DaemonRestoredSession,
-  type DaemonSession,
   type DaemonSessionArtifact,
   type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
@@ -87,6 +86,17 @@ export interface WebShellDaemonScenario {
   gitLog?: unknown;
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
+  /**
+   * Session ids whose load/resume envelope reports `hasActivePrompt: true`,
+   * modeling a session with a prompt still in flight (no `turn_complete`).
+   */
+  busySessionIds: readonly string[];
+  /**
+   * Sessions created through `POST /session` during the test, mapped to the
+   * workspace cwd they were created in. Runtime state maintained by the mock
+   * so later load/resume calls resolve the owning workspace correctly.
+   */
+  createdSessions: Record<string, string>;
 }
 
 export interface MockDaemonController {
@@ -94,6 +104,12 @@ export interface MockDaemonController {
   sse: SseTransport<DaemonEvent>;
   requests: readonly DaemonRequestRecord[];
   sendEvent(event: DaemonEvent): Promise<void>;
+  /**
+   * Deliver an event only to SSE streams connected for `sessionId`,
+   * mirroring the real daemon's per-session event scoping. No-op when the
+   * client holds no stream for that session (e.g. after detach).
+   */
+  sendEventTo(sessionId: string, event: DaemonEvent): Promise<void>;
   burstEvents(events: readonly DaemonEvent[]): Promise<void>;
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
@@ -120,6 +136,7 @@ type ScenarioOverrides = Partial<
     | 'sessions'
     | 'sessionGroups'
     | 'state'
+    | 'createdSessions'
   >
 > & {
   capabilities?: Partial<DaemonCapabilities>;
@@ -363,13 +380,23 @@ export function createWebShellDaemonScenario(
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
+    busySessionIds: overrides.busySessionIds ?? [],
+    createdSessions: {},
   };
 }
 
 export async function installMockDaemon(
   page: Page,
   scenario: WebShellDaemonScenario,
-  options: { baseURL?: string } = {},
+  options: {
+    baseURL?: string;
+    /**
+     * Optional per-route server latency in milliseconds, applied after the
+     * request is recorded and before the response is fulfilled — modeling a
+     * slow daemon so race windows (create/load/detach) widen deterministically.
+     */
+    routeDelay?: (method: string, path: string) => number;
+  } = {},
 ): Promise<MockDaemonController> {
   const baseURL = options.baseURL ?? getPlaywrightBaseURL();
   const baseOrigin = new URL(baseURL).origin;
@@ -405,6 +432,11 @@ export async function installMockDaemon(
       return;
     }
 
+    const delayMs = options.routeDelay?.(method, path) ?? 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
     await handleDaemonRoute(
       route,
       method,
@@ -420,6 +452,7 @@ export async function installMockDaemon(
     sse,
     requests,
     sendEvent: (event) => sse.send(event),
+    sendEventTo: (sessionId, event) => sse.sendTo(sessionId, event),
     burstEvents: (events) => sse.burst(events),
     promptRequests: () =>
       requests.filter((request) =>
@@ -883,8 +916,13 @@ async function handleDaemonRoute(
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
+    // The daemon scopes the catalog to the workspace in the path; mirror that
+    // so multi-workspace scenarios render the right sessions per section.
+    const requestedCwd = decodeURIComponent(path.split('/')[2] ?? '');
     await json(route, {
-      sessions: filterScenarioSessions(scenario, searchParams),
+      sessions: filterScenarioSessions(scenario, searchParams).filter(
+        (session) => session.workspaceCwd === requestedCwd,
+      ),
     });
     return;
   }
@@ -1261,7 +1299,25 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'POST' && path === '/session') {
-    await json(route, sessionEnvelope(scenario, { attached: false }));
+    // Honor the requested workspace (wire field `cwd`) and allocate a fresh
+    // session id so tests can tell created sessions apart from the seeded one.
+    const requestedCwd = readStringField(body, 'cwd');
+    const workspaceCwd = requestedCwd ?? scenario.workspaceCwd;
+    const sessionId = `created-session-${
+      Object.keys(scenario.createdSessions).length + 1
+    }`;
+    scenario.createdSessions = {
+      ...scenario.createdSessions,
+      [sessionId]: workspaceCwd,
+    };
+    await json(route, {
+      sessionId,
+      workspaceCwd,
+      attached: false,
+      clientId: scenario.clientId,
+      createdAt: now,
+      hasActivePrompt: false,
+    });
     return;
   }
 
@@ -1412,31 +1468,17 @@ async function handleDaemonRoute(
   );
 }
 
-function sessionEnvelope(
-  scenario: WebShellDaemonScenario,
-  options: { attached: boolean },
-): DaemonSession {
-  return {
-    sessionId: scenario.sessionId,
-    workspaceCwd: scenario.workspaceCwd,
-    attached: options.attached,
-    clientId: scenario.clientId,
-    createdAt: now,
-    hasActivePrompt: false,
-  };
-}
-
 function restoredSessionEnvelope(
   scenario: WebShellDaemonScenario,
   sessionId: string,
 ): DaemonRestoredSession {
   return {
     sessionId,
-    workspaceCwd: scenario.workspaceCwd,
+    workspaceCwd: scenario.createdSessions[sessionId] ?? scenario.workspaceCwd,
     attached: true,
     clientId: scenario.clientId,
     createdAt: now,
-    hasActivePrompt: false,
+    hasActivePrompt: scenario.busySessionIds.includes(sessionId),
     state: scenario.state,
     compactedReplay: scenario.events,
     liveJournal: [],

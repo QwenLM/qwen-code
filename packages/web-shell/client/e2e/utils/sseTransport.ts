@@ -14,6 +14,12 @@ export interface SseTransport<TEvent> {
   ): Promise<SseConnectionRecord>;
   connections(): Promise<SseConnectionRecord[]>;
   send(event: TEvent): Promise<void>;
+  /**
+   * Deliver an event only to streams connected for `sessionId`, mirroring the
+   * real daemon's per-session event scoping (a session's stream never carries
+   * another session's events). No-op when no stream for that session is open.
+   */
+  sendTo(sessionId: string, event: TEvent): Promise<void>;
   burst(events: readonly TEvent[]): Promise<void>;
   split(event: TEvent, chunkSizes?: readonly number[]): Promise<void>;
   close(): Promise<void>;
@@ -23,6 +29,7 @@ export interface SseTransport<TEvent> {
 interface BrowserSseHarness {
   connections: SseConnectionRecord[];
   writeFrame: (frame: string) => void;
+  writeFrameTo: (sessionId: string, frame: string) => void;
   writeSplitFrame: (frame: string, chunkSizes: readonly number[]) => void;
   close: () => void;
   error: (message: string) => void;
@@ -43,6 +50,10 @@ export async function installSseTransport<TEvent>(
     const originalFetch = window.fetch.bind(window);
     const encoder = new TextEncoder();
     const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const recordByController = new Map<
+      ReadableStreamDefaultController<Uint8Array>,
+      SseConnectionRecord
+    >();
     const connections: SseConnectionRecord[] = [];
 
     function removeController(
@@ -52,6 +63,7 @@ export async function installSseTransport<TEvent>(
       if (index >= 0) {
         controllers.splice(index, 1);
       }
+      recordByController.delete(target);
     }
 
     function removeConnection(target: SseConnectionRecord) {
@@ -68,6 +80,7 @@ export async function installSseTransport<TEvent>(
           const _desiredSize = controller.desiredSize;
           active.push(controller);
         } catch {
+          recordByController.delete(controller);
           continue;
         }
       }
@@ -83,12 +96,22 @@ export async function installSseTransport<TEvent>(
       }
     }
 
+    function writeBytesTo(sessionId: string, bytes: Uint8Array) {
+      for (const controller of activeControllers()) {
+        const record = recordByController.get(controller);
+        if (record && record.sessionId === sessionId) {
+          controller.enqueue(bytes);
+        }
+      }
+    }
+
     function finishActiveStreams(
       finish: (controller: ReadableStreamDefaultController<Uint8Array>) => void,
     ) {
       const active = activeControllers();
       controllers.length = 0;
       connections.length = 0;
+      recordByController.clear();
       for (const controller of active) {
         finish(controller);
       }
@@ -98,6 +121,9 @@ export async function installSseTransport<TEvent>(
       connections,
       writeFrame(frame: string) {
         writeBytes(encoder.encode(frame));
+      },
+      writeFrameTo(sessionId: string, frame: string) {
+        writeBytesTo(sessionId, encoder.encode(frame));
       },
       writeSplitFrame(frame: string, chunkSizes: readonly number[]) {
         const bytes = encoder.encode(frame);
@@ -143,6 +169,7 @@ export async function installSseTransport<TEvent>(
             headers: Object.fromEntries(request.headers.entries()),
             connectedAt: Date.now(),
           };
+          recordByController.set(controller, connectionRecord);
           connections.push(connectionRecord);
         },
         cancel() {
@@ -199,6 +226,14 @@ export async function installSseTransport<TEvent>(
       return page.evaluate((frame) => {
         window.__webShellSseHarness?.writeFrame(frame);
       }, frameFor(event));
+    },
+    sendTo(sessionId, event) {
+      return page.evaluate(
+        ({ target, frame }) => {
+          window.__webShellSseHarness?.writeFrameTo(target, frame);
+        },
+        { target: sessionId, frame: frameFor(event) },
+      );
     },
     async burst(events) {
       for (const event of events) {

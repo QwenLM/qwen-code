@@ -97,7 +97,7 @@ describe('WorkspaceSessionProvider transactional targets', () => {
   });
 
   async function renderTarget(
-    sessionId: string,
+    sessionId: string | undefined,
     workspaceCwd: string,
     onSessionIdChange = vi.fn(),
   ) {
@@ -357,6 +357,74 @@ describe('WorkspaceSessionProvider transactional targets', () => {
     expect(mocks.appProps.at(-1)).toMatchObject({
       initialSelectedWorkspaceCwd: '/work/b',
     });
+  });
+
+  it('does not remount the legacy provider when the host catches up to a created session', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: [],
+        workspaces: [
+          { id: 'a', cwd: '/work/a', primary: true, trusted: true },
+          { id: 'b', cwd: '/work/b', primary: false, trusted: true },
+        ],
+      },
+    };
+    const onSessionIdChange = await renderTarget('session-a', '/work/a');
+    expect(mocks.providerMounts).toBe(1);
+
+    mocks.connection = { status: 'connected', workspaceCwd: '/work/a' };
+    await renderTarget(undefined, '/work/b', onSessionIdChange);
+    expect(mocks.providerMounts).toBe(2);
+    expect(mocks.providerUnmounts).toBe(1);
+
+    mocks.connection = {
+      status: 'connected',
+      sessionId: 'session-created',
+      workspaceCwd: '/work/b',
+    };
+    await renderTarget(undefined, '/work/b', onSessionIdChange);
+
+    await renderTarget('session-created', '/work/b', onSessionIdChange);
+    expect(mocks.providerMounts).toBe(2);
+    expect(mocks.providerUnmounts).toBe(1);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-created',
+      workspaceCwd: '/work/b',
+    });
+
+    await renderTarget('session-b', '/work/b', onSessionIdChange);
+    expect(mocks.providerMounts).toBe(3);
+    expect(mocks.providerUnmounts).toBe(2);
+  });
+
+  it('does not suppress a legacy remount with a previous provider observation', async () => {
+    mocks.workspace = {
+      ...mocks.workspace,
+      capabilities: {
+        workspaceCwd: '/work/a',
+        features: [],
+        workspaces: [
+          { id: 'a', cwd: '/work/a', primary: true, trusted: true },
+          { id: 'b', cwd: '/work/b', primary: false, trusted: true },
+        ],
+      },
+    };
+    const onSessionIdChange = await renderTarget('session-a', '/work/a');
+    expect(mocks.providerMounts).toBe(1);
+
+    mocks.connection = { status: 'connected', workspaceCwd: '/work/a' };
+    await renderTarget(undefined, '/work/b', onSessionIdChange);
+    expect(mocks.providerMounts).toBe(2);
+    expect(mocks.providerUnmounts).toBe(1);
+
+    // The host pairs the session observed under the previous provider with
+    // the new workspace before the fresh provider reports any connection.
+    // The stale observation must not suppress this remount.
+    await renderTarget('session-a', '/work/b', onSessionIdChange);
+    expect(mocks.providerMounts).toBe(3);
+    expect(mocks.providerUnmounts).toBe(2);
   });
 
   it('does not remount when an unknown daemon resolves as modern', async () => {
