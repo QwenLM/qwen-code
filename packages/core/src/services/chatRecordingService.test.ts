@@ -1308,7 +1308,7 @@ describe('ChatRecordingService', () => {
       expect(record.toolCallResult?.callId).toBe('call-1');
     });
 
-    it('uses persistence metadata only for diagnostics', async () => {
+    it('preserves replayable artifacts without diagnostic metadata', async () => {
       const toolResultParts: Part[] = [
         {
           functionResponse: {
@@ -1319,25 +1319,35 @@ describe('ChatRecordingService', () => {
         },
       ];
 
+      const artifacts = [
+        {
+          kind: 'link' as const,
+          title: 'Replay artifact',
+          url: 'https://example.com/replayed',
+        },
+      ];
       chatRecordingService.recordToolResult(toolResultParts, {
         callId: 'call-1',
         status: 'success',
         persistedOutputFiles: ['/private/tool-result.txt'],
-        artifacts: [
-          {
-            kind: 'link',
-            title: 'private artifact',
-            url: 'https://private.example/result',
-          },
-        ],
+        artifacts,
+        boundaryArtifact: { state: 'reusable', kinds: ['link'] },
       });
       await chatRecordingService.flush();
 
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.toolCallResult).not.toHaveProperty('persistedOutputFiles');
-      expect(record.toolCallResult).not.toHaveProperty('artifacts');
+      expect(record.toolCallResult).not.toHaveProperty('boundaryArtifact');
+      expect(
+        JSON.parse(JSON.stringify(record)).toolCallResult.artifacts,
+      ).toEqual(artifacts);
       expect(JSON.stringify(record)).not.toContain('/private/tool-result.txt');
-      expect(JSON.stringify(record)).not.toContain('private.example');
+      expect(boundaryObserveMock).toHaveBeenCalledTimes(2);
+      for (const [observation] of boundaryObserveMock.mock.calls) {
+        expect(observation.artifacts).toEqual([
+          { state: 'reusable', kinds: ['file', 'link'] },
+        ]);
+      }
     });
 
     it('should keep small file diff resultDisplay unchanged', async () => {

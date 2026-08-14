@@ -1734,7 +1734,7 @@ export class ChatRecordingService {
       if (toolCallResult) {
         const recordableToolCallResult = { ...toolCallResult };
         delete recordableToolCallResult.persistedOutputFiles;
-        delete recordableToolCallResult.artifacts;
+        delete recordableToolCallResult.boundaryArtifact;
         recordingToolCallResult = sanitizeToolCallResultForRecording(
           recordableToolCallResult,
         );
