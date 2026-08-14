@@ -19,13 +19,22 @@ import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { useI18n } from '../../i18n';
-import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import {
+  SESSION_LIST_PAGE_SIZE,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
+} from '../../constants/sessions';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
 } from './collapsedSessionSections';
+import {
+  readWorkspaceExpanded,
+  writeWorkspaceExpanded,
+} from './workspaceExpansion';
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
+import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
 import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
@@ -76,7 +85,6 @@ interface WorkspaceSectionProps {
   sourceType?: string;
   channelGroupingEnabled?: boolean;
   ungroupedLabel: string;
-  formatTime: (iso: string) => string;
   searchQuery?: string;
   expanded?: boolean;
   autoExpandKey?: string;
@@ -89,6 +97,7 @@ interface WorkspaceSectionProps {
    * instead of a bespoke, feature-poor row.
    */
   renderSession: (session: DaemonSessionSummary) => ReactNode;
+  showSessionDetails?: boolean;
   headerActions?: (visible: boolean) => ReactNode;
   onRenameGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
   onDeleteGroup?: (group: DaemonSessionGroup, workspaceCwd: string) => void;
@@ -119,13 +128,13 @@ export function WorkspaceSection({
   sourceType,
   channelGroupingEnabled = false,
   ungroupedLabel,
-  formatTime,
   searchQuery = '',
   expanded: controlledExpanded,
   autoExpandKey,
   onExpandedChange,
   renderSessions = true,
   renderSession,
+  showSessionDetails = true,
   headerActions,
   onRenameGroup,
   onDeleteGroup,
@@ -141,11 +150,14 @@ export function WorkspaceSection({
     catalog: DaemonChannelTypeCatalog;
     snapshot: DaemonChannelsSnapshot;
   }>();
-  const [internalExpanded, setInternalExpanded] = useState(false);
+  const [internalExpanded, setInternalExpanded] = useState(() =>
+    readWorkspaceExpanded(workspace.id),
+  );
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() =>
     readWorkspaceCollapsedGroupIds(workspace.id),
   );
   const [actionsVisible, setActionsVisible] = useState(false);
+  const [showAllSessions, setShowAllSessions] = useState(false);
   const [gitStatus, setGitStatus] = useState<DaemonWorkspaceGitStatus>();
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   const channelCatalogLoadRequestId = useRef(0);
@@ -155,10 +167,16 @@ export function WorkspaceSection({
   const disabled = workspace.primary && !workspace.trusted;
   const searchActive = searchQuery.trim().length > 0;
 
-  // A workspace always starts collapsed, including the primary workspace.
+  // Uncontrolled workspace rows restore the user's last choice.
   useEffect(() => {
-    if (controlledExpanded === undefined) setInternalExpanded(false);
+    if (controlledExpanded === undefined) {
+      setInternalExpanded(readWorkspaceExpanded(workspace.id));
+    }
   }, [controlledExpanded, workspace.id]);
+
+  useEffect(() => {
+    if (!expanded) setShowAllSessions(false);
+  }, [expanded]);
 
   // The render site keys this component by workspace id, so an id change
   // always remounts and the lazy useState initializer re-reads storage.
@@ -374,6 +392,10 @@ export function WorkspaceSection({
       );
     });
   }, [excludePinned, searchQuery, sessions]);
+  const directSessions =
+    searchActive || showAllSessions
+      ? visibleSessions
+      : visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
 
   const groupedSessions = useMemo(() => {
     if (!organizationEnabled || channelGroupingEnabled || groups.length === 0)
@@ -407,10 +429,23 @@ export function WorkspaceSection({
     [channelCatalog, channelGroupingEnabled, t, visibleSessions],
   );
 
+  const toggleExpanded = () => {
+    if (disabled) return;
+    const nextExpanded = !expanded;
+    setInternalExpanded(nextExpanded);
+    if (controlledExpanded === undefined) {
+      writeWorkspaceExpanded(workspace.id, nextExpanded);
+    }
+    onExpandedChange?.(nextExpanded);
+  };
+
   return (
     <div className={styles.section}>
       <div
         className={cx(styles.headerRow, disabled && styles.headerDisabled)}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) toggleExpanded();
+        }}
         onMouseEnter={() => setActionsVisible(true)}
         onMouseLeave={() => setActionsVisible(false)}
         onFocus={() => setActionsVisible(true)}
@@ -425,11 +460,7 @@ export function WorkspaceSection({
           type="button"
           disabled={disabled}
           aria-expanded={expanded}
-          onClick={() => {
-            const nextExpanded = !expanded;
-            setInternalExpanded(nextExpanded);
-            onExpandedChange?.(nextExpanded);
-          }}
+          onClick={toggleExpanded}
         >
           {renderHeader ? (
             renderHeader(expanded)
@@ -501,6 +532,7 @@ export function WorkspaceSection({
                     key={group.id}
                     label={group.label}
                     count={group.sessions.length}
+                    limitSessions={!searchActive}
                     expanded={!collapsedGroupIds.has(group.id)}
                     onToggle={() => {
                       setCollapsedGroupIds((current) => {
@@ -523,6 +555,7 @@ export function WorkspaceSection({
                     key={group.id}
                     label={group.name}
                     count={sessions.length}
+                    limitSessions={!searchActive}
                     color={group.color}
                     expanded={!collapsedGroupIds.has(group.id)}
                     onToggle={() => {
@@ -555,6 +588,7 @@ export function WorkspaceSection({
                     id="ungrouped"
                     label={ungroupedLabel}
                     count={groupedSessions.ungrouped.length}
+                    limitSessions={!searchActive}
                     expanded={!collapsedGroupIds.has('ungrouped')}
                     onToggle={() => {
                       setCollapsedGroupIds((current) => {
@@ -572,26 +606,67 @@ export function WorkspaceSection({
                 )}
               </>
             ) : (
-              visibleSessions.map((session) => {
-                if (!readOnly) return renderSession(session);
-                const label = getSessionLabel(session);
-                const time = session.createdAt
-                  ? formatTime(session.createdAt)
-                  : '';
-                return (
-                  <div
-                    key={session.sessionId}
-                    className={styles.sessionItemReadOnly}
-                    role="note"
-                    aria-label={`${label}${time ? `, ${time}` : ''}. ${trustToOpenLabel}`}
-                  >
-                    <span className={styles.sessionName} title={label}>
-                      {label}
-                    </span>
-                    {time && <span className={styles.sessionTime}>{time}</span>}
-                  </div>
-                );
-              })
+              <>
+                {directSessions.map((session) => {
+                  if (!readOnly) return renderSession(session);
+                  const label = getSessionLabel(session);
+                  const stamp = session.updatedAt || session.createdAt;
+                  const row = (
+                    <div
+                      key={session.sessionId}
+                      className={styles.sessionItemReadOnly}
+                      role="note"
+                      aria-label={`${label}. ${trustToOpenLabel}`}
+                    >
+                      <span
+                        className={styles.sessionName}
+                        onMouseEnter={(event) => {
+                          const title = event.currentTarget.firstElementChild;
+                          const distance = Math.max(
+                            0,
+                            (title?.scrollWidth ?? 0) -
+                              event.currentTarget.clientWidth,
+                          );
+                          event.currentTarget.style.setProperty(
+                            '--session-title-scroll-distance',
+                            `${distance}px`,
+                          );
+                          event.currentTarget.style.setProperty(
+                            '--session-title-scroll-duration',
+                            `${distance / 38}s`,
+                          );
+                        }}
+                      >
+                        <span className={styles.sessionNameInner}>{label}</span>
+                      </span>
+                    </div>
+                  );
+                  return showSessionDetails ? (
+                    <SessionDetailsTooltip
+                      key={session.sessionId}
+                      session={session}
+                      label={label}
+                      time={stamp ? formatRelativeTime(stamp, t) : ''}
+                      completedUnread={false}
+                    >
+                      {row}
+                    </SessionDetailsTooltip>
+                  ) : (
+                    row
+                  );
+                })}
+                {!searchActive &&
+                  !showAllSessions &&
+                  visibleSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+                    <button
+                      type="button"
+                      className={styles.showAllSessions}
+                      onClick={() => setShowAllSessions(true)}
+                    >
+                      {t('sidebar.showAllSessions')}
+                    </button>
+                  )}
+              </>
             )}
           </div>
         )}

@@ -8,6 +8,7 @@
   align-items: center;
   width: 100%;
   border-radius: 6px;
+  cursor: pointer;
   transition: background 0.1s;
 }
 
@@ -33,6 +34,7 @@
 
 .headerDisabled {
   opacity: 0.5;
+  cursor: default;
 }
 
 .headerDisabled .header {
@@ -76,16 +78,15 @@
   border-radius: 4px;
 }
 
-/* Live git chip in the folder header — icon-only (the chip's `compact` form): a
-   status dot on the branch icon conveys dirty / conflict / in-progress at a
-   glance, while the branch name + ahead/behind live in the hover tooltip.
-   Rendered as a sibling of the header button (buttons can't nest), kept snug
-   after the folder name. The chip is a fixed 28px box, so the pill grows only to
-   carry the spare width to the hover actions on the right. */
+/* Live git chip in the folder header. */
 .gitPill {
+  --git-branch-icon-size: 12px;
+  --git-branch-badge-size: 5px;
+  --git-branch-badge-offset: -1px;
+
   display: inline-flex;
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 0 24px;
+  width: 24px;
   padding: 0;
   border: none;
   background: none;
@@ -95,9 +96,14 @@
   cursor: pointer;
 }
 
-/* With a chip present, let the pill — not the folder name — own the spare width,
-   so the icon sits right after the name and the hover actions stay pinned to the
-   right edge. Without a chip the header keeps growing as before. */
+.gitPill [data-web-shell-git-branch] {
+  width: 24px;
+  max-width: 24px;
+  flex-basis: 24px;
+  padding: 0 5px;
+}
+
+/* Keep the icon directly after the folder name. */
 .headerRow:has(.gitPill) .header {
   flex-grow: 0;
 }
@@ -111,9 +117,27 @@
   margin-bottom: 12px;
 }
 
+.showAllSessions {
+  align-self: flex-start;
+  margin-left: 26px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.showAllSessions:hover,
+.showAllSessions:focus-visible {
+  color: var(--sidebar-foreground);
+  outline: none;
+}
+
 .empty {
   padding: 4px 8px 4px 26px;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted-foreground);
 }
 
@@ -135,14 +159,37 @@
 }
 
 .sessionName {
+  position: relative;
+  min-width: 0;
   flex: 1;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - 10px),
+    transparent
+  );
 }
 
-.sessionTime {
-  flex: 0 0 auto;
-  font-size: 10px;
-  color: var(--muted-foreground);
+.sessionNameInner {
+  display: inline-block;
+  min-width: max-content;
+}
+
+.sessionItemReadOnly:hover .sessionNameInner {
+  animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+@keyframes sessionTitleScroll {
+  to {
+    transform: translateX(calc(var(--session-title-scroll-distance, 0px) * -1));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessionItemReadOnly:hover .sessionNameInner {
+    animation: none;
+  }
 }

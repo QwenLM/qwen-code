@@ -45,6 +45,7 @@ import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
+  InvalidSessionMetadataError,
   PromptQueueFullError,
   SessionArtifactValidationError,
   SessionArchivedError,
@@ -4023,6 +4024,82 @@ export function registerSessionRoutes(
         res.status(200).json({ sessionId, ...effective });
       },
     ),
+  );
+
+  app.patch(
+    '/workspaces/:workspace/session/:id/metadata',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const route = 'PATCH /workspaces/:workspace/session/:id/metadata';
+      const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
+      if (!runtime) return;
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      const rawDisplayName = safeBody(req)['displayName'];
+      if (typeof rawDisplayName !== 'string') {
+        res.status(400).json({
+          error: '`displayName` must be a string',
+          code: 'invalid_metadata',
+          field: 'displayName',
+        });
+        return;
+      }
+      try {
+        const displayName = rawDisplayName.slice(0, 256);
+        if (
+          Array.from(displayName).some((character) => {
+            const code = character.charCodeAt(0);
+            return code <= 31 || code === 127;
+          })
+        ) {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not contain control characters',
+          );
+        }
+        await archiveCoordinator.runSharedMany([sessionId], async () => {
+          await runWithWorkspaceRuntimeStorage(runtime, async () => {
+            let effective: { displayName?: string };
+            try {
+              effective = runtime.bridge.updateSessionMetadata(
+                sessionId,
+                { displayName },
+                clientId !== undefined ? { clientId } : undefined,
+              );
+            } catch (err) {
+              if (!(err instanceof SessionNotFoundError)) throw err;
+              const service = createWorkspaceRuntimeSessionService(runtime);
+              const location = await service.getSessionLocation(sessionId);
+              if (location === 'conflict') {
+                throw new SessionConflictError(sessionId);
+              }
+              if (
+                !location ||
+                !(await service.renameSession(
+                  sessionId,
+                  displayName,
+                  'manual',
+                  location,
+                ))
+              ) {
+                throw new SessionNotFoundError(sessionId);
+              }
+              effective = { displayName: displayName || undefined };
+            }
+            invalidateSessionLists(runtime, ['active', 'archived']);
+            res.status(200).json({ sessionId, ...effective });
+          });
+        });
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route,
+          sessionId,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+      }
+    },
   );
 
   type SessionOrganizationTarget = {
