@@ -71,7 +71,11 @@ function applyModelProvidersPatch(
       updatedModels = [...preservedModels, ...patch.models];
     } else if (firstRemovedIndex < 0) {
       const collidesWithPreservedModel = patch.models.some((incoming) =>
-        preservedModels.some((existing) => existing.id === incoming.id),
+        preservedModels.some(
+          (existing) =>
+            existing.id === incoming.id &&
+            patch.ownsModelAcrossEndpoints?.(existing),
+        ),
       );
       updatedModels =
         patch.retainCurrentModelAcrossEndpoints && collidesWithPreservedModel
@@ -261,8 +265,7 @@ export async function applyProviderInstallPlan(
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
       const currentBaseUrl = settings.getValue('model.baseUrl') as
-        | string
-        | undefined;
+        string | undefined;
       const retainAcrossEndpoints = (plan.modelProviders ?? []).filter(
         (patch) => patch.retainCurrentModelAcrossEndpoints,
       );
@@ -273,12 +276,24 @@ export async function applyProviderInstallPlan(
             ),
           )
         : (plan.modelProviders ?? []).flatMap((patch) => patch.models);
+      const currentIdOnlyModel =
+        currentBaseUrl === '' || currentBaseUrl === undefined
+          ? (updatedModelProviders[plan.authType] ?? []).find(
+              (model) => model.id === currentModelId,
+            )
+          : undefined;
+      const currentIdOnlyModelBelongsToPlan =
+        retainAcrossEndpoints.length === 0 ||
+        (currentIdOnlyModel !== undefined &&
+          retainAcrossEndpoints.some((patch) =>
+            patch.ownsModelAcrossEndpoints?.(currentIdOnlyModel),
+          ));
       const planOffersCurrentModel =
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
         offeredModels.some((model) =>
           currentBaseUrl === '' || currentBaseUrl === undefined
-            ? model.id === currentModelId
+            ? currentIdOnlyModelBelongsToPlan && model.id === currentModelId
             : isSameModelIdentity(
                 { id: currentModelId, baseUrl: currentBaseUrl },
                 model,

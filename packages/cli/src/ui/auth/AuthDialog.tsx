@@ -36,15 +36,10 @@ import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
-  | 'main'
-  | 'alibaba-select'
-  | 'thirdparty-select'
-  | 'provider-setup';
+  'main' | 'alibaba-select' | 'thirdparty-select' | 'provider-setup';
 
 type MainOption =
-  | 'ALIBABA_MODELSTUDIO'
-  | 'THIRD_PARTY_PROVIDERS'
-  | 'CUSTOM_PROVIDER';
+  'ALIBABA_MODELSTUDIO' | 'THIRD_PARTY_PROVIDERS' | 'CUSTOM_PROVIDER';
 
 // ---------------------------------------------------------------------------
 // Static data
@@ -419,7 +414,9 @@ export function AuthDialog({
       padding={1}
       width="100%"
     >
-      <Text bold>{viewTitle}</Text>
+      <Text bold wrap="truncate">
+        {viewTitle}
+      </Text>
 
       {viewLevel === 'main' && (
         <Box marginTop={1}>
@@ -434,7 +431,11 @@ export function AuthDialog({
             }}
             itemGap={1}
             maxItemsToShow={maxMainItems}
-            showScrollArrows={MAIN_ITEMS.length > maxMainItems}
+            showScrollArrows={
+              MAIN_ITEMS.length > maxMainItems &&
+              listHeight >=
+                MAIN_LIST_FIXED_ROWS + LIST_ITEM_ROWS + SCROLL_AFFORDANCE_ROWS
+            }
           />
         </Box>
       )}
@@ -456,7 +457,13 @@ export function AuthDialog({
               }}
               itemGap={1}
               maxItemsToShow={maxSubMenuItems}
-              showScrollArrows={activeSubMenu.items.length > maxSubMenuItems}
+              showScrollArrows={
+                activeSubMenu.items.length > maxSubMenuItems &&
+                listHeight >=
+                  SUB_MENU_LIST_FIXED_ROWS +
+                    LIST_ITEM_ROWS +
+                    SCROLL_AFFORDANCE_ROWS
+              }
             />
           </Box>
           <Box marginTop={1}>

@@ -455,6 +455,59 @@ describe('applyProviderInstallPlan', () => {
     );
   });
 
+  it('switches an id-only selection when another provider owns the same id', async () => {
+    const currentModelId = 'qwen3.7-plus';
+    const codingModels = buildProviderTemplate(
+      codingPlanProvider,
+      CODING_PLAN_CHINA_BASE_URL,
+    );
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: codingModels,
+    });
+    adapter.getValue.mockImplementation((key: string) =>
+      key === 'model.name' ? currentModelId : '',
+    );
+    const plan = buildInstallPlan(tokenPlanProvider, {
+      baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+      apiKey: 'not-persisted-by-this-test',
+      modelIds: [currentModelId],
+    });
+    delete plan.env;
+
+    await applyProviderInstallPlan(plan, {
+      settings: adapter,
+      doRefreshAuth: false,
+    });
+
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      expect.anything(),
+    );
+    expect(adapter.setValue).toHaveBeenCalledWith(
+      'modelProviders.openai',
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: currentModelId,
+          baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+          envKey: TOKEN_PLAN_ENV_KEY,
+        }),
+      ]),
+    );
+    const writtenModels = adapter.setValue.mock.calls.find(
+      ([key]) => key === 'modelProviders.openai',
+    )?.[1] as Array<{ id: string; baseUrl?: string; envKey?: string }>;
+    expect(
+      writtenModels.find((model) => model.id === currentModelId),
+    ).toMatchObject({
+      baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+      envKey: TOKEN_PLAN_ENV_KEY,
+    });
+  });
+
   it('keeps id-only sibling endpoint resolution stable on first install', async () => {
     const chinaUrl = 'https://api.moonshot.cn/v1';
     const intlUrl = 'https://api.moonshot.ai/v1';

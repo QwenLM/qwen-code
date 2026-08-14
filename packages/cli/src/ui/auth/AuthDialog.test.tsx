@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { render as renderInk } from 'ink';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   AuthDialog,
@@ -21,6 +22,10 @@ import {
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { ShellFocusContext } from '../contexts/ShellFocusContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
 
@@ -600,6 +605,106 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     expect(frame).not.toContain('Z.AI API Key');
     expect(frame).toContain('▲');
     expect(frame).toContain('▼');
+  });
+
+  it('omits scroll arrows when only one main-menu item fits', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      14,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n').length).toBeLessThanOrEqual(14);
+    expect(frame).not.toContain('▲');
+    expect(frame).not.toContain('▼');
+  });
+
+  it('omits scroll arrows when only one provider item fits', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      11,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n').length).toBeLessThanOrEqual(11);
+    expect(frame).not.toContain('▲');
+    expect(frame).not.toContain('▼');
+  });
+
+  it('keeps a long title on one row in a narrow terminal', async () => {
+    const frames: string[] = [];
+    const stdout = Object.create(process.stdout, {
+      columns: { value: 32 },
+      rows: { value: 17 },
+      isTTY: { value: true },
+      write: {
+        value(chunk: string | Uint8Array) {
+          frames.push(String(chunk));
+          return true;
+        },
+      },
+    }) as NodeJS.WriteStream;
+    const settings = createSettings();
+    const uiState = createMockUIState();
+    const uiActions = createMockUIActions();
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({ apiKey: undefined })),
+    } as unknown as Config;
+    const instance = renderInk(
+      <SettingsContext.Provider value={settings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ShellFocusContext.Provider value={true}>
+            <KeypressProvider kittyProtocolEnabled={true}>
+              <UIStateContext.Provider value={uiState}>
+                <UIActionsContext.Provider value={uiActions}>
+                  <AuthDialog
+                    availableTerminalHeight={17}
+                    initialViewLevel="thirdparty-select"
+                  />
+                </UIActionsContext.Provider>
+              </UIStateContext.Provider>
+            </KeypressProvider>
+          </ShellFocusContext.Provider>
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+      {
+        stdout,
+        debug: true,
+        exitOnCtrlC: false,
+        interactive: false,
+        patchConsole: false,
+      },
+    );
+    try {
+      await vi.waitFor(
+        () => {
+          expect(
+            frames.some((frame) =>
+              frame.includes('Third-party Providers · Pro…'),
+            ),
+          ).toBe(true);
+        },
+        { timeout: 1000 },
+      );
+      const lastFrame = frames.findLast((frame) =>
+        frame.includes('Third-party Providers · Pro…'),
+      );
+      expect(lastFrame?.split('\n').length).toBeLessThanOrEqual(17);
+      expect(lastFrame).toContain('Third-party Providers · Pro…');
+    } finally {
+      instance.unmount();
+      instance.cleanup();
+    }
   });
 
   it('keeps the main menu within the exact height when an error is shown', () => {
