@@ -337,6 +337,16 @@ class HttpError extends Error {
   }
 }
 
+// GraphQL permission denials surface as an `errors` array carrying per-entry
+// `type`s instead of an HTTP status; model the class the minimize fallback
+// keys on.
+class GraphqlError extends Error {
+  constructor(type, message) {
+    super(message);
+    this.errors = [{ type, message }];
+  }
+}
+
 const makeCore = () => {
   const logs = {
     info: [],
@@ -393,6 +403,7 @@ const makeGithub = ({ calls, fail = () => null, pages = {}, replies = {} }) => {
       },
       pulls: {
         deleteReviewComment: record('pulls.deleteReviewComment'),
+        deleteReview: record('pulls.deleteReview'),
         update: record('pulls.update'),
         get: record('pulls.get'),
         listReviewCommentsForRepo: 'pulls.listReviewCommentsForRepo',
@@ -1268,6 +1279,133 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     );
     assert.equal(core.logs.failed.length, 1);
     assert.match(core.logs.failed[0], /minimize review 7: 422/);
+  });
+
+  it('falls back to REST review delete when the minimize 403s', async () => {
+    // The permission/scope class that red-ran the predecessor workflow on
+    // every hit: the token cannot perform the mutation. REST-deleting the
+    // whole review is covered by pull-requests:write, so the lane takes it
+    // and stays green with a warning instead of red-running.
+    const { calls, core } = await enforce(
+      'pull_request_review',
+      {
+        review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
+        pull_request: {
+          number: 60,
+          user: { login: 'legit' },
+          state: 'open',
+          head: { repo: { full_name: 'QwenLM/qwen-code' } },
+        },
+      },
+      {
+        fail: (name) =>
+          name === 'graphql.minimizeComment'
+            ? new HttpError(403, 'Forbidden')
+            : null,
+      },
+    );
+    assert.deepEqual(names(calls), [
+      'graphql.minimizeComment',
+      'pulls.deleteReview',
+    ]);
+    assert.equal(calls[1].params.pull_number, 60);
+    assert.equal(calls[1].params.review_id, 7);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.warning.some((m) => /minimize unavailable/.test(m)));
+    assert.ok(summaryItems(core).some((item) => /delete review 7/.test(item)));
+  });
+
+  it('falls back to REST review delete on a GraphQL FORBIDDEN error', async () => {
+    // The GraphQL-shaped twin: GITHUB_TOKEN permission denials surface as
+    // `errors` entries carrying a type, not as an HTTP status.
+    const { calls, core } = await enforce(
+      'pull_request_review',
+      {
+        review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
+        pull_request: {
+          number: 60,
+          user: { login: 'legit' },
+          state: 'open',
+          head: { repo: { full_name: 'QwenLM/qwen-code' } },
+        },
+      },
+      {
+        fail: (name) =>
+          name === 'graphql.minimizeComment'
+            ? new GraphqlError(
+                'FORBIDDEN',
+                'Resource not accessible by integration',
+              )
+            : null,
+      },
+    );
+    assert.deepEqual(names(calls), [
+      'graphql.minimizeComment',
+      'pulls.deleteReview',
+    ]);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.warning.some((m) => /minimize unavailable/.test(m)));
+  });
+
+  it('falls back to REST review delete on INSUFFICIENT_SCOPES', async () => {
+    // The exact error class the predecessor red-ran on for as long as the
+    // blocklist was non-empty.
+    const { calls, core } = await enforce(
+      'pull_request_review',
+      {
+        review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
+        pull_request: {
+          number: 60,
+          user: { login: 'legit' },
+          state: 'open',
+          head: { repo: { full_name: 'QwenLM/qwen-code' } },
+        },
+      },
+      {
+        fail: (name) =>
+          name === 'graphql.minimizeComment'
+            ? new GraphqlError('INSUFFICIENT_SCOPES', 'Insufficient scopes')
+            : null,
+      },
+    );
+    assert.deepEqual(names(calls), [
+      'graphql.minimizeComment',
+      'pulls.deleteReview',
+    ]);
+    assert.deepEqual(core.logs.failed, []);
+  });
+
+  it('fails the run when the minimize 403s and the fallback delete fails too', async () => {
+    // Both paths exhausted: the body stays visible and no sweep backstop
+    // exists for review bodies, so the run failure is the manual-cleanup
+    // flag. Only the delete failure collects — the 403 minimize itself was
+    // handled by taking the fallback.
+    const { calls, core } = await enforce(
+      'pull_request_review',
+      {
+        review: { id: 7, node_id: 'PRR_spam', user: { login: 'spamuser' } },
+        pull_request: {
+          number: 60,
+          user: { login: 'legit' },
+          state: 'open',
+          head: { repo: { full_name: 'QwenLM/qwen-code' } },
+        },
+      },
+      {
+        fail: (name) =>
+          name === 'graphql.minimizeComment'
+            ? new HttpError(403, 'Forbidden')
+            : name === 'pulls.deleteReview'
+              ? new HttpError(422, 'Validation Failed')
+              : null,
+      },
+    );
+    assert.deepEqual(names(calls), [
+      'graphql.minimizeComment',
+      'pulls.deleteReview',
+    ]);
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /delete review 7 .*422/);
   });
 
   it('keeps closing the thread after a delete 404s', async () => {

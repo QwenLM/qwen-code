@@ -27,9 +27,11 @@ name: 'Spam blocklist enforcement'
 # was ever hidden. REST delete needs nothing beyond issues:write +
 # pull-requests:write, which GITHUB_TOKEN grants.
 #
-# Coverage limit: a review BODY (as opposed to an inline review comment) has no
-# REST delete endpoint, so the event lane minimizes it as SPAM instead and the
-# sweep skips it — there is no repo-wide "list reviews" endpoint to sweep with.
+# Coverage limit: a review BODY (as opposed to an inline review comment) has
+# no REST delete endpoint of its own, so the event lane minimizes it as SPAM
+# instead — falling back to deleting the whole review via REST when the token
+# cannot perform the mutation — and the sweep skips it: there is no repo-wide
+# "list reviews" endpoint to sweep with.
 # A review BODY on a fork PR has no lane at all: the review events run on a
 # read-only token there and the sweep cannot list reviews, so it needs manual
 # minimization. A closed+locked PR's body also stays editable by its author —
@@ -354,10 +356,15 @@ jobs:
                 return;
               }
               if (isBlocked(review?.user?.login)) {
-                // No REST delete for a review body; SPAM-classify it instead.
-                // The minimize tolerates no status: a failed minimize leaves
-                // the body visible with no sweep backstop, so it must
-                // red-run.
+                // No REST delete for a review body alone; SPAM-classify it
+                // instead. The minimize tolerates no status: a failed
+                // minimize leaves the body visible with no sweep backstop,
+                // so it must red-run. One carve-out: when the token cannot
+                // perform the mutation at all — the permission/scope class
+                // that red-ran the predecessor workflow (INSUFFICIENT_SCOPES
+                // / FORBIDDEN / 403) — fall back to REST-deleting the whole
+                // review, which pull-requests:write covers, and warn loudly.
+                // A failed fallback delete still red-runs.
                 const minimize = () =>
                   github.graphql(
                     `mutation MinimizeComment($id: ID!) {
@@ -367,7 +374,44 @@ jobs:
                     }`,
                     { id: review.node_id },
                   );
-                await run(`minimize review ${review.id}`, minimize, []);
+                // Permission failures surface either as a REST-style status
+                // on the error or as GraphQL `errors` entries carrying a
+                // type. A rate-limit 403 misclassifies as a permission
+                // failure, but its fallback delete is doomed the same way
+                // and the run still red-runs.
+                const isPermissionFailure = (error) =>
+                  error?.status === 403 ||
+                  (error?.errors ?? []).some(
+                    (entry) =>
+                      entry?.type === 'FORBIDDEN' ||
+                      entry?.type === 'INSUFFICIENT_SCOPES',
+                  ) ||
+                  /INSUFFICIENT_SCOPES|Resource not accessible by integration/.test(
+                    String(error?.message ?? ''),
+                  );
+                try {
+                  await minimize();
+                  actions.push(`minimize review ${review.id}`);
+                  core.info(`ok: minimize review ${review.id}`);
+                } catch (error) {
+                  if (!isPermissionFailure(error)) {
+                    // Same fail-closed collection run() performs.
+                    failures.push(`minimize review ${review.id}: ${error?.status ?? ''} ${error?.message ?? error}`);
+                    core.warning(`failed: minimize review ${review.id} — ${error?.message ?? error}`);
+                  } else {
+                    core.warning(
+                      `minimize unavailable for review ${review.id} (${error?.message ?? error}); deleting the review via REST instead`,
+                    );
+                    await run(`delete review ${review.id} (minimize unavailable)`, () =>
+                      github.rest.pulls.deleteReview({
+                        owner,
+                        repo,
+                        pull_number: pull?.number,
+                        review_id: review.id,
+                      }),
+                    );
+                  }
+                }
               }
               if (
                 pull &&
