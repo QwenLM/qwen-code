@@ -38,6 +38,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import {
+  MAX_DISPLAYED_QUEUED_MESSAGES,
+  summarizeQueuedPrompt,
+} from './queue-summary.js';
+import {
   findProviderByCredentials,
   resolveMetadataKey,
   tildeifyPath,
@@ -1546,15 +1550,17 @@ function App({
           )}
           {queuedPrompts.length > 0 && (
             <box flexDirection="column" marginTop={1} paddingLeft={2}>
-              {queuedPrompts.slice(0, 3).map((m, i) => (
-                <text key={`${i}-${m}`} fg={C.dim}>
-                  {m.replace(/\s+/g, ' ')}
-                </text>
-              ))}
-              {queuedPrompts.length > 3 && (
+              {queuedPrompts
+                .slice(0, MAX_DISPLAYED_QUEUED_MESSAGES)
+                .map((m, i) => (
+                  <text key={`${i}-${m}`} fg={C.dim}>
+                    {summarizeQueuedPrompt(m, width - 8)}
+                  </text>
+                ))}
+              {queuedPrompts.length > MAX_DISPLAYED_QUEUED_MESSAGES && (
                 <text
                   fg={C.dim}
-                >{`... (+${queuedPrompts.length - 3} more)`}</text>
+                >{`... (+${queuedPrompts.length - MAX_DISPLAYED_QUEUED_MESSAGES} more)`}</text>
               )}
               <text fg={C.dim} attributes={2}>
                 {'Ctrl+Q to queue · ↑ to edit queued messages'}

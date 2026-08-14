@@ -43,10 +43,12 @@ import {
   useTerminalDimensions,
 } from '@opentui/react';
 import {
+  isDeleteWordBackwardSequence,
   isPrintableKeyInput,
   isUnmodifiedBackspaceSequence,
 } from './input-prompt-key.js';
-import type { KeyEvent, TextareaRenderable } from '@opentui/core';
+import type { KeyEvent, PasteEvent, TextareaRenderable } from '@opentui/core';
+import { decodePasteBytes } from '@opentui/core';
 import {
   FileSearchFactory,
   ApprovalMode,
@@ -60,8 +62,9 @@ import {
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
 import path from 'node:path';
-import type { SlashCommand } from '../commands/types.js';
+import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { Suggestion } from '../utils/suggestions.js';
+import { toCodePoints } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { InputHistory } from './input-history.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
@@ -70,14 +73,72 @@ import {
   EscapeClearModel,
   MAX_SUGGESTIONS_TO_SHOW,
   applyCompletion,
+  commandCompletionItemsToSuggestions,
   decideSubmit,
   detectCompletionTarget,
+  expandPendingPastePlaceholders,
   fileSearchToSuggestions,
+  freePastePlaceholderId,
   historyDownDecision,
   historyUpDecision,
-  slashSuggestions,
+  isLargePaste,
+  isPerfectSlashMatch,
+  nextLargePastePlaceholder,
+  normalizePastedText,
+  parsePastePlaceholder,
+  parseSlashCommandQuery,
+  slashCompletionPositions,
+  subcommandSuggestions,
   suggestionWindow,
 } from './input-prompt-model.js';
+
+/**
+ * Minimal CommandContext for argument completion (`command.completion`).
+ * Same shape as the dispatcher's context; completion functions read
+ * `services.config` (or nothing) and never drive UI.
+ */
+function buildCompletionContext(
+  config: Config | null,
+  invocation: { raw: string; name: string; args: string },
+): CommandContext {
+  return {
+    executionMode: 'interactive',
+    invocation,
+    services: { config, settings: null, logger: null },
+    ui: {
+      history: [],
+      addItem: () => 0,
+      clear: () => {},
+      setDebugMessage: () => {},
+      pendingItem: null,
+      setPendingItem: () => {},
+      btwItem: null,
+      setBtwItem: () => {},
+      cancelBtw: () => {},
+      btwAbortControllerRef: { current: null },
+      isIdleRef: { current: true },
+      loadHistory: () => {},
+      refreshStatic: () => {},
+      toggleVimEnabled: async () => false,
+      setGeminiMdFileCount: () => {},
+      reloadCommands: () => {},
+      setSessionName: () => {},
+      extensionsUpdateState: new Map(),
+      dispatchExtensionStateUpdate: () => {},
+      addConfirmUpdateExtensionRequest: () => {},
+    },
+    session: {
+      stats: {
+        sessionId: '',
+        sessionStartTime: new Date(),
+        metrics: {},
+        lastPromptTokenCount: 0,
+        promptCount: 0,
+      },
+      sessionShellAllowlist: new Set<string>(),
+    },
+  } as unknown as CommandContext;
+}
 
 const DEFAULT_PLACEHOLDER = '  Type your message or @path/to/file';
 const ESCAPE_ARM_HINT = 'Press Esc again to clear.';
@@ -186,6 +247,23 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const fileSearchReadyRef = useRef<Promise<void> | null>(null);
   const atSearchSeqRef = useRef(0);
   const commandsRef = useRef<readonly SlashCommand[]>([]);
+  // SLASH-completion state for the current buffer: the query-relative
+  // replacement range and whether the input already names a runnable command
+  // exactly (Enter then submits instead of accepting a suggestion).
+  const slashStateRef = useRef<{
+    range: { start: number; end: number };
+    perfect: boolean;
+  } | null>(null);
+  // Sequence guard for async argument completion (drops stale results).
+  const slashSearchSeqRef = useRef(0);
+  // The user navigated the dropdown with ↑/↓ (reset on recompute/accept):
+  // with a perfect match AND navigation, Enter accepts the highlighted
+  // suggestion instead of submitting the typed text (ink navigatedRef).
+  const suggestionNavigatedRef = useRef(false);
+  // Large-paste collapsing: placeholder → full pasted text, restored on
+  // submit (ink pendingPastes).
+  const pendingPastesRef = useRef<Map<string, string>>(new Map());
+  const activePlaceholderIdsRef = useRef<Map<number, Set<number>>>(new Map());
 
   const chrome = promptChrome(approvalMode);
   const borderColor = chrome.color ?? C.accent;
@@ -262,6 +340,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (!target || suppressedByHistory || dismissed) {
       completionModeRef.current = CompletionMode.IDLE;
+      slashStateRef.current = null;
+      suggestionNavigatedRef.current = false;
       setSuggestions([]);
       setActiveIndex(0);
       setLoadingSuggestions(false);
@@ -269,10 +349,49 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
 
     completionModeRef.current = target.mode;
+    // Any buffer change invalidates dropdown navigation (ink resets
+    // navigatedRef when the query changes).
+    suggestionNavigatedRef.current = false;
 
     if (target.mode === CompletionMode.SLASH) {
-      const results = slashSuggestions(target.query, [...commandsRef.current]);
-      setSuggestions(results);
+      const parsed = parseSlashCommandQuery(target.query, commandsRef.current);
+      slashStateRef.current = {
+        range: slashCompletionPositions(target.query, parsed),
+        perfect: isPerfectSlashMatch(parsed),
+      };
+
+      // Argument completion: the leaf command's async completion() supplies
+      // the candidates (ink useCommandSuggestions), e.g. `/cd <path>`,
+      // `/model <id>`, `/curator pin <dir>`.
+      const leaf = parsed.leafCommand;
+      const complete = leaf?.completion;
+      if (parsed.isArgumentCompletion && leaf && complete) {
+        const seq = ++slashSearchSeqRef.current;
+        setLoadingSuggestions(true);
+        const context = buildCompletionContext(config ?? null, {
+          raw: parsed.invocationRaw,
+          name: leaf.name,
+          args: parsed.argumentString,
+        });
+        void complete(context, parsed.argumentString)
+          .then((results) => {
+            if (slashSearchSeqRef.current !== seq) return;
+            setSuggestions(commandCompletionItemsToSuggestions(results ?? []));
+            setActiveIndex(0);
+          })
+          .catch(() => {
+            if (slashSearchSeqRef.current === seq) setSuggestions([]);
+          })
+          .finally(() => {
+            if (slashSearchSeqRef.current === seq) setLoadingSuggestions(false);
+          });
+        return;
+      }
+
+      // Sub-command level: prefix candidates from the parsed command tree
+      // (`/cmd ` → its subCommands, `/dir ad` → `add`).
+      slashSearchSeqRef.current++;
+      setSuggestions(subcommandSuggestions(parsed));
       setActiveIndex(0);
       setLoadingSuggestions(false);
       return;
@@ -301,7 +420,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         if (atSearchSeqRef.current === seq) setLoadingSuggestions(false);
       }
     });
-  }, [ensureFileSearch]);
+  }, [ensureFileSearch, config]);
 
   useEffect(() => {
     const el = editorRef.current;
@@ -348,11 +467,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         cursor.offset,
       );
       if (!target) return;
+      suggestionNavigatedRef.current = false;
       const applied = applyCompletion(
         lines[cursor.row] ?? '',
         target,
         suggestion,
         viaEnter,
+        target.mode === CompletionMode.SLASH
+          ? (slashStateRef.current?.range ?? undefined)
+          : undefined,
       );
       if (applied.submitNow) {
         el.clear();
@@ -398,18 +521,87 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   // ── raw Backspace: consumed before parsed-key dispatch so legacy DEL/BS
   //    and unmodified kitty encodings delete exactly once via the editor API
-  //    and never double-fire through the focused editor ────────────────────
+  //    and never double-fire through the focused editor. Also owns the raw
+  //    DELETE_WORD_BACKWARD byte (\x1f, MinTTY/legacy Ctrl+Backspace) and
+  //    placeholder-aware backspace for collapsed large pastes ──────────────
   useLayoutEffect(() => {
     const onRawInput = (sequence: string): boolean => {
-      if (!focus || !isUnmodifiedBackspaceSequence(sequence)) return false;
+      if (!focus) return false;
+      if (isDeleteWordBackwardSequence(sequence)) {
+        const el = editorRef.current;
+        if (!el) return false;
+        el.deleteWordBackward();
+        setTextVersion((v) => v + 1);
+        return true;
+      }
+      if (!isUnmodifiedBackspaceSequence(sequence)) return false;
       const el = editorRef.current;
       if (!el) return false;
+      // Placeholder-aware deletion (ink parity): backspace at the end of a
+      // collapsed-paste placeholder removes the whole placeholder, not one
+      // character.
+      if (pendingPastesRef.current.size > 0) {
+        const cursor = el.logicalCursor;
+        const codePoints = toCodePoints(el.plainText);
+        for (const placeholder of pendingPastesRef.current.keys()) {
+          const placeholderStart = cursor.offset - placeholder.length;
+          if (
+            placeholderStart >= 0 &&
+            codePoints.slice(placeholderStart, cursor.offset).join('') ===
+              placeholder
+          ) {
+            const nextText =
+              codePoints.slice(0, placeholderStart).join('') +
+              codePoints.slice(cursor.offset).join('');
+            el.setText(nextText);
+            el.cursorOffset = placeholderStart;
+            pendingPastesRef.current.delete(placeholder);
+            const parsedPlaceholder = parsePastePlaceholder(placeholder);
+            if (parsedPlaceholder) {
+              freePastePlaceholderId(
+                activePlaceholderIdsRef.current,
+                parsedPlaceholder.charCount,
+                parsedPlaceholder.id,
+              );
+            }
+            setTextVersion((v) => v + 1);
+            return true;
+          }
+        }
+      }
       el.deleteCharBackward();
       setTextVersion((v) => v + 1);
       return true;
     };
     renderer.addInputHandler(onRawInput);
     return () => renderer.removeInputHandler(onRawInput);
+  }, [renderer, focus]);
+
+  // ── large-paste collapsing: bracketed pastes over the thresholds fold
+  //    into a `[Pasted Content N chars]` placeholder (ink useBracketedPaste
+  //    parity). Global keyInput paste listeners run BEFORE the focused
+  //    editor's handler; preventDefault stops the raw insertion ───────────
+  useLayoutEffect(() => {
+    const onPaste = (event: PasteEvent): void => {
+      if (!focus) return;
+      const el = editorRef.current;
+      if (!el) return;
+      const pasted = normalizePastedText(decodePasteBytes(event.bytes));
+      if (!isLargePaste(pasted)) return; // small pastes insert verbatim
+      event.preventDefault();
+      const charCount = [...pasted].length;
+      const placeholder = nextLargePastePlaceholder(
+        charCount,
+        activePlaceholderIdsRef.current,
+      );
+      pendingPastesRef.current.set(placeholder, pasted);
+      el.insertText(placeholder);
+      setTextVersion((v) => v + 1);
+    };
+    renderer.keyInput.on('paste', onPaste);
+    return () => {
+      renderer.keyInput.off('paste', onPaste);
+    };
   }, [renderer, focus]);
 
   // ── keyboard: global handlers run BEFORE the focused editor, so
@@ -443,21 +635,76 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         key.preventDefault();
         return;
       }
-      const text = el.plainText.trim();
-      if (text) {
-        const images = attachments.map((a) => a.path);
-        el.clear();
-        setTextVersion((v) => v + 1);
-        setAttachments([]);
-        onSubmit(text, images.length > 0 ? images : undefined);
+
+      // Completion dropdown open: Enter accepts the highlighted suggestion
+      // into the input instead of submitting the partial text (ink parity —
+      // prevents submitting half-typed commands like `/he`). Only a perfect
+      // command match submits directly; if the user navigated away from the
+      // highlighted default, Enter fills the navigated suggestion instead.
+      const showing = suggestions.length > 0;
+      const isPerfectMatch =
+        completionModeRef.current === CompletionMode.SLASH &&
+        (slashStateRef.current?.perfect ?? false);
+      if (showing && (!isPerfectMatch || suggestionNavigatedRef.current)) {
         key.preventDefault();
+        acceptSuggestion(activeIndex, true);
+        return;
       }
+
+      // decideSubmit owns the whitespace guard and the `\`+Enter
+      // continuation: a trailing backslash before the caret is removed and
+      // becomes a newline instead of submitting (ink InputPrompt parity).
+      const decision = decideSubmit(el.plainText, el.cursorOffset);
+      if (decision.kind === 'noop') {
+        key.preventDefault();
+        return;
+      }
+      if (decision.kind === 'newline-continuation') {
+        el.deleteCharBackward();
+        el.newLine();
+        setTextVersion((v) => v + 1);
+        key.preventDefault();
+        return;
+      }
+
+      let finalText = decision.text.trim();
+      if (pendingPastesRef.current.size > 0) {
+        finalText = expandPendingPastePlaceholders(
+          finalText,
+          pendingPastesRef.current,
+        );
+        pendingPastesRef.current.clear();
+        activePlaceholderIdsRef.current.clear();
+      }
+      const images = attachments.map((a) => a.path);
+      el.clear();
+      setTextVersion((v) => v + 1);
+      setAttachments([]);
+      historyRef.current?.reset();
+      historyRestoredTextRef.current = null;
+      setSuggestions([]);
+      setLoadingSuggestions(false);
+      onSubmit(finalText, images.length > 0 ? images : undefined);
+      key.preventDefault();
       return;
     }
     if (key.name === 'v' && (key.ctrl || key.super)) {
       // PASTE_CLIPBOARD_IMAGE parity (ctrl+v / cmd+v).
       key.preventDefault();
       void handleClipboardImage();
+      return;
+    }
+    if (
+      key.name === 'backspace' &&
+      (key.ctrl || key.super) &&
+      key.eventType !== 'release'
+    ) {
+      // DELETE_WORD_BACKWARD parity (keyBindings.ts: ctrl/command+backspace;
+      // the legacy \x1f byte is consumed on the raw-input path). Kitty
+      // encodings (CSI 127;5u …) parse into this modified-backspace key.
+      el.deleteWordBackward();
+      setTextVersion((v) => v + 1);
+      key.preventDefault();
       return;
     }
     if (isPrintableKeyInput(key)) {
@@ -526,6 +773,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
     if (showing && (navigationUp || navigationDown)) {
       key.preventDefault();
+      // Navigation marks the dropdown as user-driven: with a perfect command
+      // match, Enter then accepts the highlighted suggestion instead of
+      // submitting the typed text (ink navigatedRef parity).
+      suggestionNavigatedRef.current = true;
       setActiveIndex((prev) => {
         if (navigationUp) {
           return prev <= 0 ? suggestions.length - 1 : prev - 1;
@@ -541,11 +792,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    if (showing && key.name === 'return' && !key.ctrl && !key.shift) {
-      key.preventDefault();
-      acceptSuggestion(activeIndex, true);
-      return;
-    }
+    // Enter with the dropdown open is owned by the force-captured Enter
+    // branch above (accept-unless-perfect-match); there is no separate path.
 
     // Up at the top edge pops queued prompts into the composer (original).
     if (navigationUp && queueLength > 0) {
@@ -619,6 +867,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setTextVersion((v) => v + 1);
       return;
     }
+    let finalText = decision.text.trim();
+    if (pendingPastesRef.current.size > 0) {
+      finalText = expandPendingPastePlaceholders(
+        finalText,
+        pendingPastesRef.current,
+      );
+      pendingPastesRef.current.clear();
+      activePlaceholderIdsRef.current.clear();
+    }
     const images = attachments.map((a) => a.path);
     el.clear();
     setTextVersion((v) => v + 1);
@@ -627,7 +884,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     setSuggestions([]);
     setLoadingSuggestions(false);
     setAttachments([]);
-    onSubmit(decision.text.trim(), images.length > 0 ? images : undefined);
+    onSubmit(finalText, images.length > 0 ? images : undefined);
   }, [onSubmit, attachments]);
 
   // Force the editor text color after mount (prop may not forward), max contrast.

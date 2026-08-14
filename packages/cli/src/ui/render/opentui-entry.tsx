@@ -1,4 +1,3 @@
- 
 /** @jsxImportSource @opentui/react */
 /**
  * @license
@@ -22,6 +21,7 @@
 import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { App } from '../opentui/backend.js';
+import { probeKittyKeyboardSupport } from '../opentui/kitty-negotiation.js';
 import type { StreamEvent } from '../model/streamingModel.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 
@@ -34,9 +34,15 @@ export async function startOpenTuiUI(opts?: {
   events?: AsyncIterable<StreamEvent>;
   config?: Config;
 }): Promise<void> {
+  // Headless/no-reply terminals never answer the kitty `\x1b[?u` queries the
+  // framework would send, and without a fallback that left legacy keystrokes
+  // entirely unprocessed (audit G-02). Probe once with a 200ms timeout first
+  // (ink kittyProtocolDetector parity) and disable the protocol outright in
+  // terminals that do not answer, so legacy key input always works.
+  const kittySupported = await probeKittyKeyboardSupport();
   const renderer = await createCliRenderer({
     targetFps: 60,
-    useKittyKeyboard: {},
+    useKittyKeyboard: kittySupported ? {} : null,
     useMouse: true,
     exitOnCtrlC: false,
     externalOutputMode: 'passthrough',

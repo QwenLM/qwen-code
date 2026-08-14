@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  isDeleteWordBackwardSequence,
   isPrintableKeyInput,
   isUnmodifiedBackspaceSequence,
   type PrintableKeyInput,
@@ -175,5 +176,23 @@ describe('opentui input-prompt-key: printable fallback', () => {
 
   it('rejects empty sequences', () => {
     expect(isPrintableKeyInput(key({ sequence: '' }))).toBe(false);
+  });
+});
+
+describe('opentui input-prompt-key: DELETE_WORD_BACKWARD raw byte', () => {
+  it('consumes the MinTTY/legacy Ctrl+Backspace byte \\x1f', () => {
+    expect(isDeleteWordBackwardSequence('\x1f')).toBe(true);
+  });
+
+  it('rejects plain backspace and other controls', () => {
+    for (const sequence of ['\x7f', '\x08', '\x17', '\x1b', '', 'a']) {
+      expect(isDeleteWordBackwardSequence(sequence)).toBe(false);
+    }
+  });
+
+  it('rejects kitty-encoded modified backspace (parsed-key path owns them)', () => {
+    for (const sequence of ['\x1b[127;5u', '\x1b[127;9u', '\x1b[127u']) {
+      expect(isDeleteWordBackwardSequence(sequence)).toBe(false);
+    }
   });
 });
