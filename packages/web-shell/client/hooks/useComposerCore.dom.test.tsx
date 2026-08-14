@@ -156,6 +156,15 @@ async function mount({
   };
 }
 
+async function waitForImageIngestion() {
+  await vi.waitFor(async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   vi.useRealTimers();
@@ -836,9 +845,7 @@ describe('useComposerCore paste', () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(latest!.pendingImageBatchCount).toBe(1);
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await waitForImageIngestion();
     expect(latest!.pendingImageBatchCount).toBe(0);
     expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
 
@@ -917,9 +924,7 @@ describe('useComposerCore paste', () => {
       drop([first, unsupported]);
       drop([second]);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await waitForImageIngestion();
 
     expect(latest!.pastedImages.map((image) => image.media_type)).toEqual([
       'image/bmp',
@@ -952,9 +957,7 @@ describe('useComposerCore paste', () => {
       drop([new File(['text'], 'notes.txt', { type: 'text/plain' })]);
       drop([new File(['png'], 'photo.png', { type: 'image/png' })]);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await waitForImageIngestion();
 
     expect(onImageIngestionNotice).toHaveBeenCalledOnce();
     expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);

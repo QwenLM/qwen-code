@@ -767,7 +767,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
   });
 
-  it('keeps the final answer when active agents are pinned after it', () => {
+  it('keeps latest assistant content when active agents are pinned after it', () => {
     const activeAgent = agentMsg('agent-1');
     activeAgent.tools[0]!.status = 'pending';
     const c = mount([
@@ -777,14 +777,579 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
     ]);
 
-    expect(
-      c
-        .querySelector('[data-testid="msg-a1"]')
-        ?.getAttribute('data-assistant-actions'),
-    ).toBe('true');
+    expect(assistantActions(c, 'a1')).toBe('false');
     click(toggle(c, 'u1'));
     expect(has(c, 'a1')).toBe(true);
     expect(parallelAgentsSummary(c)).toBeNull();
+  });
+
+  it('does not mark narration as final before agents are summarized', () => {
+    const activeAgent = agentMsg('agent-1');
+    activeAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      activeAgent,
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    const awaitingSummaryMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+    ];
+    rerenderMessages(c, awaitingSummaryMessages);
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    rerenderMessages(c, [...awaitingSummaryMessages, asstMsg('summary')]);
+    expect(assistantActions(c, 'a1')).toBe('false');
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('keeps actions suppressed for stale agents until they reconcile terminal', () => {
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const messages = [userMsg('u1'), firstAgent, secondAgent, asstMsg('a1')];
+    const c = mount(messages, undefined, {
+      catchingUp: true,
+      isResponding: false,
+    });
+
+    rerenderMessages(c, messages, {
+      catchingUp: false,
+      isResponding: false,
+    });
+    expect(assistantActions(c, 'a1')).toBe('false');
+
+    rerenderMessages(
+      c,
+      [userMsg('u1'), agentMsg('agent-1'), agentMsg('agent-2'), asstMsg('a1')],
+      { catchingUp: false, isResponding: false },
+    );
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('shows final actions for stale agents in a readonly transcript', () => {
+    const staleAgent = agentMsg('agent-1');
+    staleAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), staleAgent, asstMsg('a1')], undefined, {
+      transcriptRenderMode: 'readonly',
+    });
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('keeps final actions for a pending foreground agent in a completed turn', () => {
+    const foregroundAgent = agentMsg('agent-1');
+    foregroundAgent.tools[0]!.status = 'pending';
+    foregroundAgent.tools[0]!.args = {
+      subagent_type: 'explore',
+      run_in_background: false,
+    };
+    const c = mount([userMsg('u1'), foregroundAgent, asstMsg('a1')]);
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('keeps turn-2 final actions while a turn-1 agent stays pending', () => {
+    const pendingAgent = agentMsg('agent-1');
+    pendingAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      pendingAgent,
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a2')).toBe('true');
+    expect(assistantActions(c, 'a1')).toBe('false');
+  });
+
+  it('releases a delayed sibling footer hold only after a bounded grace', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    // The sibling reconciles terminal before its notification arrives: the
+    // hold stays until the grace expires, in case the notification is merely
+    // delayed.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A late notification still re-hides the narration until the summary.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('restores final actions when a completed sibling notification is lost', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    // The hold survives until the grace expires, in case the sibling
+    // notification is merely delayed; afterwards the lost notification can
+    // no longer hide the final answer.
+    expect(assistantActions(c, 'summary')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('does not restart the unmatched-completion grace for a non-agent notification', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    // The sibling's completion notification is lost: the hold is bounded.
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+    // A non-agent notification must not restart the grace timer; the bound
+    // still runs from the agent notification.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+      monitorNotificationMsg('monitor'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('keeps a released footer released for a monitor notification after a catch-up cycle', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      secondAgentStillActive,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ]);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+
+    // The second sibling reconciles terminal before its notification arrives;
+    // the hold lasts until the bounded grace expires.
+    const settled = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('waiting'),
+    ];
+    rerenderMessages(c, settled);
+    expect(assistantActions(c, 'waiting')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A catch-up cycle re-establishes the notification baseline, so the
+    // grace deactivates without any agent notification or turn change.
+    rerenderMessages(c, settled, { catchingUp: true });
+    rerenderMessages(c, settled, { catchingUp: false });
+    expect(assistantActions(c, 'waiting')).toBe('true');
+
+    // A non-agent notification reactivates the coarse grace afterwards but
+    // cannot change which agents are unmatched, so it must not re-arm the
+    // expired latch and re-hide the already-released footer. The turn stays
+    // released: `undefined` means it even collapsed (the narration row is
+    // folded away), which is the opposite of a re-hide.
+    rerenderMessages(c, [...settled, monitorNotificationMsg('monitor')], {
+      catchingUp: false,
+    });
+    expect(assistantActions(c, 'waiting')).not.toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(assistantActions(c, 'waiting')).not.toBe('false');
+
+    // A genuine new lost-completion episode in the same turn still receives
+    // a full grace window after the catch-up cycle. The model narrates after
+    // launching agent-3, so the turn's final footer is gated again.
+    rerenderMessages(
+      c,
+      [
+        ...settled,
+        monitorNotificationMsg('monitor'),
+        agentMsg('agent-3'),
+        asstMsg('final'),
+      ],
+      { catchingUp: false },
+    );
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(assistantActions(c, 'final')).toBe('true');
+  });
+
+  it('does not consume the unmatched-completion grace while the turn is still streaming', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount(
+      [userMsg('u1'), firstAgent, secondAgent, asstMsg('launched')],
+      undefined,
+      { isResponding: true },
+    );
+
+    // Agent-1 completes mid-response while the model keeps streaming.
+    const secondAgentStillActive = agentMsg('agent-2');
+    secondAgentStillActive.tools[0]!.status = 'pending';
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        secondAgentStillActive,
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: true },
+    );
+
+    // Agent-2 reconciles terminal with its notification delayed. isResponding
+    // hides the turn anyway, so streaming past the grace window must not
+    // consume the budget before the hold can actually gate the footer.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: true },
+    );
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+    // When streaming ends, the full grace window must still be available.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: false },
+    );
+    expect(assistantActions(c, 'launched')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(assistantActions(c, 'launched')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(assistantActions(c, 'launched')).toBe('true');
+  });
+
+  it('releases the footer after grace when the final narration precedes the notification', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      firstAgent,
+      secondAgent,
+      asstMsg('launched'),
+    ]);
+
+    // The sibling's notification lands after the turn's final narration (the
+    // ordinary placement) and agent-2 reconciles terminal without its own
+    // notification ever arriving.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+    ]);
+    expect(assistantActions(c, 'launched')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    // Grace expiry must release the footer even though the narration
+    // precedes the notification; a truly lost notification cannot hide the
+    // final footer forever.
+    expect(assistantActions(c, 'launched')).toBe('true');
+  });
+
+  it('gives a later lost-completion episode a full grace after an earlier matched hold', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    firstAgent.tools[0]!.status = 'pending';
+    const c = mount(
+      [userMsg('u1'), firstAgent, asstMsg('launched')],
+      undefined,
+      {
+        isResponding: true,
+      },
+    );
+
+    // Agent-1 completes mid-turn and its (matched) notification lands while
+    // the model keeps working: a benign hold arms the grace timer.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      ],
+      { isResponding: true },
+    );
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+
+    // The model launches agent-2 in the same turn and emits the final
+    // answer; agent-2 is still active, so the footer stays suppressed.
+    const secondAgent = agentMsg('agent-2');
+    secondAgent.tools[0]!.status = 'pending';
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        secondAgent,
+        asstMsg('final'),
+      ],
+      { isResponding: false },
+    );
+    expect(assistantActions(c, 'final')).toBe('false');
+
+    // Agent-2 reconciles terminal but its notification is lost. The genuine
+    // unmatched episode must receive a fresh grace window even though the
+    // benign mid-turn hold already expired the latch.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        asstMsg('launched'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        agentMsg('agent-2'),
+        asstMsg('final'),
+      ],
+      { isResponding: false },
+    );
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(assistantActions(c, 'final')).toBe('false');
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(assistantActions(c, 'final')).toBe('true');
+  });
+
+  it('restarts the unmatched-completion grace when another agent notification lands mid-hold', () => {
+    vi.useFakeTimers();
+    const agents = [
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      agentMsg('agent-3'),
+    ];
+    for (const agent of agents) {
+      agent.tools[0]!.status = 'pending';
+    }
+    const c = mount([userMsg('u1'), ...agents, asstMsg('launched')]);
+
+    // All three reconcile terminal but only agent-1's notification arrives,
+    // so the hold arms a 5s bound from T0.
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      agentMsg('agent-3'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(4_000);
+    });
+
+    // Agent-2's notification lands mid-hold while agent-3 stays unmatched;
+    // the bound restarts from the new notification (keep the final narration
+    // after it so the ordering rule does not mask the grace state).
+    rerenderMessages(c, [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      agentMsg('agent-3'),
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      asstMsg('summary'),
+    ]);
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    // The original bound (T0+5s) has passed; the restarted one still holds.
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('false');
+
+    act(() => {
+      vi.advanceTimersByTime(4_000);
+    });
+    expect(assistantActions(c, 'summary')).toBe('true');
+  });
+
+  it('keeps completed turn actions while the latest turn awaits agents', () => {
+    const activeAgent = agentMsg('agent-2');
+    activeAgent.tools[0]!.status = 'pending';
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      agentMsg('agent-1'),
+      activeAgent,
+      asstMsg('a2'),
+    ]);
+
+    expect(assistantActions(c, 'a1')).toBe('true');
+    expect(assistantActions(c, 'a2')).toBe('false');
   });
 
   it('keeps an automatically expanded terminal group mounted until its delay expires', () => {

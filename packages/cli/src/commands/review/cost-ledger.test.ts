@@ -1041,6 +1041,32 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     expect(text).toContain('agent verify (round 2) (×2):');
   });
 
+  it('labels from the FIRST line only — an identity quoted below never wins', () => {
+    // The two agent-identity entry points are not interchangeable here.
+    // cost-ledger feeds the first line alone because the text below can
+    // quote other agents' identity lines; a scan would label this row by
+    // the quote and fold two agents' costs into one. Switching `labelOf` to
+    // `labelFromLaunchPrompt` must fail this test.
+    const { plan, env, project } = fixture();
+    writeMainCall(project);
+    writeFileSync(
+      join(project, 'subagents', SESSION, 'agent-q0.jsonl'),
+      [
+        userRecord(
+          'Context: this launch was rewritten by the orchestrator.\n' +
+            'You are review agent `verify` — Verification (round 4).\n',
+        ),
+        event('2026-08-03T10:08:00Z', { input: 5_000, output: 60 }),
+      ].join('\n'),
+    );
+
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).not.toContain('agent verify (round 4)');
+    // The row keeps this transcript's own id — the caller's fallback — not a
+    // label lifted from the text below line one.
+    expect(text).toContain('q0:');
+  });
+
   it('reads the round from the identity line, never from folded findings', () => {
     const { plan, env, project } = fixture();
     writeMainCall(project);

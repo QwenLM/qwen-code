@@ -399,6 +399,20 @@ describe('parseReviewArgs — settings-provided defaults', () => {
     expect(got.warnings.some((w) => w.includes('review.comment'))).toBe(true);
   });
 
+  it('a flag-forced high names the flag in the forcing warning, not the setting', () => {
+    // The flag branch of the same ternary: with no setting enabled, the
+    // warning must not send the operator hunting a setting that is off.
+    const got = parseReviewArgs('6711 --comment --effort low');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+    expect(got.warnings).toContain(
+      '`--comment` requires a verified review; running at high effort.',
+    );
+    expect(
+      got.warnings.some((w) => w.includes('`review.comment` is enabled')),
+    ).toBe(false);
+  });
+
   it('the standing comment setting stays inert on a local target', () => {
     const got = parseReviewArgs('', { comment: true });
     expect(got.comment.effective).toBe(false);
@@ -569,6 +583,10 @@ describe('parseReviewArgs — repeated --effort warnings state what is actually 
     const invalidWarning = got.warnings.find((w) => w.includes('"typo"'));
     expect(invalidWarning).toContain('forces high effort');
     expect(invalidWarning).not.toContain('default');
+    // The flag drove the forcing — the resolution must name the flag, not a
+    // setting that is off (both branches contain 'forces high effort').
+    expect(invalidWarning).toContain('`--comment` forces high effort');
+    expect(invalidWarning).not.toContain('review.comment');
   });
 
   it('with no valid occurrence anywhere the warning still says the default applies', () => {

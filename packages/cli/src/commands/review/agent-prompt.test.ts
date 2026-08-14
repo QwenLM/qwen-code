@@ -58,7 +58,11 @@ import {
   findingsSection,
   agentPromptCommand,
 } from './agent-prompt.js';
-import { BRIEFS, MODELED_SYSTEM_EXECUTION_LENS } from './lib/agent-briefs.js';
+import {
+  BRIEFS,
+  ENUMERATION_TRAP_LENS,
+  MODELED_SYSTEM_EXECUTION_LENS,
+} from './lib/agent-briefs.js';
 import {
   MODELED_SYSTEM_DOMAIN,
   SHELL_MODEL_LAYERS,
@@ -161,6 +165,21 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     const p = buildChunkAgentPrompt(PLAN, 15);
     expect(p).toContain('Uncoverable: chunk 15');
     expect(p).not.toContain('Covered: chunk 15');
+  });
+
+  it('gives an unreachable chunk only the Uncoverable receipt — no review block or shape lens', () => {
+    // R4-1: an unreachable chunk's one instruction is to return the Uncoverable
+    // line; carrying the dimension review, the shape lens, or the finding format
+    // beside it is the two-masters contradiction the modeled/budget blocks already
+    // guard against. It returns after the receipt.
+    const p = buildChunkAgentPrompt(PLAN, 15);
+    expect(p).not.toContain(ENUMERATION_TRAP_LENS);
+    expect(p).not.toContain('## What to review');
+    // The finding-format / severity / exclusions blocks are the rest of the
+    // two-masters contract; none may reach an unreachable chunk either (R5-177).
+    expect(p).not.toContain('Format each finding');
+    expect(p).not.toContain('Apply the severity definitions');
+    expect(p).not.toContain('What is NOT a finding');
   });
 
   it('drops a malformed files[] entry instead of rendering "undefined"', () => {
@@ -284,6 +303,39 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(
       buildChunkAgentPrompt(chunkPlan([MODELED_SYSTEM_DOMAIN], 10_000_000), 1),
     ).not.toContain('Modeled-executable-system lens — your territory');
+  });
+
+  it('carries the enumeration-trap lens — with its operational clauses — into both the 3b brief (3A) and the chunk brief (3B)', () => {
+    // Delivery: one exported constant reaches both paths. A cleanup that drops the
+    // lens from either the whole-diff 3b brief or buildChunkAgentPrompt must fail —
+    // otherwise a large chunked PR (the 3B path, where the bloat lives) silently
+    // stops filing the class-closing shape finding.
+    expect(BRIEFS['3b'].brief).toContain(ENUMERATION_TRAP_LENS);
+    expect(buildChunkAgentPrompt(PLAN, 13)).toContain(ENUMERATION_TRAP_LENS);
+    // Content: the delivery assertions above are `toContain(constant)`, so they
+    // pass even if the constant is emptied or its operational clauses paraphrased
+    // away (both sites update together). Pin the load-bearing text literally, so a
+    // weakened lens fails independently of where it is delivered.
+    expect(ENUMERATION_TRAP_LENS).toContain('has **no last corner**');
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'file it ONCE, in place of enumerating cases',
+    );
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'can be fooled into a wrong result is **Critical**',
+    );
+    // The witness contract: without a concrete demonstrated corner the shape
+    // finding confirms only low, and low-confidence findings are terminal-only —
+    // they never post and never reach the ledger the backstop reads. Drop it and
+    // the headline mechanism goes inert.
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      "Carry ONE demonstrated corner as the finding's witness",
+    );
+    // The bounded-surface exception is the false-positive guard R4-2 demanded;
+    // deleting it would make the lens escalate a small exhaustively-specified
+    // grammar. Pin it literally — the delivery assertions cannot see its loss.
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'Adversarial input alone does NOT make a surface unbounded',
+    );
   });
 });
 
