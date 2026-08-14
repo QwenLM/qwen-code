@@ -42,6 +42,7 @@ const loggingSpanRecords = vi.hoisted(
      */
     endMetadata?: {
       success?: boolean;
+      cancelled?: boolean;
       inputTokens?: number;
       outputTokens?: number;
       cachedInputTokens?: number;
@@ -163,6 +164,7 @@ vi.mock('../../telemetry/index.js', () => {
         },
         metadata?: {
           success: boolean;
+          cancelled?: boolean;
           inputTokens?: number;
           outputTokens?: number;
           cachedInputTokens?: number;
@@ -187,15 +189,11 @@ vi.mock('../../telemetry/index.js', () => {
           record.endMetadata = metadata;
         }
         try {
-          if (metadata) {
-            if (metadata.success) {
-              span.setStatus({ code: 1 }); // OK
-            } else {
-              span.setStatus({
-                code: 2,
-                message: metadata.error ?? 'unknown error',
-              }); // ERROR
-            }
+          if (metadata && !metadata.success && !metadata.cancelled) {
+            span.setStatus({
+              code: 2,
+              message: metadata.error ?? 'unknown error',
+            }); // ERROR
           }
           span.end();
         } catch {
@@ -723,7 +721,7 @@ describe('LoggingContentGenerator', () => {
       model: 'test-model',
       prompt_id: 'prompt-span',
     });
-    expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.statuses).toEqual([]);
     expect(spanRecord.ended).toBe(true);
     expect(
       genAiExchangeState.controllers.at(-1)?.finalize,
@@ -967,6 +965,13 @@ describe('LoggingContentGenerator', () => {
     ).rejects.toBeInstanceOf(APIUserAbortError);
 
     expect(logApiError).not.toHaveBeenCalled();
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(spanRecord.statuses).toHaveLength(0);
   });
 
   it('still emits an api_error event for a real failure that is not a cancel', async () => {
@@ -1116,6 +1121,13 @@ describe('LoggingContentGenerator', () => {
     ).rejects.toBeInstanceOf(APIUserAbortError);
 
     expect(logApiError).not.toHaveBeenCalled();
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(spanRecord.statuses).toHaveLength(0);
   });
 
   it('does not emit an api_error event when the user cancels mid-stream', async () => {
@@ -1203,6 +1215,11 @@ describe('LoggingContentGenerator', () => {
     ).rejects.toMatchObject({ name: 'AbortError' });
 
     expect(logApiError).not.toHaveBeenCalled();
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
   });
 
   it('forwards usage attached to the final response after it was yielded', async () => {
@@ -1577,9 +1594,7 @@ describe('LoggingContentGenerator', () => {
     expect(response.responseId).toBe('resp-safe');
     expect(logApiResponse).toHaveBeenCalledTimes(1);
     expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
-    expect(getGenerateContentSpanRecord().statuses).toEqual([
-      { code: SpanStatusCode.OK },
-    ]);
+    expect(getGenerateContentSpanRecord().statuses).toEqual([]);
   });
 
   it('truncates long response text in API response telemetry', async () => {
@@ -1821,7 +1836,7 @@ describe('LoggingContentGenerator', () => {
     expect(consolidatedResponse.candidates?.[0]?.finishReason).toBe('STOP');
 
     const spanRecord = getStreamSpanRecord();
-    expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.statuses).toEqual([]);
     expect(spanRecord.ended).toBe(true);
     expect(
       genAiExchangeState.controllers.at(-1)?.finalize,
@@ -1928,8 +1943,7 @@ describe('LoggingContentGenerator', () => {
     expect(getStreamSpanRecord().ended).toBe(true);
   });
 
-  it('preserves stream success when the OK status update fails', async () => {
-    loggingSpanNamesWithSetStatusFailure.add('qwen-code.llm_request');
+  it('leaves stream success status unset', async () => {
     const response = createResponse('resp-status', 'model-stream', [
       { text: 'ok' },
     ]);
@@ -2110,7 +2124,7 @@ describe('LoggingContentGenerator', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
-  it('classifies an aborted partial stream and retains known response data', async () => {
+  it('keeps a real partial-stream failure as an error when it races an abort', async () => {
     const abortController = new AbortController();
     const response = createResponse(
       'resp-abort',
@@ -2157,11 +2171,90 @@ describe('LoggingContentGenerator', () => {
     ).toBeGreaterThanOrEqual(0);
     expect(spanRecord.endMetadata).toMatchObject({
       success: false,
-      error: 'API call aborted',
+      cancelled: false,
+      error: 'API call failed',
       responseModel: 'model-stream',
       inputTokens: 9,
       outputTokens: 2,
       finishReasons: ['STOP'],
+    });
+  });
+
+  it('records cancellation when a provider ends normally after swallowing an abort', async () => {
+    const abortController = new AbortController();
+    const response = createResponse('resp-cancelled', 'model-stream', [
+      { text: 'partial' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+          abortController.abort();
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'request-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const stream = await generator.generateContentStream(
+      {
+        model: 'request-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as never,
+      'prompt-swallowed-abort',
+    );
+
+    for await (const _ of stream) {
+      // Consume until the provider ends the stream normally.
+    }
+
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+  });
+
+  it('does not let an abort after stream completion rewrite success', async () => {
+    const abortController = new AbortController();
+    const response = createResponse('resp-complete', 'model-stream', [
+      { text: 'done' },
+    ]);
+    vi.mocked(logApiResponse).mockImplementationOnce(() =>
+      abortController.abort(),
+    );
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'request-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const stream = await generator.generateContentStream(
+      {
+        model: 'request-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as never,
+      'prompt-late-abort',
+    );
+
+    for await (const _ of stream) {
+      // Consume the successful stream.
+    }
+
+    expect(abortController.signal.aborted).toBe(true);
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: true,
+      cancelled: false,
     });
   });
 
@@ -2541,7 +2634,7 @@ describe('LoggingContentGenerator', () => {
     expect(
       spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
     ).toBeGreaterThanOrEqual(0);
-    expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.statuses).toEqual([]);
     expect(spanRecord.ended).toBe(true);
     expect(
       genAiExchangeState.controllers.at(-1)?.finalize,
