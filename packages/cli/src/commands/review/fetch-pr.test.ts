@@ -747,12 +747,14 @@ describe('fetch-pr run-session ledger wiring', () => {
     // After the plan write: the entry must sit inside the run-epoch fence the
     // readers apply, which is keyed on the plan's mtime.
     const appendOrder = vi.mocked(appendRunSession).mock.invocationCallOrder[0];
-    const writeOrder = producerMocks.writeFileSync.mock.invocationCallOrder.at(
-      producerMocks.writeFileSync.mock.calls.findIndex(
-        ([path]) => path === '/tmp/fetch-report.json',
-      ),
+    const writeIndex = producerMocks.writeFileSync.mock.calls.findIndex(
+      ([path]) => path === '/tmp/fetch-report.json',
     );
-    expect(writeOrder).toBeDefined();
-    expect(appendOrder).toBeGreaterThan(writeOrder as number);
+    // A findIndex miss returns -1, and `.at(-1)` would silently hand back an
+    // unrelated call's order — the assertion below would still pass.
+    expect(writeIndex).toBeGreaterThanOrEqual(0);
+    const writeOrder =
+      producerMocks.writeFileSync.mock.invocationCallOrder[writeIndex];
+    expect(appendOrder).toBeGreaterThan(writeOrder);
   });
 });

@@ -25,7 +25,7 @@
 // skill used to hold only in transcript memory: how many times this review has
 // resumed, and whether it already restarted once for head movement.
 
-import { readFileSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, lstatSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { promptRecordDir } from './prompt-record.js';
@@ -58,12 +58,25 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
  */
 const RUN_EPOCH_SLACK_MS = 2000;
 
+/**
+ * How far ahead of NOW an entry may be stamped. The fence's lower half keeps
+ * a previous review's entries out; without an upper half, one hand-written
+ * far-future entry survives every future rewrite of the same plan and is
+ * read as belonging to every later run. The same slack, mirrored.
+ */
+const FUTURE_SLACK_MS = 2000;
+
 function runEpochMs(planPath: string): number {
   try {
     return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
   } catch {
     return Number.NEGATIVE_INFINITY;
   }
+}
+
+/** Entries stamped past this are not this run's; nothing writes the future. */
+function runCeilingMs(nowMs: number = Date.now()): number {
+  return nowMs + FUTURE_SLACK_MS;
 }
 
 interface SessionEntry {
@@ -81,13 +94,30 @@ export function runSessionsPath(planPath: string): string {
  * the failure direction is "earlier evidence invisible", which coverage answers
  * by requiring the work again — never the reverse.
  */
+/**
+ * Read one ledger file, refusing anything that is not a regular file.
+ *
+ * The write side is hardened with `noFollow`; the read side must match, or a
+ * planted symlink redirects the read and a planted FIFO blocks it forever —
+ * a hang, not an error, in a command a review is waiting on.
+ */
+function readLedgerFile(path: string): string | null {
+  try {
+    if (!lstatSync(path).isFile()) return null;
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
 function readSessions(planPath: string): SessionEntry[] {
   try {
-    const parsed = JSON.parse(
-      readFileSync(runSessionsPath(planPath), 'utf8'),
-    ) as unknown;
+    const raw = readLedgerFile(runSessionsPath(planPath));
+    if (raw === null) return [];
+    const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     const epoch = runEpochMs(planPath);
+    const ceiling = runCeilingMs();
     const kept = parsed.filter(
       (e): e is SessionEntry =>
         typeof e === 'object' &&
@@ -95,7 +125,8 @@ function readSessions(planPath: string): SessionEntry[] {
         typeof (e as SessionEntry).sessionId === 'string' &&
         SESSION_ID_RE.test((e as SessionEntry).sessionId) &&
         typeof (e as SessionEntry).atMs === 'number' &&
-        (e as SessionEntry).atMs >= epoch,
+        (e as SessionEntry).atMs >= epoch &&
+        (e as SessionEntry).atMs <= ceiling,
     );
     // Deduplicate on READ, not only on append: the file lives in a directory
     // the orchestrator can reach, and a hand-written duplicate would make a
@@ -165,7 +196,11 @@ export function priorSessionEntries(
   env: NodeJS.ProcessEnv = process.env,
 ): Array<{ sessionId: string; atMs: number; endsAtMs: number | null }> {
   const current = env['QWEN_CODE_SESSION_ID']?.trim();
-  const all = readSessions(planPath);
+  // Sort by time, not file order: `endsAtMs` is a COST CLAMP, and an
+  // out-of-order (hand-written) ledger or a backwards wall-clock step
+  // between attempts would otherwise invert it — a null or negative window
+  // silently unbounds or empties a prior session's bill.
+  const all = [...readSessions(planPath)].sort((a, b) => a.atMs - b.atMs);
   return all
     .map((e, i) => ({
       sessionId: e.sessionId,
@@ -207,9 +242,9 @@ export function resumeMarkerPath(planPath: string): string {
  */
 export function readResumeMarker(planPath: string): ResumeMarker {
   try {
-    const parsed = JSON.parse(
-      readFileSync(resumeMarkerPath(planPath), 'utf8'),
-    ) as unknown;
+    const text = readLedgerFile(resumeMarkerPath(planPath));
+    if (text === null) return emptyMarker();
+    const parsed = JSON.parse(text) as unknown;
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
@@ -218,6 +253,7 @@ export function readResumeMarker(planPath: string): ResumeMarker {
       return emptyMarker();
     }
     const epoch = runEpochMs(planPath);
+    const ceiling = runCeilingMs();
     const raw = parsed as ResumeMarker;
     const resumes = Array.isArray(raw.resumes)
       ? raw.resumes.filter(
@@ -230,7 +266,8 @@ export function readResumeMarker(planPath: string): ResumeMarker {
             // while the other does not is how a threat model rots.
             SESSION_ID_RE.test(e.sessionId) &&
             typeof e.atMs === 'number' &&
-            e.atMs >= epoch,
+            e.atMs >= epoch &&
+            e.atMs <= ceiling,
         )
       : [];
     const restarts = Array.isArray(raw.restarts)
@@ -240,7 +277,8 @@ export function readResumeMarker(planPath: string): ResumeMarker {
             e !== null &&
             typeof e.reason === 'string' &&
             typeof e.atMs === 'number' &&
-            e.atMs >= epoch,
+            e.atMs >= epoch &&
+            e.atMs <= ceiling,
         )
       : [];
     return { schemaVersion: 1, resumes, restarts };

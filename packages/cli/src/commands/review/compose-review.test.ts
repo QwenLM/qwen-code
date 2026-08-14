@@ -5823,9 +5823,19 @@ describe('composeReview — a resumed run is continuity, not a coverage gap', ()
 });
 
 describe('composeReview — continuity renders on every verdict', () => {
-  /** A resumed run: chunk-1's agent re-homed to the ledgered prior session. */
-  function resumedPlan(): string {
-    const p = coveredPlan();
+  /**
+   * A resumed run: chunk-1's agent re-homed to the ledgered prior session.
+   *
+   * `base()`'s object literal evaluates its `planPath: coveredPlan()` default
+   * even when the caller overrides it, and `coveredPlan()` REWRITES
+   * `subagents/S1/agent-a1.jsonl` — so the move must happen after `base()`
+   * has been built, not before. Callers pass the input through here.
+   */
+  function resumedInput(
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    const input = base(over);
+    const p = input.planPath as string;
     mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
     renameSync(
       join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
@@ -5838,21 +5848,17 @@ describe('composeReview — continuity renders on every verdict', () => {
         { sessionId: 'S1', atMs: Date.now() },
       ]),
     );
-    return p;
+    return input;
   }
 
   it('renders on REQUEST_CHANGES', () => {
-    const r = composeReview(
-      base({ planPath: resumedPlan(), criticalsInline: 1 }),
-    );
+    const r = composeReview(resumedInput({ criticalsInline: 1 }));
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
   });
 
   it('renders on COMMENT', () => {
-    const r = composeReview(
-      base({ planPath: resumedPlan(), suggestionsInline: 1 }),
-    );
+    const r = composeReview(resumedInput({ suggestionsInline: 1 }));
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
   });

@@ -1784,6 +1784,20 @@ describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', 
     );
   }
 
+  it('reads the prior attempt before this session has launched anything', () => {
+    // The scheduler runs BEFORE the first launch of a resumed run, so the
+    // harness has not created `subagents/<current>` yet — the exact shape
+    // `currentDirOptional` exists for.
+    ledger('S0', 'S1');
+    for (const r of [1, 2]) {
+      transcriptIn('S0', record(r, 13, `chunk 13 round ${r} territory walk`));
+    }
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+    const r3 = scheduleReverseAuditRound(plan, [13], 3, process.env, diff);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
   it('retires a chunk on dry receipts the interrupted attempt earned', () => {
     ledger('S0', 'S1');
     for (const r of [1, 2]) {

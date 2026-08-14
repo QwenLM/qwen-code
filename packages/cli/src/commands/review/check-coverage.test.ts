@@ -2310,6 +2310,9 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
 
     const r = coverageFromTranscripts(p, ENV);
+    // `ok` is the verdict that decides exit 0 vs exit 3 (relaunch
+    // everything) — the point of the continuation is that it does not.
+    expect(r.ok).toBe(true);
     expect(r.coveredChunks).toEqual([1, 2]);
     expect(r.recoveredAgents).toBeGreaterThanOrEqual(2);
   });
