@@ -277,7 +277,8 @@ import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import {
   LiveProviderConfigError,
   readLiveVoiceConfiguration,
@@ -586,7 +587,7 @@ export interface ServeAppDeps {
   liveCoordinator?: LiveHostCoordinator;
   liveHostInstaller?: LiveHostInstaller;
   liveSessionCoordinator?: LiveSessionCoordinator;
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
   validateLiveProviderCredential?: (
     credential: LiveProviderCredential,
   ) => Promise<void>;
@@ -1286,106 +1287,94 @@ export function createServeApp(
           message: 'The Live Appshot channel is unavailable.',
         },
   );
-  let liveRuntime: WorkspaceRuntime | undefined;
-  let liveRuntimePromise: Promise<WorkspaceRuntime> | undefined;
+  const conversationRuntimeManager = deps.liveConversationWorkspace
+    ? new ConversationRuntimeManager({
+        workspace: deps.liveConversationWorkspace,
+        registry: workspaceRegistry,
+        publishRuntime: async (canonicalRoot, validate) => {
+          const runtime = await workspaceManagementHandle.publishOwnedRuntime(
+            canonicalRoot,
+            'live-conversation',
+            async (candidate) => {
+              await validate(candidate);
+              await deps.liveConversationWorkspace!.revalidate();
+            },
+          );
+          invalidateServeFeaturesCache();
+          return runtime;
+        },
+      })
+    : undefined;
+  let liveBoundRuntime: WorkspaceRuntime | undefined;
+  let liveBindingPromise: Promise<WorkspaceRuntime> | undefined;
   let liveRuntimeBootPromise: Promise<void> | undefined;
   let liveAppshotChannelPromise: Promise<void> | undefined;
   let liveCoordinatorSealed = false;
-  const bindLiveAppshotHandler = (runtime: WorkspaceRuntime): void => {
+  const clearLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
+    const handlers: Array<((handler: undefined) => void) | undefined> = [
+      runtime.bridge.setLiveScreenContextCaptureHandler,
+      runtime.bridge.setLiveTaskToolRequestHandler,
+      runtime.bridge.setLiveSpeakToUserHandler,
+    ];
+    for (const clear of handlers) {
+      try {
+        clear?.call(runtime.bridge, undefined);
+      } catch {
+        continue;
+      }
+    }
+  };
+  const bindLiveRuntimeHandlers = (runtime: WorkspaceRuntime): void => {
     if (liveCoordinatorSealed) {
       throw new Error('Live Voice is shutting down.');
     }
-    const setHandler = runtime.bridge.setLiveScreenContextCaptureHandler;
-    if (!setHandler) {
+    const setScreenHandler = runtime.bridge.setLiveScreenContextCaptureHandler;
+    const setTaskHandler = runtime.bridge.setLiveTaskToolRequestHandler;
+    const setSpeakHandler = runtime.bridge.setLiveSpeakToUserHandler;
+    if (!setScreenHandler) {
       throw new Error('Live conversation runtime has no Appshot channel.');
     }
-    setHandler.call(runtime.bridge, ({ callerSessionId }) =>
-      liveCoordinator.captureScreenContext(callerSessionId),
-    );
-    const setTaskHandler = runtime.bridge.setLiveTaskToolRequestHandler;
     if (!setTaskHandler) {
       throw new Error('Live conversation runtime has no task-tool channel.');
     }
-    setTaskHandler.call(runtime.bridge, (info) => liveTaskService.handle(info));
-    const setSpeakHandler = runtime.bridge.setLiveSpeakToUserHandler;
     if (!setSpeakHandler) {
       throw new Error('Live conversation runtime has no speech channel.');
     }
-    setSpeakHandler.call(runtime.bridge, ({ callerSessionId, message }) =>
-      liveSessionCoordinator.speakToUser(callerSessionId, message),
-    );
+    liveBoundRuntime = runtime;
+    try {
+      setScreenHandler.call(runtime.bridge, ({ callerSessionId }) =>
+        liveCoordinator.captureScreenContext(callerSessionId),
+      );
+      setTaskHandler.call(runtime.bridge, (info) =>
+        liveTaskService.handle(info),
+      );
+      setSpeakHandler.call(runtime.bridge, ({ callerSessionId, message }) =>
+        liveSessionCoordinator.speakToUser(callerSessionId, message),
+      );
+    } catch (error) {
+      clearLiveRuntimeHandlers(runtime);
+      throw error;
+    }
   };
   const ensureLiveConversationRuntime = (): Promise<WorkspaceRuntime> => {
     if (liveCoordinatorSealed) {
       return Promise.reject(new Error('Live Voice is shutting down.'));
     }
-    if (liveRuntimePromise) return liveRuntimePromise;
+    if (liveBindingPromise) return liveBindingPromise;
     const pending = (async (): Promise<WorkspaceRuntime> => {
-      const conversationWorkspace = deps.liveConversationWorkspace;
-      const runtimePublisher = workspaceManagementHandle;
-      if (!conversationWorkspace || !runtimePublisher) {
+      if (!conversationRuntimeManager) {
         throw new Error('Live conversation runtime is unavailable.');
       }
-      const root = await conversationWorkspace.revalidate();
-      if (liveRuntime) {
-        await conversationWorkspace.assertExactRoot(liveRuntime.workspaceCwd);
-        const entry = workspaceRegistry.getEntryByWorkspaceCwd(
-          root.canonicalRoot,
-        );
-        if (
-          entry?.state !== 'active' ||
-          entry.current?.runtime !== liveRuntime ||
-          liveRuntime.provenance !== 'live-conversation' ||
-          !liveRuntime.trusted ||
-          liveRuntime.removable !== false
-        ) {
-          throw new Error(
-            'Live conversation runtime is no longer an active owned runtime.',
-          );
-        }
-        bindLiveAppshotHandler(liveRuntime);
-        return liveRuntime;
+      const runtime = await conversationRuntimeManager.ensure();
+      if (liveCoordinatorSealed) {
+        throw new Error('Live Voice is shutting down.');
       }
-      const existing = workspaceRegistry.getByWorkspaceCwd(root.canonicalRoot);
-      if (existing) {
-        if (
-          existing.provenance !== 'live-conversation' ||
-          !existing.trusted ||
-          existing.removable !== false
-        ) {
-          throw new Error(
-            'Live conversation root is already registered without Live provenance.',
-          );
-        }
-        await conversationWorkspace.assertExactRoot(existing.workspaceCwd);
-        liveRuntime = existing;
-        bindLiveAppshotHandler(existing);
-        return existing;
-      }
-      const created = await runtimePublisher.publishOwnedRuntime(
-        root.canonicalRoot,
-        'live-conversation',
-        async (candidate) => {
-          await conversationWorkspace.assertExactRoot(candidate.workspaceCwd);
-          if (
-            candidate.provenance !== 'live-conversation' ||
-            !candidate.trusted ||
-            candidate.removable !== false
-          ) {
-            throw new Error(
-              'Live conversation runtime failed its ownership gate.',
-            );
-          }
-        },
-      );
-      liveRuntime = created;
-      bindLiveAppshotHandler(created);
-      invalidateServeFeaturesCache();
-      return created;
+      bindLiveRuntimeHandlers(runtime);
+      return runtime;
     })().finally(() => {
-      if (liveRuntimePromise === pending) liveRuntimePromise = undefined;
+      if (liveBindingPromise === pending) liveBindingPromise = undefined;
     });
-    liveRuntimePromise = pending;
+    liveBindingPromise = pending;
     return pending;
   };
   const verifyLiveAppshotChannel = (): Promise<void> => {
@@ -1539,9 +1528,7 @@ export function createServeApp(
     liveCoordinatorSealed = true;
     if (liveCoordinatorStopped) return;
     liveCoordinatorStopped = true;
-    liveRuntime?.bridge.setLiveScreenContextCaptureHandler?.(undefined);
-    liveRuntime?.bridge.setLiveTaskToolRequestHandler?.(undefined);
-    liveRuntime?.bridge.setLiveSpeakToUserHandler?.(undefined);
+    if (liveBoundRuntime) clearLiveRuntimeHandlers(liveBoundRuntime);
     liveSessionCoordinator.dispose();
     liveCoordinator.dispose();
   };
@@ -1557,7 +1544,7 @@ export function createServeApp(
   ).sealAndWaitLiveCoordinator = async () => {
     stopLiveCoordinator();
     await Promise.all([
-      liveRuntimePromise?.catch(() => undefined),
+      liveBindingPromise?.catch(() => undefined),
       liveAppshotChannelPromise?.catch(() => undefined),
     ]);
   };
