@@ -706,6 +706,13 @@ export interface BridgeClientRequestContext {
   modelPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
   promptDisplayText?: string;
+  /**
+   * Trusted channel-turn classification injected by the daemon prompt route
+   * after validating the channel-worker prompt authorization. Never
+   * populated from caller-controlled ACP metadata: `sendPrompt` strips the
+   * wire key from untrusted callers and re-injects it only from this flag.
+   */
+  channelPrompt?: boolean;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -748,6 +755,9 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
+// Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
+// dependency path between them, so a cross-package test pins the value.
+export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side

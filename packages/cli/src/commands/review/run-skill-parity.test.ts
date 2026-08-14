@@ -58,8 +58,14 @@ describe('run pins match the bundled skill templates', () => {
   itWithSkill('composedNameFor renders Step 6’s --out template', () => {
     // The template as the skill writes it, e.g.
     //   --out .qwen/tmp/qwen-review-{target}-composed.json
+    // The filename must END the token: an unanchored capture matches a skill
+    // edit that APPENDS to the artifact name (`…composed.json.tmp` for an
+    // atomic write-then-rename, `…json-v2` for a rename) as a prefix,
+    // leaving this oracle green while the pin drifts — one direction of the
+    // drift it exists to catch. Whitespace-or-end, not a rejected character
+    // class, so no future suffix character has to be foreseen.
     const m =
-      /--out\s+\.qwen\/tmp\/(qwen-review-\{target\}-composed\.json)/.exec(
+      /--out\s+\.qwen\/tmp\/(qwen-review-\{target\}-composed\.json)(?=\s|$)/.exec(
         skill as string,
       );
     // A null here means SKILL.md no longer writes that `--out` line: update
