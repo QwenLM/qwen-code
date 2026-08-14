@@ -53,7 +53,7 @@ jobs:
 
       - name: 'Minimize comments from blocklisted users'
         env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ github.token }}'
           LOOKBACK_HOURS: "${{ inputs.hours || '2' }}"
         run: |-
           set -euo pipefail
