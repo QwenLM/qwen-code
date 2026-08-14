@@ -4566,6 +4566,9 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    const conditionalDrainDeadline = opts?.onlyIfUnheld
+      ? Date.now() + drainTimeoutMs
+      : undefined;
     // Reject known work before disturbing any active turn. The close gate
     // prevents new turns, but a turn that was already running can still settle
     // into a new hold while the drain below is in progress, so this early read
@@ -4577,13 +4580,28 @@ class QwenAgent implements Agent {
         return { closed: false, holds };
       }
     }
-    for (const [requestId, generation] of this.generationControllers) {
-      if (generation.sessionId !== sessionId) continue;
-      generation.controller.abort();
-      this.generationControllers.delete(requestId);
-    }
     let removedFromStore = false;
     try {
+      if (opts?.onlyIfUnheld) {
+        // Let the turn that already owned the gate settle without cancelling
+        // queues or stopping schedulers. It may create a hold while settling;
+        // a refusal must leave the retained Session untouched.
+        await waitForSessionDrain(
+          session.waitForActiveTurnsToSettle(),
+          drainTimeoutMs,
+          'close',
+        );
+        const holds = session.collectActiveWorkHolds();
+        if (holds.length > 0) {
+          return { closed: false, holds };
+        }
+      }
+
+      for (const [requestId, generation] of this.generationControllers) {
+        if (generation.sessionId !== sessionId) continue;
+        generation.controller.abort();
+        this.generationControllers.delete(requestId);
+      }
       await waitForSessionDrain(
         (async () => {
           try {
@@ -4597,7 +4615,9 @@ class QwenAgent implements Agent {
           }
           await session.waitForActiveTurnsToSettle();
         })(),
-        drainTimeoutMs,
+        conditionalDrainDeadline === undefined
+          ? drainTimeoutMs
+          : Math.max(1, conditionalDrainDeadline - Date.now()),
         'close',
       );
 

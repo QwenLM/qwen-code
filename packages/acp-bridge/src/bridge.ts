@@ -2499,17 +2499,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     reason: string,
   ): Promise<void> {
-    if (!entryIsAutoCloseCandidate(entry)) return;
     // Note the asymmetry, preserved from the call sites this replaces: the
     // kill path keys off `attachCount`, the close path off `clientIds`. A
     // spawn owner that asked for a kill gets one once nothing is attached,
-    // even if some client id is still registered.
-    if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+    // even if some client id is still registered. This is a deferred explicit
+    // kill, so incomplete child reporting must not turn it into ordinary
+    // cleanup or leave it pending forever.
+    if (
+      byId.get(entry.sessionId) === entry &&
+      !entry.closing &&
+      entry.spawnOwnerWantedKill &&
+      entry.attachCount === 0
+    ) {
       await bridgeApi.killSession(entry.sessionId).catch(() => {
         /* best-effort; channel.exited will eventually reap anyway */
       });
       return;
     }
+    if (!entryIsAutoCloseCandidate(entry)) return;
     if (entry.clientIds.size > 0) return;
     await closeIfChildUnheld(entry, {
       trigger: reason,
@@ -2610,6 +2617,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
           sessionId: entry.sessionId,
           [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+          drainTimeoutMs: Math.max(
+            1,
+            Math.floor(ACTIVE_WORK_CLOSE_TIMEOUT_MS * 0.8),
+          ),
         }),
         ACTIVE_WORK_CLOSE_TIMEOUT_MS,
         SERVE_CONTROL_EXT_METHODS.sessionClose,

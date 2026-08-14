@@ -392,6 +392,37 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('honors a deferred spawn-owner kill for an incomplete child', async () => {
+      const handle = makeChannel({
+        initializeImpl: () =>
+          activeWorkInitializeResponse({
+            categories: [...ACTIVE_WORK_LEGACY_HOLD_CATEGORIES],
+          }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      try {
+        const owner = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const attacher = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: owner.sessionId, holds: [] },
+        ]);
+
+        await expect(
+          bridge.killSession(owner.sessionId, {
+            requireZeroAttaches: true,
+          }),
+        ).resolves.toBe(false);
+        await bridge.detachClient(attacher.sessionId, attacher.clientId);
+
+        expect(bridge.sessionCount).toBe(0);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
     it('accepts the aggregate shell hold as active work', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
@@ -743,7 +774,11 @@ describe('createAcpSessionBridge', () => {
       await bridge.detachClient(session.sessionId, session.clientId);
 
       await vi.waitFor(() => expect(closeCalls.length).toBe(1));
-      expect(closeCalls[0]?.['sessionId']).toBe(session.sessionId);
+      expect(closeCalls[0]).toMatchObject({
+        sessionId: session.sessionId,
+        [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+        drainTimeoutMs: Math.floor(ACTIVE_WORK_CLOSE_TIMEOUT_MS * 0.8),
+      });
       await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
 
       await bridge.shutdown();
@@ -10617,13 +10652,17 @@ describe('createAcpSessionBridge', () => {
     vi.useFakeTimers();
     const lateRestore = deferred<LoadSessionResponse>();
     const first = makeChannel({
+      initializeImpl: () =>
+        activeWorkInitializeResponse({
+          categories: [...ACTIVE_WORK_LEGACY_HOLD_CATEGORIES],
+        }),
       loadSessionImpl: () => lateRestore.promise,
       extMethodImpl: (method, params) => {
-        if (
-          method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
-          params['sessionId'] === 'restore-cleanup-fails'
-        ) {
-          throw new Error('late close failed');
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          if (params['sessionId'] === 'restore-cleanup-fails') {
+            throw new Error('late close failed');
+          }
+          return { closed: true, holds: [] };
         }
         return {};
       },
@@ -10699,8 +10738,16 @@ describe('createAcpSessionBridge', () => {
         }),
       ).resolves.toMatchObject({ stopReason: 'end_turn' });
 
-      await bridge.closeSession(sibling.sessionId);
+      await bridge.detachClient(sibling.sessionId, sibling.clientId);
       await vi.advanceTimersByTimeAsync(0);
+      expect(first.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        params: {
+          sessionId: sibling.sessionId,
+          drainTimeoutMs: 8_000,
+        },
+      });
+      expect(bridge.sessionCount).toBe(0);
       expect(first.killed).toBe(true);
       await vi.advanceTimersByTimeAsync(0);
       await expect(
