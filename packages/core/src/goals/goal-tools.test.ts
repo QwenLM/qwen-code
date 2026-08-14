@@ -182,6 +182,43 @@ describe('GetGoalTool', () => {
     expect(getGoalForWorker).not.toHaveBeenCalled();
   });
 
+  it('summarises a paused Goal outside a permitted turn', async () => {
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 2,
+          objective: 'Ship Goal v3',
+          status: 'paused' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 1,
+          activeTimeMs: 750,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      }),
+    });
+
+    const result = await execute(new GetGoalTool(config));
+
+    expect(JSON.parse(String(result.llmContent))).toEqual({
+      active: false,
+      lastGoal: {
+        goalId: 'goal-1',
+        revision: 2,
+        status: 'paused',
+        turnCount: 1,
+        activeTimeMs: 750,
+      },
+    });
+    expect(result.returnDisplay).toBe(
+      'No Goal turn is permitted · last Goal paused after 1 turn',
+    );
+  });
+
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
     const config = makeConfig({
       getGoalForWorker: vi.fn(),

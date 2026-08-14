@@ -172,20 +172,8 @@ function unpermittedGoalResult(lastGoal: LastGoalSummary | undefined) {
     };
   }
   return {
-    llmContent: JSON.stringify({
-      active: false,
-      lastGoal: {
-        goalId: lastGoal.goalId,
-        revision: lastGoal.revision,
-        status: lastGoal.status,
-        turnCount: lastGoal.turnCount,
-        activeTimeMs: lastGoal.activeTimeMs,
-        ...(lastGoal.lastReason === undefined
-          ? {}
-          : { lastReason: lastGoal.lastReason }),
-      },
-    }),
-    returnDisplay: `No Goal turn is permitted · last Goal ${lastGoal.status} after ${lastGoal.turnCount} turns`,
+    llmContent: JSON.stringify({ active: false, lastGoal }),
+    returnDisplay: `No Goal turn is permitted · last Goal ${lastGoal.status} after ${lastGoal.turnCount} ${lastGoal.turnCount === 1 ? 'turn' : 'turns'}`,
   };
 }
 
