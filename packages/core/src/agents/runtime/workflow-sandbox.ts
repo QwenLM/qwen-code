@@ -148,88 +148,64 @@ export interface WorkflowMeta {
   phases?: Array<{ title: string; detail?: string; model?: string }>;
 }
 
-function observePromiseRejections<T>(run: () => T): T {
-  const nativeThen = Promise.prototype.then;
-  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-  const defineProperty = Object.defineProperty;
-  const deleteProperty = Reflect.deleteProperty;
-  let attaching = false;
-  let createdPromise = false;
-  const hook = createHook({
-    init(_asyncId, type, _triggerAsyncId, resource) {
-      if (type !== 'PROMISE' || attaching) return;
-      createdPromise = true;
-      attaching = true;
-      const ownConstructor = getOwnPropertyDescriptor(resource, 'constructor');
-      try {
-        defineProperty(resource, 'constructor', {
-          value: Promise,
-          configurable: true,
-        });
-        Reflect.apply(nativeThen, resource, [undefined, () => undefined]);
-      } catch {
-        // Non-native thenables are rejected by the bounded serializer.
-      } finally {
-        if (ownConstructor) {
-          defineProperty(resource, 'constructor', ownConstructor);
-        } else {
-          Reflect.apply(deleteProperty, Reflect, [resource, 'constructor']);
-        }
-        attaching = false;
-      }
+function evaluateMetaIsolated(metaSource: string): string {
+  const childEnv = { ...process.env };
+  // The inline evaluator has no source coverage to collect; inherited V8
+  // coverage only adds cold-start cost and races the parent's coverage files.
+  delete childEnv['NODE_V8_COVERAGE'];
+  const result = spawnSync(
+    process.execPath,
+    [
+      `--max-old-space-size=${META_CHILD_MAX_OLD_SPACE_MB}`,
+      '--eval',
+      META_CHILD_SOURCE,
+    ],
+    {
+      input: metaSource,
+      encoding: 'utf8',
+      timeout: META_CHILD_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: META_SERIALIZED_MAX_CHARS * 8,
+      windowsHide: true,
+      env: childEnv,
     },
-  });
-  hook.enable();
-  try {
-    const value = run();
-    if (createdPromise) {
-      throw new Error(META_PROMISE_ERROR);
-    }
-    return value;
-  } finally {
-    hook.disable();
-  }
-}
-
-function formatMetaEvaluationError(error: unknown): string {
-  const context = createMetaContext();
-  Object.defineProperty(context, META_ERROR_SLOT, { value: error });
-  try {
-    const message = new vm.Script(META_ERROR_SOURCE).runInContext(context, {
-      timeout: META_EVAL_TIMEOUT_MS,
-    });
-    return typeof message === 'string' ? message : 'unknown error';
-  } catch {
-    return 'unknown error';
-  }
-}
-
-function createMetaContext(): vm.Context {
-  return vm.createContext(Object.create(null), {
-    microtaskMode: 'afterEvaluate',
-  });
-}
-
-function drainMetaMicrotasks(context: vm.Context): void {
-  new vm.Script('void 0').runInContext(context, {
-    timeout: META_EVAL_TIMEOUT_MS,
-  });
-}
-
-function metaStageError(
-  stage: 'evaluate' | 'serialize',
-  error: unknown,
-  metaContext: vm.Context,
-): Error {
-  let message = formatMetaEvaluationError(error);
-  try {
-    drainMetaMicrotasks(metaContext);
-  } catch (drainError) {
-    message = formatMetaEvaluationError(drainError);
-  }
-  return new Error(
-    `extractAndStripMeta: failed to ${stage} meta object literal: ${message}`,
   );
+  const stage = result.stderr.includes(META_CHILD_SERIALIZE_MARKER)
+    ? 'serialize'
+    : 'evaluate';
+  if (result.error) {
+    const message =
+      'code' in result.error && result.error.code === 'ETIMEDOUT'
+        ? `isolated evaluator exceeded ${META_CHILD_TIMEOUT_MS}ms`
+        : result.error.message;
+    throw new Error(
+      `extractAndStripMeta: failed to ${stage} meta object literal: ${message}`,
+    );
+  }
+  let response: { ok: boolean; serialized?: unknown; error?: unknown };
+  try {
+    response = JSON.parse(result.stdout) as typeof response;
+  } catch {
+    throw new Error(
+      `extractAndStripMeta: failed to ${stage} meta object literal: ` +
+        'isolated evaluator exited without a result',
+    );
+  }
+  if (!response.ok) {
+    throw new Error(
+      typeof response.error === 'string'
+        ? response.error
+        : `extractAndStripMeta: failed to ${stage} meta object literal: ` +
+          'unknown error',
+    );
+  }
+  if (typeof response.serialized !== 'string') {
+    throw new Error(
+      'extractAndStripMeta: failed to serialize meta object literal: ' +
+        'unexpected serializer result',
+    );
+  }
+  return response.serialized;
 }
 
 /**
@@ -253,14 +229,11 @@ function metaStageError(
  *      and the host parses the result into host-realm plain objects. Its
  *      intrinsics have never been exposed to the model-authored program.
  *
- * Both scripts run under `META_EVAL_TIMEOUT_MS`, and the split between them
- * is what makes that bound real. The literal is model-authored source, so it
- * can defer arbitrary work to property-read time — `{ get phases() { while
- * (true) {} } }` evaluates instantly and only spins when something
- * reads `.phases`. Walking the value on the host would run that getter on the
- * host thread, where no timeout can reach it and a synchronous loop blocks
- * the event loop outright. Doing the walk inside the vm puts the getter back
- * under the timeout.
+ * Both scripts run in a bounded child process. The model-authored literal can
+ * defer arbitrary work to property-read time — `{ get phases() { while (true)
+ * {} } }` evaluates instantly and only spins when something reads `.phases`.
+ * The child boundary lets the host force-stop even native builtins that do not
+ * reach a `node:vm` interrupt point promptly.
  *
  * The two scripts must stay separate programs for a second reason: the copy
  * helper interpolates only fixed host constants, never model-authored source,
@@ -286,34 +259,7 @@ export function extractAndStripMeta(source: string): {
   const stripped =
     source.slice(0, bounds.exportIdx) + source.slice(bounds.afterMeta);
 
-  // Null-prototyped globalThis: no host bridge (no `process` / `require`
-  // / `args` / workflow-sandbox bridge globals). The vm realm still
-  // provides its own intrinsics, but that's intentional — see the
-  // docstring above.
-  const metaContext = createMetaContext();
-  let raw: unknown;
-  let serialized: unknown;
-  observePromiseRejections(() => {
-    try {
-      raw = new vm.Script(`(${metaSource})`).runInContext(metaContext, {
-        timeout: META_EVAL_TIMEOUT_MS,
-      });
-    } catch (e) {
-      throw metaStageError('evaluate', e, metaContext);
-    }
-
-    try {
-      const serializeContext = createMetaContext();
-      Object.defineProperty(serializeContext, META_SLOT, { value: raw });
-      serialized = new vm.Script(META_SERIALIZE_SOURCE).runInContext(
-        serializeContext,
-        { timeout: META_EVAL_TIMEOUT_MS },
-      );
-      drainMetaMicrotasks(metaContext);
-    } catch (e) {
-      throw metaStageError('serialize', e, metaContext);
-    }
-  });
+  const serialized = evaluateMetaIsolated(metaSource);
 
   let walked: {
     hasThenable: boolean;
@@ -469,7 +415,7 @@ function isRegexContext(source: string, i: number): boolean {
   return /[{[(,;:=!&|?+\-*/%^~<>]/.test(prev);
 }
 
-import { createHook } from 'node:async_hooks';
+import { spawnSync } from 'node:child_process';
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
@@ -488,15 +434,14 @@ const MAX_PHASE_ENTRIES = 10_000;
 // nested model-authored input.
 const ARGS_MAX_DEPTH = 64;
 
-// Wall-clock bound on each of the two vm scripts that evaluate and serialise
-// the `meta` literal. The literal is model-authored source, so a field value
-// that never returns — `{ name: (function(){ while(true){} })() }`, or the
-// lazier `{ get name() { while(true){} } }` — would otherwise wedge the
-// calling thread: the loop is synchronous, so no timer fires and no signal
-// handler runs. `vm`'s own timeout is the only mechanism that can interrupt
-// synchronous JS from inside the process. Generous for a contract object of
-// strings and small arrays; tight enough that a wedge is reported promptly.
+// Per-script timeout inside the isolated evaluator. The child has a separate
+// outer timeout because V8 cannot interrupt one long native builtin promptly.
 const META_EVAL_TIMEOUT_MS = 250;
+const META_CHILD_TIMEOUT_MS = 2_000;
+// Prevent allocation-heavy literals from exhausting the host process before
+// the child timeout can stop them.
+const META_CHILD_MAX_OLD_SPACE_MB = 256;
+const META_CHILD_SERIALIZE_MARKER = '__qwen_meta_serialize__';
 
 // Cap on the serialised meta payload. Bounds what a literal can force the
 // host to retain and re-parse — a 250ms budget is enough to allocate a very
@@ -606,6 +551,10 @@ const META_SERIALIZE_SOURCE = `(() => {
     }
     if (apply(setHas, promiseScanSeen, [value])) return;
     apply(setAdd, promiseScanSeen, [value]);
+    if (isArray(value) && value.length * 2 > budget) {
+      tooLarge = true;
+      return;
+    }
     const descriptors = getOwnPropertyDescriptors(value);
     const keys = ownKeys(descriptors);
     for (let i = 0; i < keys.length; i++) {
@@ -675,6 +624,135 @@ const META_SERIALIZE_SOURCE = `(() => {
   }
   return serialized;
 })()`;
+
+const META_CHILD_SOURCE = `
+const { createHook } = require('node:async_hooks');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const META_EVAL_TIMEOUT_MS = ${META_EVAL_TIMEOUT_MS};
+const META_PROMISE_ERROR = ${JSON.stringify(META_PROMISE_ERROR)};
+const META_SLOT = ${JSON.stringify(META_SLOT)};
+const META_ERROR_SLOT = ${JSON.stringify(META_ERROR_SLOT)};
+const META_ERROR_SOURCE = ${JSON.stringify(META_ERROR_SOURCE)};
+const META_SERIALIZE_SOURCE = ${JSON.stringify(META_SERIALIZE_SOURCE)};
+const META_CHILD_SERIALIZE_MARKER = ${JSON.stringify(META_CHILD_SERIALIZE_MARKER)};
+
+process.on('unhandledRejection', () => {});
+
+function createMetaContext() {
+  return vm.createContext(Object.create(null), {
+    microtaskMode: 'afterEvaluate',
+  });
+}
+
+function drainMetaMicrotasks(context) {
+  new vm.Script('void 0').runInContext(context, {
+    timeout: META_EVAL_TIMEOUT_MS,
+  });
+}
+
+function formatMetaEvaluationError(error) {
+  const context = createMetaContext();
+  Object.defineProperty(context, META_ERROR_SLOT, { value: error });
+  try {
+    const message = new vm.Script(META_ERROR_SOURCE).runInContext(context, {
+      timeout: META_EVAL_TIMEOUT_MS,
+    });
+    return typeof message === 'string' ? message : 'unknown error';
+  } catch {
+    return 'unknown error';
+  }
+}
+
+function metaStageError(stage, error, metaContext) {
+  let message = formatMetaEvaluationError(error);
+  try {
+    drainMetaMicrotasks(metaContext);
+  } catch (drainError) {
+    message = formatMetaEvaluationError(drainError);
+  }
+  return new Error(
+    'extractAndStripMeta: failed to ' + stage +
+      ' meta object literal: ' + message,
+  );
+}
+
+function observePromiseRejections(run) {
+  const nativeThen = Promise.prototype.then;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const defineProperty = Object.defineProperty;
+  const deleteProperty = Reflect.deleteProperty;
+  let attaching = false;
+  let createdPromise = false;
+  const hook = createHook({
+    init(_asyncId, type, _triggerAsyncId, resource) {
+      if (type !== 'PROMISE' || attaching) return;
+      createdPromise = true;
+      attaching = true;
+      const ownConstructor = getOwnPropertyDescriptor(resource, 'constructor');
+      try {
+        defineProperty(resource, 'constructor', {
+          value: Promise,
+          configurable: true,
+        });
+        Reflect.apply(nativeThen, resource, [undefined, () => undefined]);
+      } catch {
+        // Non-native thenables are rejected by the bounded serializer.
+      } finally {
+        if (ownConstructor) {
+          defineProperty(resource, 'constructor', ownConstructor);
+        } else {
+          Reflect.apply(deleteProperty, Reflect, [resource, 'constructor']);
+        }
+        attaching = false;
+      }
+    },
+  });
+  hook.enable();
+  try {
+    const value = run();
+    if (createdPromise) throw new Error(META_PROMISE_ERROR);
+    return value;
+  } finally {
+    hook.disable();
+  }
+}
+
+try {
+  const metaSource = fs.readFileSync(0, 'utf8');
+  const metaContext = createMetaContext();
+  const serialized = observePromiseRejections(() => {
+    let raw;
+    try {
+      raw = new vm.Script('(' + metaSource + ')').runInContext(metaContext, {
+        timeout: META_EVAL_TIMEOUT_MS,
+      });
+    } catch (error) {
+      throw metaStageError('evaluate', error, metaContext);
+    }
+
+    fs.writeSync(2, META_CHILD_SERIALIZE_MARKER);
+    try {
+      const serializeContext = createMetaContext();
+      Object.defineProperty(serializeContext, META_SLOT, { value: raw });
+      const output = new vm.Script(META_SERIALIZE_SOURCE).runInContext(
+        serializeContext,
+        { timeout: META_EVAL_TIMEOUT_MS },
+      );
+      drainMetaMicrotasks(metaContext);
+      return output;
+    } catch (error) {
+      throw metaStageError('serialize', error, metaContext);
+    }
+  });
+  process.stdout.write(JSON.stringify({ ok: true, serialized }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    error: error instanceof Error ? error.message : 'unknown error',
+  }));
+}
+`;
 
 /**
  * WorkflowAgentOpts — structured options for the `agent()` global.

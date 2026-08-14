@@ -361,6 +361,24 @@ describe('extractAndStripMeta', () => {
       expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
     });
 
+    it('bounds descriptor scanning for a materialized array', () => {
+      const src = `export const meta = { name: 'x', description: 'd', phases: new Array(10_000_000).fill({}) }\nreturn 1`;
+      const startedAt = Date.now();
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to serialize meta object literal/,
+      );
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+    });
+
+    it('bounds a long native builtin during evaluation', () => {
+      const src = `export const meta = { name: (new Array(2**26).fill(1).sort(), 'x'), description: 'd' }\nreturn 1`;
+      const startedAt = Date.now();
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+    });
+
     it('bounds a looping then getter', () => {
       const src = `export const meta = { name: 'x', description: 'd', extra: { get then() { while (true) {} } } }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
@@ -617,6 +635,20 @@ describe('extractAndStripMeta', () => {
       } }),
     }\nreturn 1`;
     expect(() => extractAndStripMeta(src)).toThrow();
+  });
+
+  it('preserves phase arrays after attempted Array.prototype poisoning', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      phases: [{ title: 'real' }],
+      extra: Object.defineProperty({}, 'value', { enumerable: true, get: function () {
+        const serializerGlobal = arguments.callee.caller.constructor('return globalThis')();
+        serializerGlobal.Array.prototype.toJSON = () => [{ title: 'forged' }];
+        return 'safe';
+      } }),
+    }\nreturn 1`;
+    expect(extractAndStripMeta(src).meta?.phases).toEqual([{ title: 'real' }]);
   });
 
   it('rejects an oversized payload after attempted envelope forgery', () => {
