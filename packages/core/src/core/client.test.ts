@@ -633,6 +633,7 @@ describe('Gemini Client (client.ts)', () => {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      getSessionRestoreRuntime: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
@@ -705,6 +706,46 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('initializes from the selective runtime projection without the full transcript', async () => {
+      const seedResumeTokenCountsSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'seedResumeTokenCounts',
+      );
+      const apiHistory = [
+        { role: 'user' as const, parts: [{ text: 'projected history' }] },
+      ];
+      const uiEvent = { type: 'projected-event' };
+      vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+        apiHistory,
+        resumeTokenCounts: {
+          promptTokenCount: 321,
+          outputTokenCount: 45,
+          isEstimated: false,
+        },
+        uiTelemetryEvents: [uiEvent],
+        recording: {
+          lastCompletedUuid: 'record-1',
+          turnParentUuids: [],
+        },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getHistory().at(-1)).toEqual(apiHistory[0]);
+      expect(uiTelemetryService.resetSession).toHaveBeenCalledWith(
+        'test-session-id',
+      );
+      expect(uiTelemetryService.addEvent).toHaveBeenCalledWith(
+        uiEvent,
+        'test-session-id',
+      );
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
+    });
+
     it('seeds resumed chat with replayed prompt token count', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {
