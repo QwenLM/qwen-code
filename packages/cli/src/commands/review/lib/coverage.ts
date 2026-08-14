@@ -717,6 +717,16 @@ export function coverageFromTranscripts(
       budgetGaps.push({ agent: name, gaps });
     }
 
+    // A PRIOR attempt's agent that never returned did not review anything.
+    // Its transcript can look complete — verbatim prompt, a diff read — yet
+    // its findings never existed, because the session died mid-flight; the
+    // resumed run would then skip the relaunch and ship the chunk unread.
+    // Only prior records take this bar: an empty final text in the CURRENT
+    // session is an agent still running (or a whiff the idle checks own),
+    // and a single-session run cannot reach this state at all — its crash
+    // rewrites the plan and fences the record out.
+    if (rec.fromPriorSession && rec.finalText.trim() === '') continue;
+
     // What it was told to read, plus what it demonstrably read. The second
     // term is what lets an agent handed the bare diff path with no
     // territory — a reverse-audit pass, a verifier — be credited for
@@ -1002,6 +1012,9 @@ export function coverageFromTranscripts(
   // whose launch verbatim-contains a CLI-built prompt and shows the brief or
   // the diff actually opened earns a count here.
   const certifies = (r: AgentRecord): boolean => {
+    // Same bar as the coverage walk: a prior agent that never returned did
+    // not finish, so it is not recovered work either.
+    if (r.finalText.trim() === '') return false;
     // A record whose own return declares a chunk unreachable did not review
     // it; counting it as recovered would have the body announce work
     // "counted as reviewed" beside the gap that same record disclosed.

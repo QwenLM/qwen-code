@@ -44,6 +44,31 @@ import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
  * takes it as an argument. A path the model can choose is a path the model can
  * point somewhere flattering.
  */
+/**
+ * Slack for the run-epoch fence: absorbs the sub-millisecond skew between a
+ * file mtime (fractional) and `Date.now()` (integral) when a record is
+ * written moments after the plan. Real cross-run gaps are minutes to hours.
+ */
+export const RUN_EPOCH_SLACK_MS = 2000;
+
+/**
+ * The run's epoch: records older than this predate the run and are ignored.
+ *
+ * Every per-run artifact beside the plan keys on this — the deadline stamps,
+ * the prompt records, the transcripts, the session ledger — because the plan
+ * path is stable per PR while its mtime dates the run. One definition, so a
+ * change to the fence cannot apply to some readers and not others. An
+ * unstatable plan disables the fence (fail open, like every other malformed
+ * input these readers take).
+ */
+export function runEpochMs(planPath: string): number {
+  try {
+    return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
+  } catch {
+    return Number.NEGATIVE_INFINITY;
+  }
+}
+
 export function promptRecordDir(planPath: string): string {
   const p = resolve(planPath);
   return join(dirname(p), `${basename(p).replace(/\.json$/i, '')}-prompts`);

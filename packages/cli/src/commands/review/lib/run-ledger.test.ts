@@ -98,11 +98,30 @@ describe('appendRunSession / priorSessionIds', () => {
   });
 
   it('keeps entries when the plan is untouched — the resume case', () => {
+    // A resume does not rewrite the plan, so the entry's recorded plan mtime
+    // still matches. (Backdating the plan here would be a DIFFERENT plan
+    // state, which the exact fresh-run boundary is right to reject — the
+    // rewrite case has its own test below.)
     appendRunSession(plan, envOf('S1'));
-    // Simulate time passing without a plan rewrite: entries stay visible.
-    const past = new Date(Date.now() - 3600_000);
-    utimesSync(plan, past, past);
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
+  });
+
+  it('drops an entry written against a DIFFERENT plan state', () => {
+    // The window's slack is inexact by construction: a previous run that
+    // appended within it survives the fence. The recorded plan mtime is the
+    // exact boundary — a fresh run rewrites the plan, a resume does not.
+    appendRunSession(plan, envOf('S0'));
+    const later = new Date(Date.now() + 1000);
+    utimesSync(plan, later, later);
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
+  it('reads a case-variant of the current session as the SAME session', () => {
+    // These ids become path segments; on APFS/Windows `s1` and `S1` are one
+    // directory, so treating a variant as a prior session double-reads every
+    // record this run wrote and mints a resume that never happened.
+    appendRunSession(plan, envOf('s1'));
+    expect(priorSessionIds(plan, envOf('S1'))).toEqual([]);
   });
 
   it('reads a corrupt ledger as empty', () => {

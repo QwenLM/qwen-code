@@ -2297,6 +2297,23 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(false);
   });
 
+  it('does NOT credit a prior agent that died mid-flight', () => {
+    // Verbatim prompt, a logged diff read, and no return: the session was
+    // killed before it reported. Crediting it would let the resumed run skip
+    // the relaunch and ship a chunk whose findings never existed anywhere.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1dead', good(1), { calls: 2, text: '' });
+    moveToSession('a1dead', 'S0');
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).toEqual([2]);
+    expect(r.missingChunks).toEqual([1]);
+    expect(r.recoveredAgents).toBe(0);
+    expect(r.ok).toBe(false);
+  });
+
   it('credits the prior attempt when this session launched nothing at all', () => {
     // The zero-launch continuation: the harness creates subagents/<session>
     // on the first launch, so a run that recovered everything has no dir.
