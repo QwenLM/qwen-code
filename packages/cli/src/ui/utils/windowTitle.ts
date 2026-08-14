@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { sanitizeForOsc } from '../ui/utils/osc8.js';
-import { ICON } from '../ui/constants.js';
-import { StreamingState } from '../ui/types.js';
+import { sanitizeForOsc } from './osc8.js';
+import { ICON } from '../constants.js';
+import { StreamingState } from '../types.js';
 
 export const DEFAULT_WINDOW_TITLE = 'qwen';
 
