@@ -25,7 +25,7 @@ describe('xiaomiMimoProvider', () => {
       id: 'xiaomi-mimo',
       label: 'Xiaomi MiMo API Key',
       protocol: AuthType.USE_OPENAI,
-      envKey: 'MIMO_API_KEY',
+      envKey: expect.any(Function),
       apiKeyPlaceholder: 'sk-... or tp-...',
       modelsEditable: true,
       mergeModelsByIdentity: true,
@@ -70,7 +70,7 @@ describe('xiaomiMimoProvider', () => {
       modelIds: ['mimo-v2.5-pro', 'mimo-v2.5'],
     });
 
-    expect(plan.env).toEqual({ MIMO_API_KEY: 'tp-mimo' });
+    expect(plan.env).toEqual({ MIMO_TOKEN_PLAN_API_KEY: 'tp-mimo' });
     expect(plan.modelProviders?.[0]).toMatchObject({
       retainCurrentModelAcrossEndpoints: true,
       ownsModel: expect.any(Function),
@@ -81,7 +81,7 @@ describe('xiaomiMimoProvider', () => {
         id: 'mimo-v2.5-pro',
         name: '[Xiaomi MiMo] mimo-v2.5-pro',
         baseUrl: 'https://token-plan-sgp.xiaomimimo.com/v1',
-        envKey: 'MIMO_API_KEY',
+        envKey: 'MIMO_TOKEN_PLAN_API_KEY',
         generationConfig: { contextWindowSize: 1048576 },
       }),
       expect.objectContaining({
@@ -92,6 +92,24 @@ describe('xiaomiMimoProvider', () => {
         },
       }),
     ]);
+  });
+
+  it('keeps pay-as-you-go and Token Plan credentials separate', () => {
+    const payGoPlan = buildInstallPlan(xiaomiMimoProvider, {
+      baseUrl: 'https://api.xiaomimimo.com/v1',
+      apiKey: 'sk-mimo',
+      modelIds: ['mimo-v2.5-pro'],
+    });
+    const tokenPlan = buildInstallPlan(xiaomiMimoProvider, {
+      baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+      apiKey: 'tp-mimo',
+      modelIds: ['mimo-v2.5-pro'],
+    });
+
+    expect(payGoPlan.env).toEqual({ MIMO_API_KEY: 'sk-mimo' });
+    expect(tokenPlan.env).toEqual({
+      MIMO_TOKEN_PLAN_API_KEY: 'tp-mimo',
+    });
   });
 
   it.each([
@@ -130,7 +148,7 @@ describe('xiaomiMimoProvider', () => {
     expect(
       findProviderByCredentials(
         'https://token-plan-ams.xiaomimimo.com/v1',
-        'MIMO_API_KEY',
+        'MIMO_TOKEN_PLAN_API_KEY',
       ),
     ).toBe(xiaomiMimoProvider);
   });

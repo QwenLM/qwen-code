@@ -276,24 +276,12 @@ export async function applyProviderInstallPlan(
             ),
           )
         : (plan.modelProviders ?? []).flatMap((patch) => patch.models);
-      const currentIdOnlyModel =
-        currentBaseUrl === '' || currentBaseUrl === undefined
-          ? (updatedModelProviders[plan.authType] ?? []).find(
-              (model) => model.id === currentModelId,
-            )
-          : undefined;
-      const currentIdOnlyModelBelongsToPlan =
-        retainAcrossEndpoints.length === 0 ||
-        (currentIdOnlyModel !== undefined &&
-          retainAcrossEndpoints.some((patch) =>
-            patch.ownsModelAcrossEndpoints?.(currentIdOnlyModel),
-          ));
       const planOffersCurrentModel =
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
         offeredModels.some((model) =>
           currentBaseUrl === '' || currentBaseUrl === undefined
-            ? currentIdOnlyModelBelongsToPlan && model.id === currentModelId
+            ? model.id === currentModelId
             : isSameModelIdentity(
                 { id: currentModelId, baseUrl: currentBaseUrl },
                 model,

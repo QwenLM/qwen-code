@@ -508,6 +508,49 @@ describe('applyProviderInstallPlan', () => {
     });
   });
 
+  it('keeps an id-only selection when reinstalling a provider behind a duplicate', async () => {
+    const currentModelId = 'kimi-k2.6';
+    const kimiUrl = 'https://api.moonshot.ai/v1';
+    const kimiModels = buildProviderTemplate(kimiProvider, kimiUrl);
+    const tokenModels = buildProviderTemplate(
+      tokenPlanProvider,
+      TOKEN_PLAN_GLOBAL_BASE_URL,
+    );
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [...kimiModels, ...tokenModels],
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === 'model.name') return currentModelId;
+      if (key === 'model.baseUrl') return '';
+      return '';
+    });
+    const plan = buildInstallPlan(tokenPlanProvider, {
+      baseUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
+      apiKey: 'rotated-token-plan-key',
+      modelIds: tokenModels.map((model) => model.id),
+    });
+
+    await applyProviderInstallPlan(plan, {
+      settings: adapter,
+      doRefreshAuth: false,
+    });
+
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.name',
+      expect.anything(),
+    );
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      expect.anything(),
+    );
+    const writtenModels = adapter.setValue.mock.calls.find(
+      ([key]) => key === 'modelProviders.openai',
+    )?.[1] as Array<{ id: string; envKey?: string }>;
+    expect(
+      writtenModels.find((model) => model.id === currentModelId),
+    ).toMatchObject({ envKey: KIMI_API_ENV_KEY });
+  });
+
   it('keeps id-only sibling endpoint resolution stable on first install', async () => {
     const chinaUrl = 'https://api.moonshot.cn/v1';
     const intlUrl = 'https://api.moonshot.ai/v1';

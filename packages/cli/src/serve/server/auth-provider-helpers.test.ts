@@ -52,7 +52,7 @@ describe('buildAuthProviderCatalog', () => {
     expect(options[2]?.models).toEqual(options[1]?.models);
   });
 
-  it('populates per-option envKey for providers with a static envKey', () => {
+  it('populates endpoint-specific env keys for Xiaomi MiMo', () => {
     const catalog = buildAuthProviderCatalog('/workspace');
     const xiaomi = catalog.providers.find(
       (provider) => provider.id === 'xiaomi-mimo',
@@ -64,9 +64,10 @@ describe('buildAuthProviderCatalog', () => {
     );
     const options = xiaomi?.baseUrl as ServeAuthProviderBaseUrlOption[];
     expect(options).toHaveLength(4);
-    for (const option of options) {
-      expect(option.envKey).toBe('MIMO_API_KEY');
-    }
+    expect(options[0]?.envKey).toBe('MIMO_API_KEY');
+    expect(options[1]?.envKey).toBe('MIMO_TOKEN_PLAN_API_KEY');
+    expect(options[2]?.envKey).toBe('MIMO_TOKEN_PLAN_API_KEY');
+    expect(options[3]?.envKey).toBe('MIMO_TOKEN_PLAN_API_KEY');
     // The options carry no per-option models; the descriptor's top-level
     // models fall back to the provider-wide list and seed the Web Shell
     // models field.

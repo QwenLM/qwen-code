@@ -85,7 +85,10 @@ export {
   OPENROUTER_ENV_KEY,
 } from './presets/openrouter.js';
 export { REQUESTY_BASE_URL, REQUESTY_ENV_KEY } from './presets/requesty.js';
-export { XIAOMI_MIMO_ENV_KEY } from './presets/xiaomi-mimo.js';
+export {
+  XIAOMI_MIMO_ENV_KEY,
+  XIAOMI_MIMO_TOKEN_ENV_KEY,
+} from './presets/xiaomi-mimo.js';
 
 // Install logic
 export {

@@ -388,6 +388,7 @@ describe('settingsWriter', () => {
           OPENROUTER_API_KEY: 'sk-openrouter',
           KIMI_CODE_API_KEY: 'sk-kimi-code',
           MIMO_API_KEY: 'sk-mimo',
+          MIMO_TOKEN_PLAN_API_KEY: 'tp-mimo',
           MOONSHOT_API_KEY: 'sk-kimi-api',
           BAILIAN_CODING_PLAN_API_KEY: 'sk-coding',
           BAILIAN_TOKEN_PLAN_API_KEY: 'sk-token',

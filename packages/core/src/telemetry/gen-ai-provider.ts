@@ -7,11 +7,7 @@
 export type GenAiOperationName = 'chat' | 'generate_content';
 export type GenAiOutputType = 'text' | 'json' | 'image' | 'speech';
 export type GenAiAuthType =
-  | 'openai'
-  | 'qwen-oauth'
-  | 'gemini'
-  | 'vertex-ai'
-  | 'anthropic';
+  'openai' | 'qwen-oauth' | 'gemini' | 'vertex-ai' | 'anthropic';
 
 interface ProviderConfig {
   authType?: GenAiAuthType;
@@ -29,6 +25,7 @@ const PROVIDER_BY_ENV_KEY: Readonly<Record<string, string>> = {
   KIMI_CODE_API_KEY: 'kimi',
   MINIMAX_API_KEY: 'minimax',
   MIMO_API_KEY: 'mimo',
+  MIMO_TOKEN_PLAN_API_KEY: 'mimo',
   MISTRAL_API_KEY: 'mistral_ai',
   MODELSCOPE_API_KEY: 'modelscope',
   MOONSHOT_API_KEY: 'kimi',

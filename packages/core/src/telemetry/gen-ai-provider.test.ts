@@ -134,6 +134,7 @@ describe('GenAI provider resolution', () => {
     ['MISTRAL_API_KEY', 'mistral_ai'],
     ['MINIMAX_API_KEY', 'minimax'],
     ['MIMO_API_KEY', 'mimo'],
+    ['MIMO_TOKEN_PLAN_API_KEY', 'mimo'],
     ['ZAI_API_KEY', 'z_ai'],
     ['MODELSCOPE_API_KEY', 'modelscope'],
     ['MOONSHOT_API_KEY', 'kimi'],
