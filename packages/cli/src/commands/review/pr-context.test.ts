@@ -4,11 +4,49 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Argv, CommandModule } from 'yargs';
+
+const {
+  ghMock,
+  ghApiAllMock,
+  currentUserMock,
+  ensureAuthenticatedMock,
+  writeFileSyncMock,
+  mkdirSyncMock,
+} = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+  ghApiAllMock: vi.fn(),
+  currentUserMock: vi.fn(),
+  ensureAuthenticatedMock: vi.fn(),
+  writeFileSyncMock: vi.fn(),
+  mkdirSyncMock: vi.fn(),
+}));
+
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    gh: ghMock,
+    ghApiAll: ghApiAllMock,
+    currentUser: currentUserMock,
+    ensureAuthenticated: ensureAuthenticatedMock,
+    setGhHost: vi.fn(),
+  };
+});
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const mock = {
+    ...actual,
+    mkdirSync: mkdirSyncMock,
+    writeFileSync: writeFileSyncMock,
+  };
+  return { ...mock, default: mock };
+});
 import {
   prContextCommand,
   isLegacySuggestionSummary,
@@ -1265,5 +1303,82 @@ describe('buildMarkdown host baking', () => {
     expect(md).toContain(
       'comment-body 31 --kind issue --repo o/r --host ghe.example.com',
     );
+  });
+});
+
+describe('runPrContext host baking (handler level)', () => {
+  const metaJson = JSON.stringify({
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  });
+  const longReview = {
+    id: 7,
+    user: { login: 'rev' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'x'.repeat(9000),
+  };
+
+  let savedGhHost: string | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    currentUserMock.mockReturnValue('someone-else');
+    ghMock.mockReturnValue(metaJson);
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([]) // inline
+      .mockReturnValueOnce([]) // issue comments
+      .mockReturnValueOnce([longReview]); // reviews
+    process.exitCode = undefined;
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+
+  afterEach(() => {
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+  });
+
+  async function runHandler(extra: Record<string, unknown>) {
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+      ...extra,
+    });
+    return writeFileSyncMock.mock.calls[0][1] as string;
+  }
+
+  it('bakes --host into the emitted refetch commands when passed', async () => {
+    const written = await runHandler({ host: 'ghe.example.com' });
+    expect(written).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
+    );
+  });
+
+  it('bakes an operator-exported GH_HOST when no flag is passed', async () => {
+    process.env['GH_HOST'] = 'ghe.example.com';
+    const written = await runHandler({});
+    expect(written).toContain('--host ghe.example.com');
+  });
+
+  it('does not bake a host gh tolerates but the refetch validator rejects', async () => {
+    // gh accepts underscore aliases; comment-body's setGhHost rejects them —
+    // baking one would strand every refetch on an exit-2 validation error.
+    process.env['GH_HOST'] = 'my_ghe';
+    const written = await runHandler({});
+    expect(written).not.toContain('--host');
   });
 });

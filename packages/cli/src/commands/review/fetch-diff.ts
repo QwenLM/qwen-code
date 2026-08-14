@@ -41,6 +41,11 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
       `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
+  // An empty --out resolves to the cwd and dies EISDIR AFTER the fetch —
+  // classify it before fetching.
+  if (args.out.trim() === '') {
+    throw new TypeError('--out must name a file path');
+  }
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 
@@ -50,7 +55,10 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
 
   const diffPath = resolve(args.out);
   mkdirSync(dirname(diffPath), { recursive: true });
-  writeFileSync(diffPath, diff + '\n');
+  // An empty diff writes a 0-byte file — never '\n': plan-diff parses a
+  // one-blank-line file as 1 diff line with zero files and dies with a
+  // coverage-hole error instead of taking the designed empty-plan branch.
+  writeFileSync(diffPath, diff === '' ? '' : diff + '\n');
 
   return {
     diffPath,

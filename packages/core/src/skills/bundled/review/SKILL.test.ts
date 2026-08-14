@@ -153,6 +153,20 @@ describe('bundled review skill', () => {
     expect(body).toContain('compare its `headSha`');
   });
 
+  it('routes Step 7 owner/repo and head-SHA resolution through review meta', () => {
+    // Revert guard: restoring the pre-absorption `gh repo view` /
+    // `gh pr view --json headRefOid` prose here decides where the review
+    // POSTS — on an auth-config-only GHE clone that is github.com's
+    // same-named repo. Both lines must stay subcommand-shaped.
+    const body = skillBody();
+    expect(body).toContain(
+      'run `"${QWEN_CODE_CLI:-qwen}" review meta` (add `--host <host>` for Enterprise) and read its `ownerRepo`',
+    );
+    expect(body).toContain(
+      'review meta {pr_number} --repo {owner}/{repo}` (add `--host <host>` for Enterprise) and read its `headSha`',
+    );
+  });
+
   it('keeps the lightweight capture on fetch-diff with the plan-diff host note', () => {
     // Revert guard: restoring a prose `gh pr diff > file` here (or dropping
     // the plan-diff --host note) must fail a test, not slip through — the

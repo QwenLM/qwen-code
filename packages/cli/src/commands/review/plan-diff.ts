@@ -78,7 +78,7 @@ function runPlanDiff(args: PlanDiffArgs): void {
   // when the plan carries both, and a plan with half an identity would silently
   // drop the requirement the caller meant to add.
   if ((args.pr === undefined) !== (args.repo === undefined)) {
-    throw new Error(
+    throw new TypeError(
       'plan-diff: --pr and --repo go together — the roster requires the ' +
         'issue-fidelity agent only when the plan carries the full PR identity.',
     );
@@ -191,6 +191,14 @@ export const planDiffCommand: CommandModule = {
           'one value. Omit for the full (high) roster.',
       }),
   handler: (argv) => {
-    runPlanDiff(argv as unknown as PlanDiffArgs);
+    // The sibling handlers' contract: usage errors (a TypeError — the
+    // malformed --host above) exit 2, everything else exits 1 — never an
+    // uncaught crash banner for a repairable invocation.
+    try {
+      runPlanDiff(argv as unknown as PlanDiffArgs);
+    } catch (err) {
+      writeStderrLine(`plan-diff: ${(err as Error).message}`);
+      process.exitCode = err instanceof TypeError ? 2 : 1;
+    }
   },
 };

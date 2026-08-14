@@ -23,6 +23,7 @@ import {
   ensureAuthenticated,
   gh,
   ghApiAll,
+  HOSTNAME_RE,
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
@@ -1011,6 +1012,16 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // Keeping the stale copy only ever advances the count, which is the safe
   // direction for an id space.
 
+  // The effective host (explicit --host, else an operator-exported
+  // GH_HOST) goes into the emitted refetch commands — but only if it is a
+  // hostname the refetch command's own setGhHost would accept: gh tolerates
+  // aliases HOSTNAME_RE rejects (underscores, IPv6 literals), and baking
+  // one strands every refetch on an exit-2 validation error.
+  const resolvedHost = resolveGhHost(args.host);
+  const bakeHost =
+    resolvedHost !== undefined && HOSTNAME_RE.test(resolvedHost)
+      ? resolvedHost
+      : undefined;
   const md = buildMarkdown(
     prNumber,
     ownerRepo,
@@ -1019,10 +1030,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     issue,
     reviews,
     prevLedger,
-    // The effective host (explicit --host, else an operator-exported
-    // GH_HOST) goes into the emitted refetch commands; only a resolved
-    // undefined — the github.com default — leaves the `--host` flag off.
-    resolveGhHost(args.host),
+    bakeHost,
   );
 
   mkdirSync(dirname(out), { recursive: true });

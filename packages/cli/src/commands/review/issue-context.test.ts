@@ -164,7 +164,82 @@ describe('runIssueContext', () => {
     const result = runIssueContext(ARGS);
     const written = writeFileSyncMock.mock.calls[0][1] as string;
     expect(written).toContain('No closing issues are linked');
+    // No extras were requested — the extras section must be ABSENT, not
+    // empty (its header asserts "requested explicitly").
+    expect(written).not.toContain('Additionally fetched issues');
     expect(result.closingIssues).toEqual([]);
+  });
+
+  it('renders an indented first line verbatim (no trim) — it is the code block', () => {
+    mockClosing([
+      {
+        number: 9,
+        repository: { name: 'qwen-code', owner: { login: 'QwenLM' } },
+      },
+    ]);
+    ghMock.mockReturnValueOnce(
+      JSON.stringify({
+        title: 't',
+        body: '    at Object.<anonymous> (/tmp/repro.js:1:1)',
+        comments: [
+          {
+            author: { login: 'm' },
+            body: '  indented comment first line',
+            createdAt: '',
+          },
+        ],
+      }),
+    );
+    runIssueContext(ARGS);
+    const written = writeFileSyncMock.mock.calls[0][1] as string;
+    expect(written).toContain(
+      '\n    at Object.<anonymous> (/tmp/repro.js:1:1)',
+    );
+    expect(written).toContain('\n  indented comment first line');
+  });
+
+  it('a failed extra lands in unfetchable too (JSON and file agree)', () => {
+    mockClosing([]);
+    ghMock.mockImplementationOnce(() => {
+      throw new Error('HTTP 404: Not Found');
+    });
+    const result = runIssueContext({ ...ARGS, extraIssues: [555] });
+    expect(result.unfetchable).toEqual([
+      {
+        number: 555,
+        ownerRepo: 'QwenLM/qwen-code',
+        error: 'HTTP 404: Not Found',
+      },
+    ]);
+    const written = writeFileSyncMock.mock.calls[0][1] as string;
+    expect(written).toContain(
+      '## Issue #555 of QwenLM/qwen-code — could not be fetched',
+    );
+  });
+
+  it('cross-repo closing refs keep their own repo in the result JSON', () => {
+    mockClosing([
+      {
+        number: 42,
+        repository: { name: 'other', owner: { login: 'acme' } },
+      },
+    ]);
+    mockIssue('elsewhere');
+    const result = runIssueContext(ARGS);
+    expect(result.closingIssues).toEqual([
+      { number: 42, ownerRepo: 'acme/other', title: 'elsewhere' },
+    ]);
+  });
+
+  it('the extras section header does not claim NOT-in-closing when discovery failed', () => {
+    ghMock.mockImplementationOnce(() => {
+      throw new Error('HTTP 403: secondary rate limit');
+    });
+    mockIssue('five');
+    runIssueContext({ ...ARGS, extraIssues: [555] });
+    const written = writeFileSyncMock.mock.calls[0][1] as string;
+    expect(written).toContain('the closing set could not be checked');
+    expect(written).not.toContain('NOT in the closing set');
   });
 
   it('fetches --issue extras from the PR repo, marks them as not-closing, and dedups closing numbers', () => {
@@ -417,5 +492,40 @@ describe('issueContextCommand handler', () => {
       'title,body,comments',
     );
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it('exits 2 on a non-positive pr_number or --issue, without calling gh or auth', () => {
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 0,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
+    });
+    expect(process.exitCode).toBe(2);
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
+      issue: [0],
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on an empty --out (classified before any fetch)', () => {
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 });

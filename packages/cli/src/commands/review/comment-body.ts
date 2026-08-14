@@ -52,6 +52,11 @@ export function runCommentBody(args: CommentBodyArgs): {
       `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
+  // An empty --out (a bare flag or an empty variable expansion) resolves to
+  // the cwd and dies EISDIR AFTER the fetch — classify it before fetching.
+  if (args.out !== undefined && args.out.trim() === '') {
+    throw new TypeError('--out must name a file path');
+  }
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
   const body = platform.getCommentBody(

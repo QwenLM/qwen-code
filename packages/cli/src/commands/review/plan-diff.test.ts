@@ -25,6 +25,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'plan-diff-'));
   cwd = process.cwd();
   process.chdir(dir);
+  process.exitCode = undefined;
 });
 afterEach(() => {
   process.chdir(cwd);
@@ -116,17 +117,17 @@ describe('plan-diff', () => {
     expect(JSON.parse(readFileSync(out, 'utf8')).host).toBeUndefined();
 
     // The role-0 weld interpolates this value unquoted into a shell command
-    // — a metacharacter payload must die here, not in an agent's shell.
-    expect(() =>
-      (planDiffCommand.handler as (a: unknown) => void)({
-        diff_path: diffPath,
-        out,
-        maxChunkLines: 400,
-        pr: 6998,
-        repo: 'QwenLM/qwen-code',
-        host: 'ghe.example.com; touch /tmp/pwned',
-      }),
-    ).toThrow(/not a hostname/);
+    // — a metacharacter payload must die here, not in an agent's shell. And
+    // the error is the usage class: exit 2, not an uncaught crash.
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      pr: 6998,
+      repo: 'QwenLM/qwen-code',
+      host: 'ghe.example.com; touch /tmp/pwned',
+    });
+    expect(process.exitCode).toBe(2);
   });
 
   it('records the effort the caller passed, so the roster reads it from the plan', () => {
@@ -171,14 +172,14 @@ describe('plan-diff', () => {
     const diffPath = join(dir, 'local.diff');
     const out = join(dir, 'plan.json');
     writeFileSync(diffPath, makeDiff('src/a.ts', 60));
-    expect(() =>
-      (planDiffCommand.handler as (a: unknown) => void)({
-        diff_path: diffPath,
-        out,
-        maxChunkLines: 400,
-        pr: 6998,
-      }),
-    ).toThrow(/--pr and --repo go together/);
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      pr: 6998,
+    });
+    // A usage error, so exit 2 under the sibling-handler contract.
+    expect(process.exitCode).toBe(2);
   });
 
   it('cannot decide heaviness without a tree, and says so by omission', () => {
@@ -229,11 +230,13 @@ describe('plan-diff', () => {
 
   it('refuses a diff whose chunks would not tile it', () => {
     // `buildDiffPlan` asserts the tiling invariant. `plan-diff` has no worktree
-    // to protect, so it fails loudly rather than degrading.
+    // to protect, so it fails loudly rather than degrading — exit 1, a real
+    // content failure, not a usage error.
     const diffPath = join(dir, 'junk.diff');
     const out = join(dir, 'plan.json');
     writeFileSync(diffPath, 'this is not a diff\nnot at all\n');
-    expect(() => run(diffPath, out)).toThrow(/do not tile the diff/);
+    run(diffPath, out);
+    expect(process.exitCode).toBe(1);
   });
 
   it('plans an empty diff without pretending it reviewed anything', () => {
@@ -251,8 +254,7 @@ describe('plan-diff', () => {
   });
 
   it('reports a missing diff file by name', () => {
-    expect(() => run(join(dir, 'absent.diff'), join(dir, 'p.json'))).toThrow(
-      /Cannot read diff file/,
-    );
+    run(join(dir, 'absent.diff'), join(dir, 'p.json'));
+    expect(process.exitCode).toBe(1);
   });
 });

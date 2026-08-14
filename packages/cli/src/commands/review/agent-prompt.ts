@@ -1199,7 +1199,9 @@ export function buildRoleBrief(
     }
     // The plan is a file on disk — re-validate before welding values into a
     // shell command the agent is told to run verbatim (compose-review does
-    // the same on its read path).
+    // the same on its read path). Trim the host first: fetch-pr records the
+    // raw flag, and a padded-but-valid host must not fall to null here while
+    // routing fine everywhere else.
     if (!/^\d+$/.test(String(pr))) {
       throw new Error(
         `agent-prompt: plan prNumber is not a number: ${JSON.stringify(pr)}`,
@@ -1210,10 +1212,9 @@ export function buildRoleBrief(
         `agent-prompt: plan ownerRepo is not owner/repo: ${JSON.stringify(repo)}`,
       );
     }
-    const host =
-      typeof report.host === 'string' && HOSTNAME_RE.test(report.host)
-        ? report.host
-        : null;
+    const trimmedHost =
+      typeof report.host === 'string' ? report.host.trim() : '';
+    const host = HOSTNAME_RE.test(trimmedHost) ? trimmedHost : null;
     const dir = opts.planPath ? dirname(resolve(opts.planPath)) : null;
     const ctx = dir ? join(dir, `qwen-review-pr-${pr}-context.md`) : null;
     const evidence = dir

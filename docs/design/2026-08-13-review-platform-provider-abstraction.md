@@ -83,9 +83,10 @@ operations join in Phase 3; Phase 1 (the `meta` / `issue-context` /
 `fetch-diff` / `comment-body` PR, #9096) ships a synchronous, read-only subset
 named `ReviewPlatformReader` with exactly the operations those four subcommands
 consume (`resolveRepo`, `getPrMeta`, `getClosingIssues`, `getIssue`,
-`fetchDiff`, `getCommentBody`) and a no-arg `getPlatformReader()` registry —
-the subset keeps the interface honest (every member has a consumer), and
-detection arrives with the second provider:
+`fetchDiff`, `getCommentBody`) plus the `ensureAuthenticated` gate every one
+of them calls first, and a no-arg `getPlatformReader()` registry — the subset
+keeps the interface honest (every member has a consumer), and detection
+arrives with the second provider:
 
 ```ts
 // packages/cli/src/commands/review/lib/platform/types.ts
@@ -130,14 +131,14 @@ descriptions like "queries `gh pr view`", and Step 4's scratch-repo
 render-adjudication carve-out — a deliberately raw `gh api` call, GitHub-specific
 by nature — remain, to be re-authored or gated in Phase 3):
 
-| Prose today                                                                               | New home                                                                                                                                                    |
-| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gh repo view` owner/repo/host derivation (bare PR numbers; Step 1 & 7)                   | `qwen review meta <n>` — one call returning `{platform, ownerRepo, host, headSha, webUrl}`                                                                  |
-| `gh pr view --json headRefOid` head-SHA fallbacks (Step 7, 422 recovery)                  | same `meta` subcommand                                                                                                                                      |
-| Agent 0's `closingIssuesReferences` + `gh issue view` pair                                | `qwen review issue-context <n> --out <file>` — emits the evidence markdown; GitHub: closing issues + bodies + comments; Aone: workitems + fields + comments |
-| `gh pr diff` (lightweight cross-repo mode)                                                | `qwen review fetch-diff <target>`                                                                                                                           |
-| `gh api repos/…/pulls/comments/<id>` refetch refs that `pr-context` emits into context.md | emit `qwen review comment-body <id>` commands instead (provider-routed)                                                                                     |
-| `GH_HOST=<host>` prefixing rule for all model-run gh calls                                | gone for every call except the Step 4 render-adjudication carve-out, which keeps its `GH_HOST=<host> ` prefix until Phase 3 re-authors it                   |
+| Prose today                                                                               | New home                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gh repo view` owner/repo/host derivation (bare PR numbers; Step 1 & 7)                   | `qwen review meta <n>` — one call returning `{platform, ownerRepo, host, headSha, webUrl}`                                                                                                                                                                                                  |
+| `gh pr view --json headRefOid` head-SHA fallbacks (Step 7, 422 recovery)                  | same `meta` subcommand                                                                                                                                                                                                                                                                      |
+| Agent 0's `closingIssuesReferences` + `gh issue view` pair                                | `qwen review issue-context <n> --out <file>` — emits the evidence markdown; GitHub: closing issues + bodies + comments; Aone: workitems + fields + comments                                                                                                                                 |
+| `gh pr diff` (lightweight cross-repo mode)                                                | `qwen review fetch-diff <target>`                                                                                                                                                                                                                                                           |
+| `gh api repos/…/pulls/comments/<id>` refetch refs that `pr-context` emits into context.md | emit `qwen review comment-body <id>` commands instead (provider-routed)                                                                                                                                                                                                                     |
+| `GH_HOST=<host>` prefixing rule for all model-run gh calls                                | gone for every call; the Step 4 carve-out (the one remaining model-run `gh api`) carries no host routing of its own — it routes at the Enterprise host only when `GH_HOST` is exported in the environment (subagent shells inherit it), and is unavailable otherwise. Phase 3 re-authors it |
 
 This phase is GitHub-only behavior-preserving and independently shippable: it
 removes the exact class of prose-carried failures the skill has measured, even

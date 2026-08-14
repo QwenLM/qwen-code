@@ -112,6 +112,11 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
       `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
+  // An empty --out resolves to the cwd and dies EISDIR AFTER the fetches —
+  // classify it before fetching.
+  if (args.out.trim() === '') {
+    throw new TypeError('--out must name a file path');
+  }
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 
@@ -185,8 +190,12 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
     sections.push(renderOutcome(outcome));
   }
   if (extraOutcomes.length > 0) {
+    // When discovery failed the closing set is UNKNOWN — the one state where
+    // "NOT in the closing set" cannot be claimed.
     sections.push(
-      '## Additionally fetched issues (referenced by the PR context, NOT in the closing set)',
+      discoveryError !== undefined
+        ? '## Additionally fetched issues (referenced by the PR context; the closing set could not be checked)'
+        : '## Additionally fetched issues (referenced by the PR context, NOT in the closing set)',
       '',
       'These were requested explicitly. Whether the PR must satisfy them is ' +
         'the relevance judgment the fetcher already made — they are evidence, ' +

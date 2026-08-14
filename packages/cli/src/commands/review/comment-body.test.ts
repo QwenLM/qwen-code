@@ -197,6 +197,78 @@ describe('commentBodyCommand handler', () => {
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
+  it('threads --pr through to the review-body fetch on the success path', () => {
+    ghRawMock.mockReturnValue('review body');
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 99,
+      kind: 'review',
+      repo: 'QwenLM/qwen-code',
+      pr: 9073,
+    });
+    expect(ghRawMock).toHaveBeenCalledWith(
+      'api',
+      'repos/QwenLM/qwen-code/pulls/9073/reviews/99',
+      '--jq',
+      '.body // ""',
+    );
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('exits 2 on a non-positive id or --pr, without calling gh or auth', () => {
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 0,
+      kind: 'inline',
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(process.exitCode).toBe(2);
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 5,
+      kind: 'review',
+      repo: 'QwenLM/qwen-code',
+      pr: -3,
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on an empty --out (classified before any fetch)', () => {
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 5,
+      kind: 'inline',
+      repo: 'QwenLM/qwen-code',
+      out: '',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a malformed --host (setGhHost TypeError → usage class)', () => {
+    setGhHostMock.mockImplementationOnce(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 5,
+      kind: 'inline',
+      repo: 'QwenLM/qwen-code',
+      host: 'bad host; rm -rf /',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
   it('exits 2 on a malformed --repo (usage error, not a fetch failure)', () => {
     (commentBodyCommand.handler as (a: unknown) => void)({
       _: [],

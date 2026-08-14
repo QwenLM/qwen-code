@@ -60,10 +60,36 @@ describe('setGhHost / ghEnv', () => {
     expect(() => setGhHost('ghe.internal; rm -rf /')).toThrow(/--host/);
     expect(() => setGhHost('bad host')).toThrow(/--host/);
     expect(() => setGhHost('https://ghe.internal')).toThrow(/--host/);
+    // The rejection is a TypeError — the subcommand handlers split usage
+    // (exit 2) from fetch failure (exit 1) on exactly this class.
+    expect(() => setGhHost('bad host')).toThrow(TypeError);
+    // Flag-shaped values are not hostnames (the weld interpolates unquoted).
+    expect(() => setGhHost('--help')).toThrow(TypeError);
+    // A non-empty all-whitespace value is an error, not a silent reset —
+    // only ''/undefined mean "restore default".
+    expect(() => setGhHost(' ')).toThrow(TypeError);
+  });
+
+  it('trims a padded valid host and stores the trimmed form', () => {
+    setGhHost(' ghe.internal ');
+    expect(ghEnv()!['GH_HOST']).toBe('ghe.internal');
+    setGhHost(undefined);
   });
 });
 
 describe('resolveGhHost precedence', () => {
+  it('trims the flag and falls through to the env on all-whitespace', () => {
+    expect(resolveGhHost(' ghe.example.com ')).toBe('ghe.example.com');
+    const saved = process.env['GH_HOST'];
+    process.env['GH_HOST'] = 'env.example.com';
+    try {
+      expect(resolveGhHost(' ')).toBe('env.example.com');
+    } finally {
+      if (saved === undefined) delete process.env['GH_HOST'];
+      else process.env['GH_HOST'] = saved;
+    }
+  });
+
   it('an explicit --host wins over an operator-exported GH_HOST', () => {
     // Load-bearing for the gates: a GHE operator who exports GH_HOST and
     // reviews a github.com PR must resolve to github.com, or the matcher

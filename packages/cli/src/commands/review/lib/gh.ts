@@ -118,12 +118,15 @@ export function isOwnerRepo(repo: string): boolean {
 export function setGhHost(host: string | undefined): void {
   // Trim once here so every caller is consistent — `resolveGhHost` trims
   // too, and a raw `'ghe.corp '` must not fail validation where the
-  // resolved form would pass.
-  const trimmed = host?.trim() || undefined;
-  if (trimmed === undefined) {
+  // resolved form would pass. Only genuinely-absent input resets: a
+  // non-empty all-whitespace value is a validation error, not a silent
+  // "restore default" (a scripted `--host "$EMPTY_VAR"` must not silently
+  // retarget every call at github.com).
+  if (host === undefined || host === '') {
     ghHost = undefined;
     return;
   }
+  const trimmed = host.trim();
   if (!HOSTNAME_RE.test(trimmed)) {
     throw new TypeError(
       `--host must be a hostname (optionally :port), got ${JSON.stringify(host)}`,

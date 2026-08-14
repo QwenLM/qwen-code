@@ -96,7 +96,7 @@ describe('runFetchDiff', () => {
     );
   });
 
-  it('reports an empty diff as zero lines', () => {
+  it('reports an empty diff as zero lines and writes a 0-byte file', () => {
     ghRawMock.mockReturnValue('');
     const result = runFetchDiff({
       prNumber: 1,
@@ -105,6 +105,9 @@ describe('runFetchDiff', () => {
     });
     expect(result.lines).toBe(0);
     expect(result.chars).toBe(0);
+    // Never '\n': plan-diff parses a one-blank-line file as 1 line with zero
+    // files and dies with a coverage error instead of the empty-plan branch.
+    expect(writeFileSyncMock).toHaveBeenCalledWith(resolve(OUT), '');
   });
 });
 
@@ -180,6 +183,40 @@ describe('fetchDiffCommand handler', () => {
     expect(ghRawMock).not.toHaveBeenCalled();
     // The usage error must preempt the auth gate — `gh auth login` can
     // never repair the invocation.
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a non-positive pr_number, without calling gh or auth', () => {
+    (fetchDiffCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 0,
+      repo: 'QwenLM/qwen-code',
+      out: OUT,
+    });
+    expect(process.exitCode).toBe(2);
+    (fetchDiffCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1.5,
+      repo: 'QwenLM/qwen-code',
+      out: OUT,
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on an empty --out (classified before any fetch)', () => {
+    (fetchDiffCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 });
