@@ -800,6 +800,10 @@ export const useGeminiStream = (
   const interactionOwnersByToolCallIdRef = useRef(
     new Map<string, NonNullable<ReturnType<typeof getActiveInteractionSpan>>>(),
   );
+  const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
+  const handleCompletedToolsRef = useRef<
+    (completedTools: TrackedToolCall[]) => Promise<void>
+  >(async () => {});
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
     responses: Array<{
@@ -2263,6 +2267,9 @@ export const useGeminiStream = (
         0,
       );
       const toolCallRequests: ToolCallRequestInfo[] = [];
+      let streamInteractionOwner = trackInteractionOwner
+        ? activeInteractionOwnerRef.current
+        : undefined;
       const bufferedEvents: BufferedStreamEvent[] = [];
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -2408,9 +2415,11 @@ export const useGeminiStream = (
       dualOutput?.startAssistantMessage();
       try {
         for await (const event of stream) {
-          if (trackInteractionOwner && promptId) {
-            activeInteractionOwnerRef.current ??=
-              getActiveInteractionSpan(promptId);
+          if (!streamInteractionOwner && promptId) {
+            streamInteractionOwner = getActiveInteractionSpan(promptId);
+            if (trackInteractionOwner && streamInteractionOwner) {
+              activeInteractionOwnerRef.current ??= streamInteractionOwner;
+            }
           }
           dualOutput?.processEvent(event);
           switch (event.type) {
@@ -2811,12 +2820,11 @@ export const useGeminiStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
-          const interactionOwner = activeInteractionOwnerRef.current;
-          if (trackInteractionOwner && interactionOwner) {
+          if (streamInteractionOwner) {
             for (const request of executableToolCallRequests) {
               interactionOwnersByToolCallIdRef.current.set(
                 request.callId,
-                interactionOwner,
+                streamInteractionOwner,
               );
             }
           }
@@ -3778,7 +3786,9 @@ export const useGeminiStream = (
             0,
             activeModelStreamsRef.current - 1,
           );
-          if (activeModelStreamsRef.current === 0) {
+          const shouldDrainCompletedToolBatches =
+            activeModelStreamsRef.current === 0;
+          if (shouldDrainCompletedToolBatches) {
             setIsResponding(false);
           }
           if (goalBinding) {
@@ -3813,6 +3823,21 @@ export const useGeminiStream = (
             activeGoalAdmissionRef.current = null;
           }
           releaseSubmissionLease();
+          if (shouldDrainCompletedToolBatches) {
+            const pendingCompletedToolBatches =
+              pendingCompletedToolBatchesRef.current.splice(0);
+            const pendingCompletedTools = new Map<string, TrackedToolCall>();
+            for (const pendingBatch of pendingCompletedToolBatches) {
+              for (const toolCall of pendingBatch) {
+                pendingCompletedTools.set(toolCall.request.callId, toolCall);
+              }
+            }
+            if (pendingCompletedTools.size > 0) {
+              await handleCompletedToolsRef.current([
+                ...pendingCompletedTools.values(),
+              ]);
+            }
+          }
         }
       });
     },
@@ -4048,9 +4073,19 @@ export const useGeminiStream = (
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
+        for (const callId of dedupedCallIds) {
+          interactionOwnersByToolCallIdRef.current.delete(callId);
+        }
       }
 
       if (activeModelStreamsRef.current > 0) {
+        const deferredTools = completedAndReadyToSubmitTools.filter(
+          (toolCall) =>
+            !historyCallIdsWithResponse.has(toolCall.request.callId),
+        );
+        if (deferredTools.length > 0) {
+          pendingCompletedToolBatchesRef.current.push(deferredTools);
+        }
         return;
       }
 
@@ -4076,7 +4111,7 @@ export const useGeminiStream = (
           !processedMemoryToolsRef.current.has(t.request.callId),
       );
 
-      const geminiTools = completedAndReadyToSubmitTools.filter(
+      let geminiTools = completedAndReadyToSubmitTools.filter(
         (t) =>
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
@@ -4084,26 +4119,87 @@ export const useGeminiStream = (
       const terminalPromptId = completedAndReadyToSubmitTools.find(
         (toolCall) => !toolCall.request.isClientInitiated,
       )?.request.prompt_id;
+      const ownerForToolCall = (toolCall: TrackedToolCall) =>
+        interactionOwnersByToolCallIdRef.current.get(toolCall.request.callId) ??
+        (activeInteractionPromptIdRef.current === toolCall.request.prompt_id
+          ? activeInteractionOwnerRef.current
+          : undefined);
+      const liveOwnerForToolCall = (toolCall: TrackedToolCall) => {
+        const owner = ownerForToolCall(toolCall);
+        const ownerPromptId = toolCall.request.prompt_id;
+        return owner &&
+          ownerPromptId &&
+          getActiveInteractionSpan(ownerPromptId) === owner
+          ? owner
+          : undefined;
+      };
+      const liveActiveInteractionOwner =
+        activeInteractionPromptIdRef.current &&
+        activeInteractionOwnerRef.current &&
+        getActiveInteractionSpan(activeInteractionPromptIdRef.current) ===
+          activeInteractionOwnerRef.current
+          ? activeInteractionOwnerRef.current
+          : undefined;
       const ownerToolCall =
+        (liveActiveInteractionOwner
+          ? geminiTools.find(
+              (toolCall) =>
+                liveOwnerForToolCall(toolCall) === liveActiveInteractionOwner,
+            )
+          : undefined) ??
+        geminiTools.find((toolCall) => liveOwnerForToolCall(toolCall)) ??
         geminiTools[0] ??
         completedAndReadyToSubmitTools.find(
           (toolCall) => !toolCall.request.isClientInitiated,
         );
       const interactionOwner = ownerToolCall
-        ? (interactionOwnersByToolCallIdRef.current.get(
-            ownerToolCall.request.callId,
-          ) ??
-          (activeInteractionPromptIdRef.current ===
-          ownerToolCall.request.prompt_id
-            ? activeInteractionOwnerRef.current
-            : undefined))
+        ? liveOwnerForToolCall(ownerToolCall)
         : undefined;
+      const secondaryInteractionOwners = new Map<
+        NonNullable<ReturnType<typeof getActiveInteractionSpan>>,
+        string
+      >();
+      const secondaryTools = interactionOwner
+        ? geminiTools.filter(
+            (toolCall) => ownerForToolCall(toolCall) !== interactionOwner,
+          )
+        : [];
+      for (const toolCall of secondaryTools) {
+        const secondaryOwner = ownerForToolCall(toolCall);
+        if (secondaryOwner && toolCall.request.prompt_id) {
+          secondaryInteractionOwners.set(
+            secondaryOwner,
+            toolCall.request.prompt_id,
+          );
+        }
+        if (toolCall.status !== 'cancelled') {
+          geminiClient?.recordCompletedToolCall(
+            toolCall.request.name,
+            toolCall.request.args as Record<string, unknown>,
+          );
+        }
+        dualOutput?.emitToolResult(toolCall.request, toolCall.response);
+      }
+      if (secondaryTools.length > 0) {
+        const secondaryCallIds = new Set(
+          secondaryTools.map((toolCall) => toolCall.request.callId),
+        );
+        markToolsAsSubmitted([...secondaryCallIds]);
+        geminiTools = geminiTools.filter(
+          (toolCall) => !secondaryCallIds.has(toolCall.request.callId),
+        );
+      }
       for (const toolCall of completedAndReadyToSubmitTools) {
         interactionOwnersByToolCallIdRef.current.delete(
           toolCall.request.callId,
         );
       }
-      let promptId = geminiTools[0]?.request.prompt_id;
+      for (const [owner, ownerPromptId] of secondaryInteractionOwners) {
+        if (getActiveInteractionSpan(ownerPromptId) === owner) {
+          endInteractionSpan('cancelled', { promptId: ownerPromptId });
+        }
+      }
+      let promptId = ownerToolCall?.request.prompt_id;
       const endToolInteraction = (
         status: 'ok' | 'error' | 'cancelled',
         errorMessage?: string,
@@ -4279,9 +4375,10 @@ export const useGeminiStream = (
         );
       }
       const completedCallIds = new Set(
-        completedAndReadyToSubmitTools.map(
-          (toolCall) => toolCall.request.callId,
-        ),
+        geminiTools.map((toolCall) => toolCall.request.callId),
+      );
+      const secondaryCallIds = new Set(
+        secondaryTools.map((toolCall) => toolCall.request.callId),
       );
       const readyDuplicateBatches: PendingDuplicateToolResponses[] = [];
       pendingDuplicateToolResponsesRef.current =
@@ -4292,11 +4389,19 @@ export const useGeminiStream = (
           if (isReady) {
             readyDuplicateBatches.push(batch);
           }
-          return !isReady;
+          const belongsToSecondaryOwner = [...batch.executableCallIds].some(
+            (callId) => secondaryCallIds.has(callId),
+          );
+          return !isReady && !belongsToSecondaryOwner;
         });
-      const pendingDuplicateResponses = readyDuplicateBatches.flatMap(
-        (batch) => batch.duplicateResponses,
-      );
+      const pendingDuplicateResponses = readyDuplicateBatches
+        .flatMap((batch) => batch.duplicateResponses)
+        .filter(
+          ({ request }) =>
+            !interactionOwner ||
+            !request.prompt_id ||
+            request.prompt_id === promptId,
+        );
       const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
       if (!promptId && pendingDuplicatePromptId) {
         promptId = pendingDuplicatePromptId;
@@ -4520,7 +4625,7 @@ export const useGeminiStream = (
       );
       if (terminatesGoalTurn && toolGoalBinding) {
         geminiClient.addHistory({ role: 'user', parts: responsesToSend });
-        let goalFinishFailed = false;
+        let goalFinishErrorMessage: string | undefined;
         try {
           await config.getChatRecordingService()?.flush();
           const runtime = await config.getGoalRuntimeReady();
@@ -4548,19 +4653,20 @@ export const useGeminiStream = (
             }
           }
         } catch (error) {
-          goalFinishFailed = true;
+          const errorMessage = getErrorMessage(error);
+          goalFinishErrorMessage = `Goal tool continuation could not finish: ${errorMessage}`;
           await failClosedGoalTurn(
             toolGoalBinding,
-            `Goal turn could not finish: ${getErrorMessage(error)}`,
+            `Goal turn could not finish: ${errorMessage}`,
           );
         } finally {
           // Idempotent with the release inside failClosedGoalTurn; also covers the success path.
           releaseGoalTurn(toolGoalBinding);
         }
-        if (goalFinishFailed) {
+        if (goalFinishErrorMessage) {
           endToolInteraction(
             'error',
-            'Goal tool continuation could not finish',
+            goalFinishErrorMessage,
             'continuation_goal_finish_failed',
           );
         } else {
@@ -4803,6 +4909,7 @@ export const useGeminiStream = (
       releaseGoalTurn,
     ],
   );
+  handleCompletedToolsRef.current = handleCompletedTools;
 
   const pendingHistoryItems = useMemo(
     () =>

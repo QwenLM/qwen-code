@@ -2245,6 +2245,139 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('records the Goal finalization error on the owning interaction', async () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-finish-error',
+      revision: 1,
+      turnId: 'turn-finish-error',
+    };
+    const finishTurn = vi
+      .fn()
+      .mockRejectedValue(new Error('goal journal is unavailable'));
+    const runtime = {
+      permitForTurn: vi.fn(() => permit),
+      finishTurn,
+      getSnapshot: vi.fn(() => ({
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'finish with diagnostics',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'record-finish-error' },
+          turnCount: 1,
+          activeTimeMs: 20,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      })),
+      dispatch: vi.fn().mockResolvedValue(undefined),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+    const client = new MockedGeminiClientClass(mockConfig);
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'update-goal-error',
+            name: 'update_goal',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-finish-error',
+            goalContext: permit,
+          },
+        };
+      })(),
+    );
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+    await act(async () => {
+      await result.current.submitQuery(
+        'finish the Goal',
+        SendMessageType.UserQuery,
+        'prompt-goal-finish-error',
+      );
+    });
+    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'update-goal-error',
+            name: 'update_goal',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-finish-error',
+            goalContext: permit,
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'update-goal-error',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'update-goal-error',
+                  name: 'update_goal',
+                  response: { output: 'proposal recorded' },
+                },
+              },
+            ],
+            errorType: undefined,
+            terminateTurn: true,
+          },
+          tool: { displayName: 'UpdateGoal' },
+          invocation: {
+            getDescription: () => 'complete Goal',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ]);
+    });
+
+    expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
+      promptId: 'prompt-goal-finish-error',
+      errorMessage:
+        'Goal tool continuation could not finish: goal journal is unavailable',
+      errorType: 'continuation_goal_finish_failed',
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledOnce();
+  });
+
   it('does not let an old tool batch end a replacement interaction', async () => {
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -12804,6 +12937,202 @@ describe('useGeminiStream', () => {
         resolveFirstCall();
         await mainRequest;
       }
+    });
+
+    it('continues a deferred main tool batch without leaking its mixed ?btw owner', async () => {
+      const mainOwner = {};
+      const btwOwner = {};
+      const ownersByPromptId = new Map<string, object>();
+      mockGetActiveInteractionSpan.mockImplementation((promptId?: string) =>
+        promptId ? ownersByPromptId.get(promptId) : undefined,
+      );
+
+      let resolveMainStream!: () => void;
+      const mainStream = new Promise<void>((resolve) => {
+        resolveMainStream = resolve;
+      });
+      let callCount = 0;
+      let btwPromptId: string | undefined;
+      mockSendMessageStream.mockImplementation((_query, _signal, promptId) => {
+        callCount += 1;
+        if (callCount === 1) {
+          ownersByPromptId.set(promptId, mainOwner);
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'main-tool',
+                name: 'testTool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: promptId,
+              },
+            };
+            await mainStream;
+          })();
+        }
+        if (callCount > 2) {
+          return (async function* () {})();
+        }
+        btwPromptId = promptId;
+        ownersByPromptId.set(promptId, btwOwner);
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'btw-cancelled-tool',
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })();
+      });
+
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      const client = new MockedGeminiClientClass(mockConfig);
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery(
+          'Main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'Main query' },
+        );
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery(
+          '?btw use a tool',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw use a tool' },
+        );
+      });
+      expect(btwPromptId).toBeDefined();
+      expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+        [expect.objectContaining({ callId: 'btw-cancelled-tool' })],
+        expect.any(AbortSignal),
+        undefined,
+      );
+
+      const makeCancelledToolCall = (
+        callId: string,
+        promptId: string | undefined,
+      ) =>
+        ({
+          request: {
+            callId,
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: promptId,
+          },
+          status: 'cancelled',
+          response: {
+            callId,
+            responseParts: [{ text: 'cancelled' }],
+            errorType: undefined,
+          },
+          responseSubmittedToGemini: false,
+          tool: { displayName: 'mock tool' },
+          invocation: {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation,
+        }) as TrackedCancelledToolCall;
+      const mainCompletedToolCall = {
+        ...makeCancelledToolCall('main-tool', 'main-prompt'),
+        status: 'success',
+        response: {
+          callId: 'main-tool',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'main-tool',
+                name: 'testTool',
+                response: { output: 'done' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+      } as unknown as TrackedCompletedToolCall;
+      const btwCancelledToolCall = makeCancelledToolCall(
+        'btw-cancelled-tool',
+        btwPromptId,
+      );
+
+      await act(async () => {
+        await capturedOnComplete?.([
+          mainCompletedToolCall,
+          btwCancelledToolCall,
+        ]);
+      });
+      expect(mockEndInteractionSpan).not.toHaveBeenCalledWith('cancelled', {
+        promptId: btwPromptId,
+      });
+      expect(mockEndInteractionSpan).not.toHaveBeenCalledWith('cancelled', {
+        promptId: 'main-prompt',
+      });
+
+      resolveMainStream();
+      await act(async () => {
+        await mainRequest;
+      });
+
+      expect(mockEndInteractionSpan).toHaveBeenCalledWith('cancelled', {
+        promptId: btwPromptId,
+      });
+      expect(mockEndInteractionSpan).not.toHaveBeenCalledWith('cancelled', {
+        promptId: 'main-prompt',
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3),
+      );
+      expect(mockSendMessageStream.mock.calls[2]?.[2]).toBe('main-prompt');
+      expect(mockSendMessageStream.mock.calls[2]?.[3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(mockSendMessageStream.mock.calls[2]?.[0]).toEqual([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ id: 'main-tool' }),
+        }),
+      ]);
     });
 
     it('should prevent concurrent submitQuery calls', async () => {
