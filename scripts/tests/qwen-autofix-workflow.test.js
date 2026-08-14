@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
@@ -9724,6 +9724,772 @@ exit 1
     }
   });
 
+  // Shared fixture for the content-based validity checks: a repo whose
+  // origin/main..origin/feat span is the PR's own diff and whose
+  // origin/feat..feat commit is the round under verification.
+  // Ambient global/system git config (fsmonitor, hooks) must not reach the
+  // fixtures — under load it is a spawn-level flake source (R5-1).
+  const isolatedGitEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  };
+  const validityFixture = (build) => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-validity-'));
+    const git = (...args) =>
+      execFileSync('git', ['-C', dir, ...args], {
+        encoding: 'utf8',
+        env: isolatedGitEnv,
+      });
+    const write = (rel, content) => {
+      mkdirSync(join(dir, dirname(rel)), { recursive: true });
+      writeFileSync(join(dir, rel), content);
+    };
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@test');
+    git('config', 'user.name', 'test');
+    build.base({ git, write, dir });
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    git('update-ref', 'refs/remotes/origin/main', 'main');
+    git('checkout', '-qb', 'feat');
+    build.pr({ git, write, dir });
+    git('add', '-A');
+    git('commit', '-qm', 'pr', '--allow-empty');
+    git('update-ref', 'refs/remotes/origin/feat', 'feat');
+    build.round({ git, write, dir });
+    git('add', '-A');
+    git('commit', '-qm', 'round', '--allow-empty');
+    return { dir, git };
+  };
+
+  it('rejects a round that expands into CI machinery outside the PR footprint', () => {
+    const block = reviewVerificationRunner.match(
+      /(was_workspace_dir\(\) \{[\s\S]*?reject_fix 'round expands into CI\/verification machinery outside the PR footprint'\n {2}fi\nfi)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (build) => {
+      const { dir } = validityFixture(build);
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            `cd "$1"`,
+            'BRANCH=feat',
+            'GATE_LOG="$(mktemp)"',
+            'RUNNER_TEMP="$(mktemp -d)"',
+            // Stub resolver: first-level packages/* manifests/configs are
+            // workspace-rooted; everything else is unowned.
+            `printf '%s\\n' 'read f; d=\${f%/*}; case "$f" in packages/*/*) case "$d" in packages/*/*) ;; *) echo "$d";; esac;; esac' > "$RUNNER_TEMP/resolve-owning-packages.sh"`,
+            'reject_fix() { echo "REJECT:${1}"; exit 1; }',
+            block,
+            'echo PASSED',
+          ].join('\n'),
+          'bash',
+          dir,
+        ],
+        { encoding: 'utf8', env: isolatedGitEnv },
+      );
+      expect(res.error).toBeUndefined();
+      rmSync(dir, { recursive: true, force: true });
+      return `${res.stdout}\n${res.stderr}`;
+    };
+    // A round reaching into .github/ on a PR that never touched CI: rejected.
+    expect(
+      run({
+        base: ({ write }) => write('src/a.ts', 'a\n'),
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) => write('.github/workflows/x.yml', 'on: push\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // The SAME edit on an infra PR whose own diff already touches that area
+    // class (takeover on a workflow PR): allowed.
+    expect(
+      run({
+        base: ({ write }) => write('.github/workflows/x.yml', 'on: push\n'),
+        pr: ({ write }) => write('.github/workflows/x.yml', 'on: pull\n'),
+        round: ({ write }) => write('.github/workflows/y.yml', 'on: push\n'),
+      }),
+    ).toContain('PASSED');
+    // Workspace manifest: a dependency edit passes, a scripts edit is the
+    // gate's own command surface and is rejected; a fixture manifest deeper
+    // in a src tree is ordinary test data.
+    const manifests = {
+      base: ({ write }) => {
+        write('package.json', '{"scripts":{"lint":"eslint ."},"x":1}\n');
+        write('src/a.ts', 'a\n');
+      },
+      pr: ({ write }) => write('src/a.ts', 'b\n'),
+    };
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"eslint ."},"x":2}\n'),
+      }),
+    ).toContain('PASSED');
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"true"},"x":1}\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write('src/fixtures/pkg/package.json', '{"scripts":{"t":"x"}}\n'),
+      }),
+    ).toContain('PASSED');
+    // Deleting a nested src-tree FIXTURE manifest is data, not command
+    // surface: pre-round workspaces globs are matched path-aware ('*'
+    // must not span '/').
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"workspaces":["packages/*"]}\n');
+          write('packages/cli/package.json', '{"name":"c"}\n');
+          write('packages/cli/src/examples/starter/package.json', '{}\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ dir }) =>
+          rmSync(join(dir, 'packages/cli/src/examples/starter/package.json')),
+      }),
+    ).toContain('PASSED');
+    // …while deleting a DECLARED (globbed) workspace manifest classifies.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"workspaces":["packages/*"]}\n');
+          write('packages/cli/package.json', '{"name":"c"}\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ dir }) => rmSync(join(dir, 'packages/cli/package.json')),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // A manifest the round ADDS (a new workspace) is the round's own new
+    // surface, not a rewrite of commands the gate already ran.
+    expect(
+      run({
+        ...manifests,
+        round: ({ write }) =>
+          write(
+            'packages/newpkg/package.json',
+            '{"scripts":{"test":"vitest run"}}\n',
+          ),
+      }),
+    ).toContain('PASSED');
+    // Classes are NARROW: a PR that only touched .github METADATA (issue
+    // templates) does not license rounds to rewrite workflows.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('.github/ISSUE_TEMPLATE/bug.yml', 'name: bug\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('.github/ISSUE_TEMPLATE/bug.yml', 'name: b\n'),
+        round: ({ write }) => write('.github/workflows/x.yml', 'on: push\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // Renaming a workflow OUT of .github/ is a removal of verification
+    // machinery: --no-renames decomposes it into A+D and the vacated D-side
+    // path is classified.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('.github/workflows/x.yml', 'on: push\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ git, write, dir }) => {
+          rmSync(join(dir, '.github', 'workflows', 'x.yml'));
+          write('x.yml', 'on: push\n');
+          git('add', '-A');
+        },
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // The gate's transitive executable surface: repo scripts are a class,
+    // while scripts/tests/** stays ordinary test code.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('scripts/lint.js', 'x\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) => write('scripts/lint.js', 'y\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    expect(
+      run({
+        base: ({ write }) => write('src/a.ts', 'a\n'),
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) => write('scripts/tests/new.test.js', 't\n'),
+      }),
+    ).toContain('PASSED');
+    // The loop's OWN enforcement files are their own class: a footprint on
+    // ordinary workflows does not license rewriting the referee.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('.github/workflows/ci.yml', 'on: push\n');
+          write('.github/workflows/qwen-autofix.yml', 'on: schedule\n');
+        },
+        pr: ({ write }) => write('.github/workflows/ci.yml', 'on: pull\n'),
+        round: ({ write }) =>
+          write('.github/workflows/qwen-autofix.yml', 'on: never\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // Skills are executable agent behavior.
+    expect(
+      run({
+        base: ({ write }) => write('src/a.ts', 'a\n'),
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) => write('.qwen/skills/autofix/SKILL.md', 'x\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // The root manifest's workspaces array steers the gate's dispatch.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"scripts":{},"workspaces":["packages/*"]}\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) =>
+          write(
+            'package.json',
+            '{"scripts":{},"workspaces":["packages/*","!packages/x"]}\n',
+          ),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // A workspace-manifest footprint must not license the ROOT dispatcher:
+    // root and workspace manifests are separate classes.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"scripts":{"lint":"eslint ."}}\n');
+          write('packages/w/package.json', '{"scripts":{"test":"vitest"}}\n');
+        },
+        pr: ({ write }) =>
+          write(
+            'packages/w/package.json',
+            '{"scripts":{"test":"vitest run"}}\n',
+          ),
+        round: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"true"}}\n'),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // Nested declared workspaces are command surface too (resolver-backed,
+    // not pattern-depth), while deep configs in a src tree are data.
+    const classifierProbe = (paths) => {
+      const helpers = reviewVerificationRunner.match(
+        /(at_workspace_root\(\) \{[\s\S]*?\n\})\n(sensitive_class_of\(\) \{[\s\S]*?\n\})/,
+      );
+      expect(helpers).toBeTruthy();
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'RUNNER_TEMP="$(mktemp -d)"',
+            `printf '%s\\n' 'read f; d=\${f%/*}; case "$f" in packages/channels/*/package.json|packages/channels/*/tsconfig.json) echo "$d";; packages/*/*) case "$d" in packages/*/*) ;; *) echo "$d";; esac;; esac' > "$RUNNER_TEMP/resolve-owning-packages.sh"`,
+            helpers[1],
+            helpers[2],
+            `for f in ${paths.map((x) => `'${x}'`).join(' ')}; do printf '%s=%s\\n' "$f" "$(sensitive_class_of "$f")"; done`,
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+    };
+    const classes = classifierProbe([
+      '.github/actions/a/action.yml',
+      '.github/scripts/x.sh',
+      '.husky/pre-commit',
+      '.npmrc',
+      '.nvmrc',
+      'eslint.config.js',
+      'packages/cli/vitest.config.ts',
+      'packages/cli/tsconfig.json',
+      'packages/cli/src/examples/starter/tsconfig.json',
+      'packages/channels/github/tsconfig.json',
+      'package-lock.json',
+      'packages/cli/package-lock.json',
+      'patches/ink+7.0.3.patch',
+      '.gitattributes',
+      'packages/core/.gitattributes',
+      'packages/desktop-shell/.npmrc',
+      'eslint.legacy-filenames.mjs',
+      '.github/workflows/qwen-pr-safety-precheck.yml',
+    ]);
+    expect(classes).toContain('.github/actions/a/action.yml=ci-workflows');
+    expect(classes).toContain('.github/scripts/x.sh=ci-scripts');
+    expect(classes).toContain('.husky/pre-commit=git-hooks');
+    expect(classes).toContain('.npmrc=toolchain-config');
+    expect(classes).toContain('.nvmrc=toolchain-config');
+    expect(classes).toContain('eslint.config.js=lint-config');
+    expect(classes).toContain('packages/cli/vitest.config.ts=test-config');
+    expect(classes).toContain('packages/cli/tsconfig.json=ts-config');
+    expect(classes).toContain(
+      'packages/cli/src/examples/starter/tsconfig.json=\n',
+    );
+    expect(classes).toContain(
+      'packages/channels/github/tsconfig.json=ts-config',
+    );
+    expect(classes).toContain('package-lock.json=supply-chain');
+    expect(classes).toContain('packages/cli/package-lock.json=supply-chain');
+    expect(classes).toContain('patches/ink+7.0.3.patch=supply-chain');
+    expect(classes).toContain('.gitattributes=measurement-config');
+    expect(classes).toContain(
+      'packages/core/.gitattributes=measurement-config',
+    );
+    expect(classes).toContain('packages/desktop-shell/.npmrc=toolchain-config');
+    expect(classes).toContain('eslint.legacy-filenames.mjs=lint-config');
+    expect(classes).toContain(
+      '.github/workflows/qwen-pr-safety-precheck.yml=autofix-loop',
+    );
+  });
+
+  const freightHelper = () => {
+    const m = reviewVerificationRunner.match(
+      /(not_merge_freight\(\) \{[\s\S]*?\n\})/,
+    )?.[1];
+    expect(m).toBeTruthy();
+    return m;
+  };
+
+  it('writes a gate-authored advisory when a round shrinks test coverage', () => {
+    const block = reviewVerificationRunner.match(
+      /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (build) => {
+      const { dir } = validityFixture(build);
+      const workdir = mkdtempSync(join(tmpdir(), 'autofix-validity-wd-'));
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'cd "$1"',
+            'BRANCH=feat',
+            'WORKDIR="$2"',
+            'GATE_LOG="$(mktemp)"',
+            'ROUND_RANGE="origin/feat...feat"',
+            freightHelper(),
+            block,
+            'echo DONE',
+          ].join('\n'),
+          'bash',
+          dir,
+          workdir,
+        ],
+        { encoding: 'utf8', env: isolatedGitEnv },
+      );
+      expect(res.error).toBeUndefined();
+      const advisoryPath = join(workdir, 'gate-advisories.md');
+      const advisory = existsSync(advisoryPath)
+        ? readFileSync(advisoryPath, 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(workdir, { recursive: true, force: true });
+      expect(`${res.stdout}\n${res.stderr}`).toContain('DONE');
+      return advisory;
+    };
+    const manyLines = Array.from({ length: 40 }, (_, i) => `t${i}`).join('\n');
+    // Deleting a test file is surfaced by name.
+    const deleted = run({
+      base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
+      pr: () => {},
+      round: ({ dir }) => rmSync(join(dir, 'src', 'a.test.ts')),
+    });
+    expect(deleted).toContain('src/a.test.ts');
+    expect(deleted).toContain('Gate advisory');
+    // A net shrink past the threshold is surfaced even with no deleted file…
+    expect(
+      run({
+        base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
+        pr: () => {},
+        round: ({ write }) => write('src/a.test.ts', 't0\n'),
+      }),
+    ).toContain('Gate advisory');
+    // …while a small trim stays silent.
+    expect(
+      run({
+        base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
+        pr: () => {},
+        round: ({ write }) =>
+          write(
+            'src/a.test.ts',
+            `${Array.from({ length: 35 }, (_, i) => `t${i}`).join('\n')}\n`,
+          ),
+      }),
+    ).toBe('');
+    // Filenames are branch-controlled bytes rendered in a trusted-voice
+    // document: a backtick in a legal git filename must not escape the code
+    // span and forge gate-authored markdown.
+    const forged = run({
+      base: ({ write }) => write('src/a`](x)b.test.ts', `${manyLines}\n`),
+      pr: () => {},
+      round: ({ dir }) => rmSync(join(dir, 'src', 'a`](x)b.test.ts')),
+    });
+    expect(forged).toContain('src/a???x?b.test.ts');
+    expect(forged).not.toContain('`](x)');
+  });
+
+  it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
+    const block = reviewVerificationRunner.match(
+      /(# Bite check:[\s\S]*?)\nassert_verification_tree\necho "verified_head/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (
+      build,
+      { runnerExit, runnerScript, resolverLines, workdir },
+    ) => {
+      const { dir, git } = validityFixture(build);
+      const tools = mkdtempSync(join(tmpdir(), 'autofix-validity-tools-'));
+      // Stub owning-package resolver and bite runner — the block treats the
+      // runner as an opaque command. A fixed exit code drives the semantic
+      // cases; a runnerScript drives the tree-state-proving cases.
+      writeFileSync(
+        join(tools, 'resolve-owning-packages.sh'),
+        `printf '%s\\n' ${resolverLines.map((l) => `'${l}'`).join(' ')}\n`,
+      );
+      writeFileSync(
+        join(tools, 'bite-runner'),
+        runnerScript ??
+          `#!/usr/bin/env bash\necho "bite-runner: $*" >&2\nexit ${runnerExit}\n`,
+      );
+      chmodSync(join(tools, 'bite-runner'), 0o755);
+      // WORKDIR fixtures: resolved-comments.txt + rc.json/rv.json make the
+      // round a DEFECT-CLAIM round (it resolves a Critical / CR finding).
+      for (const [name, content] of Object.entries(workdir ?? {})) {
+        writeFileSync(join(tools, name), content);
+      }
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'cd "$1"',
+            'BRANCH=feat',
+            'WORKDIR="$2"',
+            'RUNNER_TEMP="$2"',
+            'GATE_LOG="$2/gate.log"',
+            ': > "$GATE_LOG"',
+            'ROUND_RANGE="origin/feat...feat"',
+            freightHelper(),
+            'BITE_RUNNER="$2/bite-runner"',
+            'reject_fix() { echo "REJECT:${1}"; exit 1; }',
+            block,
+            'echo SURVIVED',
+          ].join('\n'),
+          'bash',
+          dir,
+          tools,
+        ],
+        { encoding: 'utf8', env: isolatedGitEnv },
+      );
+      expect(res.error).toBeUndefined();
+      const status = git('status', '--porcelain');
+      const head = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+      const advisoryPath = join(tools, 'gate-advisories.md');
+      const advisory = existsSync(advisoryPath)
+        ? readFileSync(advisoryPath, 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(tools, { recursive: true, force: true });
+      return {
+        out: `${res.stdout}\n${res.stderr}\n[spawn status=${res.status}]`,
+        status,
+        head,
+        advisory,
+      };
+    };
+    const srcAndTest = {
+      base: ({ write }) => {
+        // The bite runner guard reads the workspace's test script and the
+        // self-import guard reads its name (absent from the test files).
+        write(
+          'packages/cli/package.json',
+          '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
+        );
+        write('packages/cli/src/a.ts', 'a\n');
+        write('packages/cli/src/a.test.ts', 't\n');
+      },
+      pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
+      round: ({ write }) => {
+        write('packages/cli/src/a.ts', 'c\n');
+        write('packages/cli/src/a.test.ts', 't2\n');
+      },
+    };
+    // Artifacts that mark the round as resolving a Critical finding.
+    const criticalClaim = {
+      // rc: prefix + CRLF, exactly as SKILL tells the agent to write the
+      // handle and as the other consumers tolerate.
+      'resolved-comments.txt': 'rc:101\r\n',
+      'rc.json': JSON.stringify([
+        { id: 101, body: '**[Critical]** stale owner routes writes' },
+      ]),
+      'rv.json': JSON.stringify([]),
+    };
+    // Defect-claim round + all changed tests green on the pre-round tree =>
+    // the claimed defect does not reproduce => non-retryable rejection.
+    const rejected = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli'],
+      workdir: criticalClaim,
+    });
+    expect(rejected.out).toContain('REJECT:bite check');
+    // The SAME all-green result WITHOUT a defect claim (a refactor pinning
+    // existing behavior, an optional cleanup) is an advisory, not a
+    // rejection — and the tree still comes back clean on the branch.
+    const advisory = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli'],
+    });
+    expect(advisory.out).toContain('SURVIVED');
+    expect(advisory.out).not.toContain('REJECT:');
+    expect(advisory.advisory).toContain('pass on the pre-round tree');
+    expect(advisory.status).toBe('');
+    expect(advisory.head).toBe('feat');
+    // Enforcement needs a RESOLVED Critical: resolving only a Suggestion,
+    // or merely having an unresolved Critical present in rc.json, stays
+    // advisory-grade.
+    for (const workdir of [
+      {
+        'resolved-comments.txt': '303\n',
+        'rc.json': JSON.stringify([
+          { id: 303, body: '**[Suggestion]** rename this helper' },
+          { id: 101, body: '**[Critical]** stale owner routes writes' },
+        ]),
+        'rv.json': JSON.stringify([]),
+      },
+      {
+        'resolved-comments.txt': '999\n',
+        'rc.json': JSON.stringify([
+          { id: 101, body: '**[Critical]** stale owner routes writes' },
+        ]),
+        'rv.json': JSON.stringify([]),
+      },
+    ]) {
+      const soft = run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir,
+      });
+      expect(soft.out).toContain('SURVIVED');
+      expect(soft.out).not.toContain('REJECT:');
+      expect(soft.advisory).toContain('pass on the pre-round tree');
+    }
+    // A reply resolved inside a Critical-rooted thread is a defect claim,
+    // matching how the feedback renderers classify replies.
+    expect(
+      run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '404\n',
+          'rc.json': JSON.stringify([
+            { id: 101, body: '**[Critical]** stale owner routes writes' },
+            { id: 404, body: 'fixed here', in_reply_to_id: 101 },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      }).out,
+    ).toContain('REJECT:bite check');
+    // A Critical anchored ON a test file is a test-side claim: all-green is
+    // its expected shape, so it demotes to the advisory arm...
+    const testSide = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli'],
+      workdir: {
+        'resolved-comments.txt': 'rc:101\n',
+        'rc.json': JSON.stringify([
+          {
+            id: 101,
+            path: 'packages/cli/src/a.test.ts',
+            body: '**[Critical]** this test asserts the wrong behavior',
+          },
+        ]),
+        'rv.json': JSON.stringify([]),
+      },
+    });
+    expect(testSide.out).toContain('SURVIVED');
+    expect(testSide.out).not.toContain('REJECT:');
+    expect(testSide.advisory).toContain('test-side defect claim');
+    // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
+    // resolved alongside must not break the demotion.
+    expect(
+      run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n303\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 303,
+              path: 'packages/cli/src/a.ts',
+              body: '**[Suggestion]** rename this helper',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      }).out,
+    ).not.toContain('REJECT:');
+    // A Critical anchored on SOURCE keeps full enforcement even when a
+    // test-side Critical is resolved in the same round.
+    expect(
+      run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n102\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: '**[Critical]** stale owner routes writes',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      }).out,
+    ).toContain('REJECT:bite check');
+    // TESTSIDE demotion honors the review-STATE arm too: a CR-attached
+    // comment on a test path demotes like a body-tagged Critical does.
+    const crTestSide = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli'],
+      workdir: {
+        'resolved-comments.txt': '505\n',
+        'rc.json': JSON.stringify([
+          {
+            id: 505,
+            path: 'packages/cli/src/a.test.ts',
+            body: 'this test asserts the wrong behavior',
+            pull_request_review_id: 9,
+          },
+        ]),
+        'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
+      },
+    });
+    expect(crTestSide.out).not.toContain('REJECT:');
+    expect(crTestSide.advisory).toContain('test-side defect claim');
+    // Resolving a comment attached to a CHANGES_REQUESTED review enforces
+    // the same way a Critical tag does.
+    expect(
+      run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '202\n',
+          'rc.json': JSON.stringify([
+            { id: 202, body: 'null branch crashes', pull_request_review_id: 9 },
+          ]),
+          'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
+        },
+      }).out,
+    ).toContain('REJECT:bite check');
+    // Any failure on the pre-round tree = the tests bite => round proceeds,
+    // and the verification tree is restored to the branch, clean.
+    const bit = run(srcAndTest, {
+      runnerExit: 1,
+      resolverLines: ['packages/cli'],
+      workdir: criticalClaim,
+    });
+    expect(bit.out).toContain('bite confirmed');
+    expect(bit.out).toContain('SURVIVED');
+    expect(bit.status).toBe('');
+    expect(bit.head).toBe('feat');
+    // Tree-state proof: the runner inspects the ACTUAL checkout instead of
+    // returning a fixed code. It fails (bites) only when it sees PRE-ROUND
+    // source ('b') alongside the ROUND's test ('t2') — passing proves the
+    // detach reverted the source AND the overlay delivered the round's test.
+    const treeProof = run(srcAndTest, {
+      runnerScript: [
+        '#!/usr/bin/env bash',
+        'grep -qx b packages/cli/src/a.ts || exit 0',
+        'grep -qx t2 packages/cli/src/a.test.ts || exit 0',
+        'exit 1',
+      ].join('\n'),
+      resolverLines: ['packages/cli'],
+      workdir: criticalClaim,
+    });
+    expect(treeProof.out).toContain('bite confirmed');
+    // Negative control: a runner that bites only on ROUND source ('c')
+    // never sees it on the detached tree — all-green, so the defect-claim
+    // round is rejected, proving the detach actually reverted the source.
+    const roundLeak = run(srcAndTest, {
+      runnerScript: [
+        '#!/usr/bin/env bash',
+        'grep -qx c packages/cli/src/a.ts && exit 1',
+        'exit 0',
+      ].join('\n'),
+      resolverLines: ['packages/cli'],
+      workdir: criticalClaim,
+    });
+    expect(roundLeak.out).toContain('REJECT:bite check');
+    // A cross-package round skips (dist confound), it never rejects.
+    const skipped = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli', 'packages/core'],
+      workdir: criticalClaim,
+    });
+    expect(skipped.out).toContain('bite check skipped');
+    expect(skipped.out).toContain('SURVIVED');
+    // A test-only round (no source change) is coverage addition, not a
+    // defect claim — no bite requirement.
+    const coverageOnly = run(
+      {
+        base: ({ write }) => {
+          write('packages/cli/src/a.ts', 'a\n');
+          write('packages/cli/src/a.test.ts', 't\n');
+        },
+        pr: () => {},
+        round: ({ write }) => write('packages/cli/src/a.test.ts', 't-more\n'),
+      },
+      {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: criticalClaim,
+      },
+    );
+    expect(coverageOnly.out).toContain('SURVIVED');
+    expect(coverageOnly.out).not.toContain('REJECT:');
+    expect(coverageOnly.advisory).toContain('test-only changes');
+
+    // Contract pins: the rejection is non-retryable (a repair pass cannot
+    // make a nonexistent defect reproduce), and the report step embeds the
+    // gate-authored advisory file, which is also uploaded as an artifact.
+    expect(reviewVerificationRunner).toContain(
+      "reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'",
+    );
+    expect(pushAndReportStep).toContain('gate-advisories.md');
+    expect(reviewAddressJob).toContain('gate-advisories.md agent-api-error');
+    const skill = readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
+    expect(skill).toContain('Verification is SOURCE-BLIND');
+    expect(skill).toContain('changed tests against the pre-round branch');
+    expect(skill).toContain("outside the PR's own");
+  });
+
   it('still runs review verification reporting when the agent step fails', () => {
     expect(verificationGateSteps).toHaveLength(2);
     const reviewVerificationGateStep = verificationGateSteps[1];
@@ -10056,9 +10822,10 @@ exit 1
     // Token-breaking neutralization at ALL EIGHT agent-derived publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
     // gate-rejection body, the comment-reply body whose content is agent
-    // stdout that can echo external comment text, and the two
-    // deferred-feedback report sections, which render untrusted
-    // review-comment paths into a bot-authored comment), and it
+    // stdout that can echo external comment text, the two
+    // deferred-feedback report sections, and the gate-advisories section,
+    // which render untrusted review-comment/branch paths into a
+    // bot-authored comment), and it
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
@@ -10067,7 +10834,7 @@ exit 1
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
-    expect(escapeSites).toHaveLength(8);
+    expect(escapeSites).toHaveLength(9);
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }
