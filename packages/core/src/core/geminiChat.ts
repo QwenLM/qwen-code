@@ -1163,6 +1163,18 @@ function isValidContentPart(part: Part): boolean {
 // substring check would false-positive on legitimate mentions.
 const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
 
+// Non-thought text of a part list, trimmed. Both placeholder gates — the
+// per-chunk hold during iteration and the completed-placeholder drop on the
+// stream-error path — must agree on what counts as the turn's text, so they
+// share this exact computation.
+function nonThoughtText(parts: Part[]): string {
+  return parts
+    .filter((part) => !part.thought && part.text)
+    .map((part) => part.text)
+    .join('')
+    .trim();
+}
+
 function isDegradedPlaceholderPrefix(text: string): boolean {
   const trimmed = text.trim();
   return (
@@ -1925,6 +1937,10 @@ export class GeminiChat {
       this.config.getChatCompression(),
     );
     if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
+      // skipParts is the load-bearing protection for the current message's
+      // images: when placeholder curation merges adjacent user turns, the
+      // curated entry is a fresh object, so the identity find below misses
+      // and only skipParts keeps the current image out of the eviction pass.
       const skipEntry = currentUserContent
         ? curatedHistory.find((c) => c === currentUserContent)
         : undefined;
@@ -4757,11 +4773,7 @@ export class GeminiChat {
           }
         }
 
-        const pendingPlaceholderText = allModelParts
-          .filter((part) => !part.thought && part.text)
-          .map((part) => part.text)
-          .join('')
-          .trim();
+        const pendingPlaceholderText = nonThoughtText(allModelParts);
         const shouldHoldDegradedPlaceholder =
           !hasToolCall && isDegradedPlaceholderPrefix(pendingPlaceholderText);
 
@@ -4805,14 +4817,16 @@ export class GeminiChat {
       // aligned. (Staging the never-delivered text into the buffer instead
       // let a diverged continuation persist an invisible prefix into
       // history/JSONL, and a stale stage could leak into a later turn.)
-      const accumulatedText = allModelParts
-        .filter((part) => !part.thought && part.text)
-        .map((part) => part.text)
-        .join('')
-        .trim();
+      const accumulatedText = nonThoughtText(allModelParts);
       const completedPlaceholder =
         !hasToolCall && accumulatedText === UPSTREAM_DEGRADED_PLACEHOLDER;
-      if (!completedPlaceholder) {
+      if (completedPlaceholder) {
+        // Trace the deliberate discard: without it, a benign transport-cut
+        // recovery is indistinguishable from lost output after the fact.
+        debugLogger.warn(
+          `[UPSTREAM_DEGRADED] stream error completed the fail-fast placeholder; discarding ${pendingPreValidationChunks.length} withheld chunk(s) and replaying fresh`,
+        );
+      } else {
         for (const pendingChunk of pendingPreValidationChunks) {
           yield pendingChunk;
         }

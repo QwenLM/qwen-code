@@ -89,7 +89,12 @@ export function replaceImagePayloadsInPlace(
       ) {
         const stored = store.put(part);
         replaced.push(stored);
-        content.parts[i] = { text: imageReferenceText(stored) };
+        // Rewrite the shared Part object itself, not only this array slot:
+        // curated entries can be fresh merges (appendCuratedContent) whose
+        // parts arrays reuse the durable history's Part objects, and a
+        // slot-only swap would leave the inline payload alive in history.
+        part.text = imageReferenceText(stored);
+        part.inlineData = undefined;
         continue;
       }
       const nested = getFunctionResponseParts(part);
@@ -102,7 +107,10 @@ export function replaceImagePayloadsInPlace(
         ) {
           const stored = store.put(inner);
           replaced.push(stored);
-          nested[j] = { text: imageReferenceText(stored) };
+          // Same shared-object rewrite as above (nested parts are reused by
+          // durable history entries too).
+          inner.text = imageReferenceText(stored);
+          inner.inlineData = undefined;
         }
       }
     }

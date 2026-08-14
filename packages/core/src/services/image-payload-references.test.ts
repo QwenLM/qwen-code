@@ -270,6 +270,28 @@ describe('replaceImagePayloadsInPlace', () => {
     expect(JSON.stringify(contents)).toContain('"data":"current-shot"');
     expect(JSON.stringify(contents)).not.toContain('"data":"old-shot"');
   });
+
+  it('rewrites the shared part object so durable history loses the payload too', () => {
+    // Curated entries can be fresh merges (appendCuratedContent) whose parts
+    // arrays reuse the durable history's Part objects. Replacing only the
+    // array slot would leave the inline payload alive in history, so the
+    // rewrite must hit the shared object itself.
+    const store = new InMemoryImagePayloadStore();
+    const sharedPart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'old-shot' },
+    };
+    const durableHistoryEntry: Content = { role: 'user', parts: [sharedPart] };
+    const mergedEntry: Content = {
+      role: 'user',
+      parts: [sharedPart, { text: 'new message' }],
+    };
+
+    replaceImagePayloadsInPlace([mergedEntry], store);
+
+    expect(countAllInlineImages([durableHistoryEntry])).toBe(0);
+    expect(sharedPart.text).toMatch(/\[Image #[a-f0-9]{12}/);
+    expect(sharedPart.inlineData).toBeUndefined();
+  });
 });
 
 describe('buildReattachParts', () => {
