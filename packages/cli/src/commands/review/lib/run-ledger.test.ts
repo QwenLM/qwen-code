@@ -46,6 +46,16 @@ const envOf = (sessionId: string): NodeJS.ProcessEnv => ({
   QWEN_CODE_SESSION_ID: sessionId,
 });
 
+/**
+ * Authorize `sessionId` to read prior evidence — what `fetch-pr --resume`
+ * records once every probe has passed. Reading the ledger's prior entries at
+ * all requires it, so a test about ledger CONTENT states that precondition
+ * explicitly rather than relying on its absence.
+ */
+function authorize(sessionId: string, atMs: number = Date.now()): void {
+  recordResume(plan, envOf(sessionId), atMs);
+}
+
 beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'run-ledger-')));
   plan = join(root, 'qwen-review-pr-7-fetch.json');
@@ -56,11 +66,13 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 describe('appendRunSession / priorSessionIds', () => {
   it('records a session and surfaces it to a LATER session as prior', () => {
     appendRunSession(plan, envOf('S1'));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
   it('excludes the current session from its own priors', () => {
     appendRunSession(plan, envOf('S1'));
+    authorize('S1');
     expect(priorSessionIds(plan, envOf('S1'))).toEqual([]);
   });
 
@@ -68,6 +80,7 @@ describe('appendRunSession / priorSessionIds', () => {
     appendRunSession(plan, envOf('S1'));
     appendRunSession(plan, envOf('S1'));
     appendRunSession(plan, envOf('S2'));
+    authorize('S3');
     expect(priorSessionIds(plan, envOf('S3'))).toEqual(['S1', 'S2']);
   });
 
@@ -75,6 +88,7 @@ describe('appendRunSession / priorSessionIds', () => {
     appendRunSession(plan, envOf('../evil'));
     appendRunSession(plan, envOf('a/b'));
     appendRunSession(plan, envOf(''));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
@@ -87,6 +101,7 @@ describe('appendRunSession / priorSessionIds', () => {
     ) as Array<Record<string, unknown>>;
     raw.push({ sessionId: '../../etc', atMs: Date.now() });
     writeFileSync(runSessionsPath(plan), JSON.stringify(raw));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
@@ -94,6 +109,7 @@ describe('appendRunSession / priorSessionIds', () => {
     appendRunSession(plan, envOf('S0'), Date.now() - 60_000);
     // Rewriting the plan advances the run epoch past the stale entry.
     writeFileSync(plan, JSON.stringify({ diffLines: 2, chunks: [] }));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
@@ -103,6 +119,7 @@ describe('appendRunSession / priorSessionIds', () => {
     // state, which the exact fresh-run boundary is right to reject — the
     // rewrite case has its own test below.)
     appendRunSession(plan, envOf('S1'));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
@@ -113,7 +130,18 @@ describe('appendRunSession / priorSessionIds', () => {
     appendRunSession(plan, envOf('S0'));
     const later = new Date(Date.now() + 1000);
     utimesSync(plan, later, later);
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
+  it('reads NO prior sessions until this session was authorized to resume', () => {
+    // The ledger is an address book, not permission. Without the marker any
+    // session pointing at an old plan would inherit the ledgered attempts'
+    // evidence — after head drift, stale work could certify unreviewed code.
+    appendRunSession(plan, envOf('S1'));
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+    authorize('S2');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
   it('reads a case-variant of the current session as the SAME session', () => {
@@ -121,22 +149,26 @@ describe('appendRunSession / priorSessionIds', () => {
     // directory, so treating a variant as a prior session double-reads every
     // record this run wrote and mints a resume that never happened.
     appendRunSession(plan, envOf('s1'));
+    authorize('S1');
     expect(priorSessionIds(plan, envOf('S1'))).toEqual([]);
   });
 
   it('reads a corrupt ledger as empty', () => {
     appendRunSession(plan, envOf('S1'));
     writeFileSync(runSessionsPath(plan), '{not json');
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
   it('reads a non-array ledger as empty', () => {
     appendRunSession(plan, envOf('S1'));
     writeFileSync(runSessionsPath(plan), JSON.stringify({ sessionId: 'S1' }));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
   it('reads a missing ledger as empty', () => {
+    authorize('S1');
     expect(priorSessionIds(plan, envOf('S1'))).toEqual([]);
   });
 
@@ -247,6 +279,7 @@ describe('the properties the threat model rests on', () => {
     for (const id of ['..', '.', './x', '..\\evil']) {
       appendRunSession(plan, envOf(id));
     }
+    authorize('S9');
     expect(priorSessionIds(plan, envOf('S9'))).toEqual([]);
   });
 
@@ -266,6 +299,7 @@ describe('the properties the threat model rests on', () => {
     appendRunSession(plan, envOf('S1'));
     const raw = JSON.parse(readFileSync(runSessionsPath(plan), 'utf8'));
     writeFileSync(runSessionsPath(plan), JSON.stringify([...raw, ...raw]));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
@@ -275,6 +309,7 @@ describe('the properties the threat model rests on', () => {
     // a same-millisecond entry would read as older than its own run.
     const mtimeMs = statSync(plan).mtimeMs;
     appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
@@ -282,6 +317,7 @@ describe('the properties the threat model rests on', () => {
     // One-sided fences let a hand-written far-future entry read as belonging
     // to every later run of the same PR.
     appendRunSession(plan, envOf('S1'), Date.now() + 3_600_000);
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
@@ -293,6 +329,7 @@ describe('the properties the threat model rests on', () => {
     // step between attempts would leave it.
     appendRunSession(plan, envOf('S1'), base + 60_000);
     appendRunSession(plan, envOf('S0'), base);
+    authorize('S2');
     expect(priorSessionEntries(plan, envOf('S2'))).toEqual([
       { sessionId: 'S0', atMs: base, endsAtMs: base + 60_000 },
       { sessionId: 'S1', atMs: base + 60_000, endsAtMs: null },
@@ -310,12 +347,14 @@ describe('the properties the threat model rests on', () => {
       JSON.stringify([{ sessionId: 'X', atMs: Date.now() }]),
     );
     symlinkSync(target, runSessionsPath(plan));
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
   it('drops an entry older than the slack window', () => {
     const mtimeMs = statSync(plan).mtimeMs;
     appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs) - 3000);
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
@@ -331,6 +370,7 @@ describe('the properties the threat model rests on', () => {
     appendRunSession(plan, envOf('S1'));
     expect(readFileSync(target, 'utf8')).toBe('"untouched"');
     expect(lstatSync(runSessionsPath(plan)).isSymbolicLink()).toBe(false);
+    authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
@@ -342,6 +382,7 @@ describe('the properties the threat model rests on', () => {
     const base = Math.floor(statSync(plan).mtimeMs);
     appendRunSession(plan, envOf('S0'), base);
     appendRunSession(plan, envOf('S1'), base + 60_000);
+    authorize('S2');
     expect(priorSessionEntries(plan, envOf('S2'))).toEqual([
       { sessionId: 'S0', atMs: base, endsAtMs: base + 60_000 },
       { sessionId: 'S1', atMs: base + 60_000, endsAtMs: null },

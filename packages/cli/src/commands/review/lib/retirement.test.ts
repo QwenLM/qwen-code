@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scheduleReverseAuditRound } from './retirement.js';
+import { appendRunSession, recordResume } from './run-ledger.js';
 import {
   promptRecordDir,
   recordPrompt,
@@ -1778,10 +1779,19 @@ describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', 
   function ledger(...ids: string[]): void {
     const d = promptRecordDir(plan);
     mkdirSync(d, { recursive: true });
-    writeFileSync(
-      join(d, 'run-sessions.json'),
-      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    // Written by the real writer: it stamps the plan mtime each entry is
+    // keyed on, and the resume marker is what authorizes reading prior
+    // evidence at all. The current attempt is stamped last, since each
+    // attempt's window closes when the next one opened.
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        plan,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
     );
+    recordResume(plan, process.env, nowMs + 1500);
   }
 
   it('reads the prior attempt before this session has launched anything', () => {

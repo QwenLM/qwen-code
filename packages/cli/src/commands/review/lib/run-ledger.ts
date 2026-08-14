@@ -105,9 +105,19 @@ export function runSessionsPath(planPath: string): string {
  * planted symlink redirects the read and a planted FIFO blocks it forever —
  * a hang, not an error, in a command a review is waiting on.
  */
+const MAX_LEDGER_BYTES = 256 * 1024;
+const MAX_LEDGER_ENTRIES = 64;
+
 function readLedgerFile(path: string): string | null {
   try {
-    if (!lstatSync(path).isFile()) return null;
+    const st = lstatSync(path);
+    // Not a regular file: a symlink would redirect the read and a FIFO would
+    // block it forever — a hang, not an error, in a command a review waits on.
+    if (!st.isFile()) return null;
+    // Bounded before the read: these files are bookkeeping (a handful of
+    // small entries), and a planted multi-gigabyte one would otherwise stall
+    // or exhaust every command that touches them.
+    if (st.size > MAX_LEDGER_BYTES) return null;
     return readFileSync(path, 'utf8');
   } catch {
     return null;
@@ -123,7 +133,9 @@ function readSessions(planPath: string): SessionEntry[] {
     const epoch = runEpochMs(planPath);
     const ceiling = runCeilingMs();
     const planMtime = planMtimeMs(planPath);
-    const kept = parsed.filter(
+    // Cap the entry count too: the byte bound alone still admits tens of
+    // thousands of tiny entries, each of which costs a directory read.
+    const kept = parsed.slice(0, MAX_LEDGER_ENTRIES).filter(
       (e): e is SessionEntry =>
         typeof e === 'object' &&
         e !== null &&
@@ -132,13 +144,16 @@ function readSessions(planPath: string): SessionEntry[] {
         typeof (e as SessionEntry).atMs === 'number' &&
         (e as SessionEntry).atMs >= epoch &&
         (e as SessionEntry).atMs <= ceiling &&
-        // The exact boundary when the entry carries one: an entry written
-        // against a DIFFERENT plan belongs to a different run, whatever the
-        // window says. The window's own slack is inexact by construction —
-        // a previous run that appended within it survives otherwise.
-        (typeof (e as SessionEntry).planMtimeMs !== 'number' ||
-          planMtime === null ||
-          (e as SessionEntry).planMtimeMs === planMtime),
+        // The exact boundary, with no fallback: an entry written against a
+        // DIFFERENT plan belongs to a different run, whatever the window
+        // says, and an entry that cannot say which plan it saw cannot be
+        // placed at all. The window alone is inexact by construction — a
+        // previous run that appended within its slack survives it — and the
+        // field ships in the same change as the ledger itself, so there are
+        // no older files to be lenient toward.
+        typeof (e as SessionEntry).planMtimeMs === 'number' &&
+        planMtime !== null &&
+        (e as SessionEntry).planMtimeMs === planMtime,
     );
     // Deduplicate on READ, not only on append: the file lives in a directory
     // the orchestrator can reach, and a hand-written duplicate would make a
@@ -213,6 +228,28 @@ export function priorSessionIds(
  * exists to prevent. `null` when nothing followed it (it is the newest prior
  * entry and the current session's own start is not recorded here).
  */
+/**
+ * Did the CURRENT session actually earn the right to read prior evidence?
+ *
+ * The ledger is an address book; it does not say a resume was authorized.
+ * Without this gate any session that points at an old plan unions the
+ * ledgered attempts' transcripts and inherits their coverage — after head
+ * drift, stale evidence could certify code nobody reviewed. `fetch-pr
+ * --resume` records the resume only after every probe passed (worktree at
+ * the fetched SHA and clean, diff bytes unchanged, live head unmoved), so
+ * the marker naming this session IS that proof, written by the CLI.
+ */
+function resumeAuthorized(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const current = env['QWEN_CODE_SESSION_ID']?.trim().toLowerCase();
+  if (!current) return false;
+  return readResumeMarker(planPath).resumes.some(
+    (r) => r.sessionId.toLowerCase() === current,
+  );
+}
+
 export function priorSessionEntries(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -222,6 +259,7 @@ export function priorSessionEntries(
   // reading it as a prior session double-reads every record this run wrote —
   // minting `recoveredAgents` and a resumed disclosure on a run that never
   // resumed, and folding the current chat into the prior totals.
+  if (!resumeAuthorized(planPath, env)) return [];
   const current = env['QWEN_CODE_SESSION_ID']?.trim().toLowerCase();
   // Sort by time, not file order: `endsAtMs` is a COST CLAMP, and an
   // out-of-order (hand-written) ledger or a backwards wall-clock step
@@ -282,8 +320,9 @@ export function readResumeMarker(planPath: string): ResumeMarker {
     const epoch = runEpochMs(planPath);
     const ceiling = runCeilingMs();
     const raw = parsed as ResumeMarker;
+    const seenResume = new Set<string>();
     const resumes = Array.isArray(raw.resumes)
-      ? raw.resumes.filter(
+      ? raw.resumes.slice(0, MAX_LEDGER_ENTRIES).filter(
           (e) =>
             typeof e === 'object' &&
             e !== null &&
@@ -294,19 +333,25 @@ export function readResumeMarker(planPath: string): ResumeMarker {
             SESSION_ID_RE.test(e.sessionId) &&
             typeof e.atMs === 'number' &&
             e.atMs >= epoch &&
-            e.atMs <= ceiling,
+            e.atMs <= ceiling &&
+            // Duplicates would each consume a RESUME_MAX slot and refuse a
+            // legitimate continuation.
+            !seenResume.has(e.sessionId.toLowerCase()) &&
+            (seenResume.add(e.sessionId.toLowerCase()), true),
         )
       : [];
     const restarts = Array.isArray(raw.restarts)
-      ? raw.restarts.filter(
-          (e) =>
-            typeof e === 'object' &&
-            e !== null &&
-            typeof e.reason === 'string' &&
-            typeof e.atMs === 'number' &&
-            e.atMs >= epoch &&
-            e.atMs <= ceiling,
-        )
+      ? raw.restarts
+          .slice(0, MAX_LEDGER_ENTRIES)
+          .filter(
+            (e) =>
+              typeof e === 'object' &&
+              e !== null &&
+              typeof e.reason === 'string' &&
+              typeof e.atMs === 'number' &&
+              e.atMs >= epoch &&
+              e.atMs <= ceiling,
+          )
       : [];
     return { schemaVersion: 1, resumes, restarts };
   } catch {

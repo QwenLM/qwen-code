@@ -8,7 +8,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   mkdtempSync,
   readFileSync,
-  renameSync,
   writeFileSync,
   mkdirSync,
   rmSync,
@@ -18,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { parseLedger } from './lib/ledger.js';
@@ -338,6 +338,34 @@ function transcript(
     join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
     lines.join('\n') + '\n',
   );
+}
+
+/**
+ * Move one agent's transcript into a ledgered PRIOR session — the shape a
+ * resumed run reads.
+ *
+ * The records are re-stamped with the owning session (a transcript copied
+ * into another session's directory is not that session's evidence, and
+ * production refuses the misplaced shape), and the ledger is written by the
+ * real writer so the entries carry the plan mtime they are keyed on. The
+ * current attempt is stamped last and its resume recorded: reading prior
+ * evidence at all requires that authorization.
+ */
+function rehomeToPriorSession(planPath: string, file: string): void {
+  mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+  const from = join(dir, 'subagents', 'S1', file);
+  writeFileSync(
+    join(dir, 'subagents', 'S0', file),
+    readFileSync(from, 'utf8').replaceAll(
+      '"sessionId":"S1"',
+      '"sessionId":"S0"',
+    ),
+  );
+  rmSync(from, { force: true });
+  const now = Date.now();
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+  appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+  recordResume(planPath, ENV, now + 1500);
 }
 
 /**
@@ -5801,18 +5829,7 @@ describe('composeReview — a resumed run is continuity, not a coverage gap', ()
     // a capping entry here downgraded every clean resumed run to COMMENT,
     // permanently, since the prior records never leave the ledger.
     const p = coveredPlan();
-    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
-    renameSync(
-      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
-      join(dir, 'subagents', 'S0', 'agent-a1.jsonl'),
-    );
-    writeFileSync(
-      join(promptRecordDir(p), 'run-sessions.json'),
-      JSON.stringify([
-        { sessionId: 'S0', atMs: Date.now() },
-        { sessionId: 'S1', atMs: Date.now() },
-      ]),
-    );
+    rehomeToPriorSession(p, 'agent-a1.jsonl');
 
     const r = composeReview(base({ planPath: p }));
     expect(r.event).toBe('APPROVE');
@@ -5836,18 +5853,7 @@ describe('composeReview — continuity renders on every verdict', () => {
   ): ComposeReviewInput {
     const input = base(over);
     const p = input.planPath as string;
-    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
-    renameSync(
-      join(dir, 'subagents', 'S1', 'agent-a1.jsonl'),
-      join(dir, 'subagents', 'S0', 'agent-a1.jsonl'),
-    );
-    writeFileSync(
-      join(promptRecordDir(p), 'run-sessions.json'),
-      JSON.stringify([
-        { sessionId: 'S0', atMs: Date.now() },
-        { sessionId: 'S1', atMs: Date.now() },
-      ]),
-    );
+    rehomeToPriorSession(p, 'agent-a1.jsonl');
     return input;
   }
 
