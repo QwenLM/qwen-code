@@ -12,17 +12,23 @@
 
 import { createHash } from 'node:crypto';
 import {
-  copyFileSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { probeGit, runGit, type FilesPlan } from './files-plan.js';
-import { AUDIT_READ_MAX_BYTES, readGuarded } from './safe-read.js';
+import {
+  AUDIT_READ_MAX_BYTES,
+  readGuarded,
+  streamSha256,
+} from './safe-read.js';
 
 /** Callers are agent-authored and read whole into the sidecar: bound the
  *  read so a pathological path cannot OOM the capture. */
@@ -42,9 +48,16 @@ function sha256(content: Buffer): string {
  *  the empty string (auditing the toplevel itself) reads the root tree. Both
  *  sides are realpath'd — git reports the symlink-resolved toplevel. */
 function subtreeHashAt(rootAbs: string, toplevel: string): string | undefined {
-  const rel = relative(realpathSync(toplevel), realpathSync(rootAbs))
-    .split(sep)
-    .join('/');
+  let rel: string;
+  try {
+    rel = relative(realpathSync(toplevel), realpathSync(rootAbs))
+      .split(sep)
+      .join('/');
+  } catch {
+    // A TOCTOU delete/rename degrades to "no baseline" like a failed
+    // probe, never a raw ENOENT out of the handler.
+    return undefined;
+  }
   return git(rootAbs, ['rev-parse', `HEAD:${rel}`])?.trim();
 }
 
@@ -97,44 +110,66 @@ export interface Sidecar {
  *  platform. Returns the hash, or undefined when the caller vanished or was
  *  unreadable — the name is still recorded by the caller. */
 function recordCaller(sidecarDir: string, caller: string): string | undefined {
+  // Stream-hash through an O_NONBLOCK open: callers are agent-authored —
+  // a writer-less FIFO must not hang, and the chunked read keeps memory
+  // O(chunk), so the size bound limits the COPY below, not baseline
+  // eligibility: an over-cap caller still drift-aligns instead of
+  // reporting phantom drift at every checkpoint with no remedy. The
+  // open follows symlinks and fstat keeps the regular-file baseline, so
+  // a symlinked caller with regular-file content baselines like any other.
+  const hash = streamSha256(caller);
+  if (hash === undefined) return undefined;
+  const callersRoot = join(sidecarDir, 'callers');
+  const dest = join(callersRoot, caller.replace(/^([A-Za-z]:)?[\\/]/, ''));
+  // Caller paths are agent-authored: '..' segments must not normalize the
+  // copy outside the sidecar. The hash still rides in callerHashes, so a
+  // skipped copy never becomes a silent drop at drift-check time.
+  const rel = relative(callersRoot, dest);
+  if (rel.startsWith('..') || isAbsolute(rel)) return hash;
+  // The copy is best-effort and capped — a multi-hundred-MB caller must
+  // not exhaust the sidecar disk — and a failed copy (ENOSPC, a squatter,
+  // oversize) must not discard the hash: that would turn a transient
+  // error into permanent false drift.
   try {
-    // Stat before reading: callers are agent-authored — a writer-less FIFO
-    // blocks readFileSync forever and a device node buffers until OOM. A
-    // skipped caller stays name-registered (drift-check watches it), so the
-    // skip is never a silent drop. statSync follows symlinks: a symlinked
-    // caller with regular-file content is baselined like any other (lstat
-    // rejected it and left it name-only, which drift-check then flags at
-    // every checkpoint — a phantom drift).
-    const st = statSync(caller);
-    if (!st.isFile() || st.size > CALLER_MAX_BYTES) return undefined;
-    const hash = sha256(readFileSync(caller));
-    const callersRoot = join(sidecarDir, 'callers');
-    const dest = join(callersRoot, caller.replace(/^([A-Za-z]:)?[\\/]/, ''));
-    // Caller paths are agent-authored: '..' segments must not normalize the
-    // copy outside the sidecar. The hash still rides in callerHashes, so a
-    // skipped copy never becomes a silent drop at drift-check time.
-    const rel = relative(callersRoot, dest);
-    if (rel.startsWith('..') || isAbsolute(rel)) return hash;
-    // The copy is best-effort: the hash was computed BEFORE it, and a
-    // failed copy (ENOSPC, a squatter) must not discard it — that would
-    // turn a transient error into permanent false drift.
-    try {
-      mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(caller, dest);
-    } catch {
-      // copy skipped: the hash stays in callerHashes.
-    }
-    return hash;
+    mkdirSync(dirname(dest), { recursive: true });
+    copyGuarded(caller, dest, CALLER_MAX_BYTES);
   } catch {
-    return undefined;
+    // copy skipped: the hash stays in callerHashes.
+  }
+  return hash;
+}
+
+/** Open-and-copy with the same FIFO/regular-file/size discipline the other
+ *  content reads apply: the fd-based gate covers the check-then-use window
+ *  a stat-then-copy pair leaves open. */
+function copyGuarded(src: string, dest: string, maxBytes: number): void {
+  const fd = openSync(src, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) {
+      throw new Error('not a copyable regular file');
+    }
+    writeFileSync(dest, readFileSync(fd));
+  } finally {
+    closeSync(fd);
   }
 }
 
 /** Tracked and staged changes, path-scoped so the sidecar never carries
  *  unrelated dirty content from elsewhere in the repository. Returns false
- *  when the probe fails without an answer. */
-function captureDiffArm(rootAbs: string, sidecarDir: string): boolean {
-  const diff = git(rootAbs, ['diff', 'HEAD', '--', rootAbs]);
+ *  when the probe fails without an answer. On an UNBORN HEAD `git diff
+ *  HEAD` fails definitively (exit 128) and the arm would stay degraded for
+ *  the whole run — every extend re-run retrying the same certain failure;
+ *  the index-vs-worktree diff captures the same dirty state there. */
+function captureDiffArm(
+  rootAbs: string,
+  sidecarDir: string,
+  headUnborn: boolean,
+): boolean {
+  const diff = git(
+    rootAbs,
+    headUnborn ? ['diff', '--', rootAbs] : ['diff', 'HEAD', '--', rootAbs],
+  );
   if (diff === null) return false;
   if (diff.length > 0) {
     writeFileSync(join(sidecarDir, 'diff.patch'), diff, 'utf8');
@@ -171,7 +206,6 @@ function captureUntrackedArm(
       names.add(entry);
     }
   }
-  let copied = 0;
   let failed = 0;
   for (const rel of [...names].sort()) {
     if (!enumerated.has(rel)) continue;
@@ -179,17 +213,23 @@ function captureUntrackedArm(
     const dest = join(sidecarDir, 'untracked', rel);
     try {
       mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(src, dest);
-      copied++;
+      // Open-gated copy: a writer-less FIFO swapped in between the
+      // listing and the copy must not hang, and an oversize subject must
+      // not exhaust the sidecar disk (every other read in this module
+      // caps at AUDIT_READ_MAX_BYTES).
+      copyGuarded(src, dest, AUDIT_READ_MAX_BYTES);
     } catch {
-      // A file that vanishes between the listing and its copy is skipped;
-      // the capture degrades instead of aborting.
+      // A file that vanishes, swaps to a non-regular shape, or exceeds
+      // the cap between the listing and its copy is skipped; the capture
+      // degrades instead of aborting.
       failed++;
     }
   }
-  // Every enumerated copy failing is a degraded arm exactly like a failed
-  // listing: a silently partial sidecar must not publish as complete.
-  return !(copied === 0 && failed > 0);
+  // ANY failed copy degrades the arm, exactly like a failed listing: a
+  // silently partial sidecar must not publish as complete. (Readable
+  // failures still received hash baselines above the arm, so drift
+  // alignment survives — the marker covers the archived evidence set.)
+  return failed === 0;
 }
 
 /** Capture the run-start sidecar: the path-scoped diff, the untracked
@@ -213,30 +253,71 @@ export function captureSidecar(
     try {
       const existing = loadSidecar(sidecarDir);
       for (const caller of callerPaths) {
-        if (existing.callerNames.includes(caller)) continue;
-        existing.callerNames.push(caller);
-        // An unreadable caller is recorded by name only.
+        // A name WITHOUT a hash was unreadable at capture — the transient
+        // class is retryable here (this re-run is the only command that
+        // can retry it), so retry instead of skipping forever into
+        // phantom drift at every checkpoint.
+        if (
+          existing.callerNames.includes(caller) &&
+          Object.hasOwn(existing.callerHashes, caller)
+        ) {
+          continue;
+        }
+        if (!existing.callerNames.includes(caller)) {
+          existing.callerNames.push(caller);
+        }
         const hash = recordCaller(sidecarDir, caller);
         if (hash !== undefined) existing.callerHashes[caller] = hash;
       }
       // An arm that degraded transiently at capture can be repaired here —
-      // this re-run is the only command that can retry it. The baselines
-      // stay preserved; only the failed arms run again.
-      if (
+      // this re-run is the only command that can retry it. The walked-file
+      // baselines stay preserved; only the failed arms run again. A
+      // vcsProbeFailed capture skipped BOTH arms AND the HEAD/subtree
+      // baselines: when the probe has recovered, re-capture those too —
+      // clearing vcsProbeFailed while noVcs stayed true would silence the
+      // re-arm (the unsafe direction).
+      const probeFailed = existing.meta.vcsProbeFailed === true;
+      const degraded =
         existing.meta.captureDegraded !== undefined &&
-        existing.meta.captureDegraded.length > 0
-      ) {
+        existing.meta.captureDegraded.length > 0;
+      if (probeFailed || degraded) {
         const probe = probeGit(
           rootAbs,
           ['rev-parse', '--show-toplevel'],
           GIT_TIMEOUT_MS,
         );
         if (probe.ok) {
+          if (probeFailed) {
+            existing.meta.noVcs = false;
+            existing.meta.vcsProbeFailed = undefined;
+            const headProbe = probeGit(
+              rootAbs,
+              ['rev-parse', 'HEAD'],
+              GIT_TIMEOUT_MS,
+            );
+            if (headProbe.ok) {
+              existing.meta.headSha = headProbe.out.trim();
+            } else if (headProbe.unborn) {
+              const ref = git(rootAbs, ['symbolic-ref', 'HEAD']);
+              if (ref !== null && ref.trim() !== '') {
+                existing.meta.headUnborn = true;
+              }
+            }
+            const subtree = subtreeHashAt(rootAbs, probe.out.trim());
+            if (subtree) existing.meta.subtreeHash = subtree;
+          }
+          const arms: Array<'diff' | 'untracked'> = probeFailed
+            ? ['diff', 'untracked']
+            : [...(existing.meta.captureDegraded ?? [])];
           const still: Array<'diff' | 'untracked'> = [];
-          for (const arm of existing.meta.captureDegraded) {
+          for (const arm of arms) {
             const ok =
               arm === 'diff'
-                ? captureDiffArm(rootAbs, sidecarDir)
+                ? captureDiffArm(
+                    rootAbs,
+                    sidecarDir,
+                    existing.meta.headUnborn === true,
+                  )
                 : captureUntrackedArm(plan, sidecarDir, rootAbs);
             if (!ok) still.push(arm);
           }
@@ -274,19 +355,23 @@ export function captureSidecar(
   }
   const captureDegraded: Array<'diff' | 'untracked'> = [];
   if (top !== null) {
-    const head = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
-    if (head !== undefined) {
-      meta.headSha = head;
-    } else {
+    const headProbe = probeGit(rootAbs, ['rev-parse', 'HEAD'], GIT_TIMEOUT_MS);
+    if (headProbe.ok) {
+      meta.headSha = headProbe.out.trim();
+    } else if (headProbe.unborn) {
       // An unborn HEAD (git init without a commit, an orphan branch) is a
       // DEFINITIVE state, not an unknown one: the branch ref exists, so
       // record it and let the checkpoint treat "still unborn" as unmoved.
+      // The definitive unborn fatal (exit 128 + unknown revision) is the
+      // gate — a transient rev-parse failure on a BORN HEAD must not
+      // record headUnborn; without it headSha stays undefined and the
+      // checkpoint reports headUnknown instead of passing on the silence.
       const ref = git(rootAbs, ['symbolic-ref', 'HEAD']);
       if (ref !== null && ref.trim() !== '') meta.headUnborn = true;
     }
     const subtree = subtreeHashAt(rootAbs, top.trim());
     if (subtree) meta.subtreeHash = subtree;
-    if (!captureDiffArm(rootAbs, sidecarDir)) {
+    if (!captureDiffArm(rootAbs, sidecarDir, meta.headUnborn === true)) {
       captureDegraded.push('diff');
     }
     if (!captureUntrackedArm(plan, sidecarDir, rootAbs)) {
@@ -352,8 +437,12 @@ export interface DriftReport {
 export function loadSidecar(sidecarDir: string): Sidecar {
   const file = join(sidecarDir, 'sidecar.json');
   // Guarded read: the sidecar path is orchestrator-handled — a writer-less
-  // FIFO in its place must not hang every downstream command.
-  const content = readGuarded(file, AUDIT_READ_MAX_BYTES);
+  // FIFO in its place must not hang every downstream command. The size
+  // cap does NOT apply: this artifact is written by this same module and
+  // scales with the enumeration, so a capped read would produce a sidecar
+  // a large audit can never load again (every re-run looping on the same
+  // oversized write). The FIFO/regular-file protection stays.
+  const content = readGuarded(file, Number.POSITIVE_INFINITY);
   if (content === null) {
     throw new Error(
       `audit: cannot read sidecar ${file} — re-run \`qwen audit snapshot\`.`,
@@ -441,9 +530,10 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
       driftedCallers.push(caller);
       continue;
     }
-    // Guarded read: callers are agent-authored paths.
-    const content = readGuarded(caller, CALLER_MAX_BYTES);
-    if (content === null || sha256(content) !== baseline) {
+    // Stream-hash like recordCaller: the same uncapped eligibility, so an
+    // over-cap caller drift-aligns instead of reading null here forever.
+    const current = streamSha256(caller);
+    if (current === undefined || current !== baseline) {
       driftedCallers.push(caller);
     }
   }
@@ -456,15 +546,24 @@ export function driftCheck(plan: FilesPlan, sidecarDir: string): DriftReport {
   // recovered by checkpoint time, and a definitive not-a-worktree capture
   // has nothing to re-probe.
   if (!sidecar.meta.noVcs || sidecar.meta.vcsProbeFailed) {
-    const head = git(rootAbs, ['rev-parse', 'HEAD'])?.trim();
+    const headProbe = probeGit(rootAbs, ['rev-parse', 'HEAD'], GIT_TIMEOUT_MS);
     if (sidecar.meta.headUnborn) {
-      // "HEAD did not exist, still does not exist" is definitively
-      // unmoved; a resolvable HEAD means the first commit landed.
-      headMoved = head !== undefined;
-    } else if (head === undefined || sidecar.meta.headSha === undefined) {
+      if (headProbe.ok) {
+        // A resolvable HEAD means the first commit landed.
+        headMoved = true;
+      } else if (!headProbe.unborn) {
+        // A FAILED probe is not "still unborn": without the definitive
+        // unborn fatal, a moved HEAD under a broken git would pass clean
+        // over the silence. The born branch maps the identical failure to
+        // headUnknown; the unborn sibling does the same.
+        headUnknown = true;
+      }
+      // Unborn-at-checkpoint with no HEAD: "did not exist, still does not
+      // exist" is definitively unmoved.
+    } else if (!headProbe.ok || sidecar.meta.headSha === undefined) {
       headUnknown = true;
     } else {
-      headMoved = head !== sidecar.meta.headSha;
+      headMoved = headProbe.out.trim() !== sidecar.meta.headSha;
     }
     if (sidecar.meta.subtreeHash !== undefined) {
       const top = git(rootAbs, ['rev-parse', '--show-toplevel']);

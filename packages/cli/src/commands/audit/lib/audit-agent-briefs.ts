@@ -335,6 +335,18 @@ export function buildLowReaderPrompt(plan: FilesPlan): string {
       'buildLowReaderPrompt: the plan claims the angle floor while not carrying exactly angles A and C — regenerate the plan.',
     );
   }
+  // Mirror direction: a reduced angle set WITHOUT the floor claim walks
+  // fewer angles than the module's size commissions — the mismatch
+  // misreports coverage both ways.
+  if (
+    !low.angleFloorApplied &&
+    (low.angles.length !== 5 ||
+      !['A', 'C', 'D', 'E', 'F'].every((angle) => low.angles.includes(angle)))
+  ) {
+    throw new Error(
+      'buildLowReaderPrompt: the plan carries a reduced angle set without claiming the angle floor — regenerate the plan.',
+    );
+  }
   // The floor/sweep claims must agree with the plan's own walked line
   // total — a claim-vs-data mismatch renders a self-contradicting prompt
   // and silently drops (or fakes) coverage.

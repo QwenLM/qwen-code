@@ -17,6 +17,8 @@
 import { execFileSync } from 'node:child_process';
 import {
   closeSync,
+  constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -39,6 +41,7 @@ import {
 } from 'node:path';
 import { isGitIgnored, Storage } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
+import { AUDIT_READ_MAX_BYTES, readGuarded } from './safe-read.js';
 
 // --- Pinned constants (docs/design/legacy-code-audit.md) --------------------
 
@@ -123,7 +126,7 @@ const BINARY_EXT_RE =
  *  scope — recording the names surfaces them at the confirmation while no
  *  content copy, walker read, or model payload ever sees them. */
 const SECRET_FILE_RE =
-  /(^|\/)(\.env|\.env\.[^/]+|[^/]+\.env|\.npmrc|\.netrc|credentials\.json|id_[^/]+|[^/]+\.(pem|key|p12|pfx|keystore|tfstate(\.backup)?))$/i;
+  /(^|\/)(\.env|\.env\.[^/]+|[^/]+\.env|\.npmrc|\.netrc|credentials\.json|id_(rsa|dsa|ecdsa|ed25519|ed448|xmss)(\.pub)?|[^/]+\.(pem|key|p12|pfx|keystore|tfstate(\.backup)?))$/i;
 
 // --- Enumeration -------------------------------------------------------------
 
@@ -182,6 +185,7 @@ function isExcludedDirName(name: string, underVendor: boolean): boolean {
 
 export type UncoverableReason =
   | 'over-cap-lines'
+  | 'over-cap-bytes'
   | 'non-text'
   | 'secret-shaped'
   | 'symlink'
@@ -321,6 +325,18 @@ export function walkAuditTree(rootAbs: string): WalkResult {
         continue;
       }
       if (stat.isDirectory()) {
+        // The command group's own artifact directories never become audit
+        // subjects, even when the tracked-files override descends into
+        // .qwen: re-auditing would ingest the previous run's findings,
+        // plan, and raw args (self-contaminated findings), and the walk
+        // deliberately ignores ignore status there.
+        if (
+          (entry === 'audits' || entry === 'tmp') &&
+          basename(dirAbs) === '.qwen'
+        ) {
+          excludedDirs.push(childRel);
+          continue;
+        }
         if (isExcludedDirName(entry, underVendor)) {
           if (!dirHasTrackedFiles(entryAbs)) {
             excludedDirs.push(childRel);
@@ -402,6 +418,7 @@ interface FileMeasure {
   chars: number;
   maxLine: number;
   hasNul: boolean;
+  size: number;
 }
 
 const MEASURE_CHUNK_CHARS = 64 * 1024;
@@ -413,11 +430,17 @@ const MEASURE_CHUNK_CHARS = 64 * 1024;
 function measureFile(abs: string): FileMeasure | null {
   let fd: number;
   try {
-    fd = openSync(abs, 'r');
+    // O_NONBLOCK + the fstat gate below: the walk completes for the whole
+    // tree before any measurement, so a file swapped for a writer-less
+    // FIFO in between must not hang the open.
+    fd = openSync(abs, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch {
     return null;
   }
   try {
+    // Re-check the opened fd: the walk-time lstat regular-file gate spans
+    // the whole enumeration window and cannot speak for the open moment.
+    if (!fstatSync(fd).isFile()) return null;
     const buf = Buffer.allocUnsafe(MEASURE_CHUNK_CHARS);
     let chars = 0;
     let newlines = 0;
@@ -447,7 +470,7 @@ function measureFile(abs: string): FileMeasure | null {
     // wc-style: a trailing newline terminates the last line, it does not add
     // one.
     const lines = chars === 0 ? 0 : newlines + (lastWasNewline ? 0 : 1);
-    return { lines, chars, maxLine, hasNul };
+    return { lines, chars, maxLine, hasNul, size: fstatSync(fd).size };
   } catch {
     return null;
   } finally {
@@ -506,6 +529,18 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
       uncoverable.push({ path: relPath, kind, reason: 'unreadable', lines: 0 });
       continue;
     }
+    // Anchor resolution reads capped at AUDIT_READ_MAX_BYTES: a subject
+    // over the cap is a citation target whose anchors can never resolve,
+    // so the plan excludes it up front instead of refusing at write time.
+    if (measured.size > AUDIT_READ_MAX_BYTES) {
+      uncoverable.push({
+        path: relPath,
+        kind,
+        reason: 'over-cap-bytes',
+        lines: measured.lines,
+      });
+      continue;
+    }
     // NUL is scanned over the WHOLE content — a windowed scan let late-NUL
     // binaries escape — and non-text entries record zero lines: raw 0x0A
     // bytes are not code lines and must not steer the gate arms.
@@ -533,15 +568,13 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
     } else {
       subjects.push(entry);
       if (measured.chars <= EVENT_SCAN_MAX_CHARS) {
-        let content: string | null = null;
-        try {
-          content = readFileSync(entryAbs, 'utf8');
-        } catch {
-          // Vanished between the measure and the read; the hash stage
-          // reports it like any other vanished file.
-        }
+        // Guarded read: the walk-to-read window spans the whole
+        // enumeration, so a FIFO swapped in must not hang the scan.
+        const content = readGuarded(entryAbs, AUDIT_READ_MAX_BYTES);
         if (content !== null) {
-          const matches = stripCommentsAndStrings(content).match(EVENT_CALL_RE);
+          const matches = stripCommentsAndStrings(
+            content.toString('utf8'),
+          ).match(EVENT_CALL_RE);
           if (matches && matches.length > 0) {
             eventCallSites += matches.length;
             eventFiles.add(relPath);
@@ -571,13 +604,19 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
 /** GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE override `-C` path resolution, so
  *  an ambient value makes every probe answer against a foreign repository;
  *  strip them (plus GIT_OBJECT_DIRECTORY) so `-C` is the sole repository
- *  selector. */
+ *  selector. GIT_CEILING_DIRECTORIES defeats repository discovery for a
+ *  probe run from a subdirectory — the 128 reads as "definitively not a
+ *  worktree" and every guard passes vacuously inside a live worktree.
+ *  LC_ALL pins the C locale: probeGit matches git's ENGLISH fatal text,
+ *  and git localizes it under an ambient locale. */
 function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env['GIT_DIR'];
   delete env['GIT_WORK_TREE'];
   delete env['GIT_INDEX_FILE'];
   delete env['GIT_OBJECT_DIRECTORY'];
+  delete env['GIT_CEILING_DIRECTORIES'];
+  env['LC_ALL'] = 'C';
   return env;
 }
 
@@ -640,7 +679,7 @@ function git(root: string, args: string[]): string | null {
  *  exactly the runs where it cannot verify anything. */
 export type GitProbe =
   | { ok: true; out: string }
-  | { ok: false; notRepo: boolean };
+  | { ok: false; notRepo: boolean; unborn: boolean };
 
 export function probeGit(
   root: string,
@@ -651,10 +690,12 @@ export function probeGit(
   if (spawn.ok) return { ok: true, out: spawn.out };
   // Git exits 128 for fatals beyond "not a git repository" (dubious
   // ownership, corrupt config): only git's own message is definitive, a
-  // bare exit code is not.
+  // bare exit code is not. The unborn arm keys on rev-parse's definitive
+  // unborn fatal the same way.
   const notRepo =
     spawn.status === 128 && /not a git repository/i.test(spawn.stderr);
-  return { ok: false, notRepo };
+  const unborn = spawn.status === 128 && /unknown revision/i.test(spawn.stderr);
+  return { ok: false, notRepo, unborn };
 }
 
 export interface GitGeometry {
@@ -696,9 +737,17 @@ export function submoduleRefusal(rootAbs: string): string | null {
   }
   const top = probe.out;
   // git reports the symlink-resolved toplevel (macOS /var → /private/var);
-  // resolve both sides before computing the relative path.
-  const toplevel = realpathSync(top.trim());
-  const realRoot = realpathSync(rootAbs);
+  // resolve both sides before computing the relative path. A TOCTOU
+  // delete/rename between the probe and the resolution degrades like a
+  // failed probe instead of throwing a raw ENOENT out of the handler.
+  let toplevel: string;
+  let realRoot: string;
+  try {
+    toplevel = realpathSync(top.trim());
+    realRoot = realpathSync(rootAbs);
+  } catch {
+    return 'the audited path could not be resolved — cannot rule out a submodule';
+  }
   const superproject = git(rootAbs, [
     'rev-parse',
     '--show-superproject-working-tree',
@@ -811,10 +860,23 @@ function guardDir(
     }
     const rel = relative(realpathSync(gitRoot), target);
     if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
-      // The link points outside the worktree: the artifacts physically
-      // land where git can never commit them. ('..' alone or a leading
+      // The link points outside THIS worktree. ('..' alone or a leading
       // '../' — a repo-relative name that merely STARTS with '..' is a
-      // legal in-repo entry and keeps probing.)
+      // legal in-repo entry and keeps probing.) That lands artifacts where
+      // THIS repo can never commit them — but inside ANOTHER repository a
+      // plain `git add -A` publishes them, so certify ok only when the
+      // target is definitively outside every worktree; a probe without an
+      // answer fails closed like every other guard arm.
+      const targetGeometry = gitGeometry(target);
+      if (targetGeometry.inWorktree || targetGeometry.probeFailed) {
+        return {
+          dir,
+          representative: join(dir, representativeFiles[0]),
+          ignored: false,
+          trackedFiles: [],
+          status: 'unprotected',
+        };
+      }
       return {
         dir,
         representative: join(dir, representativeFiles[0]),
@@ -870,7 +932,7 @@ function guardDir(
   return { dir, representative, ignored, trackedFiles, status };
 }
 
-function auditTimestamp(date: Date): string {
+export function auditTimestamp(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return (
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
@@ -892,10 +954,18 @@ export function checkLocalOnlyGuard(
 ): GuardReport {
   const geometry = gitGeometry(projectRoot);
   const ts = auditTimestamp(new Date());
+  // Runs are hours-long: the report is written at write time, so its
+  // date can legitimately roll past the probe instant — probe the next
+  // calendar date's report shape too.
+  const nextDate = auditTimestamp(new Date(Date.now() + 24 * 60 * 60 * 1000))
+    .split('-')
+    .slice(0, 3)
+    .join('-');
   return {
     dirs: [
       guardDir(projectRoot, geometry, AUDITS_DIR, [
         `${ts}-${reportFileName}`,
+        `${nextDate}-000000-${reportFileName}`,
         `audit-${ts}.sidecar`,
       ]),
       guardDir(projectRoot, geometry, AUDIT_TMP_DIR, [
@@ -903,12 +973,17 @@ export function checkLocalOnlyGuard(
         `audit-raw-args-${ts}.txt`,
         `audit-plan-${ts}.json`,
         `audit-callers-${ts}.json`,
+        // The report draft (Step 7's check-anchors input) carries every
+        // finding's verbatim anchor snippets; SKILL.md pins its name.
+        `audit-draft-${ts}.md`,
         // One representative per findings shape the skill writes: the
         // low-tier reader plus every roster role of the high tier (which
-        // contains the medium roster).
+        // contains the medium roster), plus the reserved specialist shape
+        // (SKILL.md constrains specialist findings to it).
         ...['low', ...rosterForEffort('high')].map(
           (role) => `audit-findings-${role}-${ts}.md`,
         ),
+        `audit-findings-specialist-01-${ts}.md`,
       ]),
     ],
     fallbackRoot: Storage.getAuditFallbackDir(projectRoot),
@@ -1193,11 +1268,14 @@ export function buildFilesPlan(
     // The remedy must not bounce into the next refusal: medium applies the
     // test-line gate low never checks, so advise it only when medium would
     // actually accept the module.
+    // The arms mirror medium's actual refusal order (the test-line gate
+    // fires before the token cap), so the message names the refusal a
+    // tier change would really hit.
     const mediumRefuses =
-      atMedium.topTokens > TOKEN_CAP
-        ? `the priced estimate (${atMedium.floorTokens}–${atMedium.topTokens} tokens) exceeds the ${TOKEN_CAP} cap`
-        : testLines > TEST_LINES_GATE
-          ? `${testLines} test lines exceed the ${TEST_LINES_GATE}-line test gate`
+      testLines > TEST_LINES_GATE
+        ? `${testLines} test lines exceed the ${TEST_LINES_GATE}-line test gate`
+        : atMedium.topTokens > TOKEN_CAP
+          ? `the priced estimate (${atMedium.floorTokens}–${atMedium.topTokens} tokens) exceeds the ${TOKEN_CAP} cap`
           : null;
     refuse(
       'low-gate',
@@ -1261,13 +1339,18 @@ export function resolveAuditRoot(targetPath: string): string {
   }
   const abs = resolve(targetPath);
   // throwIfNoEntry suppresses only ENOENT/ENOTDIR; an untraversable
-  // ancestor (EACCES) or a symlink loop (ELOOP) still threw the raw system
-  // error out of the dedicated path-validation entry.
+  // ancestor (EACCES) or a symlink loop (ELOOP) carries its own
+  // diagnostic — both paths EXIST, and "does not exist" would send the
+  // user chasing a checkout problem instead.
   let stat: Stats | undefined;
   try {
     stat = statSync(abs, { throwIfNoEntry: false });
-  } catch {
-    stat = undefined;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP') {
+      throw new Error(`Path is a symbolic link loop: ${targetPath}`);
+    }
+    throw new Error(`Path cannot be accessed: ${targetPath}`);
   }
   if (!stat) {
     throw new Error(`Path does not exist: ${targetPath}`);
@@ -1280,5 +1363,12 @@ export function resolveAuditRoot(targetPath: string): string {
   }
   // Realpath the root: the path-scoped git calls in sidecar.ts must see the
   // resolved path, or a symlinked target silently drops the captures.
-  return realpathSync(abs);
+  try {
+    return realpathSync(abs);
+  } catch {
+    // Vanished between the stat and the realpath (concurrent rotation):
+    // the clean missing-path diagnostic, never a raw stack out of the
+    // yargs handler.
+    throw new Error(`Path does not exist: ${targetPath}`);
+  }
 }

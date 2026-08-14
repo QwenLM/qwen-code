@@ -745,6 +745,222 @@ describe('resolveAnchors', () => {
     },
   );
 
+  it('parses a two-hash finding header (the FINDING_RE lower bound)', () => {
+    // FINDING_RE accepts 2-4 hashes; the 2-hash arm needs its own pin.
+    const findings = parseReportFindings(
+      '## [Suggestion] two-hash header\n- Location: unique.ts:1\n- Anchor: export const uniqueToken = 42;\n',
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      title: 'two-hash header',
+      severity: 'Suggestion',
+      locations: ['unique.ts'],
+    });
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('keeps the first Location when an unfenced snippet quotes a field-shaped Location line', () => {
+    // The quoted line sits at anchor indent or shallower, so it ends
+    // collection — but it must NOT overwrite the finding's real location
+    // (the old overwrite mis-bound the finding to the quoted file).
+    const quoted = [
+      '### [Critical] quoted location',
+      '- Location: unique.ts:1',
+      '- Anchor:',
+      'export const uniqueToken = 42;',
+      '- Location: dup.ts',
+      '- Issue: a',
+    ].join('\n');
+    const findings = parseReportFindings(quoted);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].locations).toEqual(['unique.ts']);
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('ends anchor collection on a deviated severity heading inside an unfenced anchor', () => {
+    // Without the split, the deviated header is swallowed as snippet
+    // content and the two blocks merge into one finding.
+    const merged = [
+      '### [Critical] first',
+      '- Location: unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+      '### Suggestion: leaked header',
+      '- Location: unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(merged);
+    expect(findings).toHaveLength(2);
+    expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
+    expect(findings[1].title).toBe('### Suggestion: leaked header');
+    expect(findings[1].severity).toBe('');
+  });
+
+  it('strips inline-code wrapping and trailing bold from Location values', () => {
+    // FIELD_RE is lenient on the LABEL only; the value decorations an LLM
+    // rendering adds must peel before the membership check.
+    expect(
+      parseReportFindings(
+        '### [Critical] code-wrapped\n- Location: `unique.ts:1`\n- Anchor: x\n',
+      )[0].locations,
+    ).toEqual(['unique.ts']);
+    expect(
+      parseReportFindings(
+        '### [Critical] bold tail\n- Location: unique.ts:1**\n- Anchor: x\n',
+      )[0].locations,
+    ).toEqual(['unique.ts']);
+  });
+
+  it('peels a spaced line suffix and the GitHub #L form from Location values', () => {
+    expect(
+      parseReportFindings(
+        '### [Critical] spaced suffix\n- Location: unique.ts :1\n- Anchor: x\n',
+      )[0].locations,
+    ).toEqual(['unique.ts']);
+    expect(
+      parseReportFindings(
+        '### [Critical] github form\n- Location: unique.ts#L1\n- Anchor: x\n',
+      )[0].locations,
+    ).toEqual(['unique.ts']);
+    // Windows quoting arrives backslash-separated.
+    expect(
+      parseReportFindings(
+        '### [Critical] backslash form\n- Location: .\\unique.ts:1\n- Anchor: x\n',
+      )[0].locations,
+    ).toEqual(['unique.ts']);
+  });
+
+  it('resolves a snippet whose first quoted line sits deeper than the snippet minimum', () => {
+    writeFileSync(join(dir, 'deepfirst.ts'), 'if (ok) {\n    doIt();\n}\n');
+    const deepPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const findings = parseReportFindings(
+      [
+        '### [Critical] deep first line',
+        '- Location: deepfirst.ts:2',
+        '- Anchor:',
+        '    doIt();',
+        '}',
+        '- Issue: a',
+      ].join('\n'),
+    );
+    expect(findings[0].anchor).toBe('    doIt();\n}');
+    // The window base is the minimum indent across the window, not the
+    // first line's — otherwise this shape is structurally unmatchable.
+    expect(resolveAnchors(findings, deepPlan)[0].verdict).toBe('resolved');
+  });
+
+  it('resolves a snippet against file lines carrying trailing whitespace', () => {
+    writeFileSync(join(dir, 'trail.ts'), 'const a = 1;\nconst b = 2;   \n');
+    const trailPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const findings = parseReportFindings(
+      [
+        '### [Critical] trailing whitespace',
+        '- Location: trail.ts:1',
+        '- Anchor:',
+        'const a = 1;',
+        'const b = 2;',
+        '- Issue: a',
+      ].join('\n'),
+    );
+    expect(resolveAnchors(findings, trailPlan)[0].verdict).toBe('resolved');
+  });
+
+  it('resolves a snippet whose last quoted line is a strict prefix of the file line', () => {
+    // An agent trimming a trailing comment when quoting cites code that
+    // IS present at the location; the last needle line compares by prefix.
+    writeFileSync(
+      join(dir, 'prefix.ts'),
+      'const a = 1;\nconst b = 2; // TODO remove\n',
+    );
+    const prefixPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const findings = parseReportFindings(
+      [
+        '### [Critical] trimmed comment',
+        '- Location: prefix.ts:1',
+        '- Anchor:',
+        'const a = 1;',
+        'const b = 2;',
+        '- Issue: a',
+      ].join('\n'),
+    );
+    expect(resolveAnchors(findings, prefixPlan)[0].verdict).toBe('resolved');
+  });
+
+  it('counts a raw occurrence that starts mid-line', () => {
+    // The window matcher requires a line-start window; a snippet whose
+    // first line sits after other content on the file line binds through
+    // the raw-occurrence path instead.
+    writeFileSync(
+      join(dir, 'midline.ts'),
+      'const head = 0;\nconst pre = 1; const x = 1;\nconst y = x;\n',
+    );
+    const midPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const findings = parseReportFindings(
+      [
+        '### [Critical] mid-line start',
+        '- Location: midline.ts:2',
+        '- Anchor:',
+        'const x = 1;',
+        'const y = x;',
+        '- Issue: a',
+      ].join('\n'),
+    );
+    expect(resolveAnchors(findings, midPlan)[0]).toMatchObject({
+      verdict: 'resolved',
+      matchCount: 1,
+    });
+  });
+
+  it('refuses a shredded multi-location whose fragments lack line suffixes', () => {
+    // Both fragment names exist in the plan: without the :line
+    // requirement on every fragment, any delimiter inside an unknown name
+    // would certify the finding against files the report never cited.
+    const findings = parseReportFindings(
+      [
+        '### [Critical] shred bypass',
+        '- Location: unique.ts, dup.ts',
+        '- Anchor: const x = 1;',
+      ].join('\n'),
+    );
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('out-of-scope');
+  });
+
+  it('resolves an anchor whose first line follows a UTF-8 BOM', () => {
+    writeFileSync(join(dir, 'bom.ts'), '\uFEFFexport const bomToken = 1;\n');
+    const bomPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const findings = parseReportFindings(
+      [
+        '### [Critical] bom',
+        '- Location: bom.ts:1',
+        '- Anchor: export const bomToken = 1;',
+      ].join('\n'),
+    );
+    expect(resolveAnchors(findings, bomPlan)[0].verdict).toBe('resolved');
+  });
+
+  it('strips a double-backtick wrap around a single-line anchor', () => {
+    // CommonMark requires `` spans when the snippet itself carries
+    // backticks; the generic single-backtick arm would leave a residue.
+    const findings = parseReportFindings(
+      [
+        '### [Critical] double backticks',
+        '- Location: unique.ts:1',
+        '- Anchor: ``export const uniqueToken = 42;``',
+      ].join('\n'),
+    );
+    expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
   it('grades a cited file deleted before resolution unresolved', () => {
     // Plan (Step 1) and resolution (Step 7) are separated by the whole
     // run — the cited file can vanish in between (TOCTOU); the read

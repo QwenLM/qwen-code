@@ -60,6 +60,16 @@ const FINDING_RE = /^#{2,4}\s+\[(critical|suggestion)\]\s+(.+)$/i;
 const HEADER_SHAPED_RE = /^#{1,6}\s*\[/;
 const SEVERITY_HEADING_RE = /^#{2,6}\s*(?:critical|suggestion)\b\s*:/i;
 const BOLD_FINDING_RE = /^\*\*\s*\[(?:critical|suggestion)\]/i;
+const headerNetted = (line: string): boolean =>
+  HEADER_SHAPED_RE.test(line) ||
+  SEVERITY_HEADING_RE.test(line) ||
+  BOLD_FINDING_RE.test(line);
+// Inside an UNFENCED anchor the generic header-shaped arm stays out: it
+// would split on `#[cfg(test)]` and other single-hash attribute/macro
+// lines a snippet legitimately quotes. The two severity-bearing shapes
+// are the deviated-finding-header class; code does not carry them.
+const deviatedFindingHeader = (line: string): boolean =>
+  SEVERITY_HEADING_RE.test(line) || BOLD_FINDING_RE.test(line);
 // Field names match case-insensitively: header matching is deliberately
 // case-lenient, and LLM casing deviation on the fields must not fail a
 // correctly-anchored finding. Bold labels are the same deviation the
@@ -95,12 +105,24 @@ function dedent(line: string, indent: number): string {
 /** One cited location, normalized to the audit-relative file path: strip a
  *  leading './' (agents emit it habitually) and peel the line/column/range
  *  suffixes — iteratively, so the four-part editor form ':1:5-10' peels
- *  whole instead of leaving a residual ':1'. */
+ *  whole instead of leaving a residual ':1'. FIELD_RE is lenient on the
+ *  LABEL but passes value decoration through: inline-code wrapping and
+ *  trailing bold are the pervasive LLM renderings, '#L42' the GitHub form,
+ *  backslashes the Windows quoting — all peel before the membership check
+ *  instead of grading a correctly-anchored finding out-of-scope. */
 function normalizeLocation(raw: string): string {
-  return raw
-    .trim()
+  let value = raw.trim();
+  while (value.length >= 2 && value.startsWith('`') && value.endsWith('`')) {
+    value = value.slice(1, -1).trim();
+  }
+  return value
+    .replace(/\*{1,2}$/, '')
+    .replace(/\\/g, '/')
     .replace(/^\.\//, '')
-    .replace(/(?::\d+)+(?:-\d+)?$/, '');
+    .replace(/#L\d+(?:-L?\d+)?$/i, '')
+    .replace(/\s+lines?\s+\d+(?:-\d+)?$/i, '')
+    .replace(/(?::\d+)+(?:-\d+)?$/, '')
+    .trim();
 }
 
 /** The brief template instructs pairs to cite both locations on the one
@@ -128,6 +150,12 @@ export function parseReportFindings(report: string): ReportFinding[] {
   const findings: ReportFinding[] = [];
   const lines = report.split('\n');
   let current: (ReportFinding & { anchorLines: string[] }) | null = null;
+  // A second Location field does not overwrite at once: it is held here
+  // and committed only when a SECOND Anchor field confirms the restart
+  // (an author re-writing the block pair-wise). A field-shaped line
+  // quoted inside an unfenced snippet is never followed by a new Anchor
+  // field, so the first locations survive and the mis-bind fails closed.
+  let pendingLocations: { locations: string[]; raw: string } | null = null;
   let inAnchor = false;
   // Open-fence state inside the collected anchor: a ``` fence pair quoted
   // into the snippet shields its interior from field- and header-detection
@@ -169,6 +197,14 @@ export function parseReportFindings(report: string): ReportFinding[] {
       ) {
         collected[lo] = trimmed.slice(3, -3);
       } else if (
+        trimmed.length >= 4 &&
+        trimmed.startsWith('``') &&
+        trimmed.endsWith('``')
+      ) {
+        // The CommonMark-required span when the snippet itself carries
+        // backticks: the generic arm below would leave one backtick pair.
+        collected[lo] = trimmed.slice(2, -2);
+      } else if (
         trimmed.length >= 2 &&
         trimmed.startsWith('`') &&
         trimmed.endsWith('`')
@@ -187,12 +223,15 @@ export function parseReportFindings(report: string): ReportFinding[] {
       const ind = leadingIndent(l);
       if (ind < minIndent) minIndent = ind;
     }
+    // No final trim: the needle keeps its first line's relative indent
+    // when it sits deeper than the snippet minimum — trimming it away
+    // made that shape structurally unmatchable. The lo/hi blank-line
+    // strip above already handles the edges.
     const anchor = kept
       .map((l) =>
         minIndent === Number.POSITIVE_INFINITY ? l : dedent(l, minIndent),
       )
-      .join('\n')
-      .trim();
+      .join('\n');
     findings.push({
       title: current.title,
       severity: current.severity,
@@ -201,6 +240,7 @@ export function parseReportFindings(report: string): ReportFinding[] {
       anchor,
     });
     current = null;
+    pendingLocations = null;
     inAnchor = false;
     inFence = false;
   };
@@ -214,6 +254,13 @@ export function parseReportFindings(report: string): ReportFinding[] {
       // one starts over, whatever came between (a bare `- Location:` in
       // between turned collection off but must not merge the blocks).
       if (current.anchorLines.length > 0) {
+        // The restart is confirmed — commit any held second Location with
+        // it (the pinned pair-wise rewrite shape), THEN reset.
+        if (pendingLocations) {
+          current.locations = pendingLocations.locations;
+          current.locationRaw = pendingLocations.raw;
+          pendingLocations = null;
+        }
         current.anchorLines = [];
       }
       inAnchor = true;
@@ -227,8 +274,21 @@ export function parseReportFindings(report: string): ReportFinding[] {
       anchorIndent = leadingIndent(rawLine);
       current.anchorLines.push(field[2].trimEnd());
     } else {
-      current.locations = parseLocations(field[2]);
-      current.locationRaw = field[2];
+      // The FIRST Location field binds: a second one — a bare duplicate,
+      // or a field-shaped line quoted inside an unfenced snippet — must
+      // not silently overwrite the finding's real locations (the
+      // reordered Anchor-before-Location shape arrives with locations
+      // still empty). Held as pending instead, committed only by a
+      // following second Anchor (see above).
+      if (current.locations.length === 0) {
+        current.locations = parseLocations(field[2]);
+        current.locationRaw = field[2];
+      } else {
+        pendingLocations = {
+          locations: parseLocations(field[2]),
+          raw: field[2],
+        };
+      }
     }
   };
 
@@ -267,16 +327,20 @@ export function parseReportFindings(report: string): ReportFinding[] {
         handleField(raw, line);
         continue;
       }
-      current.anchorLines.push(
-        dedent(raw.replace(/\r$/, ''), anchorIndent).trimEnd(),
-      );
-      continue;
+      if (!inFence && deviatedFindingHeader(line)) {
+        // A deviated finding header inside an UNFENCED anchor ends
+        // collection: fall through to the fail-closed net below instead
+        // of merging the two blocks into one. Only genuinely
+        // fence-shielded lines stay content.
+        inAnchor = false;
+      } else {
+        current.anchorLines.push(
+          dedent(raw.replace(/\r$/, ''), anchorIndent).trimEnd(),
+        );
+        continue;
+      }
     }
-    if (
-      HEADER_SHAPED_RE.test(line) ||
-      SEVERITY_HEADING_RE.test(line) ||
-      BOLD_FINDING_RE.test(line)
-    ) {
+    if (headerNetted(line)) {
       push();
       // Open a fail-closed block rather than emitting at once: fields that
       // follow a deviant header attach to it, so the block emits ONCE with
@@ -329,25 +393,48 @@ export function parseReportFindings(report: string): ReportFinding[] {
   return findings;
 }
 
-/** Count matches of a multi-line needle tolerating the haystack's base
+/** One window of consecutive haystack lines against the needle, tolerating
  *  indent: the needle arrives dedented to column 0, while code quoted from
- *  an indented body keeps its indent in the file. Each window of
- *  consecutive lines is compared after stripping the window's own base
- *  indent (relative indent inside the snippet is preserved). */
-function countIndentTolerantMatches(haystack: string, needle: string): number {
-  const needleLines = needle.split('\n');
-  const hayLines = haystack.split('\n');
+ *  an indented body keeps its indent in the file. The window base is the
+ *  MINIMUM indent across its non-empty lines — the needle is dedented by
+ *  its own minimum, so a snippet whose first quoted line sits deeper than
+ *  the minimum must still match. Window lines compare right-trimmed (the
+ *  needle's lines are right-trimmed at collection). The LAST needle line
+ *  compares by prefix: an agent trimming a trailing comment when quoting
+ *  (`const b = 2;` against `const b = 2; // TODO`) cites code that is
+ *  present at the location. */
+function windowMatchesAt(
+  hayLines: string[],
+  start: number,
+  needleLines: string[],
+): boolean {
+  if (start + needleLines.length > hayLines.length) return false;
+  let base = Number.POSITIVE_INFINITY;
+  for (let j = 0; j < needleLines.length; j++) {
+    const windowLine = hayLines[start + j];
+    if (windowLine.trim() === '') continue;
+    const indent = leadingIndent(windowLine);
+    if (indent < base) base = indent;
+  }
+  if (base === Number.POSITIVE_INFINITY) base = leadingIndent(hayLines[start]);
+  for (let j = 0; j < needleLines.length; j++) {
+    const windowLine = dedent(hayLines[start + j], base).trimEnd();
+    const matches =
+      j === needleLines.length - 1
+        ? windowLine.startsWith(needleLines[j])
+        : windowLine === needleLines[j];
+    if (!matches) return false;
+  }
+  return true;
+}
+
+function countIndentTolerantMatches(
+  hayLines: string[],
+  needleLines: string[],
+): number {
   let count = 0;
   for (let i = 0; i + needleLines.length <= hayLines.length; i++) {
-    const base = leadingIndent(hayLines[i]);
-    let matches = true;
-    for (let j = 0; j < needleLines.length; j++) {
-      if (dedent(hayLines[i + j], base) !== needleLines[j]) {
-        matches = false;
-        break;
-      }
-    }
-    if (matches) count++;
+    if (windowMatchesAt(hayLines, i, needleLines)) count++;
   }
   return count;
 }
@@ -386,10 +473,28 @@ export function resolveAnchors(
       finding.locationRaw !== undefined
         ? normalizeLocation(finding.locationRaw)
         : '';
-    const locations =
-      whole !== '' && (allowed.has(whole) || callerSet.has(whole))
-        ? [whole]
-        : finding.locations;
+    const wholeKnown =
+      whole !== '' && (allowed.has(whole) || callerSet.has(whole));
+    // The shredded fragments bind only when every fragment carries its
+    // own :line suffix — the cited-pair shape the briefs instruct. Any
+    // other split is an out-of-scope bypass: a delimiter inside an
+    // unknown name would certify the finding against files the report
+    // never cited. The whole (unknown) value binds instead and the
+    // membership check below refuses it.
+    const fragmentsLined =
+      !wholeKnown &&
+      finding.locations.length > 1 &&
+      (finding.locationRaw ?? '')
+        .split(/,|\s+and\s+/)
+        .filter((fragment) => fragment.trim() !== '')
+        .every((fragment) => /:\d+/.test(fragment));
+    const locations = wholeKnown
+      ? [whole]
+      : fragmentsLined
+        ? finding.locations
+        : whole !== ''
+          ? [whole]
+          : finding.locations;
     let matchCount = 0;
     let onePerLocation = true;
     for (const location of locations) {
@@ -406,8 +511,13 @@ export function resolveAnchors(
       }
       // Multi-line anchors join with \n; a CRLF file (Windows checkouts,
       // vendored .bat/.cmd) must resolve against the same anchor, so
-      // normalize both sides to LF before matching.
-      const haystack = content.toString('utf8').replace(/\r\n/g, '\n');
+      // normalize both sides to LF before matching. A UTF-8 BOM on line 1
+      // (the same Windows/vendored class) must not defeat an anchor whose
+      // first line sits there.
+      const haystack = content
+        .toString('utf8')
+        .replace(/^\uFEFF/, '')
+        .replace(/\r\n/g, '\n');
       // Count PER CITED LOCATION: a pair finding's snippet appears in every
       // cited file by definition, so a sum across locations grades exactly
       // the pair class ambiguous whenever it binds at all. The finding
@@ -417,9 +527,13 @@ export function resolveAnchors(
         // Multi-line needles match indent-tolerantly: the needle is
         // dedented to column 0, so a snippet quoted from an indented body
         // must still resolve (a raw substring search would never find it).
-        // Every line-start raw occurrence is one window match too, so the
-        // window count subsumes it; add only raw matches starting MID-line.
-        locationMatches = countIndentTolerantMatches(haystack, needle);
+        // The window matcher's last-line prefix compare subsumes every
+        // line-start raw occurrence (the needle is present there verbatim,
+        // whole on every line but the last, prefix on the last); add only
+        // raw matches starting MID-line.
+        const needleLines = needle.split('\n');
+        const hayLines = haystack.split('\n');
+        locationMatches = countIndentTolerantMatches(hayLines, needleLines);
         let idx = haystack.indexOf(needle);
         while (idx !== -1) {
           const lineStart = haystack.lastIndexOf('\n', idx - 1) + 1;

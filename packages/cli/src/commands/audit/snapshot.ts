@@ -59,6 +59,10 @@ export const snapshotCommand: CommandModule = {
           subtreeHash: sidecar.meta.subtreeHash ?? null,
           hashedFiles: Object.keys(sidecar.hashes).length,
           callers: sidecar.callerNames.length,
+          // uncoverableNames is written and shape-validated in the
+          // sidecar; the count is disclosed here, where the capture
+          // contract is published.
+          uncoverable: sidecar.uncoverableNames.length,
         },
         null,
         2,

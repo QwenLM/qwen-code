@@ -13,7 +13,7 @@
 
 import type { CommandModule } from 'yargs';
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   applyExcludeRemedy,
@@ -62,6 +62,9 @@ function readArgsReport(path: string): ParsedAuditArgs {
   if (
     typeof parsed?.targetPath !== 'string' ||
     typeof parsed?.targetPathAbsolute !== 'string' ||
+    // Absolute is load-bearing (the producer realpath's it): a relative
+    // value would plan against whatever sits under the invocation cwd.
+    !isAbsolute(parsed.targetPathAbsolute) ||
     (parsed?.effort !== 'low' &&
       parsed?.effort !== 'medium' &&
       parsed?.effort !== 'high')
@@ -75,6 +78,22 @@ function readArgsReport(path: string): ParsedAuditArgs {
     targetPathAbsolute: parsed.targetPathAbsolute,
     effort: parsed.effort,
   };
+}
+
+/** The --out write is the handler's last word: a raw fs error out of it
+ *  would replace the designed exit codes (3 refusal / 0 success) with a
+ *  generic crash, so both branches write through one clean diagnostic. */
+function writePlanOut(out: string, payload: unknown): void {
+  try {
+    mkdirSync(dirname(resolve(out)), { recursive: true });
+    writeFileSync(out, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (err) {
+    throw new Error(
+      `plan-files: cannot write ${out} — ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 function runPlanFiles(args: PlanFilesArgs): void {
@@ -111,8 +130,7 @@ function runPlanFiles(args: PlanFilesArgs): void {
         effort,
         ...err.refusal,
       };
-      mkdirSync(dirname(resolve(args.out)), { recursive: true });
-      writeFileSync(args.out, JSON.stringify(refusal, null, 2), 'utf8');
+      writePlanOut(args.out, refusal);
       writeStderrLine(err.refusal.message);
       writeStderrLine(`Wrote refusal to ${args.out}`);
       process.exitCode = 3;
@@ -144,8 +162,7 @@ function runPlanFiles(args: PlanFilesArgs): void {
   );
 
   const result = { targetPath, ...plan, guard };
-  mkdirSync(dirname(resolve(args.out)), { recursive: true });
-  writeFileSync(args.out, JSON.stringify(result, null, 2), 'utf8');
+  writePlanOut(args.out, result);
   writeStdoutLine(`Wrote audit plan to ${args.out}`);
 
   const exposed = guard.dirs.filter(

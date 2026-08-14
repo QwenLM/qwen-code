@@ -11,10 +11,12 @@
 // construction: the shared helper carries no memo.
 
 import type { CommandModule } from 'yargs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { isGitIgnored } from '@qwen-code/qwen-code-core';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { safeTarget } from '../../utils/paths.js';
 import {
+  auditTimestamp,
   checkLocalOnlyGuard,
   gitGeometry,
   type GuardReport,
@@ -55,17 +57,34 @@ function planRelocated(planPath: string, fallbackRoot: string): boolean {
 /** Credit the relocation only once the fallback landing itself is
  *  verified: QWEN_HOME is user-settable and can place the fallback root
  *  inside a worktree that has no ignore rule for it. Outside every
- *  worktree git can never commit the landing; inside one the
- *  representative artifact must be ignored there. A probe without an
- *  answer keeps relocated=false so exit 5 re-fires. */
+ *  worktree git can never commit the landing; inside one every durable
+ *  artifact shape written there must be ignored — the dated report and
+ *  the sidecar (the undated bare slug is never written), and one exposed
+ *  shape is an exposed directory. A probe without an answer keeps
+ *  relocated=false so exit 5 re-fires. */
 function fallbackLandingSafe(
   fallbackRoot: string,
   reportFileName: string,
 ): boolean {
   const geometry = gitGeometry(fallbackRoot);
   if (geometry.probeFailed) return false;
-  if (!geometry.inWorktree) return true;
-  return isGitIgnored(fallbackRoot, reportFileName);
+  if (!geometry.inWorktree || geometry.root === undefined) return true;
+  const prefix = relative(geometry.root, fallbackRoot).split(sep).join('/');
+  const ts = auditTimestamp(new Date());
+  const root = geometry.root;
+  return [`${ts}-${reportFileName}`, `audit-${ts}.sidecar`].every((shape) =>
+    isGitIgnored(root, prefix === '' ? shape : `${prefix}/${shape}`),
+  );
+}
+
+/** The safeTarget output space: one filename component, no traversal. */
+function isSafeReportSlug(slug: string): boolean {
+  return (
+    slug.length > 0 &&
+    slug.length <= 200 &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slug) &&
+    !slug.includes('..')
+  );
 }
 
 function isGuardReport(value: unknown): value is GuardReport {
@@ -140,11 +159,19 @@ export const guardCheckCommand: CommandModule = {
     // re-include keyed on the real slug would stay invisible to a
     // misnamed probe.
     const effectiveSlug = planReportSlug ?? reportSlug;
-    const reportFileName = `${effectiveSlug}.md`;
+    // The slug is interpolated into probe paths: only the safeTarget
+    // output space may build one (a traversal shape would re-home the
+    // probe to a path with foreign ignore rules). A violation probes the
+    // flattened shape and drops the relocation credit so exit 5 re-fires.
+    const slugSafe = isSafeReportSlug(effectiveSlug);
+    const reportFileName = `${
+      slugSafe ? effectiveSlug : safeTarget(effectiveSlug)
+    }.md`;
     const guard = checkLocalOnlyGuard(process.cwd(), reportFileName);
     writeStdoutLine(JSON.stringify(guard, null, 2));
     const relocated =
       plan !== undefined &&
+      slugSafe &&
       planRelocated(plan, guard.fallbackRoot) &&
       fallbackLandingSafe(guard.fallbackRoot, reportFileName);
     if (guardTripped(guard, planTime, relocated)) {

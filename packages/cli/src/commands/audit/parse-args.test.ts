@@ -5,8 +5,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import yargs from 'yargs';
 import { parseAuditArgs, parseArgsCommand } from './parse-args.js';
@@ -168,6 +168,20 @@ describe('parseArgsCommand handler', () => {
   it('surfaces parse refusals through the handler exit path', () => {
     fsState.stdin = `src/it's-dir\n`;
     expect(() => run({})).toThrow(/unbalanced quote/);
+  });
+
+  it('creates a non-existent nested --out parent before writing', () => {
+    // mkdirSync runs with recursive:true against the verdict's parent —
+    // a nested parent that does not exist yet is exactly the shape the
+    // skill's .qwen/tmp path lands in; without the recursive flag the
+    // verdict write would ENOENT.
+    const out = join(dir, 'nested', 'deeper', 'verdict.json');
+    fsState.stdin = `'${dir}'`;
+    run({ out });
+    expect(fsState.written.get(out)).toBeDefined();
+    expect(vi.mocked(mkdirSync)).toHaveBeenCalledWith(dirname(out), {
+      recursive: true,
+    });
   });
 });
 

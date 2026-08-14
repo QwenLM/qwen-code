@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { checkAnchorsCommand } from './check-anchors.js';
@@ -74,6 +74,20 @@ describe('checkAnchorsCommand handler', () => {
     );
     run({ plan: planPath, report: reportPath });
     expect(process.exitCode).toBeUndefined();
+    // The exit-0 payload is the skill's verdict input: assert the shape
+    // it parses, not just the exit code.
+    const payload = JSON.parse(
+      vi.mocked(writeStdoutLine).mock.calls[0][0],
+    ) as Array<Record<string, unknown>>;
+    expect(payload).toHaveLength(1);
+    expect(payload[0]['verdict']).toBe('resolved');
+    expect(payload[0]['matchCount']).toBe(1);
+    expect(payload[0]['finding']).toMatchObject({
+      title: 'ok',
+      severity: 'Critical',
+      locations: ['unique.ts'],
+      anchor: 'export const uniqueToken = 42;',
+    });
   });
 
   it('exits 4 when any anchor needs handling', () => {
@@ -87,6 +101,16 @@ describe('checkAnchorsCommand handler', () => {
     );
     run({ plan: planPath, report: reportPath });
     expect(process.exitCode).toBe(4);
+    const payload = JSON.parse(
+      vi.mocked(writeStdoutLine).mock.calls[0][0],
+    ) as Array<Record<string, unknown>>;
+    expect(payload).toHaveLength(1);
+    expect(payload[0]['verdict']).toBe('unresolved');
+    expect(payload[0]['matchCount']).toBe(0);
+    expect(payload[0]['finding']).toMatchObject({
+      title: 'missing',
+      locations: ['unique.ts'],
+    });
   });
 
   it('throws for a callers file containing a relative path', () => {
@@ -105,6 +129,22 @@ describe('checkAnchorsCommand handler', () => {
     expect(() =>
       run({ plan: planPath, report: reportPath, callers: callersPath }),
     ).toThrow(/absolute path strings/);
+  });
+
+  it('surfaces a plan with a relative targetPathAbsolute as stale', () => {
+    // read-json's absolute guard is load-bearing: a relative root would
+    // resolve anchors against the invocation cwd and bind arbitrarily.
+    const relPlan = join(dir, 'rel-plan.json');
+    const parsed = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    parsed['targetPathAbsolute'] = 'relative/mod';
+    writeFileSync(relPlan, JSON.stringify(parsed));
+    writeFileSync(reportPath, '### [Critical] x\n- Anchor: y\n');
+    expect(() => run({ plan: relPlan, report: reportPath })).toThrow(
+      /not a plan written by/,
+    );
   });
 
   it('surfaces a corrupt plan as a clean regenerate error', () => {
@@ -126,8 +166,12 @@ describe('checkAnchorsCommand handler', () => {
   });
 
   it('surfaces a missing report draft with its path', () => {
+    // The path in the message is the operator's handle for fixing it;
+    // a bare "cannot read" without the name sends the operator guessing.
     expect(() => run({ plan: planPath, report: join(dir, 'nope.md') })).toThrow(
-      /cannot read/,
+      new RegExp(
+        `cannot read .*${join(dir, 'nope.md').replace(/[\\.]/g, '\\$&')}`,
+      ),
     );
   });
 });

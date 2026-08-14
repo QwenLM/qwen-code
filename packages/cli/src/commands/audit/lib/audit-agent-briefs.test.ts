@@ -342,6 +342,52 @@ describe('buildLowReaderPrompt', () => {
     expect(() => buildLowReaderPrompt(short)).toThrow(/angle floor/);
   });
 
+  it('refuses a reduced angle set without the floor claim', () => {
+    // Mirror of the floor-claim check: a stale plan carrying the reduced
+    // A+C set WITHOUT the claim walks fewer angles than the module's size
+    // commissions — the mismatch misreports coverage both ways.
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    const reduced: FilesPlan = {
+      ...lowPlan,
+      lowTier: {
+        ...lowPlan.lowTier!,
+        angleFloorApplied: false,
+        angles: ['A', 'C'],
+      },
+    };
+    expect(() => buildLowReaderPrompt(reduced)).toThrow(/reduced angle set/);
+  });
+
+  it('refuses an angle-floor claim that disagrees with the walked lines', () => {
+    // The fixture walks 30 subject lines (< the 60-line floor), so the
+    // real plan claims the floor; flipping the claim alone must refuse.
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    expect(lowPlan.lowTier?.angleFloorApplied).toBe(true);
+    const stale: FilesPlan = {
+      ...lowPlan,
+      lowTier: {
+        ...lowPlan.lowTier!,
+        angleFloorApplied: false,
+        angles: ['A', 'C', 'D', 'E', 'F'],
+      },
+    };
+    expect(() => buildLowReaderPrompt(stale)).toThrow(
+      /angle-floor claim disagrees/,
+    );
+  });
+
+  it('refuses a sweep claim that disagrees with the walked lines', () => {
+    // The fixture walks 30 subject lines (>= the 25-line sweep floor), so
+    // the real plan claims the sweep; flipping the claim alone must refuse.
+    const lowPlan = buildFilesPlan(dir, dir, 'low', collectAuditFiles(dir));
+    expect(lowPlan.lowTier?.sweep).toBe(true);
+    const stale: FilesPlan = {
+      ...lowPlan,
+      lowTier: { ...lowPlan.lowTier!, sweep: false },
+    };
+    expect(() => buildLowReaderPrompt(stale)).toThrow(/sweep claim disagrees/);
+  });
+
   it('refuses a stale plan carrying duplicate angles', () => {
     // A duplicated angle renders twice in the prompt while the receipt
     // claims one walk per angle.

@@ -266,13 +266,26 @@ describe('caller registration', () => {
     },
   );
 
-  it('name-records an over-size caller without buffering it', () => {
+  it('baselines an over-cap caller through the streaming hash', () => {
+    // The 10MB bound limits memory (chunked reads) and the archived copy —
+    // not baseline eligibility. A name-only over-cap caller reported
+    // phantom drift at every checkpoint with no remedy, so the hash now
+    // streams regardless of size.
     const big = join(dir, 'big-caller.ts');
     writeFileSync(big, 'x'.repeat(10 * 1024 * 1024 + 1));
     const p = plan();
     const sidecar = captureSidecar(p, sidecarDir, [big]);
     expect(sidecar.callerNames).toEqual([big]);
-    expect(sidecar.callerHashes[big]).toBeUndefined();
+    expect(sidecar.callerHashes[big]).toBeDefined();
+    expect(driftCheck(p, sidecarDir).driftedCallers).toEqual([]);
+    // The archived copy stays capped: the drift contract is the hash, not
+    // the copy, so an over-cap caller must not exhaust the sidecar disk.
+    const dest = join(
+      sidecarDir,
+      'callers',
+      big.replace(/^([A-Za-z]:)?[\\/]/, ''),
+    );
+    expect(existsSync(dest)).toBe(false);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -549,13 +562,18 @@ describe('captureSidecar inside a worktree', () => {
     },
   );
 
-  it('marks the diff arm degraded on an unborn HEAD', () => {
+  it('captures the diff arm on an unborn HEAD via the index-vs-worktree diff', () => {
+    // No commit: HEAD does not exist, so `git diff HEAD` would exit 128
+    // and the arm would stay degraded for the whole run — every extend
+    // re-run retrying the same certain failure. The index-vs-worktree
+    // diff answers pre-commit (staged content is the index there), so the
+    // arm captures instead of degrading.
     const repo = join(dir, 'repo-unborn');
     mkdirSync(join(repo, 'mod'), { recursive: true });
     git(['init', '-q'], repo);
     writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
-    // No commit: HEAD does not exist — `git diff HEAD` cannot answer, but
-    // the unborn state itself is definitive, not unknown.
+    git(['add', '.'], repo);
+    writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 2;\n'); // dirty
     const modPlan = buildFilesPlan(
       join(repo, 'mod'),
       join(repo, 'mod'),
@@ -565,7 +583,10 @@ describe('captureSidecar inside a worktree', () => {
     const sidecar = captureSidecar(modPlan, sidecarDir);
     expect(sidecar.meta.headSha).toBeUndefined();
     expect(sidecar.meta.headUnborn).toBe(true);
-    expect(sidecar.meta.captureDegraded).toEqual(['diff']);
+    expect(sidecar.meta.captureDegraded ?? []).not.toContain('diff');
+    expect(readFileSync(join(sidecarDir, 'diff.patch'), 'utf8')).toContain(
+      '-const a = 1;',
+    );
     expect(sidecar.hashes['a.ts']).toBeDefined();
   });
 
@@ -605,26 +626,105 @@ describe('captureSidecar inside a worktree', () => {
     expect(drift.headUnknown).toBeFalsy();
   });
 
-  it('repairs a degraded diff arm on the extend re-run once HEAD exists', () => {
+  it('reports headUnknown when the checkpoint probe has no answer on an unborn sidecar', () => {
+    // A failed probe at checkpoint is NOT "still unborn": treating the
+    // silence as unmoved would pass a moved HEAD clean under a broken git.
+    const repo = join(dir, 'repo-unborn-probe');
+    mkdirSync(join(repo, 'mod'), { recursive: true });
+    git(['init', '-q'], repo);
+    writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+    const modPlan = buildFilesPlan(
+      join(repo, 'mod'),
+      join(repo, 'mod'),
+      'medium',
+      collectAuditFiles(join(repo, 'mod')),
+    );
+    const captured = captureSidecar(modPlan, sidecarDir);
+    expect(captured.meta.headUnborn).toBe(true);
+    const drift = withBrokenGit(() => driftCheck(modPlan, sidecarDir));
+    expect(drift.headUnknown).toBe(true);
+    expect(drift.headMoved).toBe(false);
+  });
+
+  // The shim fails only `rev-parse HEAD` (exit 3, no git message) and
+  // passes every other invocation through to the real git.
+  it.skipIf(process.platform === 'win32')(
+    'does not record headUnborn from a transient rev-parse failure on a born HEAD',
+    () => {
+      const repo = join(dir, 'repo-born-probe');
+      mkdirSync(join(repo, 'mod'), { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+      git(['add', '.'], repo);
+      git(['commit', '-m', 'init', '-q'], repo);
+      const shimDir = join(dir, 'git-shim-head');
+      mkdirSync(shimDir, { recursive: true });
+      const savedPath = process.env['PATH'];
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\nif [ "$3 $4" = "rev-parse HEAD" ]; then exit 3; fi\nPATH="${savedPath}" exec git "$@"\n`,
+      );
+      chmodSync(join(shimDir, 'git'), 0o755);
+      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
+      let captured: ReturnType<typeof captureSidecar>;
+      try {
+        const modPlan = buildFilesPlan(
+          join(repo, 'mod'),
+          join(repo, 'mod'),
+          'medium',
+          collectAuditFiles(join(repo, 'mod')),
+        );
+        captured = captureSidecar(modPlan, sidecarDir);
+        // The definitive unborn fatal is the gate: a transient failure on
+        // a BORN HEAD leaves headSha undefined, never headUnborn.
+        expect(captured.meta.headUnborn).toBeFalsy();
+        expect(captured.meta.headSha).toBeUndefined();
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+      // The checkpoint then reports headUnknown instead of passing on the
+      // silence (born branch: no baseline to compare against).
+      const modPlan = buildFilesPlan(
+        join(repo, 'mod'),
+        join(repo, 'mod'),
+        'medium',
+        collectAuditFiles(join(repo, 'mod')),
+      );
+      const drift = driftCheck(modPlan, sidecarDir);
+      expect(drift.headUnknown).toBe(true);
+    },
+  );
+
+  it('repairs a probe-failed capture on the extend re-run once git answers', () => {
     const repo = join(dir, 'repo-repair');
     mkdirSync(repo, { recursive: true });
     git(['init', '-q'], repo);
     writeFileSync(join(repo, 'a.ts'), 'const a = 1;\n');
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'first', '-q'], repo);
     const repoPlan = buildFilesPlan(
       repo,
       repo,
       'medium',
       collectAuditFiles(repo),
     );
-    const captured = captureSidecar(repoPlan, sidecarDir);
-    expect(captured.meta.captureDegraded).toEqual(['diff']);
-    // The first commit lands; the extend re-run is the only command that
-    // can retry the failed arm — it must, against the preserved baseline.
-    git(['add', '.'], repo);
-    git(['commit', '-m', 'first', '-q'], repo);
+    // Git is down at capture: the toplevel probe fails without an answer,
+    // so both arms AND the HEAD/subtree baselines are skipped.
+    const captured = withBrokenGit(() => captureSidecar(repoPlan, sidecarDir));
+    expect(captured.meta.vcsProbeFailed).toBe(true);
+    expect(captured.meta.noVcs).toBe(true);
+    expect(captured.meta.headSha).toBeUndefined();
+    expect(captured.meta.subtreeHash).toBeUndefined();
+    // Git recovers; the extend re-run (caller registration) is the only
+    // command that can retry — it must re-probe and re-capture the
+    // baselines and both arms against the preserved hash baselines.
     const caller = join(repo, 'caller.ts');
     writeFileSync(caller, 'call();\n');
     const extended = captureSidecar(repoPlan, sidecarDir, [caller]);
+    expect(extended.meta.vcsProbeFailed).toBeUndefined();
+    expect(extended.meta.noVcs).toBe(false);
+    expect(extended.meta.headSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(extended.meta.subtreeHash).toMatch(/^[0-9a-f]{40}$/);
     expect(extended.meta.captureDegraded ?? []).toEqual([]);
     expect(extended.callerNames).toEqual([caller]);
     expect(extended.hashes['a.ts']).toBe(captured.hashes['a.ts']);

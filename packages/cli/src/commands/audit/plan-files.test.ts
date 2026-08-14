@@ -48,7 +48,16 @@ describe('planFilesCommand handler', () => {
     writeFileSync(join(repo, 'empty-gitconfig'), '');
     process.env['GIT_CONFIG_NOSYSTEM'] = '1';
     process.env['GIT_CONFIG_GLOBAL'] = join(repo, 'empty-gitconfig');
-    execFileSync('git', ['init', '-q'], { cwd: repo });
+    // Scrubbed fixture env: the repository-selecting variables override
+    // `-C` resolution, so an ambient GIT_DIR re-homes this `git init`
+    // into a foreign repository (and GIT_WORK_TREE without GIT_DIR is a
+    // hard fatal) — the same scrub gitEnv() applies to the probes.
+    const initEnv: NodeJS.ProcessEnv = { ...process.env };
+    delete initEnv['GIT_DIR'];
+    delete initEnv['GIT_WORK_TREE'];
+    delete initEnv['GIT_INDEX_FILE'];
+    delete initEnv['GIT_OBJECT_DIRECTORY'];
+    execFileSync('git', ['init', '-q'], { cwd: repo, env: initEnv });
     target = join(repo, 'mod');
     mkdirSync(target, { recursive: true });
     writeFileSync(join(target, 'a.ts'), 'const a = 1;\n');
@@ -120,6 +129,23 @@ describe('planFilesCommand handler', () => {
     expect(JSON.parse(readFileSync(mediumOut, 'utf8')).effort).toBe('medium');
   });
 
+  it('surfaces a relative targetPathAbsolute with the regenerate error', () => {
+    // Absolute is load-bearing: the consumer resolve()'s a relative value
+    // against the invocation cwd and plans against whatever sits there.
+    const relReport = join(repo, 'rel-args.json');
+    writeFileSync(
+      relReport,
+      JSON.stringify({
+        targetPath: 'mod',
+        targetPathAbsolute: 'relative/mod',
+        effort: 'medium',
+      }),
+    );
+    expect(() => run({ argsReport: relReport, out: 'o' })).toThrow(
+      /not a parse-args verdict/,
+    );
+  });
+
   it('re-validates a recorded target that vanished after parse-args', () => {
     const argsReport = join(repo, 'stale-args.json');
     writeFileSync(
@@ -161,6 +187,17 @@ describe('planFilesCommand handler', () => {
     expect(() => run({ argsReport: nullReport, out: 'o' })).toThrow(
       /not a parse-args verdict/,
     );
+  });
+
+  it('surfaces an unwritable --out with a clean diagnostic', () => {
+    // A file squatting where the --out parent belongs used to throw a raw
+    // EEXIST out of the handler, replacing the designed exit codes; the
+    // write goes through the clean diagnostic instead.
+    const squatter = join(repo, 'squatter');
+    writeFileSync(squatter, 'x');
+    expect(() =>
+      run({ path: 'mod', out: join(squatter, 'nested', 'plan.json') }),
+    ).toThrow(/plan-files: cannot write/);
   });
 
   it('applies the exclude remedy only when the plan succeeds', () => {

@@ -6,16 +6,24 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Storage } from '@qwen-code/qwen-code-core';
 import { guardCheckCommand, guardTripped } from './guard-check.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import type {
-  GuardDirReport,
-  GuardReport,
-  GuardStatus,
+import {
+  AUDITS_DIR,
+  AUDIT_TMP_DIR,
+  type GuardDirReport,
+  type GuardReport,
+  type GuardStatus,
 } from './lib/files-plan.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -31,8 +39,12 @@ function report(audits: GuardStatus, tmp: GuardStatus): GuardReport {
     trackedFiles: [],
     status,
   });
+  // Build from the exported constants: guardTripped matches the plan-time
+  // baseline by exact dir equality, and live reports carry the platform
+  // join('.qwen', 'audits') — hardcoded POSIX literals never match on
+  // Windows and the relocation tests fire vacuously.
   return {
-    dirs: [mk('.qwen/audits', audits), mk('.qwen/tmp', tmp)],
+    dirs: [mk(AUDITS_DIR, audits), mk(AUDIT_TMP_DIR, tmp)],
     fallbackRoot: '/fallback',
   };
 }
@@ -168,6 +180,10 @@ describe('guardCheckCommand handler', () => {
   });
 
   it('does not credit a plan in the repo: the relocation never happened', () => {
+    // The .gitignore verifies the fallback landing, so planRelocated's
+    // containment check is the deciding arm (with the landing unverified
+    // the test would pass even if containment always answered true).
+    writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
     const fallback = Storage.getAuditFallbackDir(repo);
     const planTime = report('unprotected', 'unprotected');
     planTime.fallbackRoot = fallback;
@@ -218,6 +234,51 @@ describe('guardCheckCommand handler', () => {
     run({ reportSlug: 'mod', plan: relocatedPlan });
     expect(process.exitCode).toBeUndefined();
   });
+
+  it('drops the relocation credit for an unsafe report slug', () => {
+    // The argv slug is agent-transcribed and interpolated into probe
+    // paths: a traversal shape must not re-home the probe (a foreign
+    // ignore rule would answer ignored and credit the relocation), and
+    // exit 5 must re-fire instead.
+    writeFileSync(join(repo, '.gitignore'), 'qwen-home/\ndecoy.md\n');
+    const fallback = Storage.getAuditFallbackDir(repo);
+    const planTime = report('unprotected', 'unprotected');
+    planTime.fallbackRoot = fallback;
+    const relocatedPlan = join(fallback, 'plan.json');
+    writeFileSync(relocatedPlan, JSON.stringify({ guard: planTime }));
+    run({ reportSlug: '../../decoy', plan: relocatedPlan });
+    expect(process.exitCode).toBe(5);
+  });
+
+  // The PATH shim stands in for a git that answers only outside the
+  // fallback landing — the fallback probe fails without an answer while
+  // the main guard probes stay healthy.
+  it.skipIf(process.platform === 'win32')(
+    'does not credit a relocation whose fallback probe has no answer',
+    () => {
+      writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
+      const shimDir = join(repo, 'git-shim');
+      mkdirSync(shimDir, { recursive: true });
+      const savedPath = process.env['PATH'];
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\nfor arg in "$@"; do case "$arg" in *qwen-home*) exit 3;; esac; done\nPATH="${savedPath}" exec git "$@"\n`,
+      );
+      chmodSync(join(shimDir, 'git'), 0o755);
+      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
+      try {
+        const fallback = Storage.getAuditFallbackDir(repo);
+        const planTime = report('unprotected', 'unprotected');
+        planTime.fallbackRoot = fallback;
+        const relocatedPlan = join(fallback, 'plan.json');
+        writeFileSync(relocatedPlan, JSON.stringify({ guard: planTime }));
+        run({ reportSlug: 'mod', plan: relocatedPlan });
+        expect(process.exitCode).toBe(5);
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+    },
+  );
 
   it('probes the plan’s own reportSlug over the agent-transcribed argv slug', () => {
     // A name-selective re-include keyed on the REAL slug stays invisible

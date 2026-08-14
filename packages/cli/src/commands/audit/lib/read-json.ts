@@ -44,11 +44,28 @@ export function readPlanFile(path: string, command: string): FilesPlan {
       `audit ${command}: ${path} is not a plan written by \`qwen audit plan-files\` — regenerate it.`,
     );
   };
-  const isFileEntry = (e: unknown): boolean =>
-    typeof e === 'object' &&
-    e !== null &&
-    typeof (e as Record<string, unknown>)['path'] === 'string' &&
-    typeof (e as Record<string, unknown>)['lines'] === 'number';
+  const isFileEntry = (e: unknown): boolean => {
+    if (typeof e !== 'object' || e === null) return false;
+    const path = (e as Record<string, unknown>)['path'];
+    return (
+      typeof path === 'string' &&
+      typeof (e as Record<string, unknown>)['lines'] === 'number' &&
+      // Element paths bind anchors, sidecar hashes, and drift watches via
+      // join(targetPathAbsolute, path): absolute or '..'-carrying entries
+      // would reach outside the audited root. The writer emits
+      // toPosix-normalized relative paths, so anything else is a stale or
+      // hand-edited plan.
+      !isAbsolute(path) &&
+      !path.split(/[\\/]/).includes('..')
+    );
+  };
+  // buildAuditPrompt/buildLowReaderPrompt also dereference kind and reason
+  // on uncoverable entries: validate them at the read site instead of
+  // rendering a bare 'undefined'.
+  const isUncoverableEntry = (e: unknown): boolean =>
+    isFileEntry(e) &&
+    typeof (e as Record<string, unknown>)['kind'] === 'string' &&
+    typeof (e as Record<string, unknown>)['reason'] === 'string';
   if (
     typeof plan?.targetPathAbsolute !== 'string' ||
     !isAbsolute(plan.targetPathAbsolute) ||
@@ -57,7 +74,7 @@ export function readPlanFile(path: string, command: string): FilesPlan {
     !Array.isArray(plan?.uncoverable) ||
     !plan.subjectFiles.every(isFileEntry) ||
     !plan.testCorpus.every(isFileEntry) ||
-    !plan.uncoverable.every(isFileEntry)
+    !plan.uncoverable.every(isUncoverableEntry)
   ) {
     regenerate();
   }

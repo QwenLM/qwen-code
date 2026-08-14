@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -52,15 +52,21 @@ import {
 let dir: string;
 let originalConfigNosystem: string | undefined;
 let originalConfigGlobal: string | undefined;
+let originalQwenHome: string | undefined;
 
 beforeEach(() => {
   originalConfigNosystem = process.env['GIT_CONFIG_NOSYSTEM'];
   originalConfigGlobal = process.env['GIT_CONFIG_GLOBAL'];
+  originalQwenHome = process.env['QWEN_HOME'];
   dir = join(
     tmpdir(),
     `audit-plan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   mkdirSync(join(dir, 'src'), { recursive: true });
+  // checkLocalOnlyGuard eagerly evaluates Storage.getAuditFallbackDir
+  // (mkdirSync under the real fallback root): redirect QWEN_HOME so the
+  // guard tests never create directories in the host's home.
+  process.env['QWEN_HOME'] = join(dir, 'qwen-home');
   // Process-level git-config hermeticity: the guard's in-process
   // check-ignore probes spawn git with the ambient process.env, so a host
   // global exclude (e.g. one ignoring .qwen/) would leak into verdicts.
@@ -81,6 +87,8 @@ afterEach(() => {
   if (originalConfigGlobal === undefined)
     delete process.env['GIT_CONFIG_GLOBAL'];
   else process.env['GIT_CONFIG_GLOBAL'] = originalConfigGlobal;
+  if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+  else process.env['QWEN_HOME'] = originalQwenHome;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -360,6 +368,7 @@ describe('collectAuditFiles', () => {
     // Modern SSH key names (ed25519 has been OpenSSH's default since 2021),
     // fail-closed including the .pub halves.
     writeFileSync(join(dir, 'deploy', 'id_ed25519'), '-----BEGIN-----\n');
+    writeFileSync(join(dir, 'deploy', 'id_ed25519.pub'), 'ssh-ed25519 AAAA\n');
     writeFileSync(join(dir, 'deploy', 'id_ecdsa'), '-----BEGIN-----\n');
     writeFileSync(join(dir, 'deploy', 'id_dsa'), '-----BEGIN-----\n');
     writeFileSync(join(dir, 'id_rsa'), '-----BEGIN OPENSSH-----\n');
@@ -378,6 +387,7 @@ describe('collectAuditFiles', () => {
       'deploy/id_dsa',
       'deploy/id_ecdsa',
       'deploy/id_ed25519',
+      'deploy/id_ed25519.pub',
       'deploy/server.pem',
       'id_rsa',
       'infra/terraform.tfstate.backup',
@@ -387,9 +397,15 @@ describe('collectAuditFiles', () => {
     expect(secrets.every((u) => u.lines === 0)).toBe(true);
     // A regular .ts file named after a secret shape is not caught.
     writeFileSync(join(dir, 'src', 'env-config.ts'), 'export const e = 1;\n');
-    expect(collectAuditFiles(dir).subjects.map((f) => f.path)).toContain(
-      'src/env-config.ts',
-    );
+    // The id_ clause's negative boundary: snake_case source names that
+    // merely START with id_ (plausible in the legacy codebases the audit
+    // exists for) stay subjects; 'identity.ts' pins the .env-clause side.
+    writeFileSync(join(dir, 'src', 'id_generator.ts'), 'export const g = 1;\n');
+    writeFileSync(join(dir, 'src', 'identity.ts'), 'export const i = 1;\n');
+    const subjects = collectAuditFiles(dir).subjects.map((f) => f.path);
+    expect(subjects).toContain('src/env-config.ts');
+    expect(subjects).toContain('src/id_generator.ts');
+    expect(subjects).toContain('src/identity.ts');
   });
 
   it('keeps generated files subjects at collection level', () => {
@@ -430,6 +446,23 @@ describe('collectAuditFiles', () => {
     const entry = c.uncoverable.find((u) => u.path === 'src/late-nul.ts');
     expect(entry?.reason).toBe('non-text');
     expect(entry?.lines).toBe(0);
+  });
+
+  it('records a file over the read cap as uncoverable (anchors could never resolve it)', () => {
+    // Anchor resolution reads capped at AUDIT_READ_MAX_BYTES: a subject
+    // over the cap would be a legal citation target whose anchors can
+    // never resolve, so the plan excludes it up front.
+    const chunk = `${'a'.repeat(100)}\n`;
+    const overCap = 10 * 1024 * 1024 + chunk.length;
+    writeFileSync(
+      join(dir, 'src', 'huge.ts'),
+      chunk.repeat(Math.ceil(overCap / chunk.length)),
+    );
+    const c = collectAuditFiles(dir);
+    const entry = c.uncoverable.find((u) => u.path === 'src/huge.ts');
+    expect(entry?.reason).toBe('over-cap-bytes');
+    expect(entry?.lines).toBeGreaterThan(0);
+    expect(c.subjects.map((f) => f.path)).not.toContain('src/huge.ts');
   });
 
   it('detects an over-cap line as uncoverable with its lines counted', () => {
@@ -541,6 +574,42 @@ describe('collectAuditFiles', () => {
     expect(c.eventDetection.detected).toBe(true);
     expect(c.eventDetection.files).toBe(2);
     expect(c.eventDetection.callSites).toBe(10);
+  });
+
+  it('counts every remaining call-shape arm as an event call site', () => {
+    // Each regex arm needs its own positive fixture: deleting any arm
+    // ships green unless a fixture exercises it. emitValue pins the
+    // CamelCase-continuation suffix.
+    const arms = [
+      'bus.dispatch(x)',
+      'bus.publish(x)',
+      'bus.subscribe(x)',
+      'el.addEventListener(x)',
+      'alarm.fire(x)',
+      'job.trigger(x)',
+      'emitter.emitValue(x)',
+    ];
+    for (const name of ['arm-a.ts', 'arm-b.ts']) {
+      writeFileSync(join(dir, 'src', name), arms.join('\n'));
+    }
+    const c = collectAuditFiles(dir);
+    expect(c.eventDetection.detected).toBe(true);
+    expect(c.eventDetection.callSites).toBe(14);
+    expect(c.eventDetection.files).toBe(2);
+  });
+
+  it('does not count underscore-suffixed stems as event call sites', () => {
+    // The CamelCase continuation requires an UPPERCASE next char:
+    // emit_value( is a plain identifier, not an event-API call.
+    for (const name of ['under-a.ts', 'under-b.ts']) {
+      writeFileSync(
+        join(dir, 'src', name),
+        Array.from({ length: 5 }, (_, i) => `emit_value(${i})`).join('\n'),
+      );
+    }
+    const c = collectAuditFiles(dir);
+    expect(c.eventDetection.callSites).toBe(0);
+    expect(c.eventDetection.detected).toBe(false);
   });
 
   it('does not count past-tense and stem-prefix calls as event call sites', () => {
@@ -672,6 +741,26 @@ describe('buildFilesPlan gates', () => {
       ],
     });
     expect(() => planFor(c, 'low')).toThrow(/narrow the path/);
+  });
+
+  it('names the test gate when both medium refusals are true', () => {
+    // Both arms true at medium: the bounce message must name the refusal
+    // medium actually hits FIRST — the test-line gate fires before the
+    // token cap in buildFilesPlan.
+    const c = collect({
+      uncoverable: [],
+      subjects: [{ path: 'a.ts', kind: 'source', lines: 8_000, chars: 0 }],
+      testCorpus: [
+        {
+          path: 'a.test.ts',
+          kind: 'test',
+          lines: TEST_LINES_GATE + 20_000,
+          chars: 0,
+        },
+      ],
+    });
+    expect(() => planFor(c, 'low')).toThrow(/test lines exceed/);
+    expect(() => planFor(c, 'low')).not.toThrow(/exceeds the 60000000 cap/);
   });
 
   it('applies the test gate only on tiers that run Agent 5', () => {
@@ -909,25 +998,44 @@ describe('resolveAuditRoot', () => {
   it('rejects missing paths', () => {
     expect(() => resolveAuditRoot(join(dir, 'nope'))).toThrow(/does not exist/);
   });
+
+  // Symlink fixtures need POSIX symlink semantics.
+  it.skipIf(process.platform === 'win32')(
+    'distinguishes a symbolic link loop from a missing path',
+    () => {
+      // The path EXISTS: "does not exist" would send the user chasing a
+      // checkout problem instead of the loop.
+      symlinkSync(join(dir, 'loop-b'), join(dir, 'loop-a'));
+      symlinkSync(join(dir, 'loop-a'), join(dir, 'loop-b'));
+      expect(() => resolveAuditRoot(join(dir, 'loop-a'))).toThrow(
+        /symbolic link loop/,
+      );
+    },
+  );
 });
 
 describe('git-backed checks', () => {
   function git(args: string[], cwd: string): string {
-    return execFileSync('git', args, {
-      cwd,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        // Isolate the helper repos from ambient config (a user/global
-        // core.excludesFile or hooks.path would leak into the probes).
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: join(dir, 'empty-gitconfig'),
-        GIT_AUTHOR_NAME: 't',
-        GIT_AUTHOR_EMAIL: 't@t',
-        GIT_COMMITTER_NAME: 't',
-        GIT_COMMITTER_EMAIL: 't@t',
-      },
-    });
+    // Mirror production gitEnv(): the repository-selection variables
+    // override `-C` path resolution (ambient GIT_DIR re-homes `git init`
+    // into a foreign repository; GIT_WORK_TREE without GIT_DIR is a hard
+    // fatal), so the fixture establishment scrubs them too.
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      // Isolate the helper repos from ambient config (a user/global
+      // core.excludesFile or hooks.path would leak into the probes).
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: join(dir, 'empty-gitconfig'),
+      GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 't@t',
+      GIT_COMMITTER_NAME: 't',
+      GIT_COMMITTER_EMAIL: 't@t',
+    };
+    delete env['GIT_DIR'];
+    delete env['GIT_WORK_TREE'];
+    delete env['GIT_INDEX_FILE'];
+    delete env['GIT_OBJECT_DIRECTORY'];
+    return execFileSync('git', args, { cwd, encoding: 'utf8', env });
   }
 
   function initRepo(): string {
@@ -974,6 +1082,33 @@ describe('git-backed checks', () => {
     const rootWalk = walkAuditTree(join(repo, 'scripts', 'build'));
     expect(rootWalk.files).toContain('common.ts');
     expect(rootWalk.excludedDirs).toEqual([]);
+  });
+
+  it('never walks the audit artifact dirs, even under the tracked override', () => {
+    // This repository itself tracks files under .qwen/: the override
+    // descends into .qwen, but the command group's own artifact dirs must
+    // never become subjects (a re-audit would ingest the previous run's
+    // findings and plan — self-contaminated findings).
+    const repo = join(dir, 'repo-artifacts');
+    mkdirSync(join(repo, '.qwen', 'skills'), { recursive: true });
+    mkdirSync(join(repo, '.qwen', 'audits'), { recursive: true });
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(join(repo, '.qwen', 'skills', 'skill.md'), '# skill\n');
+    writeFileSync(join(repo, '.qwen', 'audits', 'old-report.md'), '# old\n');
+    writeFileSync(join(repo, '.qwen', 'tmp', 'plan.json'), '{}');
+    git(['init', '-q'], repo);
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    const { files, excludedDirs } = walkAuditTree(repo);
+    expect(files).toContain('.qwen/skills/skill.md');
+    expect(
+      files.some(
+        (f) => f.startsWith('.qwen/audits/') || f.startsWith('.qwen/tmp/'),
+      ),
+    ).toBe(false);
+    expect(excludedDirs).toEqual(
+      expect.arrayContaining(['.qwen/audits', '.qwen/tmp']),
+    );
   });
 
   it('still excludes a name-excluded directory git does not track', () => {
@@ -1200,17 +1335,25 @@ describe('git-backed checks', () => {
 
   it('a date-keyed re-include cannot escape the audits probe', () => {
     const repo = initRepo();
-    const now = new Date();
-    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    writeFileSync(
-      join(repo, '.gitignore'),
-      `.qwen/*\n!.qwen/audits/\n.qwen/audits/*\n!.qwen/audits/${month}-*.md\n`,
-    );
-    // The probe carries the CURRENT date, so a re-include keyed to this
-    // month matches it and the directory answers exposed.
-    expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe(
-      'unprotected',
-    );
+    // Pin the clock: the test derives the re-include month and the guard
+    // stamps its probe names from separate new Date() calls, which can
+    // disagree across a month boundary (a deterministic-shape flake).
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-14T12:00:00Z'));
+      const month = '2026-08';
+      writeFileSync(
+        join(repo, '.gitignore'),
+        `.qwen/*\n!.qwen/audits/\n.qwen/audits/*\n!.qwen/audits/${month}-*.md\n`,
+      );
+      // The probe carries the pinned date, so a re-include keyed to this
+      // month matches it and the directory answers exposed.
+      expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe(
+        'unprotected',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a sidecar-selective re-include leaves the audits dir unprotected', () => {
@@ -1271,6 +1414,61 @@ describe('git-backed checks', () => {
     },
   );
 
+  // Symlink fixtures need POSIX permissions semantics.
+  it.skipIf(process.platform === 'win32')(
+    'exposes a .qwen symlink whose target sits inside a foreign repository',
+    () => {
+      // "Outside THIS worktree" is not "outside version control": a
+      // sibling checkout (or a dotfiles repo) commits whatever lands
+      // there, so the landing is safe only when the target is
+      // definitively outside EVERY worktree.
+      const repo = initRepo();
+      const foreign = join(dir, 'foreign-repo');
+      mkdirSync(foreign, { recursive: true });
+      git(['init', '-q'], foreign);
+      symlinkSync(foreign, join(repo, '.qwen'));
+      expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe(
+        'unprotected',
+      );
+    },
+  );
+
+  it('scrubs GIT_CEILING_DIRECTORIES from the worktree probes', () => {
+    // A ceiling at the toplevel makes `git -C <subdir> rev-parse
+    // --show-toplevel` exit 128 with the stock not-a-repo fatal; without
+    // the scrub the guard would read that as no-worktree and pass
+    // vacuously inside a live worktree.
+    const repo = initRepo();
+    const saved = process.env['GIT_CEILING_DIRECTORIES'];
+    process.env['GIT_CEILING_DIRECTORIES'] = repo;
+    try {
+      const guard = checkLocalOnlyGuard(join(repo, 'mod'), 'x.md');
+      expect(guard.dirs.map((d) => d.status)).toEqual([
+        'unprotected',
+        'unprotected',
+      ]);
+    } finally {
+      if (saved === undefined) delete process.env['GIT_CEILING_DIRECTORIES'];
+      else process.env['GIT_CEILING_DIRECTORIES'] = saved;
+    }
+  });
+
+  it('a next-date-keyed re-include cannot escape the audits probe', () => {
+    // Runs are hours-long: the report's write-time date can roll past the
+    // probe instant, so the probe also carries the next calendar date.
+    const repo = initRepo();
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const date = `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(tomorrow.getDate())}`;
+    writeFileSync(
+      join(repo, '.gitignore'),
+      `.qwen/*\n!.qwen/audits/\n.qwen/audits/*\n!.qwen/audits/${date}-*.md\n`,
+    );
+    expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe(
+      'unprotected',
+    );
+  });
+
   it('the exclude remedy refuses a prefix carrying gitignore pattern syntax', () => {
     const repo = initRepo();
     const magic = join(repo, 'a[1]');
@@ -1304,6 +1502,27 @@ describe('git-backed checks', () => {
     const exclude = readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8');
     expect(exclude).toContain('/pkg/sub/.qwen/audits/');
     expect(exclude.split('\n')).toContain('/.qwen/audits/');
+  });
+
+  it('lands the exclude remedy in the common dir of a linked worktree', () => {
+    // --git-common-dir, not --git-dir: in a linked worktree the remedy
+    // must write where git actually consults (the common dir), not the
+    // per-worktree gitdir whose info/exclude git never reads.
+    const repo = initRepo();
+    git(['add', '.'], repo);
+    git(['commit', '-m', 'init', '-q'], repo);
+    const linked = join(dir, 'linked-worktree');
+    git(['worktree', 'add', linked], repo);
+    applyExcludeRemedy(linked);
+    const commonExclude = readFileSync(
+      join(repo, '.git', 'info', 'exclude'),
+      'utf8',
+    );
+    expect(commonExclude).toContain('/.qwen/audits/');
+    expect(commonExclude).toContain('/.qwen/tmp/');
+    expect(
+      checkLocalOnlyGuard(linked, 'x.md').dirs.map((d) => d.status),
+    ).toEqual(['ok', 'ok']);
   });
 
   it('probes toplevel-relative when the cwd is a subdirectory', () => {

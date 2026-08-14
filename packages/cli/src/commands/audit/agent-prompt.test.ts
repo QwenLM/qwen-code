@@ -62,6 +62,16 @@ describe('agentPromptCommand handler', () => {
     expect(printed).toContain('Execution is NOT opted in');
   });
 
+  it('maps the opted-in probe flag to the probe discipline', () => {
+    // The 'opted-in' → probesConsented === true mapping is load-bearing:
+    // without it every opted-in run prints the declined brief and the
+    // verifier tier silently caps at code reads.
+    run({ plan: writePlan('medium'), role: '1a', probes: 'opted-in' });
+    const printed = vi.mocked(writeStdoutLine).mock.calls[0][0];
+    expect(printed).toContain('A probe runs only against a scratch copy');
+    expect(printed).not.toContain('Execution is NOT opted in');
+  });
+
   it('refuses the low reader at medium and a roster role at low', () => {
     expect(() =>
       run({
