@@ -1626,6 +1626,13 @@ function ruleCommand(
     // also carries `evidenceCapped`, laundering an environmental death into
     // a definitive ruling.
     if (c.infrastructure === true) return null;
+    // A never-ran run is not definitive either, capped or not: the cap can
+    // fire on `rescueOverflow` from a stub wrapper's OWN output, which is
+    // not proof the toolchain started. The capped cascade below promises
+    // such a run `unchecked`/"Maven never started" — returning a ruling
+    // here would contradict that with wording describing a run that
+    // started.
+    if (c.neverRan === true) return null;
     if (c.exitCode !== null && c.exitCode !== 0) {
       return {
         kind: 'command',
