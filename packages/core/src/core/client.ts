@@ -3442,7 +3442,13 @@ export class GeminiClient {
                       : status !== undefined
                         ? `API request failed (${status})`
                         : 'Provider request failed';
-              await arenaAgentClient.reportError(arenaError);
+              try {
+                await arenaAgentClient.reportError(arenaError);
+              } catch {
+                this.config
+                  .getDebugLogger()
+                  .warn('Failed to report Arena provider error');
+              }
             }
             this.lastApiCompletionTimestamp = Date.now();
             // Sanitize: do not pass raw API error messages to span status.
@@ -4003,9 +4009,15 @@ export class GeminiClient {
         messageType !== SendMessageType.Hook &&
         messageType !== SendMessageType.Steer
       ) {
-        await this.config
-          .getArenaAgentClient()
-          ?.reportError('Authentication failed');
+        try {
+          await this.config
+            .getArenaAgentClient()
+            ?.reportError('Authentication failed');
+        } catch {
+          this.config
+            .getDebugLogger()
+            .warn('Failed to report Arena authentication error');
+        }
       }
       throw error;
     } finally {

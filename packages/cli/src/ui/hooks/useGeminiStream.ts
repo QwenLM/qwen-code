@@ -136,6 +136,12 @@ import {
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
+interface ToolContinuationOwner {
+  promptId: string;
+  signal: AbortSignal;
+  survivesGenerationChange: boolean;
+}
+
 // The per-turn model override is held in two coupled refs: the model id and a
 // flag marking whether it came from an explicit inline `/model <id> <prompt>`
 // (which must win over skill-tool overrides for the rest of the turn). The two
@@ -838,6 +844,9 @@ export const useGeminiStream = (
   const interactionOwnersByToolCallIdRef = useRef(
     new Map<string, NonNullable<ReturnType<typeof getActiveInteractionSpan>>>(),
   );
+  const continuationOwnersByToolCallIdRef = useRef(
+    new Map<string, ToolContinuationOwner>(),
+  );
   const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
   const handleCompletedToolsRef = useRef<
     (completedTools: TrackedToolCall[]) => Promise<void>
@@ -1314,7 +1323,7 @@ export const useGeminiStream = (
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
     }> => {
-      if (turnCancelledRef.current) {
+      if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
       }
       if (typeof query === 'string' && query.trim().length === 0) {
@@ -2294,6 +2303,7 @@ export const useGeminiStream = (
       turnAdmission?: GoalTurnAdmission,
       promptId?: string,
       trackInteractionOwner = true,
+      toolContinuationOwner?: ToolContinuationOwner,
     ): Promise<StreamProcessingResult> => {
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
@@ -2865,6 +2875,14 @@ export const useGeminiStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
+          if (toolContinuationOwner) {
+            for (const request of executableToolCallRequests) {
+              continuationOwnersByToolCallIdRef.current.set(
+                request.callId,
+                toolContinuationOwner,
+              );
+            }
+          }
           if (streamInteractionOwner) {
             for (const request of executableToolCallRequests) {
               interactionOwnersByToolCallIdRef.current.set(
@@ -3176,6 +3194,7 @@ export const useGeminiStream = (
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
         userAdmission?: DirectUserAdmission;
         goalBinding?: GoalTurnBinding;
+        toolContinuationOwner?: ToolContinuationOwner;
       },
     ) => {
       const allowConcurrentBtwDuringResponse =
@@ -3367,10 +3386,13 @@ export const useGeminiStream = (
 
       const abortController = new AbortController();
       const abortSignal = abortController.signal;
+      const inheritedToolContinuationOwner = metadata?.toolContinuationOwner;
+      const isDetachedToolContinuation =
+        inheritedToolContinuationOwner?.survivesGenerationChange === true;
 
       // Keep the main stream's cancellation state intact while /btw is handled
       // in parallel. The side-question can use its own local abort signal.
-      if (!allowConcurrentBtwDuringResponse) {
+      if (!allowConcurrentBtwDuringResponse && !isDetachedToolContinuation) {
         abortControllerRef.current = abortController;
         turnCancelledRef.current = false;
       }
@@ -3425,7 +3447,8 @@ export const useGeminiStream = (
                     prompt_id!,
                     submitType,
                     submittedPrompt,
-                    allowConcurrentBtwDuringResponse,
+                    allowConcurrentBtwDuringResponse ||
+                      isDetachedToolContinuation,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -3484,9 +3507,24 @@ export const useGeminiStream = (
         const turnController =
           goalBinding?.controller ??
           (turnKey ? new AbortController() : undefined);
-        const processingSignal = turnController
-          ? AbortSignal.any([abortSignal, turnController.signal])
-          : abortSignal;
+        const processingSignals = [abortSignal];
+        if (turnController) {
+          processingSignals.push(turnController.signal);
+        }
+        if (inheritedToolContinuationOwner) {
+          processingSignals.push(inheritedToolContinuationOwner.signal);
+        }
+        const processingSignal =
+          processingSignals.length > 1
+            ? AbortSignal.any(processingSignals)
+            : abortSignal;
+        const toolContinuationOwner: ToolContinuationOwner = {
+          promptId: prompt_id!,
+          signal: processingSignal,
+          survivesGenerationChange:
+            allowConcurrentBtwDuringResponse ||
+            inheritedToolContinuationOwner?.survivesGenerationChange === true,
+        };
         const turnAdmission =
           turnKey && turnController
             ? {
@@ -3614,9 +3652,12 @@ export const useGeminiStream = (
               ? { getSteerInput: drainSteerAtBoundary }
               : {}),
           };
+          const providerSignal = inheritedToolContinuationOwner
+            ? processingSignal
+            : abortSignal;
           const stream = geminiClient.sendMessageStream(
             finalQueryToSend,
-            abortSignal,
+            providerSignal,
             prompt_id!,
             {
               ...sendOptions,
@@ -3649,6 +3690,7 @@ export const useGeminiStream = (
             turnAdmission,
             prompt_id,
             !allowConcurrentBtwDuringResponse,
+            toolContinuationOwner,
           );
           if (
             !goalBinding &&
@@ -4053,7 +4095,6 @@ export const useGeminiStream = (
             return false;
           },
         );
-
       // History-based dedup MUST run before the active-stream early-return.
       // If a synthetic `functionResponse` for this callId is already in
       // chat.history (planted on session-load by
@@ -4122,6 +4163,7 @@ export const useGeminiStream = (
         markToolsAsSubmitted(dedupedCallIds);
         for (const callId of dedupedCallIds) {
           interactionOwnersByToolCallIdRef.current.delete(callId);
+          continuationOwnersByToolCallIdRef.current.delete(callId);
         }
       }
 
@@ -4135,6 +4177,23 @@ export const useGeminiStream = (
         }
         return;
       }
+
+      const continuationOwner = completedAndReadyToSubmitTools
+        .filter(
+          (toolCall) =>
+            !historyCallIdsWithResponse.has(toolCall.request.callId),
+        )
+        .map((toolCall) =>
+          continuationOwnersByToolCallIdRef.current.get(
+            toolCall.request.callId,
+          ),
+        )
+        .find((owner) => owner !== undefined);
+      const continuationWasCancelled = () =>
+        continuationOwner
+          ? continuationOwner.signal.aborted
+          : turnCancelledRef.current ||
+            abortControllerRef.current?.signal.aborted === true;
 
       // Finalize any client-initiated tools as soon as they are done.
       // Skip ones whose callId already lives in chat history with a
@@ -4240,13 +4299,17 @@ export const useGeminiStream = (
         interactionOwnersByToolCallIdRef.current.delete(
           toolCall.request.callId,
         );
+        continuationOwnersByToolCallIdRef.current.delete(
+          toolCall.request.callId,
+        );
       }
       for (const [owner, ownerPromptId] of secondaryInteractionOwners) {
         if (getActiveInteractionSpan(ownerPromptId) === owner) {
           endInteractionSpan('cancelled', { promptId: ownerPromptId });
         }
       }
-      let promptId = ownerToolCall?.request.prompt_id;
+      let promptId =
+        ownerToolCall?.request.prompt_id ?? continuationOwner?.promptId;
       const endToolInteraction = (
         status: 'ok' | 'error' | 'cancelled',
         errorMessage?: string,
@@ -4573,10 +4636,7 @@ export const useGeminiStream = (
         );
       });
 
-      if (
-        turnCancelledRef.current ||
-        abortControllerRef.current?.signal.aborted
-      ) {
+      if (continuationWasCancelled()) {
         markToolsAsSubmitted(
           geminiTools.map((toolCall) => toolCall.request.callId),
         );
@@ -4865,7 +4925,8 @@ export const useGeminiStream = (
       // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
       const drained =
-        turnCancelledRef.current || abortControllerRef.current?.signal.aborted
+        continuationOwner?.survivesGenerationChange ||
+        continuationWasCancelled()
           ? []
           : (midTurnDrainRef?.current?.(
               false,
@@ -4895,10 +4956,7 @@ export const useGeminiStream = (
         }
       }
 
-      if (
-        turnCancelledRef.current ||
-        abortControllerRef.current?.signal.aborted
-      ) {
+      if (continuationWasCancelled()) {
         drainedSteer?.restore();
         if (toolGoalBinding) {
           await failClosedGoalTurn(
@@ -4938,6 +4996,7 @@ export const useGeminiStream = (
           );
         },
         goalBinding: toolGoalBinding,
+        toolContinuationOwner: continuationOwner,
       });
     },
     [
@@ -4956,6 +5015,7 @@ export const useGeminiStream = (
       releaseGoalTurn,
     ],
   );
+
   useLayoutEffect(() => {
     handleCompletedToolsRef.current = handleCompletedTools;
   }, [handleCompletedTools]);

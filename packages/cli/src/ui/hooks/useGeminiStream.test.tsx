@@ -12940,6 +12940,162 @@ describe('useGeminiStream', () => {
       }
     });
 
+    it('continues a legacy ?btw tool after a repaired main batch is cancelled', async () => {
+      let resolveMain!: () => void;
+      let resolveBtw!: () => void;
+      const mainPending = new Promise<void>((resolve) => {
+        resolveMain = resolve;
+      });
+      const btwPending = new Promise<void>((resolve) => {
+        resolveBtw = resolve;
+      });
+      let mainSignal: AbortSignal | undefined;
+      let mainPromptId: string | undefined;
+      let btwPromptId: string | undefined;
+      let callCount = 0;
+      mockSendMessageStream.mockImplementation(
+        (_query, signal, promptId, options) => {
+          callCount += 1;
+          if (callCount === 1) {
+            mainSignal = signal;
+            mainPromptId = promptId;
+            return (async function* () {
+              yield {
+                type: ServerGeminiEventType.ToolCallRequest,
+                value: {
+                  callId: 'main-tool',
+                  name: 'testTool',
+                  args: {},
+                  isClientInitiated: false,
+                  prompt_id: promptId,
+                },
+              };
+              await mainPending;
+            })();
+          }
+          if (callCount === 2) {
+            btwPromptId = promptId;
+            return (async function* () {
+              yield {
+                type: ServerGeminiEventType.ToolCallRequest,
+                value: {
+                  callId: 'btw-tool',
+                  name: 'testTool',
+                  args: {},
+                  isClientInitiated: false,
+                  prompt_id: promptId,
+                },
+              };
+              await btwPending;
+            })();
+          }
+          expect(options).toEqual(
+            expect.objectContaining({ type: SendMessageType.ToolResult }),
+          );
+          return (async function* () {
+            yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+          })();
+        },
+      );
+
+      const { result, client } = renderTestHook();
+      let mainRequest!: Promise<void>;
+      let btwRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('Main query');
+      });
+      await waitFor(() => {
+        expect(mainSignal).toBeDefined();
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+      });
+      await act(async () => {
+        btwRequest = result.current.submitQuery('?btw use a tool');
+      });
+      await waitFor(() => expect(btwPromptId).toBeDefined());
+
+      act(() => {
+        resolveMain();
+      });
+      await act(async () => {
+        await mainRequest;
+      });
+      const makeCompletedTool = (
+        callId: string,
+        promptId: string | undefined,
+      ) =>
+        ({
+          request: {
+            callId,
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: promptId,
+          },
+          status: 'success',
+          response: {
+            callId,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: 'testTool',
+                  response: { output: `${callId} done` },
+                },
+              },
+            ],
+            errorType: undefined,
+          },
+          responseSubmittedToGemini: false,
+          tool: { displayName: 'mock tool' },
+          invocation: {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation,
+        }) as TrackedCompletedToolCall;
+      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      expect(onComplete).toBeDefined();
+      await act(async () => {
+        await onComplete!([makeCompletedTool('main-tool', mainPromptId)]);
+      });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+      expect(mainSignal?.aborted).toBe(true);
+
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['main-tool']));
+      let btwCompletion: Promise<void> | undefined;
+      mockScheduleToolCalls.mockImplementation((requests) => {
+        if (requests.some((request) => request.callId === 'btw-tool')) {
+          btwCompletion = onComplete!([
+            makeCompletedTool('btw-tool', btwPromptId),
+          ]);
+        }
+      });
+      act(() => {
+        resolveBtw();
+      });
+      await act(async () => {
+        await btwRequest;
+        await btwCompletion;
+      });
+
+      expect(mockFinalizeToolResponses).toHaveBeenCalled();
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      expect(mockSendMessageStream.mock.calls[2]?.[2]).toBe(btwPromptId);
+      expect(mockSendMessageStream.mock.calls[2]?.[0]).toEqual([
+        expect.objectContaining({
+          functionResponse: expect.objectContaining({ id: 'btw-tool' }),
+        }),
+      ]);
+      expect(
+        JSON.stringify(mockSendMessageStream.mock.calls[2]?.[0]),
+      ).not.toContain('main-tool');
+    });
+
     it('stays responding when a newer turn finishes before a surviving ?btw stream', async () => {
       let resolveMain!: () => void;
       let resolveBtw!: () => void;

@@ -712,6 +712,36 @@ describe('Turn', () => {
       ]);
     });
 
+    it.each([
+      [{ statusCode: 429 }, 429],
+      [{ response: { status: 503, data: {} } }, 503],
+      [new Error('upstream :HTTP_STATUS/429'), 429],
+    ])('normalizes supported provider status shapes', async (error, status) => {
+      mockSendMessageStream.mockRejectedValue(error);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Trigger provider error' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Error,
+          value: {
+            error: {
+              message: expect.any(String),
+              status,
+            },
+          },
+        },
+      ]);
+    });
+
     it('should report API errors with empty history summary', async () => {
       const error = new Error('API Error');
       const reqParts: Part[] = [{ text: 'Trigger error' }];
