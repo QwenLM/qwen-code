@@ -9,9 +9,8 @@ import {
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
-  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  goalLimitKindForReason,
   isGoalEvidenceProofKind,
   isGoalLimitKind,
   type GoalControlRequest,
@@ -351,8 +350,8 @@ function normalizeObjective(
 function isEvidenceLimited(goal: GoalRecord): boolean {
   return (
     goal.limitKind !== undefined ||
-    goal.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON ||
-    goal.lastReason === GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON
+    (goal.lastReason !== undefined &&
+      goalLimitKindForReason(goal.lastReason) !== undefined)
   );
 }
 

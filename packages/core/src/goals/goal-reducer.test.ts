@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  goalLimitKindForReason,
   goalRequiresExactPermit,
   type GoalControlRequest,
   type GoalRecord,
@@ -307,30 +308,44 @@ describe('goal reducer', () => {
     });
   });
 
-  it('refuses to resume a Goal that carries an evidence limitKind', () => {
-    expect(() =>
-      reduceGoalControl(
-        goalRecord({
-          status: 'usage_limited',
-          revision: 4,
-          limitKind: 'evidence_catalog',
-          lastReason: 'a reason the guard no longer has to recognise',
-        }),
-        {
-          request: {
-            action: 'resume',
-            expectedGoalId: 'g-1',
-            expectedRevision: 4,
+  it.each(['evidence_catalog', 'checkpoint_request'] as const)(
+    'refuses to resume a Goal that carries limitKind %s',
+    (limitKind) => {
+      expect(() =>
+        reduceGoalControl(
+          goalRecord({
+            status: 'usage_limited',
+            revision: 4,
+            limitKind,
+            lastReason: 'a reason the guard no longer has to recognise',
+          }),
+          {
+            request: {
+              action: 'resume',
+              expectedGoalId: 'g-1',
+              expectedRevision: 4,
+            },
+            now: 200,
+            nextGoalId: 'unused',
+            cursor: { recordId: 'r-200' },
           },
-          now: 200,
-          nextGoalId: 'unused',
-          cursor: { recordId: 'r-200' },
-        },
-      ),
-    ).toThrow(
-      'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
-    );
-  });
+        ),
+      ).toThrow(
+        'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
+      );
+    },
+  );
+
+  it.each([
+    [GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON, 'evidence_catalog'],
+    [GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON, 'checkpoint_request'],
+    ['An operational limit', undefined],
+  ] as const)(
+    'maps a Goal limit reason only to its canonical kind',
+    (reason, expected) => {
+      expect(goalLimitKindForReason(reason)).toBe(expected);
+    },
+  );
 
   it.each([
     GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
