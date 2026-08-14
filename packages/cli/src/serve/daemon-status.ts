@@ -196,12 +196,30 @@ interface DaemonStatusLimits {
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False, and required. Every figure in this section is resolved input or a
-   * model of a policy that does not exist yet; nothing here is applied to a
-   * process. The flag exists so a client can never mistake the `limits`
-   * namespace for enforcement that has not shipped.
+   * False, and required — scoped to the CHILD-HEAP model: every figure in
+   * this section except `journalGrowth` is resolved input or a model of a
+   * policy that does not exist yet; nothing sizes or bounds a child
+   * process. The flag exists so a client can never mistake the modeled
+   * partition for enforcement that has not shipped. Adaptive live-journal
+   * growth IS a runtime effect of the budget and is reported separately
+   * under `journalGrowth`.
    */
   enforced: false;
+  /**
+   * Adaptive live-journal growth derived from this budget — the one figure
+   * in this section with runtime effect: session journal caps really do
+   * grow within this pool mid-turn (per-session effective limits appear on
+   * each session diagnostic in `detail=full`). `null` when growth is
+   * disabled (an operator-pinned journal cap, or a budget that leaves no
+   * usable pool). The pool is owned daemon-wide: every workspace bridge
+   * accounts its sessions against the same single aggregate.
+   */
+  journalGrowth: {
+    poolBytes: number;
+    hardCapBytes: number;
+    baselineMaxEvents: number;
+    baselineMaxBytes: number;
+  } | null;
   /**
    * The per-child heap partition the daemon models but does not apply.
    * `null` when no policy was built.
@@ -266,10 +284,12 @@ export interface DaemonStatusMemoryLimits {
 export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
   childHeap?: ChildHeapPolicySnapshot,
+  journalGrowth?: DaemonStatusMemoryLimits['journalGrowth'],
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
     enforced: false,
+    journalGrowth: journalGrowth ?? null,
     childHeap: childHeap
       ? {
           mode: childHeap.mode,
@@ -852,6 +872,13 @@ export async function buildDaemonStatusResponse(
       memory: toDaemonStatusMemoryLimits(
         memoryBudget,
         input.getChildHeapPolicySnapshot?.(),
+        bridgeSnapshot.limits.journalGrowth
+          ? {
+              ...bridgeSnapshot.limits.journalGrowth,
+              baselineMaxEvents: bridgeSnapshot.limits.maxJournalEvents,
+              baselineMaxBytes: bridgeSnapshot.limits.maxJournalBytes,
+            }
+          : null,
       ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1

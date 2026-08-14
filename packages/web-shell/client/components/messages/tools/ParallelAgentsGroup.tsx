@@ -1,17 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
+import { ChevronRightIcon } from 'lucide-react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { hasActiveAgents } from '../../../adapters/toolClassification';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
-import {
-  formatElapsed,
-  formatLiveElapsed,
-  StatusIcon,
-  truncateText,
-} from './toolDisplay';
+import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
 import {
   getTaskExecutionRecord,
   getAgentType,
+  isDefaultAgentType,
   getAgentDescription,
   getAgentCurrentToolHint,
   formatTokenCount,
@@ -52,8 +49,14 @@ function formatDuration(ms: number): string {
   return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
 }
 
-function getAgentStats(agent: ACPToolCall, now: number): string {
-  const parts: string[] = [];
+function getAgentStats(
+  agent: ACPToolCall,
+  now: number,
+): {
+  duration: string;
+  tokens: string;
+  cancellationReason: string;
+} {
   const taskExec = getTaskExecutionRecord(agent.rawOutput);
   const stats = taskExec?.['executionSummary'] as
     | Record<string, unknown>
@@ -65,8 +68,7 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
           agent.startTime,
           agent.endTime ?? (agent.status === 'in_progress' ? now : undefined),
         );
-  if (elapsed) parts.push(elapsed);
-  const tokens =
+  const tokenCount =
     taskExec &&
     typeof taskExec['tokenCount'] === 'number' &&
     taskExec['tokenCount'] > 0
@@ -76,12 +78,11 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
           stats['outputTokens'] > 0
         ? (stats['outputTokens'] as number)
         : 0;
-  if (tokens > 0) {
-    parts.push(formatTokenCount(tokens));
-  }
-  const reason = getAgentCancellationReason(agent);
-  if (reason) parts.push(truncateText(reason, 80));
-  return parts.join(' · ');
+  return {
+    duration: elapsed,
+    tokens: tokenCount > 0 ? formatTokenCount(tokenCount) : '',
+    cancellationReason: truncateText(getAgentCancellationReason(agent), 80),
+  };
 }
 
 function ToolGroupIcon() {
@@ -351,19 +352,15 @@ export function ParallelAgentsGroup({
   const doneCount = agents.filter(
     (a) => a.status === 'completed' || a.status === 'failed',
   ).length;
+  const failedCount = agents.filter(
+    (a) => getAgentDisplayStatus(a) === 'failed',
+  ).length;
   const total = agents.length;
 
   const showGroup = groupExpanded || !!approvalAgent;
   const renderGroup = showGroup || automaticCollapseAnimating;
   const automaticCollapseClosing =
     automaticCollapseAnimating && !hasApprovalAgent;
-  const summaryStatus = agents.some(
-    (a) => getAgentDisplayStatus(a) === 'failed',
-  )
-    ? 'failed'
-    : hasActive
-      ? 'in_progress'
-      : 'completed';
 
   return (
     <div className={styles.wrap} ref={wrapRef}>
@@ -390,15 +387,9 @@ export function ParallelAgentsGroup({
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
-        {summaryStatus === 'failed' ? (
-          <span className={styles.summaryStatus}>
-            <StatusIcon status={summaryStatus} />
-          </span>
-        ) : (
-          <span className={styles.summaryIcon} aria-hidden="true">
-            <ToolGroupIcon />
-          </span>
-        )}
+        <span className={styles.summaryIcon} aria-hidden="true">
+          <ToolGroupIcon />
+        </span>
         <span
           className={
             hasActive
@@ -408,6 +399,14 @@ export function ParallelAgentsGroup({
         >
           {t('parallelAgents.title')}
           {runningDuration && <> {runningDuration}</>}
+          {/* Ahead of the done counter so it survives the summaryText
+              tail truncation in narrow layouts. */}
+          {failedCount > 0 && (
+            <>
+              <span className={styles.summaryDot}>·</span>
+              {t('parallelAgents.failed', { count: failedCount })}
+            </>
+          )}
           <span className={styles.summaryDot}>·</span>
           {t('parallelAgents.done', { done: doneCount, total })}
         </span>
@@ -437,6 +436,7 @@ export function ParallelAgentsGroup({
                   const desc = getAgentDescription(agent);
                   const toolHint = getAgentCurrentToolHint(agent, t);
                   const stats = getAgentStats(agent, now);
+                  const activity = toolHint || stats.cancellationReason;
                   const status = getAgentDisplayStatus(agent);
                   const rowStatus =
                     status === 'failed'
@@ -451,6 +451,12 @@ export function ParallelAgentsGroup({
                         ? t('subagent.failed')
                         : t('subagent.completed');
                   const isExpanded = expandedId === agent.callId;
+                  const localizedAgentType = localizeAgentTypeName(
+                    agentType,
+                    t,
+                  );
+                  const showAgentType =
+                    !!desc && !isDefaultAgentType(agentType);
                   return (
                     <div key={agent.callId}>
                       <button
@@ -461,7 +467,13 @@ export function ParallelAgentsGroup({
                             : styles.row
                         }
                         data-agent-status={rowStatus}
+                        data-detail-mode={subagentDetails ? 'panel' : 'inline'}
                         aria-expanded={subagentDetails ? undefined : isExpanded}
+                        title={
+                          subagentDetails
+                            ? t('planExecution.openDetails')
+                            : t('subagent.toggleStream')
+                        }
                         onClick={() => {
                           if (subagentDetails) subagentDetails.onOpen(agent);
                           else setExpandedId(isExpanded ? null : agent.callId);
@@ -483,21 +495,33 @@ export function ParallelAgentsGroup({
                               : '✓'}
                         </span>
                         <span className={styles.rowText}>
+                          {showAgentType && (
+                            <span className={styles.rowType}>
+                              {truncateText(localizedAgentType, 50)}:
+                            </span>
+                          )}
                           <span className={styles.rowTask}>
-                            {truncateText(
-                              desc || localizeAgentTypeName(agentType, t),
-                              50,
-                            )}
+                            {truncateText(desc || localizedAgentType, 50)}
                           </span>
-                          {toolHint && (
-                            <span
-                              className={styles.rowTool}
-                            >{` · ${toolHint}`}</span>
+                          {activity && (
+                            <span className={styles.rowActivity}>
+                              ({activity})
+                            </span>
                           )}
                         </span>
-                        {stats && (
-                          <span className={styles.rowStats}>{stats}</span>
+                        {(stats.duration || stats.tokens) && (
+                          <span className={styles.rowStats}>
+                            {stats.duration && <span>{stats.duration}</span>}
+                            {stats.duration && stats.tokens && (
+                              <span aria-hidden="true"> · </span>
+                            )}
+                            {stats.tokens && <span>{stats.tokens}</span>}
+                          </span>
                         )}
+                        <ChevronRightIcon
+                          className={styles.rowAction}
+                          aria-hidden="true"
+                        />
                       </button>
                       {!subagentDetails && isExpanded && (
                         <div className={styles.detail}>

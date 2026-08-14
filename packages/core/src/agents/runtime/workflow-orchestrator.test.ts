@@ -8,6 +8,8 @@
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
@@ -1165,6 +1167,31 @@ describe('WorkflowOrchestrator', () => {
     expect(results).toHaveLength(2);
     expect((results[0] as { result: unknown }).result).toBe('r:a');
     expect((results[1] as { result: unknown }).result).toBe('r:b');
+  });
+
+  // The boundary check runs before deriveAgentKey: hash.update() throws an
+  // opaque ERR_INVALID_ARG_TYPE for a non-string prompt, which would
+  // preempt the dispatch's descriptive error on the journaled path.
+  it('P6: rejects an invalid prompt before journal key derivation', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `r:${prompt}`,
+    );
+    await expect(
+      orchestrator.run({
+        script: `return await agent(42);`,
+        args: undefined,
+        journal,
+      }),
+    ).rejects.toThrow(/non-empty string prompt/);
+    // The mis-call consumes nothing: no started marker, no result line.
+    expect(entries).toHaveLength(0);
   });
 
   it('assigns journal ids before paused parallel dispatches can dequeue', async () => {
@@ -2506,6 +2533,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   };
 
   function fakeConfigWithMgr(opts: {
+    transcriptDir?: string;
     findSubagentByName?: (name: string) => Promise<{
       name: string;
       description: string;
@@ -2528,9 +2556,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // Hook for schema-mode tests: the override path attaches an
       // AgentEventEmitter that the dispatch listens to for `structured_output`
       // calls. The test can drive that emitter to simulate model behavior.
-      runWithEmitter?: (emitter: {
-        emit(event: string, payload: unknown): void;
-      }) => void;
+      runWithEmitter?: (
+        emitter: { emit(event: string, payload: unknown): void },
+        signal?: AbortSignal,
+      ) => void | Promise<void>;
     }>;
   }): {
     config: Config;
@@ -2556,6 +2585,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // drive GitWorktreeService stubs without re-deriving cwd.
       getTargetDir: () => '/fake/repo',
       getSessionId: () => 'sess_fake_test_id',
+      getProjectRoot: () => opts.transcriptDir ?? '/fake/repo',
+      getCliVersion: () => '9.9.9',
+      storage: opts.transcriptDir
+        ? { getProjectDir: () => opts.transcriptDir }
+        : undefined,
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
@@ -2594,10 +2628,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 );
                 call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
-                  outcome.runWithEmitter(
+                  await outcome.runWithEmitter(
                     options.eventEmitter as {
                       emit(event: string, payload: unknown): void;
                     },
+                    signal,
                   );
                 }
                 // R3 (wenshao #6): honor `nextExecuteThrow` on the
@@ -2680,6 +2715,325 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         'exit_plan_mode',
         'agent',
       ]),
+    );
+  });
+
+  it('records override-path events in the workflow transcript', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        onCreate: async () => ({
+          finalText: 'override-output',
+          terminateMode: 'GOAL',
+          runWithEmitter: (emitter) => {
+            emitter.emit(AgentEventType.ROUND_TEXT, {
+              subagentId: 'sub',
+              round: 1,
+              text: 'override transcript output',
+              thoughtText: '',
+              timestamp: 1,
+            });
+          },
+        }),
+      });
+
+      await createProductionDispatch(config)('override prompt', {
+        model: 'override-model',
+      });
+
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const records = fs
+        .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(2);
+      expect(records[1]!['parentUuid']).toBe(records[0]!['uuid']);
+      expect(records[1]!['agentId']).toBe(records[0]!['agentId']);
+      expect(calls[0]!.executeAgentId).toBe(records[0]!['agentId']);
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // An unlabeled override-path dispatch runs the runtime agent under the
+  // agentType's resolved canonical name; the transcript must record that
+  // same identity — not the generic default and not the raw spelling the
+  // script happened to pass (the SubagentManager lookup is
+  // case-insensitive). agentName is the only human-readable agent identity
+  // a workflow dispatch leaves on disk.
+  it('records the agentType name in the transcript for an unlabeled override dispatch', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        // Case-insensitive like the real SubagentManager lookup.
+        findSubagentByName: async (name) =>
+          name.toLowerCase() === 'code-reviewer'
+            ? {
+                name: 'code-reviewer',
+                description: 'reviews chunks',
+                systemPrompt: 'You review code.',
+                level: 'session',
+              }
+            : null,
+        onCreate: async () => ({
+          finalText: 'review-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('review chunk 1 of 3', {
+        agentType: 'Code-Reviewer',
+      });
+
+      expect(calls[0]!.config.name).toBe('code-reviewer');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('code-reviewer');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // With BOTH label and agentType set the transcript must stamp the same
+  // identity the runtime agent runs under — the resolved agentType's
+  // canonical name. A label cannot rename a resolved agentType: a fan-out
+  // that labels each chunk would otherwise attribute every on-disk record
+  // to the label while the agent that ran is the agentType, and consumers
+  // aggregating by agentName could not correlate those dispatches with
+  // AgentTool launches of the same agentType.
+  it('stamps the resolved agentType name in the transcript when a label is also set', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        findSubagentByName: async (name) =>
+          name.toLowerCase() === 'code-reviewer'
+            ? {
+                name: 'code-reviewer',
+                description: 'reviews chunks',
+                systemPrompt: 'You review code.',
+                level: 'session',
+              }
+            : null,
+        onCreate: async () => ({
+          finalText: 'review-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('review chunk 1 of 3', {
+        agentType: 'Code-Reviewer',
+        label: 'chunk-1',
+      });
+
+      expect(calls[0]!.config.name).toBe('code-reviewer');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe(calls[0]!.config.name);
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // The agentType definition is resolved exactly once per dispatch:
+  // resolveWorkflowAgentIdentity hands the resolved config to the override
+  // path instead of letting it re-run findSubagentByName — an uncached
+  // directory read + frontmatter parse per non-session level, paid on the
+  // dispatch hot path and again per stall-retry attempt.
+  it('resolves the agentType once per dispatch instead of per path', async () => {
+    let lookups = 0;
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async (name) => {
+        lookups += 1;
+        return name === 'Explore'
+          ? {
+              name: 'Explore',
+              description: 'fast read-only',
+              systemPrompt: 'You are Explore.',
+              level: 'builtin',
+            }
+          : null;
+      },
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('find foo', {
+      agentType: 'Explore',
+    });
+
+    expect(lookups).toBe(1);
+  });
+
+  // The identity invariant's third leg: an ephemeral override (model /
+  // isolation / schema only, no agentType) runs the runtime agent under the
+  // resolved display name and the transcript records that same name — a
+  // labeled model-only dispatch must not diverge into an unlabeled runtime
+  // agent.
+  it('runs a labeled model-only override under the label and records it in the transcript', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        onCreate: async () => ({
+          finalText: 'model-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('probe task', {
+        label: 'labeled-model',
+        model: 'm',
+      });
+
+      expect(calls[0]!.config.name).toBe('labeled-model');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('labeled-model');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // resolveWorkflowAgentIdentity's truthy check keeps `agentType: ''` from
+  // naming the agent '' — the dispatch still throws "agent type '' not
+  // found", but the transcript seeded before that throw records the shared
+  // default, not a blank identity.
+  it('never records a blank identity for an empty agentType', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config } = fakeConfigWithMgr({
+        transcriptDir,
+        findSubagentByName: async () => null,
+        onCreate: async () => ({
+          finalText: '',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('task', { agentType: '' }),
+      ).rejects.toThrow(/agent type '' not found/);
+
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('workflow-agent');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // The stall wrapper's abandoned error interpolates the dispatch's display
+  // name; when that name comes from a model-authored agentType definition
+  // (validateName charset-checks the TRIMMED name, so a definition named
+  // 'rev\n' registers with the raw name), control characters must not
+  // fragment the single-line error.
+  it('sanitizes control characters out of the agentType stall error', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async (name) =>
+        name === 'rev\n'
+          ? {
+              name: 'rev\n',
+              description: 'newline-named reviewer',
+              systemPrompt: 'You review code.',
+              level: 'session',
+            }
+          : null,
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: async (emitter, signal) => {
+          emitter.emit(AgentEventType.ROUND_START, {
+            subagentId: 'sub',
+            round: 1,
+            promptId: 'p1',
+            timestamp: Date.now(),
+          });
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted) return resolve();
+            signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+        },
+      }),
+    });
+
+    const dispatch = createProductionDispatch(config);
+    const error: unknown = await dispatch('doomed', {
+      agentType: 'rev\n',
+      stallMs: 5,
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\n');
+    expect((error as Error).message).toContain(
+      'agent "rev" stalled on all 3 attempts',
     );
   });
 
@@ -3819,5 +4173,244 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     ).rejects.toThrow(
       /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
     );
+  });
+});
+
+// Every workflow `agent()` dispatch leaves the same per-agent JSONL
+// transcript AgentTool writes, in the same session-scoped directory. Before
+// this, a finished workflow run left only the journal — which stores a hash
+// of the prompt, not the prompt, and no `result` line at all for a dispatch
+// that threw.
+describe('createProductionDispatch — subagent transcripts', () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    created.length = 0;
+    nextFinalText.value = undefined;
+    nextTerminateMode.value = 'GOAL';
+    nextExecuteHook.value = undefined;
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-transcript-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  function transcriptConfig(): Config {
+    return {
+      getSessionId: () => 'sess-1',
+      getProjectRoot: () => projectDir,
+      getCliVersion: () => '9.9.9',
+      storage: { getProjectDir: () => projectDir },
+    } as unknown as Config;
+  }
+
+  const sessionDir = () => path.join(projectDir, 'subagents', 'sess-1');
+
+  function transcriptNames(): string[] {
+    if (!fs.existsSync(sessionDir())) return [];
+    return fs.readdirSync(sessionDir()).filter((n) => n.endsWith('.jsonl'));
+  }
+
+  function recordsIn(name: string): Array<Record<string, unknown>> {
+    return fs
+      .readFileSync(path.join(sessionDir(), name), 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  const partsOf = (rec: Record<string, unknown>): unknown[] =>
+    ((rec['message'] as { parts?: unknown[] } | undefined)?.parts ??
+      []) as unknown[];
+
+  it('writes one transcript per dispatch, seeded with the dispatched prompt', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('review chunk 3 of 7', { label: 'chunk-3' });
+
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    const recs = recordsIn(names[0]!);
+    // The launch prompt is the first `user` record — the shape every
+    // transcript reader already recovers a launch prompt from.
+    expect(recs[0]!['type']).toBe('user');
+    expect(partsOf(recs[0]!)).toEqual([{ text: 'review chunk 3 of 7' }]);
+    expect(recs[0]!['agentId']).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(recs[0]!['agentName']).toBe('chunk-3');
+    expect(recs[0]!['sessionId']).toBe('sess-1');
+    // Launch metadata flows through buildAgentTranscriptAttach — pin it
+    // here so a dropped builder wiring line fails the suite.
+    expect(recs[0]!['version']).toBe('9.9.9');
+    expect(recs[0]!['cwd']).toBe(projectDir);
+    expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
+  });
+
+  // An empty prompt seeds no user record, so the transcript would give no
+  // evidence of what the agent was asked — the dispatch is rejected at the
+  // boundary instead, before any transcript is started.
+  it('rejects an empty or non-string prompt before attaching a transcript', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await expect(dispatch('', { label: 'empty' })).rejects.toThrow(
+      /non-empty string prompt/,
+    );
+    await expect(
+      dispatch(42 as unknown as string, { label: 'bad' }),
+    ).rejects.toThrow(/non-empty string prompt/);
+    expect(transcriptNames()).toHaveLength(0);
+  });
+
+  // The display name is resolved once and handed to both the runtime agent
+  // and the transcript, so an empty label cannot diverge into a runtime
+  // agent named '' whose transcript says 'workflow-agent'.
+  it('keeps the runtime agent name and the transcript aligned for an empty label', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('task', { label: '' });
+
+    expect(created).toHaveLength(1);
+    expect(created[0]!.name).toBe('workflow-agent');
+    const recs = recordsIn(transcriptNames()[0]!);
+    expect(recs[0]!['agentName']).toBe('workflow-agent');
+  });
+
+  it("records the subagent's tool calls and their results", async () => {
+    nextExecuteHook.value = async (emitter) => {
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'sub',
+        round: 1,
+        callId: 'c1',
+        name: 'read_file',
+        args: { absolute_path: '/tmp/diff.txt', offset: 0, limit: 40 },
+        description: 'read the diff',
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+        subagentId: 'sub',
+        round: 1,
+        responses: [
+          {
+            callId: 'c1',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'diff text' },
+                },
+              },
+            ],
+          },
+        ],
+        timestamp: 2,
+      });
+    };
+
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('read it', { label: 'reader' });
+
+    const recs = recordsIn(transcriptNames()[0]!);
+    expect(partsOf(recs[1]!)).toEqual([
+      {
+        functionCall: {
+          id: 'c1',
+          name: 'read_file',
+          args: { absolute_path: '/tmp/diff.txt', offset: 0, limit: 40 },
+        },
+      },
+    ]);
+    expect(recs[2]!['type']).toBe('tool_result');
+    expect(recs[2]!['toolCallResult']).toEqual({ callId: 'c1' });
+  });
+
+  // A stall-retried dispatch is ONE `agent()` call. Minting the agent id per
+  // attempt would present it to every transcript reader as two agents — one
+  // of them with almost no tool calls, which is exactly the shape a coverage
+  // gate reads as an agent that did nothing.
+  it('appends a stall retry to the first attempt transcript', async () => {
+    let attempt = 0;
+    nextExecuteHook.value = async (emitter, signal) => {
+      attempt += 1;
+      if (attempt > 1) {
+        nextTerminateMode.value = 'GOAL';
+        emitter.emit(AgentEventType.ROUND_TEXT, {
+          subagentId: 'workflow-agent',
+          round: 2,
+          text: 'retry completed',
+          thoughtText: '',
+          timestamp: Date.now(),
+        });
+        return;
+      }
+      nextTerminateMode.value = 'CANCELLED';
+      emitter.emit(AgentEventType.ROUND_START, {
+        subagentId: 'workflow-agent',
+        round: 1,
+        promptId: 'prompt-1',
+        timestamp: Date.now(),
+      });
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve();
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await expect(dispatch('flaky', { label: 'f1', stallMs: 5 })).resolves.toBe(
+      'headless-said:flaky',
+    );
+
+    expect(attempt).toBe(2);
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    // One launch record, not one per attempt.
+    const records = recordsIn(names[0]!);
+    const users = records.filter((r) => r['type'] === 'user');
+    expect(users).toHaveLength(1);
+    // The retry seam is visible on disk: attempt 2 seeded an agent_retry
+    // system marker before its own records.
+    expect(records[1]!['type']).toBe('system');
+    expect(records[1]!['subtype']).toBe('agent_retry');
+    expect(records[1]!['systemPayload']).toEqual({ attempt: 2 });
+    // Attempt 2's own records follow the marker — a retried agent that did
+    // nothing would end the file at the marker, exactly the shape the
+    // comment above warns about.
+    expect(records.map((r) => r['type'])).toEqual([
+      'user',
+      'system',
+      'assistant',
+    ]);
+    expect(partsOf(records[2]!)).toEqual([{ text: 'retry completed' }]);
+    for (let i = 1; i < records.length; i++) {
+      expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
+      expect(records[i]!['agentId']).toBe(records[0]!['agentId']);
+    }
+    expect(created).toHaveLength(2);
+    expect(created.map((call) => call.agentId)).toEqual([
+      records[0]!['agentId'],
+      records[0]!['agentId'],
+    ]);
+  });
+
+  // The journal writes no `result` line for a dispatch that throws, so a
+  // failed agent is invisible there. The transcript is what keeps it
+  // visible — the run left evidence of what it was asked and how far it got.
+  it('leaves a transcript for a dispatch that ends on a non-GOAL terminal', async () => {
+    nextTerminateMode.value = 'MAX_TURNS';
+    const dispatch = createProductionDispatch(transcriptConfig());
+
+    await expect(dispatch('doomed', { label: 'd1' })).rejects.toThrow(
+      /did not complete \(terminate mode: MAX_TURNS\)/,
+    );
+
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    expect(partsOf(recordsIn(names[0]!)[0]!)).toEqual([{ text: 'doomed' }]);
+  });
+
+  it('is best-effort: a config that cannot supply the paths still dispatches', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('hello', { label: 'h1' })).resolves.toBe(
+      'headless-said:hello',
+    );
+    expect(transcriptNames()).toHaveLength(0);
   });
 });

@@ -6,6 +6,7 @@ import {
   type DaemonAuthProviderDescriptor,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import styles from './AuthMessage.module.css';
 import {
   apiKeyAfterBaseUrlChange,
@@ -16,6 +17,9 @@ import {
   selectedBaseUrlModelIds,
   selectedBaseUrlOptionIndex,
 } from './auth-provider-state';
+
+const TOS_PRIVACY_URL =
+  'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
 
 type AuthView = 'groups' | 'providers' | 'step' | 'review';
 type AuthGroupId = 'alibaba' | 'third-party' | 'custom';
@@ -95,6 +99,7 @@ function maskApiKey(
 
 export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
@@ -638,6 +643,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}
             </a>
@@ -658,6 +666,9 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={documentationUrl}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) =>
+                openExternalLink(event, provider.documentationUrl)
+              }
             >
               {t('auth.documentation')}: {documentationUrl}
             </a>
@@ -878,11 +889,12 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
             <div>{t('auth.termsTitle')}:</div>
             <a
               className={styles.link}
-              href="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
+              href={TOS_PRIVACY_URL}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) => openExternalLink(event, TOS_PRIVACY_URL)}
             >
-              https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
+              {TOS_PRIVACY_URL}
             </a>
           </div>
         </>

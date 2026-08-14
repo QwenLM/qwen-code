@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
   getImageMimeTypeFromPath,
@@ -38,6 +39,8 @@ interface ReviewFinding {
   summary: string;
   shortSummary: string;
   failureScenario: string;
+  /** The executed evidence that settled the verdict, or its `not run` line. */
+  witness?: string;
   suggestedFix?: string;
   category?: string;
   locations: FindingLocation[];
@@ -208,6 +211,9 @@ function parseFinding(value: unknown, index: number): ReviewFinding {
       source['failureScenario'],
       `${label}.failureScenario`,
     ),
+    ...(optionalString(source['witness'], `${label}.witness`)
+      ? { witness: source['witness'] as string }
+      : {}),
     ...(optionalString(source['suggestedFix'], `${label}.suggestedFix`)
       ? { suggestedFix: source['suggestedFix'] as string }
       : {}),
@@ -309,6 +315,7 @@ export function CodeReviewArtifactDetail({
   workspaceActions: ArtifactWorkspaceActions;
 }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [content, setContent] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [artifactTruncated, setArtifactTruncated] = useState(false);
@@ -588,6 +595,12 @@ export function CodeReviewArtifactDetail({
                 label={t('codeReview.failureScenario')}
                 value={finding.failureScenario}
               />
+              {finding.witness && (
+                <Detail
+                  label={t('codeReview.witness')}
+                  value={finding.witness}
+                />
+              )}
               {finding.suggestedFix && (
                 <Detail
                   label={t('codeReview.suggestedFix')}
@@ -634,6 +647,7 @@ export function CodeReviewArtifactDetail({
                             href={asset}
                             target="_blank"
                             rel="noopener noreferrer"
+                            onClick={(event) => openExternalLink(event, asset)}
                           >
                             {asset}
                           </a>

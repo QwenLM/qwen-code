@@ -31,9 +31,11 @@ import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   normalizeCompactedReplayMaxBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
+  type JournalGrowthSessionLimit,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
@@ -53,6 +55,7 @@ import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   formatMemoryBudgetStderr,
   resolveDaemonMemoryBudget,
+  serveJournalGrowthPoolMb,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
 import {
   createChildHeapPolicy,
@@ -102,9 +105,11 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CAPABILITIES_SCHEMA_VERSION,
@@ -131,7 +136,7 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
-import { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import {
   workspaceRegistrationId,
@@ -1055,7 +1060,7 @@ export interface RunQwenServeDeps {
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
   /** Test/embed override; production uses ~/.qwen for the Live Host locator. */
   liveDiscoveryStableBaseDir?: string;
   /** Test/embed override for stable Live locator ownership handoff. */
@@ -1587,6 +1592,17 @@ function createBootstrapServeApp(input: {
       return;
     }
     const runtimeError = getRuntimeError();
+    // Same gate the runtime applies (see runQwenServeImpl): pinned journal
+    // flags or a budget with no usable pool disable growth, so the
+    // bootstrap response matches what the runtime will wire.
+    const bootstrapJournalGrowthPoolMb =
+      opts.daemonMemoryBudget !== undefined
+        ? serveJournalGrowthPoolMb({
+            budget: opts.daemonMemoryBudget,
+            maxJournalEvents: opts.maxJournalEvents,
+            maxJournalBytes: opts.maxJournalBytes,
+          })
+        : 0;
     const channelWorker = getChannelWorkerSnapshot();
     const channelWorkers = getChannelWorkerSnapshots();
     const runtimeFailed = runtimeError !== undefined;
@@ -1673,7 +1689,20 @@ function createBootstrapServeApp(input: {
         // No child-heap policy during bootstrap: it is built with the
         // runtime, so `enforced` is correctly false and `childHeap` null in
         // this window even when the flag says `enforce`.
-        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
+        memory: toDaemonStatusMemoryLimits(
+          opts.daemonMemoryBudget,
+          undefined,
+          bootstrapJournalGrowthPoolMb > 0
+            ? {
+                poolBytes: bootstrapJournalGrowthPoolMb * 1024 * 1024,
+                hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+                baselineMaxEvents:
+                  opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
+                baselineMaxBytes:
+                  opts.maxJournalBytes ?? DEFAULT_MAX_JOURNAL_BYTES,
+              }
+            : null,
+        ),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -2133,14 +2162,25 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
-  const baseEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...(optsIn.memoryProjectScope !== undefined
-      ? {
-          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
-        }
-      : {}),
-  };
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const launchMemoryProjectScopeValue =
+    baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+  const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
+    ? launchMemoryProjectScopeValue
+    : undefined;
+  const memoryProjectScopeValue =
+    optsIn.memoryProjectScope ?? launchMemoryProjectScope ?? 'workspace';
+  const memoryProjectScopeSource =
+    optsIn.memoryProjectScope !== undefined
+      ? 'option'
+      : launchMemoryProjectScope !== undefined
+        ? 'environment'
+        : 'default';
+  const resolvedMemoryProjectScope =
+    memoryProjectScopeValue.trim().toLowerCase() === 'workspace'
+      ? 'workspace'
+      : 'git-root';
+  baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = memoryProjectScopeValue;
   // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
   // carries the tsx loader's NODE_OPTIONS, so only then does the base env
   // keep loader vars — dev-mode ACP children and channel workers need the
@@ -2543,11 +2583,11 @@ async function runQwenServeImpl(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
   }
-  // Resolve the daemon's memory figures once, for reporting only. Nothing
-  // downstream consumes them to size a child: dividing a pool by a workspace
-  // count is unsound while registration does not spawn a child, and bounding
-  // the aggregate needs admission at spawn time keyed on live children. This
-  // establishes the denominator that work will be designed against.
+  // Resolve the daemon's memory figures once. Nothing downstream consumes
+  // them to size a child: dividing a pool by a workspace count is unsound
+  // while registration does not spawn a child, and bounding the aggregate
+  // needs admission at spawn time keyed on live children. The one consumer
+  // today is the adaptive live-journal growth pool below.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
@@ -2557,6 +2597,48 @@ async function runQwenServeImpl(
   ) {
     writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
   }
+  // Adaptive live-journal growth: sessions whose in-flight turn outgrows
+  // the journal caps can grow into a daemon-wide pool (derived once from
+  // the memory budget and shared by every bridge), instead of silently
+  // truncating the live replay window (the canonical case: one turn fanning
+  // out many concurrent subagents). An operator-pinned journal flag
+  // disables growth — explicit config wins — as does a budget with no
+  // usable pool (insufficient host, no headroom after the root reserve).
+  const journalGrowthPoolMbValue =
+    opts.daemonMemoryBudget !== undefined
+      ? serveJournalGrowthPoolMb({
+          budget: opts.daemonMemoryBudget,
+          maxJournalEvents: opts.maxJournalEvents,
+          maxJournalBytes: opts.maxJournalBytes,
+        })
+      : 0;
+  const journalGrowthPoolBytes =
+    journalGrowthPoolMbValue > 0
+      ? journalGrowthPoolMbValue * 1024 * 1024
+      : undefined;
+  // ONE aggregate pool for the whole daemon: every bridge registers its
+  // live-session cap enumerator here and receives the aggregator, so each
+  // bridge's growth advisor accounts every sharing session — across all
+  // workspaces — against the same pool instead of holding its own copy.
+  const journalGrowthSessionLimitProviders = new Set<
+    () => readonly JournalGrowthSessionLimit[]
+  >();
+  const journalGrowthSessionLimits =
+    (): readonly JournalGrowthSessionLimit[] => {
+      const limits: JournalGrowthSessionLimit[] = [];
+      for (const provider of journalGrowthSessionLimitProviders) {
+        limits.push(...provider());
+      }
+      return limits;
+    };
+  const registerJournalGrowthSessionLimits = (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ): (() => void) => {
+    journalGrowthSessionLimitProviders.add(provider);
+    return () => {
+      journalGrowthSessionLimitProviders.delete(provider);
+    };
+  };
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
     workspaceRegistrationStore === undefined &&
@@ -2689,6 +2771,11 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  daemonLog.info('project memory scope resolved', {
+    projectMemoryScope: resolvedMemoryProjectScope,
+    projectMemoryScopeSource: memoryProjectScopeSource,
+    projectMemoryScopeRaw: memoryProjectScopeValue,
+  });
   // Per-workspace .env loads keep running after boot (skill status, voice
   // capability checks, settings reloads); boot stderr is long gone by then,
   // so fresh loader-key rejections must land in the durable daemon log or
@@ -2923,6 +3010,13 @@ async function runQwenServeImpl(
       'qwen serve: required external tool guard handshake succeeded.',
     );
   }
+  // Keep the guard's core helper imports out of the serve fast-path bundle.
+  const { createDaemonToolGuard } = await import(
+    './daemon-git-worktree-guard.js'
+  );
+  const daemonToolGuardHandler = createDaemonToolGuard(
+    externalToolGuardHandler,
+  );
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
@@ -2930,8 +3024,9 @@ async function runQwenServeImpl(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: externalToolGuardHandler
-      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+    [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]: externalToolGuardHandler
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
       : undefined,
   };
 
@@ -3371,7 +3466,7 @@ async function runQwenServeImpl(
       );
     }
     const liveConversationWorkspace =
-      deps.liveConversationWorkspace ?? new LiveConversationWorkspace();
+      deps.liveConversationWorkspace ?? new ConversationWorkspace();
     let runtimeBootSettings:
       ReturnType<SettingsRuntime['loadSettings']> | undefined;
     try {
@@ -4108,6 +4203,13 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
@@ -4128,9 +4230,7 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4510,6 +4610,13 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
@@ -4530,9 +4637,7 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -5063,6 +5168,13 @@ async function runQwenServeImpl(
           ...(opts.maxJournalBytes !== undefined
             ? { maxJournalBytes: opts.maxJournalBytes }
             : {}),
+          ...(journalGrowthPoolBytes !== undefined
+            ? {
+                journalGrowthPoolBytes,
+                journalGrowthSessionLimits,
+                registerJournalGrowthSessionLimits,
+              }
+            : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
             : {}),
@@ -5083,9 +5195,7 @@ async function runQwenServeImpl(
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,
-          ...(externalToolGuardHandler
-            ? { externalToolGuard: externalToolGuardHandler }
-            : {}),
+          externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),

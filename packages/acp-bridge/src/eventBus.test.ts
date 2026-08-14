@@ -1652,6 +1652,18 @@ describe('EventBus', () => {
       expect(bus.snapshotReplay()?.degraded).toBeUndefined();
     });
 
+    it('defaults replay snapshots to full and forwards summary mode', () => {
+      const engine = makeEngine();
+      const snapshot = vi.spyOn(engine, 'snapshot');
+      const bus = new EventBus(10, undefined, engine);
+
+      bus.snapshotReplay();
+      bus.snapshotReplay('summary');
+
+      expect(snapshot).toHaveBeenNthCalledWith(1, 'full');
+      expect(snapshot).toHaveBeenNthCalledWith(2, 'summary');
+    });
+
     it('survives a throwing onCompactionError callback', () => {
       const engine = makeEngine({
         ingest: () => {
