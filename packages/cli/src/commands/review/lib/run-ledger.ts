@@ -57,6 +57,26 @@ const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FUTURE_SLACK_MS = 2000;
 
 /**
+ * How far an entry's recorded plan mtime may sit from the plan's current one
+ * and still count as the same plan.
+ *
+ * Not slack in the epoch-window sense — this is representation noise. A file
+ * mtime is nanoseconds on ext4 and APFS, `mtimeMs` is that value in a double,
+ * and restoring one through `utimesSync` (which takes seconds as a double)
+ * costs a unit in the last place: 1786717283911.999 goes back as
+ * 1786717283911.998. `repo-context` performs exactly that round trip on every
+ * enrichment that changes the plan, so an EXACT comparison here declares the
+ * run's own plan to be a different one and drops every session entry —
+ * silently emptying the resume ledger on the filesystems this runs on.
+ *
+ * A millisecond is orders of magnitude above that noise and orders of
+ * magnitude below the real thing this must still separate: a FRESH capture of
+ * the same PR rewrites the plan seconds or minutes later, never inside the
+ * same millisecond.
+ */
+const PLAN_MTIME_TOLERANCE_MS = 1;
+
+/**
  * The plan mtime an entry was written against — the EXACT fresh-run boundary.
  *
  * The epoch window alone is inexact by its own slack: a previous run that
@@ -69,6 +89,10 @@ const FUTURE_SLACK_MS = 2000;
  * say which plan it saw is dropped. (An earlier revision degraded to the
  * window instead; the fallback was removed as unsound and this paragraph
  * outlived it by one round.)
+ *
+ * Compared within `PLAN_MTIME_TOLERANCE_MS`, not exactly: the mtime survives a
+ * `utimesSync` round trip on every content-changing enrichment, and that round
+ * trip costs a unit in the last place. See that constant.
  */
 function planMtimeMs(planPath: string): number | null {
   try {
@@ -155,7 +179,8 @@ function readSessions(planPath: string): SessionEntry[] {
         // no older files to be lenient toward.
         typeof (e as SessionEntry).planMtimeMs === 'number' &&
         planMtime !== null &&
-        (e as SessionEntry).planMtimeMs === planMtime,
+        Math.abs((e as SessionEntry).planMtimeMs! - planMtime) <=
+          PLAN_MTIME_TOLERANCE_MS,
     );
     // Deduplicate on READ, not only on append: the file lives in a directory
     // the orchestrator can reach, and a hand-written duplicate would make a

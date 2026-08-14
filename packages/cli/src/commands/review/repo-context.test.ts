@@ -27,6 +27,11 @@ import {
 } from './lib/repository-context.js';
 import { repoContextCommand, runRepoContext } from './repo-context.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  appendRunSession,
+  priorSessionIds,
+  recordResume,
+} from './lib/run-ledger.js';
 
 const tempRoots: string[] = [];
 
@@ -1039,7 +1044,15 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
 
       runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
 
-      expect(statSync(planPath).mtimeMs).toBe(mtimeBefore);
+      // Within a millisecond, not exactly: `mtimeMs` is a double over a
+      // nanosecond clock and `utimesSync` takes seconds as a double, so a
+      // restore costs a unit in the last place on ext4 (…911.999 goes back as
+      // …911.998). That is the same tolerance the ledger's own plan fence
+      // uses, and the assertion that matters — the entries stay visible — is
+      // the one below.
+      expect(Math.abs(statSync(planPath).mtimeMs - mtimeBefore)).toBeLessThan(
+        1,
+      );
       // The rewrite itself still happened: the plan carries no context here,
       // but the write path ran (content is re-serialized).
       expect(() => JSON.parse(readFileSync(planPath, 'utf8'))).not.toThrow();
@@ -1069,6 +1082,10 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       const seconds = Math.floor(Date.now() / 1000) - 3600 + 0.1234567;
       utimesSync(planPath, seconds, seconds);
       const mtimeBefore = statSync(planPath).mtimeMs;
+      // The ledger `fetch-pr` writes an orchestrator turn before this command
+      // runs: S0 is the interrupted attempt, S1 the continuation reading it.
+      appendRunSession(planPath, { QWEN_CODE_SESSION_ID: 'S0' });
+      recordResume(planPath, { QWEN_CODE_SESSION_ID: 'S1' });
       // The fixture is only meaningful if this filesystem actually keeps the
       // fraction; on one that does not, the integer case above already covers
       // it.
@@ -1077,8 +1094,18 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       runRepoContext({ plan: planPath, worktree, out: join(root, 'ctx.json') });
 
       if (hasSubMs) {
-        expect(statSync(planPath).mtimeMs).toBe(mtimeBefore);
+        expect(Math.abs(statSync(planPath).mtimeMs - mtimeBefore)).toBeLessThan(
+          1,
+        );
       }
+      // The consequence that actually matters, asserted end to end rather
+      // than inferred from a timestamp: the session entry `fetch-pr` wrote
+      // before this command ran is still THIS run's. A restore that lost the
+      // fraction moved the plan out from under the ledger's fence and this
+      // comes back empty.
+      expect(priorSessionIds(planPath, { QWEN_CODE_SESSION_ID: 'S1' })).toEqual(
+        ['S0'],
+      );
       // And no WARNING: the verification compares floats that survived a
       // filesystem round trip, so an exact-equality check reports failure on
       // every enrichment that changed anything.

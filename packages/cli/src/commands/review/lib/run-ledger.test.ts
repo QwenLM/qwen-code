@@ -351,6 +351,37 @@ describe('the properties the threat model rests on', () => {
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
+  it('keeps an entry whose plan mtime drifted by a last-place unit', () => {
+    // What `repo-context`'s restore actually leaves behind: `mtimeMs` is a
+    // double over a nanosecond clock, and putting it back through
+    // `utimesSync` (seconds, also a double) returns it a fraction of a
+    // microsecond off. Compared exactly, the run's OWN plan reads as a
+    // different one and every entry is dropped — the resume ledger empties
+    // itself on ext4 and APFS.
+    appendRunSession(plan, envOf('S1'));
+    const raw = JSON.parse(
+      readFileSync(runSessionsPath(plan), 'utf8'),
+    ) as Array<Record<string, unknown>>;
+    raw[0]['planMtimeMs'] = (raw[0]['planMtimeMs'] as number) - 0.001;
+    writeFileSync(runSessionsPath(plan), JSON.stringify(raw));
+    authorize('S2');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
+  });
+
+  it('still drops an entry written against a genuinely different plan', () => {
+    // The tolerance is representation noise, not a window. A fresh capture of
+    // the same PR rewrites the plan seconds or minutes later, never inside
+    // the same millisecond, so it stays outside.
+    appendRunSession(plan, envOf('S1'));
+    const raw = JSON.parse(
+      readFileSync(runSessionsPath(plan), 'utf8'),
+    ) as Array<Record<string, unknown>>;
+    raw[0]['planMtimeMs'] = (raw[0]['planMtimeMs'] as number) - 50;
+    writeFileSync(runSessionsPath(plan), JSON.stringify(raw));
+    authorize('S2');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
   it('drops an entry older than the slack window', () => {
     const mtimeMs = statSync(plan).mtimeMs;
     appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs) - 3000);
