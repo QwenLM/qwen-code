@@ -67,6 +67,7 @@ describe('LocalControlService', () => {
       service.enable(),
     ]);
     expect(second.url).toBe(first.url);
+    expect(first.sleepInhibited).toBe(true);
     expect(attached).toHaveLength(1);
     expect(attached[0].maxConnections).toBe(64);
     expect(attached[0].headersTimeout).toBe(10_000);

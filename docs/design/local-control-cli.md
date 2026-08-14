@@ -31,7 +31,7 @@ The mode rejects a non-default `--hostname` and `--no-web` instead of silently c
 
 Desktop keeps its bundled daemon bound to authenticated loopback. The Web Shell Settings card enables the same daemon-owned Local Control service, which starts the LAN listener, generates a separate pairing token and QR code, and acquires the platform sleep inhibitor. The listener validates its public Host and Origin and accepts only the pairing credential for LAN traffic. The Desktop PID, daemon PID, loopback address, and live sessions do not change.
 
-Closing the Local Control window or choosing **Turn off Local Control** closes the listener and active connections, releases sleep inhibition, and invalidates the pairing token. A later enable gets a new token. The LAN listener does not exist while the mode is off, so the normal Desktop runtime remains loopback-only.
+Turning Local Control off from Settings closes the listener and active connections, releases sleep inhibition, and invalidates the pairing token. A later enable gets a new token. The LAN listener does not exist while the mode is off, so the normal Desktop runtime remains loopback-only.
 
 This mode intentionally covers same-network access only. Internet remote control requires an account-authenticated outbound relay with reconnectable session state; it must not be implemented by exposing this LAN gateway through port forwarding or an unauthenticated tunnel.
 

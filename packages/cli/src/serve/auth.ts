@@ -288,7 +288,7 @@ export function hostAllowlist(
     // bind is. This is the DNS-rebinding defense the CLI path lacked: it bound
     // the daemon itself to `0.0.0.0`, which took the non-loopback opt-out
     // below and left the LAN with no Host check at all, while the Rust proxy
-    // enforced one per request (`local_control.rs:347-350`).
+    // enforced one per request.
     //
     // Accept the exact bind authority plus the canonical authority browsers
     // send when the scheme uses its default port.
@@ -365,11 +365,10 @@ function buildPrimaryHostGate(
 }
 
 /**
- * Bearer token middleware. When `token` is undefined the gate is open — used
- * for the loopback-only developer default. `runQwenServe` enforces that any
- * non-loopback bind has a token, and that `--require-auth` boots only with a
- * token configured, so this no-token branch is reachable only on loopback
- * developer setups that opted out of `--require-auth`.
+ * Bearer token middleware. Primary loopback requests may be open when the
+ * configured source has no token; Local Control always requires its pairing
+ * credential. `runQwenServe` still enforces that any non-loopback primary bind
+ * has a token, and that `--require-auth` boots only with a token configured.
  */
 export function bearerAuth(
   source: string | undefined | ListenerScopedCredentials,

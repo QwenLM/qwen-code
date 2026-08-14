@@ -2854,7 +2854,8 @@ const EN: Messages = {
   'settings.localControl.enable': 'Turn on Local Control',
   'settings.localControl.disable': 'Disconnect phone access',
   'settings.localControl.encrypted': 'Encrypted',
-  'settings.localControl.unencrypted': 'Unencrypted — trusted networks only',
+  'settings.localControl.unencrypted':
+    'Unencrypted — trusted networks only; re-enable after network changes',
   'settings.localControl.awake': 'This Mac will stay awake',
   'settings.localControl.maySleep': 'This Mac may sleep',
   'settings.models.title': 'Models',
@@ -5616,7 +5617,8 @@ const ZH: Messages = {
   'settings.localControl.enable': '开启本地控制',
   'settings.localControl.disable': '断开手机访问',
   'settings.localControl.encrypted': '已加密',
-  'settings.localControl.unencrypted': '未加密，仅限受信任网络',
+  'settings.localControl.unencrypted':
+    '未加密，仅限受信任网络；网络变化后请重新启用',
   'settings.localControl.awake': '这台 Mac 将保持唤醒',
   'settings.localControl.maySleep': '这台 Mac 可能进入睡眠',
   'settings.models.title': '模型',

@@ -15,6 +15,7 @@ import type { MutableOriginAllowlist } from '../auth.js';
 import type { CredentialStore } from './credentials.js';
 import { tagListener } from './listener-identity.js';
 import { selectLanAddress, type LanCandidate } from './lan-interfaces.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 /** Key under which the LAN origin is registered in the mutable CORS allowlist. */
 const CORS_KEY = 'local-control';
@@ -33,8 +34,7 @@ export interface LocalControlStatus {
   /**
    * Paired URL, token in the fragment. Present only while active.
    *
-   * The fragment is deliberate and inherited from the Rust implementation
-   * (`local_control.rs:421-442`): fragments are not sent to the server, do not
+   * The fragment is deliberate: fragments are not sent to the server, do not
    * appear in access logs, and are not carried on cross-origin navigations, so
    * the pairing secret stays client-side after the scan.
    */
@@ -60,6 +60,14 @@ export interface LocalControlEnableOptions {
    * daemon root — the CLI path always advertised the root.
    */
   target?: string;
+}
+
+export class InvalidLocalControlTargetError extends Error {
+  readonly code = 'invalid_local_control_target';
+  constructor() {
+    super('Local Control target must be a valid URL target.');
+    this.name = 'InvalidLocalControlTargetError';
+  }
 }
 
 export interface LocalControlServiceDeps {
@@ -192,7 +200,11 @@ export class LocalControlService {
       throw error;
     }
 
-    server.on('error', () => undefined);
+    server.on('error', (error) => {
+      writeStderrLine(
+        `qwen serve: Local Control listener error: ${error.message}`,
+      );
+    });
     this.#server = server;
     this.#token = token;
     this.#selected = selected;
@@ -276,7 +288,12 @@ function buildPairedUrl(
   if (target) {
     // Parsed relative to the LAN origin so an absolute or protocol-relative
     // `target` cannot redirect the QR at a host the operator did not choose.
-    const resolved = new URL(target, url);
+    let resolved: URL;
+    try {
+      resolved = new URL(target, url);
+    } catch {
+      throw new InvalidLocalControlTargetError();
+    }
     url.pathname = resolved.pathname;
     url.search = resolved.search;
   }

@@ -36,7 +36,7 @@ function isLanIpv4(address: string): boolean {
 }
 
 function isSoftwareNetwork(interfaceName: string): boolean {
-  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt|hamachi|nordlynx|proton|vpn|docker|veth|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br|bridge)(\d|[\s_.-]|$)/i.test(
+  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt[a-z0-9]*|hamachi|nordlynx|proton|vpn|docker|veth|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br|bridge)(\d|[\s_.-]|$)/i.test(
     interfaceName,
   );
 }
@@ -96,7 +96,7 @@ export class UnknownLanInterfaceError extends Error {
  * Pick the address to bind.
  *
  * Ambiguity is surfaced, not resolved. The Rust implementation failed outright
- * when a host had more than one LAN address (`local_control.rs:478-496`) and
+ * when a host had more than one LAN address and
  * the CLI printed a QR for every one, leaving the user to guess. Neither is
  * right: the caller gets {@link AmbiguousLanInterfaceError} carrying the
  * candidates so the Web Shell can ask, and can then pass `preferredAddress` to

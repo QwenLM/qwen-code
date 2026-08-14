@@ -10,7 +10,10 @@ import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { tagListener } from '../local-control/listener-identity.js';
-import type { LocalControlService } from '../local-control/service.js';
+import {
+  InvalidLocalControlTargetError,
+  type LocalControlService,
+} from '../local-control/service.js';
 import { registerWorkspaceLocalControlRoutes } from './workspace-local-control.js';
 
 describe('Local Control routes', () => {
@@ -89,5 +92,23 @@ describe('Local Control routes', () => {
     expect(response.status).toBe(409);
     expect(response.body.code).toBe('local_control_web_shell_unavailable');
     expect(enable).not.toHaveBeenCalled();
+  });
+
+  it('maps malformed Local Control targets to input errors', async () => {
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable: vi.fn(async () => {
+          throw new InvalidLocalControlTargetError();
+        }),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({ target: 'http://%' }),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_local_control_target');
   });
 });

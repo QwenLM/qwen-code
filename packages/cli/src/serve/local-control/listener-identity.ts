@@ -18,8 +18,8 @@ import type { Request } from 'express';
  * The distinction is load-bearing for auth: the runtime token authenticates
  * only on `primary`, the pairing token only on `local-control`. That is the
  * invariant the Tauri proxy enforced by rejecting a request that already
- * carried the runtime token (`local_control.rs:357-361`); in-daemon we get it
- * by attributing the request to its listener instead.
+ * carried the runtime token; in-daemon we get it by attributing the request to
+ * its listener instead.
  */
 export type ListenerKind = 'primary' | 'local-control';
 

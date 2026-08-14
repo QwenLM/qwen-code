@@ -12,9 +12,10 @@ import {
   UnknownLanInterfaceError,
 } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
-import type {
-  LocalControlService,
-  LocalControlStatus,
+import {
+  InvalidLocalControlTargetError,
+  type LocalControlService,
+  type LocalControlStatus,
 } from '../local-control/service.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -154,6 +155,10 @@ function sendEnableError(res: Response, error: unknown): void {
       code: error.code,
       interfaces: listLanCandidates(),
     });
+    return;
+  }
+  if (error instanceof InvalidLocalControlTargetError) {
+    res.status(400).json({ error: error.message, code: error.code });
     return;
   }
   res.status(500).json({

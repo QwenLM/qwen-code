@@ -32,6 +32,7 @@ describe('listLanCandidates', () => {
         'br-123abc': [ipv4('172.18.0.1')],
         virbr0: [ipv4('192.168.122.1')],
         zt7nnig26: [ipv4('10.147.17.2')],
+        zta4b6c8d: [ipv4('10.147.17.3')],
         'vEthernet (WSL)': [ipv4('172.20.0.1')],
         'VirtualBox Host-Only Network': [ipv4('192.168.56.1')],
         podman0: [ipv4('10.88.0.1')],

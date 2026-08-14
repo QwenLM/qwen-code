@@ -2789,9 +2789,8 @@ export function createServeApp(
     app,
     credentials,
     originAllowlist,
-    // Resolved through the ref on each call rather than captured: the handle
-    // is replaced across runtime restarts, and a captured one would attach the
-    // LAN listener's upgrades to a disposed ACP mount.
+    // Resolved through the ref on each call rather than captured so Local
+    // Control cannot attach to a stale ACP mount.
     attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
     detachWebSocket: (server) => acpHandleRef.current?.detachServer(server),
     getPort,
