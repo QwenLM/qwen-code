@@ -434,6 +434,7 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         lastReason: expect.stringContaining('bounded evidence catalog'),
+        limitKind: 'evidence_catalog',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
@@ -507,6 +508,7 @@ describe('goal runtime', () => {
       goal: {
         status: 'usage_limited',
         lastReason: expect.stringContaining('bounded evidence catalog'),
+        limitKind: 'evidence_catalog',
       },
     });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([

@@ -24,9 +24,11 @@ import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  goalLimitKindForReason,
   isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
+  type GoalLimitKind,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -147,6 +149,17 @@ export interface GoalRuntime {
   ): GoalProposalReceipt;
   takePendingTerminalProposal(): GoalPendingProposal | undefined;
   dispose(): void;
+}
+
+/**
+ * The typed limit to persist beside a `usage_limited` reason.
+ *
+ * Spreads to nothing for the operational failures that also land on
+ * `usage_limited`, so only the enumerated bounds get a `limitKind`.
+ */
+function limitKindFor(reason: string): { limitKind?: GoalLimitKind } {
+  const limitKind = goalLimitKindForReason(reason);
+  return limitKind === undefined ? {} : { limitKind };
 }
 
 function normalizeRecoveredBlockedAudit(
@@ -552,6 +565,7 @@ export function createGoalRuntime(
             activeTimeMs: elapsedActiveTime(snapshot.goal, now),
             updatedAt: now,
             lastReason: outcome.reason,
+            ...limitKindFor(outcome.reason),
           },
           activity: 'idle',
         };
@@ -755,6 +769,7 @@ export function createGoalRuntime(
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
           lastReason: reason,
+          ...limitKindFor(reason),
         },
         activity: 'idle',
       };
