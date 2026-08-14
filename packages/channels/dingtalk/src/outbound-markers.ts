@@ -85,33 +85,75 @@ function maskCode(text: string): string {
   return masked.join('');
 }
 
-const MEDIA_MARKER_PREFIXES = ['IMAGE:', 'FILE:'];
+const MEDIA_MARKER_PATTERN = /\[(IMAGE|FILE):\s*/giu;
 
 function previousOpenBracket(text: string, open: number): number {
   return open === 0 ? -1 : text.lastIndexOf('[', open - 1);
 }
 
+function isMarkerCloseBoundary(
+  text: string,
+  close: number,
+  boundary: number,
+): boolean {
+  let cursor = close + 1;
+  if (cursor >= boundary || /\s/u.test(text[cursor]!)) return true;
+  while (
+    cursor < boundary &&
+    /[.,;:!?)}\]，。；：！？）】]/u.test(text[cursor]!)
+  ) {
+    cursor++;
+  }
+  return (
+    cursor > close + 1 && (cursor >= boundary || /\s/u.test(text[cursor]!))
+  );
+}
+
+function findMarkerClose(
+  text: string,
+  pathStart: number,
+  boundary: number,
+): number {
+  let close = text.indexOf(']', pathStart);
+  let lastClose = -1;
+  while (close !== -1 && close < boundary) {
+    lastClose = close;
+    if (isMarkerCloseBoundary(text, close, boundary)) return close;
+    close = text.indexOf(']', close + 1);
+  }
+  return lastClose;
+}
+
+function markerBoundary(
+  visibleText: string,
+  pathStart: number,
+  nextOpening: number | undefined,
+): number {
+  let boundary = nextOpening ?? visibleText.length;
+  const lineBreak = visibleText.slice(pathStart, boundary).search(/[\r\n]/u);
+  if (lineBreak !== -1) boundary = pathStart + lineBreak;
+  return boundary;
+}
+
 function markerSafeTruncationStart(text: string, start: number): number {
-  const before = text.slice(0, start);
-  const lastClose = before.lastIndexOf(']');
+  const visibleText = maskCode(text);
+  const before = visibleText.slice(0, start);
   let open = before.lastIndexOf('[');
-  while (open > lastClose) {
-    const candidate = before.slice(open + 1);
-    if (!/[\r\n]/u.test(candidate)) {
-      const normalized = candidate.toUpperCase();
-      if (
-        MEDIA_MARKER_PREFIXES.some(
-          (prefix) =>
-            prefix.startsWith(normalized) || normalized.startsWith(prefix),
-        )
-      ) {
-        const close = text.indexOf(']', start);
-        const newline = text
-          .slice(start, close === -1 ? undefined : close)
-          .search(/[\r\n]/u);
-        if (close === -1 || newline !== -1) return text.length;
-        return close + 1;
-      }
+  while (open !== -1) {
+    const opening = visibleText.slice(open).match(/^\[(IMAGE|FILE):\s*/iu);
+    if (opening) {
+      const pathStart = open + opening[0].length;
+      const nextOpeningOffset = visibleText
+        .slice(pathStart)
+        .search(MEDIA_MARKER_PATTERN);
+      const boundary = markerBoundary(
+        visibleText,
+        pathStart,
+        nextOpeningOffset === -1 ? undefined : pathStart + nextOpeningOffset,
+      );
+      const close = findMarkerClose(visibleText, pathStart, boundary);
+      if (close >= start) return close + 1;
+      if (close === -1 && boundary >= start) return boundary;
     }
     open = previousOpenBracket(before, open);
   }
@@ -140,8 +182,7 @@ export function findOutboundMediaMarkers(
   markerName: 'IMAGE' | 'FILE',
 ): OutboundMediaMarker[] {
   const visibleText = maskCode(text);
-  const markerPattern = /\[(IMAGE|FILE):\s*/giu;
-  const openings = [...visibleText.matchAll(markerPattern)];
+  const openings = [...visibleText.matchAll(MEDIA_MARKER_PATTERN)];
   const markers: OutboundMediaMarker[] = [];
 
   for (let i = 0; i < openings.length; i++) {
@@ -150,11 +191,13 @@ export function findOutboundMediaMarkers(
       continue;
     }
     const pathStart = match.index + match[0].length;
-    let boundary = openings[i + 1]?.index ?? visibleText.length;
-    const lineBreak = visibleText.slice(pathStart, boundary).search(/[\r\n]/u);
-    if (lineBreak !== -1) boundary = pathStart + lineBreak;
-    const close = visibleText.lastIndexOf(']', boundary - 1);
-    if (close < pathStart) continue;
+    const boundary = markerBoundary(
+      visibleText,
+      pathStart,
+      openings[i + 1]?.index,
+    );
+    const close = findMarkerClose(visibleText, pathStart, boundary);
+    if (close === -1) continue;
     const path = text.slice(pathStart, close).trim();
     if (!path) continue;
     markers.push({
@@ -199,7 +242,10 @@ export function stripPartialOutboundMediaMarker(
   while (open !== -1) {
     const candidate = visibleText.slice(open + 1);
     if (/[\r\n]/u.test(candidate)) break;
-    if (candidate.includes(']')) {
+    const nextOpen = visibleText.indexOf('[', open + 1);
+    const ownSegment =
+      nextOpen === -1 ? candidate : candidate.slice(0, nextOpen - open - 1);
+    if (ownSegment.includes(']')) {
       open = previousOpenBracket(visibleText, open);
       continue;
     }

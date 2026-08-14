@@ -23,6 +23,12 @@ describe('outbound media markers', () => {
         'FILE',
       )[0]?.path,
     ).toBe('/workspace/report.pdf');
+    expect(
+      findOutboundMediaMarkers(
+        'Chart [IMAGE: /tmp/chart.png] as shown [1].',
+        'IMAGE',
+      )[0]?.path,
+    ).toBe('/tmp/chart.png');
   });
 
   it('walks past index zero and strips the earliest partial marker', () => {
@@ -36,6 +42,13 @@ describe('outbound media markers', () => {
         '[File pending]',
       ),
     ).toBe('see [File pending]');
+    expect(
+      stripPartialOutboundMediaMarker(
+        'see [IMAGE: /Users/ben/private/a [FILE: /tmp/b]',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('see [Image pending]');
   });
 
   it('keeps truncation boundaries outside partial markers', () => {
@@ -51,5 +64,12 @@ describe('outbound media markers', () => {
     expect(
       truncateOutboundMediaText(`[${'a'.repeat(200)}`, 100, truncationMarker),
     ).toHaveLength(100);
+    expect(
+      truncateOutboundMediaText(
+        `${'a'.repeat(114)}[${'b'.repeat(53)}`,
+        80,
+        truncationMarker,
+      ),
+    ).toHaveLength(80);
   });
 });

@@ -53,6 +53,10 @@ export interface StatusCardControllerOptions {
 }
 
 function boundContent(content: string): string {
+  return truncateOutboundMediaText(content, CONTENT_LIMIT, TRUNCATION_MARKER);
+}
+
+function boundDisplayContent(content: string): string {
   return truncateOutboundMediaText(
     sanitizeStreamingMediaMarkers(content),
     CONTENT_LIMIT,
@@ -96,7 +100,7 @@ export class StatusCardController {
     if (record.terminal) return;
     record.content = boundContent(content);
     if (record.streamFailed) return;
-    record.pendingSnapshot = sanitizeStreamingMediaMarkers(record.content);
+    record.pendingSnapshot = boundDisplayContent(content);
     this.scheduleFlush(record);
   }
 
@@ -140,6 +144,7 @@ export class StatusCardController {
     initialContent = '',
   ): StatusRecord {
     const outTrackId = `qwen-status-${randomUUID()}`;
+    const initialSnapshot = boundDisplayContent(initialContent);
     const record: StatusRecord = {
       segmentId: segment.segmentId,
       runId: segment.runId,
@@ -165,7 +170,7 @@ export class StatusCardController {
       this.segmentIdsByRun.get(record.runId) ?? new Set<string>();
     segmentIds.add(record.segmentId);
     this.segmentIdsByRun.set(record.runId, segmentIds);
-    record.ready = this.create(record, target);
+    record.ready = this.create(record, target, initialSnapshot);
     void record.ready.then((ready) => {
       if (ready) this.scheduleStatusRefresh(record);
     });
@@ -177,17 +182,11 @@ export class StatusCardController {
     text: string,
     retainedContent?: (content: string) => string,
   ): Promise<boolean> {
-    return this.finalize(
-      segmentId,
-      boundContent(text),
-      'Completed',
-      false,
-      retainedContent,
-    );
+    return this.finalize(segmentId, text, 'Completed', false, retainedContent);
   }
 
   fail(segmentId: string, error: string): void {
-    void this.finalize(segmentId, boundContent(error), 'Failed', true);
+    void this.finalize(segmentId, error, 'Failed', true);
   }
 
   cancelRun(runId: string, reason: ChannelTaskCancellationReason): void {
@@ -241,9 +240,9 @@ export class StatusCardController {
   private async create(
     record: StatusRecord,
     target: { chatId: string; isGroup: boolean },
+    initialContent: string,
   ): Promise<boolean> {
     try {
-      const initialContent = sanitizeStreamingMediaMarkers(record.content);
       await this.options.client.createAndDeliver({
         templateId: STATUS_CARD_TEMPLATE_ID,
         outTrackId: record.outTrackId,
@@ -360,9 +359,7 @@ export class StatusCardController {
       const retained =
         content ||
         (retainedContent ? retainedContent(record.content) : record.content);
-      const finalContent = boundContent(
-        sanitizeStreamingMediaMarkers(retained),
-      );
+      const finalContent = boundDisplayContent(retained);
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',

@@ -35,6 +35,7 @@ interface SegmentPresentation {
   run: RunPresentation;
   context: ChannelOutputSegmentContext;
   content: string;
+  displayContent: string;
 }
 
 export interface DingtalkInteractionPresenterOptions {
@@ -135,8 +136,11 @@ export class DingtalkInteractionPresenter {
       run,
       context: segment,
       content: '',
+      displayContent: '',
     };
-    presentation.content = this.boundContent(presentation.content + chunk);
+    const accumulated = presentation.content + chunk;
+    presentation.content = this.boundContent(accumulated);
+    presentation.displayContent = this.boundDisplayContent(accumulated);
     this.segments.set(segment.segmentId, presentation);
     run.activeSegmentId = segment.segmentId;
     const statusContext = this.ensureStatusContext(run, segment);
@@ -144,7 +148,7 @@ export class DingtalkInteractionPresenter {
       this.options.statusCards?.replace(
         statusContext,
         this.cardTarget(statusContext.target),
-        presentation.content,
+        accumulated,
       );
     });
   }
@@ -193,15 +197,17 @@ export class DingtalkInteractionPresenter {
           (await statusCards.flushPending(statusContext.segmentId));
         if (deliveredViaCard) {
           run.cardDelivered = {
-            text: sanitizeFallbackOutput(text || presentation.content),
+            text: text
+              ? this.boundDisplayContent(text)
+              : presentation.displayContent,
             chatId: presentation.context.target.chatId,
             sessionId: presentation.context.sessionId,
           };
           return true;
         }
-        const fallbackText = sanitizeFallbackOutput(
-          text || presentation.content,
-        );
+        const fallbackText = text
+          ? this.boundDisplayContent(text)
+          : presentation.displayContent;
         if (!fallbackText || !this.options.sendFallback) return false;
         await this.options.sendFallback(
           presentation.context.target.chatId,
@@ -215,13 +221,13 @@ export class DingtalkInteractionPresenter {
           statusCards !== undefined &&
           (await statusCards.complete(
             statusContext.segmentId,
-            this.withSenderPrefix(run, text || presentation.content),
+            this.withSenderPrefix(run, text || presentation.displayContent),
           ));
         run.statusContext = undefined;
         if (completed) return true;
-        const fallbackText = sanitizeFallbackOutput(
-          text || presentation.content,
-        );
+        const fallbackText = text
+          ? this.boundDisplayContent(text)
+          : presentation.displayContent;
         if (!fallbackText || !this.options.sendFallback) return false;
         await this.options.sendFallback(
           presentation.context.target.chatId,
@@ -235,10 +241,12 @@ export class DingtalkInteractionPresenter {
         statusCards !== undefined &&
         (await statusCards.complete(
           statusContext.segmentId,
-          this.withSenderPrefix(run, text || presentation.content),
+          this.withSenderPrefix(run, text || presentation.displayContent),
         ));
       if (completed) return true;
-      const fallbackText = sanitizeFallbackOutput(text || presentation.content);
+      const fallbackText = text
+        ? this.boundDisplayContent(text)
+        : presentation.displayContent;
       if (!fallbackText || !this.options.sendFallback) return false;
       await this.options.sendFallback(
         presentation.context.target.chatId,
@@ -395,6 +403,10 @@ export class DingtalkInteractionPresenter {
   }
 
   private boundContent(content: string, limit = CONTENT_LIMIT): string {
+    return truncateOutboundMediaText(content, limit, TRUNCATION_MARKER);
+  }
+
+  private boundDisplayContent(content: string, limit = CONTENT_LIMIT): string {
     return truncateOutboundMediaText(
       sanitizeFallbackOutput(content),
       limit,
@@ -403,7 +415,7 @@ export class DingtalkInteractionPresenter {
   }
 
   private withSenderPrefix(run: RunPresentation, content: string): string {
-    if (!run.senderPrefix) return this.boundContent(content);
+    if (!run.senderPrefix) return this.boundDisplayContent(content);
     const body = this.withoutExistingSenderPrefix(run, content);
     if (!body) return run.senderPrefix;
     const separator = '\n\n';
@@ -411,7 +423,7 @@ export class DingtalkInteractionPresenter {
       0,
       CONTENT_LIMIT - run.senderPrefix.length - separator.length,
     );
-    return `${run.senderPrefix}${separator}${this.boundContent(
+    return `${run.senderPrefix}${separator}${this.boundDisplayContent(
       body,
       bodyLimit,
     )}`;

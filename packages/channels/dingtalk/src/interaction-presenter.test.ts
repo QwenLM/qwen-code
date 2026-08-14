@@ -790,6 +790,18 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('reassembles a file marker split across streamed chunks', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-1'), 'A [FILE: /tm');
+    presenter.appendOutput(segment('segment-1'), 'p/x.pdf] B');
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith('cid-1', 'A  B', 'session-1');
+  });
+
   it('neutralizes an image marker orphaned by file sanitization', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
     const presenter = new DingtalkInteractionPresenter({ sendFallback });
