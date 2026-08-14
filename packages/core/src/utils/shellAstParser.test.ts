@@ -59,6 +59,17 @@ describe('isShellCommandReadOnlyAST', () => {
     }
   });
 
+  it('rejects ${var@P} split by a line continuation between $ and {', async () => {
+    const command = 'echo "$\\\n{var@P}"';
+    expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    expect(await classifyShellCommandSafety(command)).toBe('unknown');
+  });
+
+  it('keeps a command with escaped backslash-newline read-only', async () => {
+    const command = 'echo "hello\\\\\\\nworld"';
+    expect(await isShellCommandReadOnlyAST(command)).toBe(true);
+  });
+
   it('keeps literal twins of issue #8582 read-only', async () => {
     for (const command of [
       'echo "\\$\\\n(touch /tmp/pwned)"',

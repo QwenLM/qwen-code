@@ -1824,18 +1824,33 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
-      if (nextChar === '\n' && command[i - 1] === '$') {
-        let dollarStart = i - 1;
-        while (dollarStart > 0 && command[dollarStart - 1] === '$') {
-          dollarStart--;
-        }
-        let escapeStart = dollarStart;
-        while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
-          escapeStart--;
-        }
-        if (
-          (i - dollarStart) % 2 === 1 &&
-          (dollarStart - escapeStart) % 2 === 0 &&
+      if (nextChar === '\n') {
+        const prevChar = command[i - 1];
+        if (prevChar === '$') {
+          let dollarStart = i - 1;
+          while (dollarStart > 0 && command[dollarStart - 1] === '$') {
+            dollarStart--;
+          }
+          let escapeStart = dollarStart;
+          while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
+            escapeStart--;
+          }
+          const oddDollarCount = (i - dollarStart) % 2 === 1;
+          const unescapedDollar = (dollarStart - escapeStart) % 2 === 0;
+          if (oddDollarCount && unescapedDollar) {
+            if (command[i + 2] === '(') {
+              return true;
+            }
+            if (command[i + 2] === '{') {
+              const effective =
+                command.slice(dollarStart, i) + command.slice(i + 2);
+              if (/^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(effective)) {
+                return true;
+              }
+            }
+          }
+        } else if (
+          (prevChar === '<' || prevChar === '>') &&
           command[i + 2] === '('
         ) {
           return true;
@@ -2373,6 +2388,8 @@ export function checkArgumentSafety(args: string): {
     dangerousPatterns.push('backtick command substitution');
   if (args.includes('<(')) dangerousPatterns.push('<() process substitution');
   if (args.includes('>(')) dangerousPatterns.push('>() process substitution');
+  if (/\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(args))
+    dangerousPatterns.push('${parameter@P} prompt expansion');
 
   // Command separators (outside of quotes)
   if (args.includes(';')) dangerousPatterns.push('; command separator');

@@ -1150,6 +1150,34 @@ function fallbackGitConfigMakesCommandUnsafe(
   return risk.diffExternal || risk.fsmonitor;
 }
 
+/**
+ * Remove unescaped `\<newline>` pairs from a command string, matching bash's
+ * line-continuation semantics: a backslash-newline pair is removed only when
+ * the backslash is not itself escaped (i.e. preceded by an even number of
+ * backslashes).
+ */
+function stripLineContinuations(command: string): string {
+  let result = '';
+  let i = 0;
+  while (i < command.length) {
+    if (command[i] === '\\' && command[i + 1] === '\n') {
+      let backslashCount = 0;
+      let j = i;
+      while (j > 0 && command[j - 1] === '\\') {
+        backslashCount++;
+        j--;
+      }
+      if (backslashCount % 2 === 0) {
+        i += 2;
+        continue;
+      }
+    }
+    result += command[i];
+    i++;
+  }
+  return result;
+}
+
 async function classifyInternal(
   command: string,
   cwd?: string,
@@ -1163,7 +1191,7 @@ async function classifyInternal(
     );
     if (safety === 'read-only' && command.includes('\\\n')) {
       const normalizedSafety = await classifyInternal(
-        command.replaceAll('\\\n', ''),
+        stripLineContinuations(command),
         cwd,
       );
       if (normalizedSafety !== 'read-only') return 'unknown';

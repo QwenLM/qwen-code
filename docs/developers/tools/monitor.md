@@ -146,7 +146,7 @@ commands without backgrounding instead.
 - **Permissions:** `monitor` has its own permission boundary and permission
   rules, such as `Monitor(git status)`. Read-only commands are automatically
   allowed; commands that modify state require user approval; commands containing
-  command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`) are rejected
+  command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or `${parameter@P}`) are rejected
   outright. The `tools.core` and `tools.exclude` settings for
   `run_shell_command` do not apply to `monitor`.
 - **Workspace restriction:** The optional `directory` must be an absolute path

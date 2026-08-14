@@ -167,6 +167,23 @@ describe('isCommandAllowed', () => {
       }
     });
 
+    it('should block ${var@P} split by a line continuation', async () => {
+      const result = await isCommandAllowed('echo "$\\\n{var@P}"', config);
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toContain('Command substitution');
+    });
+
+    it('should block process substitution split by a line continuation', async () => {
+      for (const command of [
+        'diff <\\\n(ls) <\\\n(ls -a)',
+        'echo "Log message" > >\\\n(tee log.txt)',
+      ]) {
+        const result = await isCommandAllowed(command, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      }
+    });
+
     it('should keep literal twins of issue #8582 allowed', async () => {
       config.getCoreTools = () => ['ShellTool(echo)'];
       for (const command of [
