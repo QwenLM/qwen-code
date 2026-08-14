@@ -434,12 +434,16 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   for (const base of bases) {
     const dir = join(base, `tmux-${uid}`);
     try {
-      if (existsSync(dir)) {
-        entries = entries.concat(
-          readdirSync(dir).map((name) => ({ dir, name })),
-        );
-      }
+      // readdirSync FIRST, with ENOENT as the only quiet answer: existsSync
+      // swallows EACCES and returns false, so an untraversable ANCESTOR of
+      // this directory made the base look absent and skipped it silently —
+      // past the catch below that exists precisely to be loud about a
+      // directory that could be hiding an orphan, and against both nearby
+      // comments. "Not there" and "not allowed to look" are different
+      // answers and only one of them is safe to ignore.
+      entries = entries.concat(readdirSync(dir).map((name) => ({ dir, name })));
     } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
       // A directory we cannot READ can be hiding an orphan — that is a
       // failure to surface, not a silent nothing (the doc contract above:
       // noted on stderr AND surfaced as failed).
@@ -460,8 +464,14 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       process.kill(Number(m[1]), 0);
     } catch (e) {
       // ESRCH = the pid is dead (the orphan signal). EPERM means the pid
-      // is alive under another user — not ours to reap.
-      alive = (e as NodeJS.ErrnoException).code === 'EPERM';
+      // is alive under another user. Both mean "leave it alone" here: the
+      // socket named for it lives in this uid's mode-0700 tmux directory,
+      // so a cross-user pid at that number is pid REUSE, not the launcher —
+      // and reaping on that assumption would kill a server this sweep
+      // cannot prove is ours. Anything else (an EINVAL, a host that
+      // answers oddly) is likewise treated as alive: this sweep only ever
+      // acts on a pid it positively knows is dead.
+      alive = (e as NodeJS.ErrnoException).code !== 'ESRCH';
     }
     if (alive) continue;
     // Same rules as capture-tui's own reap: unlink the socket ONLY when

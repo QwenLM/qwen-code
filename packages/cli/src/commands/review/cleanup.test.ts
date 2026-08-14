@@ -379,6 +379,54 @@ describe('runCleanup', () => {
         );
       });
 
+      it('leaves a socket alone when the pid probe answers EPERM', () => {
+        // EPERM means the pid is alive under another user, so the socket
+        // named for it in THIS uid's 0700 directory is pid reuse, not our
+        // launcher — reaping on that assumption would kill a server this
+        // sweep cannot prove is ours. The simplifying mutant (`alive =
+        // false` on any throw) shipped green through the whole suite
+        // because process.kill was never stubbed here.
+        const orphan = `${'qwen-review-capture-'}424242-abc`;
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        const realKill = process.kill;
+        process.kill = ((): never => {
+          throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        }) as typeof process.kill;
+        try {
+          runCleanup('local');
+        } finally {
+          process.kill = realKill;
+        }
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Reaped orphaned capture server'),
+        );
+        expect(mocks.rmSync).not.toHaveBeenCalledWith(
+          expect.stringContaining(orphan),
+          expect.anything(),
+        );
+      });
+
+      it('surfaces an UNTRAVERSABLE ancestor instead of skipping the base', () => {
+        // existsSync swallows EACCES and answers false, so an ancestor
+        // without +x made the whole base look absent: skipped in silence,
+        // past the catch that exists to be loud, with any orphan under it
+        // invisible. The scan asks readdir directly now — ENOENT is the
+        // only answer quiet enough to ignore.
+        mocks.existsSync.mockReturnValue(false);
+        mocks.readdirSync.mockImplementation(() => {
+          throw Object.assign(new Error('EACCES: permission denied'), {
+            code: 'EACCES',
+          });
+        });
+        runCleanup('local');
+        expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('could not scan'),
+        );
+      });
+
       it('scans the OTHER base after one of them cannot be read', () => {
         // The unreadable-dir fixture makes both bases throw, so a
         // catch-then-break mutant shipped green: an env-base tmux-<uid>

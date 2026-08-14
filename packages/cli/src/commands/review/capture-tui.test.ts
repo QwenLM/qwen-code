@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -176,44 +177,92 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
-  it('refuses an unusable TMPDIR up front, naming it', async () => {
-    // The sentinel lives under the system temp dir now, and nothing probed
-    // that directory: an unusable TMPDIR burned the whole --timeout-ms
-    // waiting for a holder that could never signal ready, then blamed the
-    // capture. The dir is created BEFORE TMPDIR is overridden — mkdtemp
-    // reads the same variable.
-    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
-    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-badtmp-'));
-    const realTmp = process.env['TMPDIR'];
-    process.env['TMPDIR'] = join(dir, 'no-such-temp-dir');
-    const started = Date.now();
-    try {
-      const { stderr } = await withStdio(() =>
-        runCaptureTui({
-          command: 'printf hi',
-          cwd: dir,
-          cols: 80,
-          rows: 24,
-          settleMs: 0,
-          until: undefined,
-          keys: undefined,
-          out: join(dir, 'cap'),
-          // Generous on purpose: the point is that it refuses in
-          // milliseconds instead of sitting out the ready deadline.
-          timeoutMs: 60_000,
-        } as never),
-      );
-      expect(process.exitCode).toBe(3);
-      expect(stderr).toContain('temporary directory is not usable');
-      expect(stderr).toContain('TMPDIR');
-      expect(Date.now() - started).toBeLessThan(10_000);
-      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
-    } finally {
-      if (realTmp === undefined) delete process.env['TMPDIR'];
-      else process.env['TMPDIR'] = realTmp;
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.skipIf(process.platform === 'win32')(
+    'refuses an unusable TMPDIR up front, naming it',
+    async () => {
+      // The sentinel lives under the system temp dir now, and nothing probed
+      // that directory: an unusable TMPDIR burned the whole --timeout-ms
+      // waiting for a holder that could never signal ready, then blamed the
+      // capture. The dir is created BEFORE TMPDIR is overridden — mkdtemp
+      // reads the same variable.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-badtmp-'));
+      const realTmp = process.env['TMPDIR'];
+      process.env['TMPDIR'] = join(dir, 'no-such-temp-dir');
+      const started = Date.now();
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            // Generous on purpose: the point is that it refuses in
+            // milliseconds instead of sitting out the ready deadline.
+            timeoutMs: 60_000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('temporary directory is not usable');
+        expect(stderr).toContain('TMPDIR');
+        expect(Date.now() - started).toBeLessThan(10_000);
+        expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      } finally {
+        if (realTmp === undefined) delete process.env['TMPDIR'];
+        else process.env['TMPDIR'] = realTmp;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an over-long tmux socket path up front, naming it',
+    async () => {
+      // A unix socket path is capped by sockaddr_un (104 bytes on macOS,
+      // 108 on Linux). Over it, the server START succeeds and the first
+      // control call fails with "error connecting to … (File name too
+      // long)" — a mid-capture refusal that blames tmux for a path this
+      // command chose, after paying for the start. Found by making this
+      // suite's own TMUX_TMPDIR test assert success: it had been passing
+      // over exactly this failure.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-longsock-'));
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      // CREATED, not just named: tmux only uses a base it can use, and an
+      // unusable one falls back to /tmp — where the path is short and the
+      // capture would have been fine.
+      const longBase = join(dir, 'x'.repeat(120));
+      mkdirSync(longBase, { recursive: true, mode: 0o700 });
+      process.env['TMUX_TMPDIR'] = longBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('too long for a unix socket');
+        expect(stderr).toContain('TMUX_TMPDIR');
+        expect(stderr).not.toContain('mid-capture');
+      } finally {
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('refuses a tmux too old for capture-pane -N, naming the version', async () => {
     // -N landed in tmux 3.1; an older host passes -V and would otherwise
@@ -952,6 +1001,43 @@ describe('capture-tui without tmux (probe seam)', () => {
     60_000,
   );
 
+  it('refuses an EMPTY --cwd, --until or --ready — a template that expanded to nothing', async () => {
+    // `resolve('')` is the launcher's own cwd, so the enterability gate
+    // always passed it: an empty --cwd captured somewhere the caller never
+    // named and the manifest recorded that directory as if asked for
+    // (probe-reproduced: exit 0, success, wrong cwd). An empty --until is a
+    // pattern matching everything, settling on the first frame.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    for (const flag of ['cwd', 'until', 'ready'] as const) {
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-emptyarg-'));
+      try {
+        writeFileSync(join(dir, 'cap.ans'), 'old run');
+        writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+            [flag]: '   ',
+          } as never),
+        );
+        expect(`${flag}:${process.exitCode}`).toBe(`${flag}:3`);
+        expect(stderr).toContain(`--${flag} must not be empty`);
+        // ...and the clear ran first, like every sibling gate.
+        expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('refuses a BARE --keys — no tokens is a template that drove nothing', async () => {
     // yargs `array: true` turns `--keys` (bare), `--keys=` and an unquoted
     // `--keys $EMPTY` into [], which was accepted silently: nothing typed,
@@ -1281,13 +1367,17 @@ describe('capture-tui without tmux (probe seam)', () => {
         );
         clearTimeout(killer);
         expect(code).toBe(3);
-        expect(out).toContain('not writable');
+        // The reason names the HOST, not the argument: this refusal used to
+        // read '--out is not writable' under fd exhaustion, sending an
+        // agent consumer to fix a --out that was fine. It is machine-read,
+        // so the misattribution propagated into whatever acted on it.
+        expect(out).toContain('out of file descriptors');
+        expect(out).toContain('not a problem with the argument');
+        expect(out).not.toContain('--out is not writable');
         // Unverifiable is not permission to delete.
         expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
         expect(existsSync(join(dir, 'cap.png'))).toBe(true);
         expect(existsSync(join(dir, 'cap.json'))).toBe(true);
-        // The sentinel is plumbing this tool alone writes — cleared even
-        // here, by design, outside the signature guard.
         // A user file at this name is not ours: the sentinel lives under
         // the system temp dir now. It used to be unlinked unconditionally,
         // before any refusal the run was already headed for.
@@ -1298,52 +1388,61 @@ describe('capture-tui without tmux (probe seam)', () => {
     },
     60_000,
   );
-  it('holds the exit-3 contract when the stdout reader is GONE — EPIPE-proof', async () => {
-    // withStdio mocks the streams, so no in-process test can raise a real
-    // EPIPE; a child whose stdout pipe closes early can. Without the guard
-    // the refusal crashed on the async 'error' event and exited 1.
-    let captureTuiTs = join(
-      process.cwd(),
-      'src/commands/review/capture-tui.ts',
-    );
-    if (!existsSync(captureTuiTs)) {
-      captureTuiTs = join(
+  // POSIX only, like every other child-spawning test here: on Windows a
+  // broken pipe surfaces through libuv as UV_EOF/UV_EAGAIN
+  // (ERROR_BROKEN_PIPE / ERROR_NO_DATA), never as EPIPE — and
+  // guardBrokenPipes rethrows every non-EPIPE code while artifactsComplete
+  // is false, so the refusal path this pins does not exist there.
+  it.skipIf(process.platform === 'win32')(
+    'holds the exit-3 contract when the stdout reader is GONE — EPIPE-proof',
+    async () => {
+      // withStdio mocks the streams, so no in-process test can raise a real
+      // EPIPE; a child whose stdout pipe closes early can. Without the guard
+      // the refusal crashed on the async 'error' event and exited 1.
+      let captureTuiTs = join(
         process.cwd(),
-        'packages/cli/src/commands/review/capture-tui.ts',
+        'src/commands/review/capture-tui.ts',
       );
-    }
-    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-epipe-'));
-    try {
-      const driver = join(dir, 'driver-epipe.mts');
-      writeFileSync(
-        driver,
-        [
-          `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
-          `mod.probes.tmux = () => ({ status: 'absent' }) as never;`,
-          `// Give the pipe a beat to be closed by the parent first.`,
-          `await new Promise((r) => setTimeout(r, 300));`,
-          `await mod.runCaptureTui({ command: 'printf hi', cwd: undefined, cols: 80, rows: 24, settleMs: 0, until: undefined, keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 1000 } as never);`,
-        ].join('\n'),
-      );
-      const { spawn } = await import('node:child_process');
-      const child = spawn(process.execPath, ['--import', 'tsx', driver], {
-        cwd: process.cwd(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      // Kill the reader immediately: the child's refusal write hits EPIPE.
-      child.stdout.destroy();
-      // Same external killer as the FIFO sibling — see there for why an
-      // in-process timeout cannot stand in for it.
-      const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
-      const code = await new Promise<number | null>((resolve) =>
-        child.once('exit', (c) => resolve(c)),
-      );
-      clearTimeout(killer);
-      expect(code).toBe(3);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 30_000);
+      if (!existsSync(captureTuiTs)) {
+        captureTuiTs = join(
+          process.cwd(),
+          'packages/cli/src/commands/review/capture-tui.ts',
+        );
+      }
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-epipe-'));
+      try {
+        const driver = join(dir, 'driver-epipe.mts');
+        writeFileSync(
+          driver,
+          [
+            `const mod = await import(${JSON.stringify(pathToFileURL(captureTuiTs).href)});`,
+            `mod.probes.tmux = () => ({ status: 'absent' }) as never;`,
+            `// Give the pipe a beat to be closed by the parent first.`,
+            `await new Promise((r) => setTimeout(r, 300));`,
+            `await mod.runCaptureTui({ command: 'printf hi', cwd: undefined, cols: 80, rows: 24, settleMs: 0, until: undefined, keys: undefined, out: ${JSON.stringify(join(dir, 'cap'))}, timeoutMs: 1000 } as never);`,
+          ].join('\n'),
+        );
+        const { spawn } = await import('node:child_process');
+        const child = spawn(process.execPath, ['--import', 'tsx', driver], {
+          cwd: process.cwd(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        // Kill the reader immediately: the child's refusal write hits EPIPE.
+        child.stdout.destroy();
+        // Same external killer as the FIFO sibling — see there for why an
+        // in-process timeout cannot stand in for it.
+        const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
+        const code = await new Promise<number | null>((resolve) =>
+          child.once('exit', (c) => resolve(c)),
+        );
+        clearTimeout(killer);
+        expect(code).toBe(3);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
   it('clears stale artifacts before the directory-shaped --out refusal too', async () => {
     // The last nameable gate without an ordering pin: a mutant hoisting the
@@ -1476,6 +1575,49 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(readFileSync(outside, 'utf8')).toBe('untouched');
     // The link itself is not ours to remove either.
     expect(lstatSync(join(dir, 'cap.ans')).isSymbolicLink()).toBe(true);
+  });
+
+  it('never credits a png written THROUGH a mid-window symlink', async () => {
+    // The png stamp was taken before the capture window, so a symlink the
+    // captured command planted at <out>.png read as "absent" — freeze wrote
+    // through it, the bytes landed outside --out, and the run attested
+    // `evidence: 'png'` for an image that is not at the path the manifest
+    // names.
+    const outside = join(dir, 'outside-the-base.png');
+    writeFileSync(outside, 'untouched');
+    await withStdio(() =>
+      run({
+        command: `ln -s '${outside}' cap.png; printf 'MARK\\n'; sleep 20`,
+        until: 'MARK',
+      }),
+    );
+    expect(process.exitCode).toBeUndefined();
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.pngPath).toBeNull();
+    expect(manifest.degradedBecause).toContain(
+      'holds a file this capture did not write',
+    );
+    // Neither the link nor what it points at was touched.
+    expect(readFileSync(outside, 'utf8')).toBe('untouched');
+    expect(lstatSync(join(dir, 'cap.png')).isSymbolicLink()).toBe(true);
+  });
+
+  it('does not delete a mid-window occupant of <out>.png', async () => {
+    // The failed-render cleanup asked the PRE-window stamp, which says
+    // absent for anything the captured command created — so `changed()`
+    // reduced to "something is there" and the cleanup deleted a file this
+    // run never wrote.
+    await withStdio(() =>
+      run({
+        command: `printf 'USER-PNG' > cap.png; printf 'MARK\\n'; sleep 20`,
+        until: 'MARK',
+      }),
+    );
+    expect(process.exitCode).toBeUndefined();
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('USER-PNG');
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
   });
 
   it('an ans-only manifest does not authorize clearing <out>.png', async () => {
@@ -1631,8 +1773,15 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // /tmp-hardcoding mutant ships green on those lanes, and on hosts that
     // DO set the variable it unlinks in /tmp while tmux created the socket
     // under $TMUX_TMPDIR/tmux-<uid>/ (measured: tmux honors the variable).
-    const tmuxTmp = join(dir, 'tmux-tmp');
-    mkdirSync(tmuxTmp, { mode: 0o700 });
+    // SHORT on purpose, and not under the mkdtemp base: a unix socket path
+    // is capped at ~104 bytes, and the deep /var/folders path this suite's
+    // dirs live under blew past it — the capture then refused mid-run and
+    // the leftover-socket probe below found an empty directory and passed
+    // over the branch it exists to watch (which is why the success
+    // assertions were added).
+    const tmuxTmp = join('/tmp', `qtt-${process.pid}`);
+    rmSync(tmuxTmp, { recursive: true, force: true });
+    mkdirSync(tmuxTmp, { mode: 0o700, recursive: true });
     const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
     process.env['TMUX_TMPDIR'] = tmuxTmp;
     try {
@@ -1641,6 +1790,12 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
       else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
     }
+    // The capture SUCCEEDED — otherwise this pins nothing: a run that
+    // refuses under a custom TMUX_TMPDIR creates no server at all, the
+    // probe below finds an empty directory, and both assertions pass over
+    // the broken branch they exist to watch.
+    expect(process.exitCode).toBeUndefined();
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toContain('WORLD');
     // Any server this run created is named qwen-review-capture-<ourpid>-…;
     // asking it for sessions must fail because the server is gone. Probe
     // the SAME dir production resolved — the TMUX_TMPDIR this test set —
@@ -1657,6 +1812,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // empty-string assertion below would pass while checking nothing.
     expect(probe.error).toBeUndefined();
     expect((probe.stdout ?? Buffer.from('')).toString().trim()).toBe('');
+    rmSync(tmuxTmp, { recursive: true, force: true });
   });
 
   it.skipIf(!hasPgrep)(
@@ -1793,39 +1949,49 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(stderr).not.toContain('may still be running');
   }, 15_000);
 
-  it('refuses a FAILED .ans write after capture — contract, not stack trace', async () => {
-    // The capture window legally runs up to an hour; the disk can fill (or
-    // the target turn hostile) inside it. The command itself creates a
-    // DIRECTORY at the .ans path mid-capture, so the final write fails
-    // EISDIR — real and deterministic, no fd-exhaustion harness needed.
-    const { stdout, stderr } = await withStdio(() =>
-      run({
-        command: 'mkdir cap.ans; printf "DIR-BLOCK\\n"; sleep 30',
-        until: 'DIR-BLOCK',
-      }),
-    );
-    expect(process.exitCode).toBe(3);
-    expect(stderr).toContain('cannot write capture output');
-    expect(JSON.parse(stdout.trim())).toEqual({
-      captured: false,
-      evidence: 'none',
-      reason: expect.stringContaining('cannot write capture output'),
-    });
-    // THIS run's artifacts or nothing — but a DIRECTORY at the path is not
-    // this run's artifact, and force-deleting it destroyed pre-existing
-    // user directories (measured). The blocker survives; the refusal names
-    // the cause; nothing of OURS remains.
-    expect(statSync(join(dir, 'cap.ans')).isDirectory()).toBe(true);
-    expect(existsSync(join(dir, 'cap.png'))).toBe(false);
-    expect(existsSync(join(dir, 'cap.json'))).toBe(false);
-    expect(leakedSentinels()).toEqual([]);
-  });
+  it.skipIf(process.getuid?.() === 0 || process.platform === 'win32')(
+    'refuses a FAILED .ans write after capture — contract, not stack trace',
+    async () => {
+      // The capture window legally runs up to an hour; the disk can fill
+      // (or the target turn hostile) inside it. Reaching the WRITE failure
+      // now takes a blocker the occupancy gate cannot see: a directory at
+      // the .ans path is intercepted as a mid-window collision before
+      // openSync is ever attempted (which is correct, and pinned
+      // elsewhere), so this drops the write permission on the PARENT —
+      // unstamped, unwatched, and exactly the "target turns hostile" shape.
+      const { stdout, stderr } = await withStdio(() =>
+        run({
+          command: 'chmod a-w .; printf "RO-DIR\\n"; sleep 30',
+          until: 'RO-DIR',
+        }),
+      );
+      // Restore first: the suite's own cleanup cannot empty a read-only dir.
+      chmodSync(dir, 0o700);
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('cannot write capture output');
+      expect(stderr).toContain('EACCES');
+      expect(JSON.parse(stdout.trim())).toEqual({
+        captured: false,
+        evidence: 'none',
+        reason: expect.stringContaining('cannot write capture output'),
+      });
+      // Nothing of OURS remains — and nothing that was not ours was touched.
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(leakedSentinels()).toEqual([]);
+    },
+  );
 
-  it('refuses a FAILED manifest write and removes what it already wrote', async () => {
-    // Same seam aimed one write later: the command creates a DIRECTORY at
-    // the manifest path, so the .ans writes fine and the manifest write
-    // fails EISDIR — the run must not leave an undescribed .ans (and png)
-    // behind ("THIS run's artifacts or nothing").
+  it('removes what it already wrote when the MANIFEST path is claimed', async () => {
+    // Was aimed at the manifest write failing EISDIR on a directory the
+    // command creates. That now refuses one step earlier — the mid-window
+    // occupancy gate sees the directory before openSync is attempted — so
+    // what this pins is the half it still reaches, and the half that
+    // matters: the .ans is already on disk when the refusal happens, and
+    // the run must not leave it there undescribed ("THIS run's artifacts
+    // or nothing"). The write-failure branch proper is pinned by the .ans
+    // sibling above, through a read-only parent.
     const { stdout, stderr } = await withStdio(() =>
       run({
         command: 'mkdir cap.json; printf "DIR-BLOCK2\\n"; sleep 30',
@@ -1834,6 +2000,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     );
     expect(process.exitCode).toBe(3);
     expect(stderr).toContain('cannot write capture manifest');
+    expect(stderr).toContain('claimed during the capture window');
     expect(JSON.parse(stdout.trim())).toEqual({
       captured: false,
       evidence: 'none',
@@ -2812,32 +2979,32 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe(foreign);
   });
 
-  it('never CREDITS a png the clear phase protected as this run evidence', async () => {
-    // A freeze that exits 0 without writing leaves the user's untouched
-    // file at <out>.png. Existence alone credited it: success JSON with
-    // evidence 'png' pointing at bytes this run never produced, and a
-    // verifier would publish an unrelated image as the rendering.
-    writeFileSync(join(dir, 'cap.png'), 'the user file');
-    await withFakeFreeze('#!/bin/sh\nexit 0\n', () => run());
-    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
-    expect(manifest.evidence).toBe('ans-only');
-    expect(manifest.pngPath).toBeNull();
-    expect(manifest.degradedBecause).toBeTruthy();
-    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('the user file');
-  });
-
-  it('never deletes a png the clear phase PROTECTED when the render fails', async () => {
-    // shaped=false (no capture manifest) deliberately leaves whatever sits
-    // at <out>.png alone as possibly the user's. The torn-png cleanup then
-    // deleted it on a SUCCEEDING run whose freeze never opened its output
-    // (EMFILE, a belt kill) — silent data loss recorded as plain ans-only.
-    writeFileSync(join(dir, 'cap.png'), 'the user file');
-    await withFakeFreeze('#!/bin/sh\nexit 9\n', () => run());
-    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
-    expect(manifest.evidence).toBe('ans-only');
-    expect(manifest.pngPath).toBeNull();
-    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('the user file');
-  });
+  // Both of these were written against the post-render arms — a freeze
+  // exiting 0 without writing (credit), and one exiting 9 (torn-png
+  // cleanup) — but with an occupant at <out>.png the ladder stops BEFORE
+  // freeze is spawned at all, so neither fixture ever ran. The outcomes
+  // they assert are right and worth keeping; what they pin is that the
+  // protection happens earlier than they claimed, which is stronger. The
+  // marker makes that explicit instead of leaving a fixture that looks
+  // load-bearing and is not.
+  for (const [label, script] of [
+    ['exits 0 without writing', 'exit 0'],
+    ['exits 9 after a torn write', 'printf torn > "$5"; exit 9'],
+  ] as const) {
+    it(`never spawns freeze at all when <out>.png is occupied — ${label}`, async () => {
+      writeFileSync(join(dir, 'cap.png'), 'the user file');
+      const ran = join(dir, 'freeze-ran');
+      await withFakeFreeze(`#!/bin/sh\n: > "${ran}"\n${script}\n`, () => run());
+      expect(existsSync(ran)).toBe(false);
+      const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+      expect(manifest.evidence).toBe('ans-only');
+      expect(manifest.pngPath).toBeNull();
+      expect(manifest.degradedBecause).toContain('did not write');
+      // Neither credited nor deleted: the two harms those arms guard
+      // against, prevented one step sooner.
+      expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('the user file');
+    });
+  }
 
   it('never manifests a png rung on exit code alone — the file must exist', async () => {
     // A freeze that exits 0 without writing anything would otherwise ship
@@ -3490,7 +3657,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
           expect(gone).toBe(true);
           expect(guardFired).toBe(false);
         } catch (e) {
-          child.kill('SIGKILL');
+          // SIGTERM for the same reason as the guard above: the child's own
+          // handler is the only thing that reaps its private server.
+          child.kill('SIGTERM');
           throw e;
         } finally {
           clearTimeout(orphanGuard);

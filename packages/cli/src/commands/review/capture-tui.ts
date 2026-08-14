@@ -655,8 +655,25 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // have failed) — every shape that could fail the last write — is
     // already refused before the capture window opens.
   } catch (e) {
+    // WHOSE fault it is, not just what failed: this block wraps the mkdir,
+    // the write probe and the clear-phase removals, and it attributed fd
+    // exhaustion and a full disk to `--out` — telling an agent consumer to
+    // fix an argument that is fine while the host is the thing that is not.
+    // The refusal reason is machine-read, so the misattribution propagates.
+    const code = (e as NodeJS.ErrnoException).code;
+    const hostState =
+      code === 'EMFILE' || code === 'ENFILE'
+        ? 'this process is out of file descriptors'
+        : code === 'ENOSPC'
+          ? 'the filesystem is full'
+          : code === 'EROFS'
+            ? 'the filesystem is read-only'
+            : null;
     refuse(
-      `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
+      hostState
+        ? `--out could not be prepared — ${hostState}, not a problem with ` +
+            `the argument: ${e instanceof Error ? e.message : String(e)}`
+        : `--out is not writable: ${e instanceof Error ? e.message : String(e)}`,
     );
     return;
   }
@@ -692,6 +709,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     ['--until', args.until],
     ['--ready', args.ready],
   ] as const) {
+    // The EMPTY form too, and --cwd is why: `resolve('')` is the launcher's
+    // own cwd, which always passes the enterability gate — so an empty
+    // --cwd (a brief template expanding a missing variable, the same shape
+    // the --keys gates refuse) silently captured somewhere the caller never
+    // named, and the manifest recorded that directory as if it had been
+    // asked for. The marker flags get it for free: an empty --until is a
+    // pattern that matches everything, settling on the first frame.
+    if (typeof v === 'string' && v.trim() === '') {
+      refuse(`${name} must not be empty.`);
+      return;
+    }
     if (v !== undefined && typeof v !== 'string') {
       refuse(`${name} must be given exactly once, as a string.`);
       return;
@@ -753,6 +781,48 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     );
     return;
   }
+  // A unix socket path is bounded by sockaddr_un — 104 bytes on macOS, 108
+  // on Linux — and tmux builds this run's from the socket base, the uid
+  // directory and the private server name. Over the limit, the start
+  // SUCCEEDS and the first control call fails with `error connecting to …
+  // (File name too long)`: a mid-capture refusal, after paying for a
+  // server start, blaming tmux for a path this command chose. Measured
+  // with a TMUX_TMPDIR under a mkdtemp base — not an exotic shape at all,
+  // since that is where a CI job's scratch directory lives.
+  if (process.getuid) {
+    // The base tmux will ACTUALLY use, by tmux's own rule: the first
+    // USABLE one. An unusable TMUX_TMPDIR (nonexistent, unwritable) is not
+    // where the socket lands — measuring it anyway refused runs that were
+    // about to succeed under /tmp, which is how this gate was caught being
+    // wrong the first time.
+    const envBase = process.env['TMUX_TMPDIR'];
+    let socketBase = '/tmp';
+    if (envBase) {
+      try {
+        accessSync(envBase, fsConstants.W_OK | fsConstants.X_OK);
+        socketBase = envBase;
+      } catch {
+        // Unusable — tmux falls back to /tmp, and so does this measurement.
+      }
+    }
+    const socketPath = join(
+      socketBase,
+      `tmux-${process.getuid()}`,
+      // The nonce is 8 hex chars for every run — its VALUE cannot change
+      // the length, so measuring a representative one measures them all.
+      captureServerName(process.pid, 'deadbeef'),
+    );
+    // The conservative bound of the two, less a byte for the NUL.
+    if (Buffer.byteLength(socketPath) > 103) {
+      refuse(
+        `the tmux socket path this capture would use is too long for a ` +
+          `unix socket (${Buffer.byteLength(socketPath)} bytes): ` +
+          `${socketPath}. Point TMUX_TMPDIR at a shorter directory.`,
+      );
+      return;
+    }
+  }
+
   // The sentinel's HOME is the one path this run writes that no gate looks
   // at. It moved into the system temp dir precisely so nothing a user can
   // name collides with it — which also took it out from behind --out's
@@ -936,11 +1006,37 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // One retry before giving up: a transient client-spawn failure is the
     // named shape, and a second attempt reaps it (measured).
     let serverDead = false;
+    let killSpawnFailed = false;
     for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
+      // Back-to-back, the second attempt was a copy of the first: under fd
+      // exhaustion — the condition the comment above names, and the one
+      // that makes the CLIENT fail rather than the server — both threw
+      // EMFILE in the same microsecond and the retry bought nothing
+      // (probe-verified). A pause cannot conjure a descriptor on its own,
+      // but it is the only thing that lets one this process is releasing
+      // elsewhere land before the last attempt. Synchronous by necessity:
+      // reap() runs from `finally` and from a signal handler, neither of
+      // which can await.
+      if (attempt > 0) {
+        try {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        } catch {
+          // Blocking waits are disallowed on some hosts; the retry still
+          // happens, just without the pause.
+        }
+      }
       try {
         tmux(plan.kill);
         serverDead = true;
       } catch (e) {
+        // A spawn that never ran says nothing about the server: the
+        // WARNING has to separate "tmux told us it failed" from "we could
+        // not run tmux at all", or an operator reads a wedged server where
+        // the real problem is this process's fd table.
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN') {
+          killSpawnFailed = true;
+        }
         // A kill failing because there was nothing to kill is the goal
         // state — in every wording tmux uses for it, including the
         // socket-directory-never-created one a start that failed before the
@@ -963,8 +1059,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // becomes an uncaughtException — exit 1 instead of 128+sig, the
       // re-raise never reached, and this very warning lost).
       writeStderrLineSafe(
-        `capture-tui: WARNING — kill-server failed twice; the private tmux ` +
-          `server ${server} may still be running (tmux -L ${server} kill-server to reap it by hand).`,
+        `capture-tui: WARNING — kill-server failed twice${
+          killSpawnFailed
+            ? ' (this process could not spawn tmux at all — fd exhaustion, ' +
+              'not a wedged server)'
+            : ''
+        }; the private tmux server ${server} may still be running ` +
+          `(tmux -L ${server} kill-server to reap it by hand).`,
       );
       return;
     }
@@ -1200,6 +1301,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     return;
   }
 
+  // RE-STAMPED here, after the capture window closed — not reused from
+  // before it. The captured command had the entire window (70 minutes at
+  // the --timeout-ms cap) to claim this path, and the pre-window stamp
+  // says "absent" for anything it planted. That stale stamp made two
+  // separate claims false: freeze writing THROUGH a symlink planted at the
+  // path was credited as this run's `evidence: 'png'` while the bytes
+  // landed wherever the link pointed, outside --out entirely; and a FAILED
+  // render then deleted whatever the command had put there, the same harm
+  // the .ans/.json collision carve-outs exist to prevent. Every question
+  // below — render or degrade, credit or not, clean up or leave alone —
+  // asks this stamp instead, so "did THIS run produce the image" is decided
+  // against a closed window with only the render able to have changed it.
+  pngStamp = stampOf(pngPath);
+
   // .ans FIRST, then render: freeze has hung mid-render on this repo's own
   // workflows, and the text evidence must already be on disk when it does.
   let png: string | null = null;
@@ -1283,7 +1398,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
                 : 'it may be installed; this host could not spawn it'
             }. .ans text captured, no image rendered`
           : `freeze did not answer --help within ${probeBudget.timeoutMs}ms — present but wedged; .ans text captured, no image rendered`
-        : 'freeze is not installed — .ans text captured, no image rendered',
+        : // Same caveat the tmux refusal carries: execve answers ENOENT for
+          // a present-but-unexecable binary too, and nothing in the spawn
+          // result separates them. Asserting the one it cannot know is what
+          // the tmux side was corrected for.
+          'freeze is not installed, or is installed but cannot be executed ' +
+            '— .ans text captured, no image rendered',
     );
   } else {
     // stdin MUST be /dev/null: freeze treats a pipe stdin — Node's spawnSync
