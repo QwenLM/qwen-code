@@ -13,7 +13,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
-import { setGhHost } from './lib/gh.js';
+import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import {
   writeStdoutLine,
@@ -33,6 +33,14 @@ export interface FetchDiffResult {
 }
 
 export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
+  // Usage errors (a malformed --repo) precede the auth gate — `gh auth
+  // login` can never fix the invocation, and exit 2 is the caller's
+  // "repair the invocation" signal.
+  if (!isOwnerRepo(args.repo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(args.repo)}`,
+    );
+  }
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 
@@ -77,11 +85,23 @@ export const fetchDiffCommand: CommandModule = {
         describe: 'Where to write the diff',
       }),
   handler: (argv) => {
+    const prNumber = argv['pr_number'] as number | undefined;
+    if (
+      prNumber === undefined ||
+      !Number.isInteger(prNumber) ||
+      prNumber <= 0
+    ) {
+      writeStderrLineSafe(
+        `fetch-diff: pr_number must be a positive integer, got ${JSON.stringify(argv['pr_number'])}`,
+      );
+      process.exitCode = 2;
+      return;
+    }
     const host = (argv as { host?: string }).host;
     try {
       setGhHost(host);
       const result = runFetchDiff({
-        prNumber: Number(argv['pr_number']),
+        prNumber,
         repo: String(argv['repo']),
         out: String(argv['out']),
       });

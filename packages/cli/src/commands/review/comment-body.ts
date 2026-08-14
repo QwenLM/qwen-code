@@ -18,7 +18,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
-import { setGhHost } from './lib/gh.js';
+import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import { COMMENT_KINDS, type CommentKind } from './lib/platform/types.js';
 import {
@@ -40,9 +40,16 @@ export function runCommentBody(args: CommentBodyArgs): {
   body: string;
   outPath?: string;
 } {
+  // Usage errors precede the auth gate: `gh auth login` can never fix the
+  // invocation, and exit 2 is the caller's "repair the invocation" signal.
   if (args.kind === 'review' && args.prNumber === undefined) {
     throw new TypeError(
       '--kind review needs --pr (review bodies are addressed per-PR)',
+    );
+  }
+  if (!isOwnerRepo(args.repo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
   const platform = getPlatformReader();
@@ -101,14 +108,28 @@ export const commentBodyCommand: CommandModule = {
           'Write the body to this file instead of stdout (for tails too long for one shell preview)',
       }),
   handler: (argv) => {
+    const id = argv['id'] as number | undefined;
+    const pr = argv['pr'] === undefined ? undefined : Number(argv['pr']);
+    if (
+      id === undefined ||
+      !Number.isInteger(id) ||
+      id <= 0 ||
+      (pr !== undefined && (!Number.isInteger(pr) || pr <= 0))
+    ) {
+      writeStderrLineSafe(
+        `comment-body: id and --pr must be positive integers, got ${JSON.stringify(argv['id'])} / ${JSON.stringify(argv['pr'])}`,
+      );
+      process.exitCode = 2;
+      return;
+    }
     const host = (argv as { host?: string }).host;
     try {
       setGhHost(host);
       const result = runCommentBody({
-        id: Number(argv['id']),
+        id,
         kind: String(argv['kind']) as CommentKind,
         repo: String(argv['repo']),
-        prNumber: argv['pr'] === undefined ? undefined : Number(argv['pr']),
+        prNumber: pr,
         out: (argv as { out?: string }).out,
       });
       if (result.outPath !== undefined) {

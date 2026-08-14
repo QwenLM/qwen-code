@@ -277,7 +277,44 @@ describe('runIssueContext', () => {
         'Unknown JSON field: "closingIssuesReferences"\navailable fields: …',
       );
     });
-    expect(() => runIssueContext(ARGS)).toThrow(/gh >= 2\.72\.0/);
+    // Discovery failure degrades into the evidence file (with the upgrade
+    // hint), it does not abort the command — extras remain fetchable.
+    const result = runIssueContext(ARGS);
+    expect(result.discoveryError).toMatch(/gh >= 2\.72\.0/);
+    const written = writeFileSyncMock.mock.calls[0][1] as string;
+    expect(written).toContain('Closing-issue discovery FAILED');
+    expect(written).toContain('gh >= 2.72.0');
+    expect(written).not.toContain('No closing issues are linked');
+  });
+
+  it('still fetches --issue extras when discovery fails', () => {
+    ghMock.mockImplementationOnce(() => {
+      throw new Error('HTTP 403: secondary rate limit');
+    });
+    mockIssue('five');
+    const result = runIssueContext({ ...ARGS, extraIssues: [555] });
+    expect(result.discoveryError).toBe('HTTP 403: secondary rate limit');
+    const written = writeFileSyncMock.mock.calls[0][1] as string;
+    expect(written).toContain('## Issue #555 of QwenLM/qwen-code: five');
+    expect(result.closingIssues).toEqual([]);
+  });
+
+  it('dedups extras against the closing set case-insensitively', () => {
+    mockClosing([
+      {
+        number: 9078,
+        repository: { name: 'qwen-code', owner: { login: 'QwenLM' } },
+      },
+    ]);
+    mockIssue('closing one');
+    // Hand-typed lowercase --repo vs the API's canonical casing.
+    runIssueContext({
+      ...ARGS,
+      repo: 'qwenlm/qwen-code',
+      extraIssues: [9078],
+    });
+    // one discovery call + one issue fetch — no duplicate section
+    expect(ghMock).toHaveBeenCalledTimes(2);
   });
 
   it('falls back to the PR repo for a closing ref with no repository payload', () => {
@@ -336,9 +373,12 @@ describe('issueContextCommand handler', () => {
     });
     expect(process.exitCode).toBe(2);
     expect(ghMock).not.toHaveBeenCalled();
+    // The usage error must preempt the auth gate — `gh auth login` can
+    // never repair the invocation.
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
-  it('exits 1 when the closing-issue fetch fails', () => {
+  it('a discovery failure degrades into the file (exit 0 with discoveryError)', () => {
     ghMock.mockImplementationOnce(() => {
       throw new Error('HTTP 500');
     });
@@ -349,7 +389,10 @@ describe('issueContextCommand handler', () => {
       repo: 'QwenLM/qwen-code',
       out: '/tmp/ic.md',
     });
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBeUndefined();
+    expect(writeStdoutLineMock).toHaveBeenCalledWith(
+      expect.stringContaining('"discoveryError":"HTTP 500"'),
+    );
   });
 
   it('wires --issue through to the extra fetch', () => {

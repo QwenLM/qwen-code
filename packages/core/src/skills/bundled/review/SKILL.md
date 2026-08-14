@@ -239,12 +239,9 @@ Do **not** hand-type a `git diff` here. Two reasons, and the second is why this 
 
 **If the plan comes back empty** (`chunks: []`), stop and take the no-diff branch. Every agent would be given nothing to read, and the review would return a clean verdict over no code at all. For a **file-path** review of a tracked, unmodified file, skip planning entirely: hand every agent the file's absolute path and tell it to read the whole file, paging until `isTruncated` is false. For a **local** review with a genuinely clean tree — nothing staged, nothing unstaged, nothing untracked — tell the user there is nothing to review and stop.
 
-For **cross-repo lightweight reviews**, do the same with the diff the platform hands you — `fetch-diff` writes it straight to the file, which keeps Shell model-output truncation out of it:
+For **cross-repo lightweight reviews**, do the same with the diff the platform hands you — Step 1's `fetch-diff` already wrote it, so this block only plans it:
 
 ```bash
-"${QWEN_CODE_CLI:-qwen}" review fetch-diff <pr_number> --repo <owner>/<repo> \
-  --out .qwen/tmp/qwen-review-pr-<n>-diff.txt
-# GitHub Enterprise: add --host <host>.
 "${QWEN_CODE_CLI:-qwen}" review plan-diff .qwen/tmp/qwen-review-pr-<n>-diff.txt \
   --pr <pr_number> --repo <owner>/<repo> \
   --effort <effort> \

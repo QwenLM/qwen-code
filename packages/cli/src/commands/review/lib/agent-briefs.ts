@@ -224,7 +224,7 @@ Establish what this PR is *supposed* to fix, then judge whether it fixes that:
 - Decide root-cause ownership: a client bug, an upstream provider/service bug, an unsafe client request shape, or a maintainer-approved defensive workaround. **If the upstream provider returned malformed data outside the client contract, a client-side parser/sanitizer workaround is Critical** unless a maintainer explicitly requested it. "The workaround's test passes" is not evidence of architectural correctness.
 - **Quote the specific issue evidence in every finding** — the relevant body or comment text. A root-cause finding that omits its evidence cannot be verified downstream and will be discarded.
 
-If the fetch fails (auth, rate limit, network), **retry the command once**. If it fails again, return the failure naming exactly what could not be fetched. Do not silently degrade to the PR description alone.
+If the fetch fails (auth, rate limit, network), **retry the command once**. If it fails again, return the failure naming exactly what could not be fetched. Do not silently degrade to the PR description alone. The command exits 0 with per-issue failures rendered as \`could not be fetched\` sections — that is still a failure for this rule: before declaring any such issue's evidence unavailable, re-run the command once with \`--issue <n>\` for each unfetchable number, then judge from what lands.
 
 **A legitimately empty scope is a complete answer, not a whiff.** If the PR has no linked issue, the context names no target issue, and it is not a bugfix, return \`No issues found — scope empty\` **with the evidence**: that the closing-issue set came back empty, that the PR context names no target issue, and that this is a feature.`,
   },

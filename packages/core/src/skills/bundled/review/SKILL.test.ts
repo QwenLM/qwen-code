@@ -152,4 +152,23 @@ describe('bundled review skill', () => {
     );
     expect(body).toContain('compare its `headSha`');
   });
+
+  it('keeps the lightweight capture on fetch-diff with the plan-diff host note', () => {
+    // Revert guard: restoring a prose `gh pr diff > file` here (or dropping
+    // the plan-diff --host note) must fail a test, not slip through — the
+    // Enterprise paragraph no longer teaches any GH_HOST routing recipe, so
+    // a hand-restored gh call silently routes at github.com.
+    const body = skillBody();
+    expect(body).toContain(
+      'review fetch-diff <number> --repo <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt',
+    );
+    expect(body).toContain(
+      '# GitHub Enterprise: add --host <host> — plan-diff records it',
+    );
+    // Step 5 only plans the diff Step 1 already fetched — a second
+    // fetch-diff would re-download it (and could race a head advance).
+    expect(body).toContain(
+      "Step 1's `fetch-diff` already wrote it, so this block only plans it",
+    );
+  });
 });

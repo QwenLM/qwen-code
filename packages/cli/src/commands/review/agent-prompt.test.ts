@@ -2321,6 +2321,36 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain(`--out ${quoted}`);
   });
 
+  it('rejects a tampered plan before welding (pr / ownerRepo / host)', () => {
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, prNumber: '6766; touch /tmp/pwned' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/not a number/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, ownerRepo: '../escape' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/owner\/repo/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, ownerRepo: '-evil/repo' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/owner\/repo/);
+    // A flag-shaped or metacharacter host is dropped to null, never welded.
+    const p = buildRoleBrief(
+      { ...PR_PLAN, host: 'ghe.example.com; rm -rf /' },
+      '0',
+      { planPath },
+    );
+    expect(p).not.toContain('--host');
+    const p2 = buildRoleBrief({ ...PR_PLAN, host: '--help' }, '0', {
+      planPath,
+    });
+    expect(p2).not.toContain('--host');
+  });
+
   it('refuses Agent 0 on a plan with no pull request in it', () => {
     expect(() => buildRoleBrief(PLAN, '0')).toThrow(/prNumber/);
   });

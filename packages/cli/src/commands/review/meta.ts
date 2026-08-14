@@ -37,17 +37,20 @@ export interface MetaResult {
 }
 
 export function runMeta(args: MetaArgs): MetaResult {
+  // Usage errors (a malformed --repo) must surface before the auth gate:
+  // `gh auth login` can never fix the invocation, and exit 2 is the
+  // caller's "repair the invocation" signal.
+  if (args.repo !== undefined && !isOwnerRepo(args.repo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(args.repo)}`,
+    );
+  }
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 
   let host: string;
   let ownerRepo: string;
   if (args.repo !== undefined) {
-    if (!isOwnerRepo(args.repo)) {
-      throw new TypeError(
-        `expected owner/repo, got ${JSON.stringify(args.repo)}`,
-      );
-    }
     // Explicit repo: the host comes from the flag/env, defaulting to
     // github.com — there is no URL to derive it from.
     ownerRepo = args.repo;

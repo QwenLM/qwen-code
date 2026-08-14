@@ -207,6 +207,9 @@ describe('commentBodyCommand handler', () => {
     });
     expect(process.exitCode).toBe(2);
     expect(ghRawMock).not.toHaveBeenCalled();
+    // The usage error must preempt the auth gate — `gh auth login` can
+    // never repair the invocation.
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
   it('--out prints the JSON marker, not the raw body', () => {

@@ -76,9 +76,15 @@ function execGhWithRetry(
 
 let ghHost: string | undefined;
 
-export const HOSTNAME_RE = /^[A-Za-z0-9.-]+(?::\d+)?$/;
+// First char must be alphanumeric: without it the class admits flag-shaped
+// values like `--help`/`-x`, which are interpolated into CLI invocations
+// downstream and misparsed as options (measured: a tampered plan carrying
+// host "--help" turned the welded issue-context call into a help print).
+export const HOSTNAME_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*(?::\d+)?$/;
 
-const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
+// No leading dash either — `--repo -evil/repo` misparses as flags. GitHub
+// owner/repo names cannot start with a hyphen.
+const REPO_SEGMENT = /^(?!-)[A-Za-z0-9._-]+$/;
 
 /**
  * `owner/repo` — and neither half may be a dot segment.
@@ -110,16 +116,20 @@ export function isOwnerRepo(repo: string): boolean {
  * parent env untouched, so an operator-exported GH_HOST stays in effect.
  */
 export function setGhHost(host: string | undefined): void {
-  if (host === undefined || host === '') {
+  // Trim once here so every caller is consistent — `resolveGhHost` trims
+  // too, and a raw `'ghe.corp '` must not fail validation where the
+  // resolved form would pass.
+  const trimmed = host?.trim() || undefined;
+  if (trimmed === undefined) {
     ghHost = undefined;
     return;
   }
-  if (!HOSTNAME_RE.test(host)) {
+  if (!HOSTNAME_RE.test(trimmed)) {
     throw new TypeError(
       `--host must be a hostname (optionally :port), got ${JSON.stringify(host)}`,
     );
   }
-  ghHost = host;
+  ghHost = trimmed;
 }
 
 /**

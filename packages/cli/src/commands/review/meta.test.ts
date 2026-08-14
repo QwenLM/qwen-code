@@ -150,6 +150,12 @@ describe('runMeta', () => {
     );
   });
 
+  it('labels the env GH_HOST for an explicit --repo (the documented inherit)', () => {
+    process.env['GH_HOST'] = 'ghe.example.com';
+    ghMock.mockReturnValue('{"headRefOid":"abc","url":"u"}');
+    expect(runMeta({ prNumber: 1, repo: 'o/r' }).host).toBe('ghe.example.com');
+  });
+
   it('rejects a malformed --repo before any gh call, with or without a number', () => {
     expect(() => runMeta({ prNumber: 1, repo: '../escape' })).toThrow(
       TypeError,
@@ -188,6 +194,9 @@ describe('metaCommand handler', () => {
     });
     expect(process.exitCode).toBe(2);
     expect(ghMock).not.toHaveBeenCalled();
+    // The usage error must preempt the auth gate — `gh auth login` can
+    // never repair the invocation.
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
   it('threads --host to setGhHost before the first gh call', () => {

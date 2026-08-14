@@ -21,9 +21,9 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
-import { setGhHost } from './lib/gh.js';
+import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
-import type { LinkedIssue } from './lib/platform/types.js';
+import type { ClosingIssueRef, LinkedIssue } from './lib/platform/types.js';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -43,6 +43,8 @@ export interface IssueContextResult {
   closingIssues: Array<{ number: number; ownerRepo: string; title: string }>;
   /** References whose fetch failed — partial evidence beats no evidence. */
   unfetchable: Array<{ number: number; ownerRepo: string; error: string }>;
+  /** Set when the closing-issue discovery itself failed (set is UNKNOWN). */
+  discoveryError?: string;
   outPath: string;
 }
 
@@ -55,12 +57,15 @@ interface IssueOutcome {
 }
 
 function renderIssue(issue: LinkedIssue): string {
+  // Bodies render verbatim (no trim): a leading indent is what puts a pasted
+  // log/stack trace inside its Markdown code block — trimming it corrupts
+  // the repro evidence this file exists to carry.
   const lines: string[] = [
     `## Issue #${issue.number} of ${issue.ownerRepo}: ${issue.title}`,
     '',
     '### Body',
     '',
-    issue.body.trim() || '_(empty body)_',
+    issue.body.trim() === '' ? '_(empty body)_' : issue.body,
     '',
     `### Comments (${issue.comments.length})`,
     '',
@@ -72,7 +77,7 @@ function renderIssue(issue: LinkedIssue): string {
     lines.push(
       `**${c.author || 'unknown'}** (${c.createdAt || 'unknown date'}):`,
       '',
-      c.body.trim() || '_(empty)_',
+      c.body.trim() === '' ? '_(empty)_' : c.body,
       '',
     );
   }
@@ -99,6 +104,14 @@ function renderOutcome(outcome: IssueOutcome): string {
 }
 
 export function runIssueContext(args: IssueContextArgs): IssueContextResult {
+  // Usage errors (a malformed --repo) precede the auth gate — `gh auth
+  // login` can never fix the invocation, and exit 2 is the caller's
+  // "repair the invocation" signal.
+  if (!isOwnerRepo(args.repo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(args.repo)}`,
+    );
+  }
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 
@@ -110,7 +123,19 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
     }
   };
 
-  const refs = platform.getClosingIssues(args.prNumber, args.repo);
+  // The closing-issue discovery is one call; its failure (an old gh, a
+  // secondary rate limit) must degrade the same way a per-issue failure
+  // does — a named section — not abort the command while `--issue` extras
+  // remain fetchable. Partial evidence beats none, and the file must say
+  // which half is missing.
+  let refs: ClosingIssueRef[];
+  let discoveryError: string | undefined;
+  try {
+    refs = platform.getClosingIssues(args.prNumber, args.repo);
+  } catch (err) {
+    refs = [];
+    discoveryError = (err as Error).message;
+  }
   const outcomes = refs.map((ref) => fetchOne(ref.number, ref.ownerRepo));
   // Explicitly requested issues (a `Refs #123` the context names as the
   // target, judged relevant by the agent — the closing set is only a
@@ -118,8 +143,13 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
   // SAME-repo closing refs only — a cross-repo closing ref's number can
   // legitimately collide with a different issue in the PR repo. Extras are
   // deduped among themselves too: the same issue never lands twice.
+  // Repo coordinates compare case-insensitively (GitHub's canonical casing
+  // need not match a hand-typed --repo).
+  const repoLower = args.repo.toLowerCase();
   const sameRepoClosing = new Set(
-    refs.filter((r) => r.ownerRepo === args.repo).map((r) => r.number),
+    refs
+      .filter((r) => r.ownerRepo.toLowerCase() === repoLower)
+      .map((r) => r.number),
   );
   const extraNumbers = [...new Set(args.extraIssues)].filter(
     (n) => !sameRepoClosing.has(n),
@@ -132,7 +162,20 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
     PREAMBLE,
     '',
   ];
-  if (refs.length === 0) {
+  if (discoveryError !== undefined) {
+    sections.push(
+      '**Closing-issue discovery FAILED** — the linked-issue set could not be fetched:',
+      '',
+      '```',
+      discoveryError,
+      '```',
+      '',
+      'Treat the closing-issue set as UNKNOWN (not empty): any issues below ' +
+        'come from explicit requests only, and issue fidelity must say the ' +
+        'closing set could not be checked.',
+      '',
+    );
+  } else if (refs.length === 0) {
     sections.push(
       '**No closing issues are linked to this PR** (the platform returned an empty closing-issue set).',
       '',
@@ -175,6 +218,7 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
         ownerRepo: o.ownerRepo,
         error: o.error ?? 'unknown',
       })),
+    ...(discoveryError !== undefined ? { discoveryError } : {}),
     outPath,
   };
 }
@@ -212,14 +256,29 @@ export const issueContextCommand: CommandModule = {
         describe: 'Where to write the Markdown evidence file',
       }),
   handler: (argv) => {
+    const prNumber = argv['pr_number'] as number | undefined;
+    const extras = ((argv as { issue?: number[] }).issue ?? []).map(Number);
+    const badExtra = extras.find((n) => !Number.isInteger(n) || n <= 0);
+    if (
+      prNumber === undefined ||
+      !Number.isInteger(prNumber) ||
+      prNumber <= 0 ||
+      badExtra !== undefined
+    ) {
+      writeStderrLineSafe(
+        `issue-context: pr_number and every --issue must be positive integers, got ${JSON.stringify(argv['pr_number'])} / ${JSON.stringify(argv['issue'])}`,
+      );
+      process.exitCode = 2;
+      return;
+    }
     const host = (argv as { host?: string }).host;
     try {
       setGhHost(host);
       const result = runIssueContext({
-        prNumber: Number(argv['pr_number']),
+        prNumber,
         repo: String(argv['repo']),
         out: String(argv['out']),
-        extraIssues: ((argv as { issue?: number[] }).issue ?? []).map(Number),
+        extraIssues: extras,
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {
