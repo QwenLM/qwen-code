@@ -73,19 +73,19 @@ export default tseslint.config(
     },
   },
   {
-    // ACP integration and the daemon are separate runtime surfaces that happen
-    // to share a package directory. ACP may consume neutral contracts under
-    // `runtime/`, but never `serve/` implementation modules — see #8084.
-    files: ['packages/cli/src/acp-integration/**/*.{ts,tsx}'],
+    // `runtime/` is the neutral layer acp-integration is directed to; it must
+    // not import `serve/` internals itself, or the #8084 boundary reforms
+    // transitively one hop away.
+    files: ['packages/cli/src/runtime/**/*.{ts,tsx}'],
     rules: {
       'no-restricted-imports': [
         'error',
         {
           patterns: [
             {
-              group: ['**/serve/*', '**/serve/**'],
+              group: ['**/serve', '**/serve/*', '**/serve/**'],
               message:
-                'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+                'packages/cli/src/runtime must not import serve/ internals (#8084).',
             },
           ],
         },
@@ -104,7 +104,9 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['**/serve/*', '**/serve/**'],
+              // `**/serve` also covers the bare directory specifier, which
+              // resolves to the serve/ barrel.
+              group: ['**/serve', '**/serve/*', '**/serve/**'],
               message:
                 'packages/cli/src/utils must not import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
             },
@@ -215,6 +217,58 @@ export default tseslint.config(
       'prefer-const': ['error', { destructuring: 'all' }],
       radix: 'error',
       'default-case': 'error',
+    },
+  },
+  {
+    // ACP integration and the daemon are separate runtime surfaces that happen
+    // to share a package directory. ACP may consume neutral contracts under
+    // `runtime/`, but never `serve/` implementation modules — see #8084.
+    // Enforcement point is `npm run lint` in CI; no fixture test pins this
+    // block — accepted trade-off, the boundary lives in config, not code.
+    //
+    // Positioned after the general TS block on purpose: flat config lets the
+    // last matching block win per rule, and that block also configures
+    // `no-restricted-syntax` — placing this one earlier would silently lose
+    // the dynamic-import guard below. Its two selectors are restated here so
+    // this override does not drop them for acp-integration files.
+    files: ['packages/cli/src/acp-integration/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              // `**/serve` also covers the bare directory specifier, which
+              // resolves to the serve/ barrel (createServeApp, runQwenServe…).
+              group: ['**/serve', '**/serve/*', '**/serve/**'],
+              message:
+                'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+            },
+          ],
+        },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'CallExpression[callee.name="require"]',
+          message: 'Avoid using require(). Use ES6 imports instead.',
+        },
+        {
+          selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
+          message:
+            'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
+        },
+        // no-restricted-imports only visits static import/export declarations;
+        // the same boundary applies to dynamic `await import('../serve/…')`.
+        // The selector regex spells `/` as `\x2f` because esquery cannot parse
+        // a literal slash inside its attribute-regex syntax.
+        {
+          selector:
+            "ImportExpression[source.value=/^(?:\\.\\.\\x2f)+serve(?:\\x2f|$)/]",
+          message:
+            'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+        },
+      ],
     },
   },
   {
