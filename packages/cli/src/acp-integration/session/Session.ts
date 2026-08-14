@@ -584,6 +584,7 @@ export type DaemonToolLoopState = {
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
+  loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
 };
@@ -596,6 +597,8 @@ const LOOP_DETECTED_SKIP_MESSAGE =
   'Skipped because loop detection stopped the current turn before this tool call could run.';
 const LOOP_DETECTED_CONTEXT_MESSAGE =
   'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
+export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
+  'Tool-call loop protection stopped this turn. The session is still available; send a more specific instruction to continue.';
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
@@ -701,6 +704,7 @@ function recordDaemonLoopDetected(
 ): true {
   if (!loopState.loopDetected) {
     loopState.loopDetected = true;
+    loopState.loopType = loopType;
     debugLogger.warn(message);
     try {
       logLoopDetected(
@@ -716,6 +720,35 @@ function recordDaemonLoopDetected(
     }
   }
   return true;
+}
+
+function createLoopDetectedTurnError(
+  loopState: DaemonToolLoopState,
+): RequestError {
+  return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
+    code: 'LOOP_DETECTED',
+    errorKind: 'loop_detected',
+    ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+  });
+}
+
+// Cancellation takes precedence when it races a loop-detected stop.
+function cancelledOrThrowLoopDetected(
+  signal: AbortSignal,
+  loopState: DaemonToolLoopState,
+): 'cancelled' {
+  if (signal.aborted) return 'cancelled';
+  throw createLoopDetectedTurnError(loopState);
+}
+
+function isLoopDetectedTurnError(error: unknown): boolean {
+  if (!(error instanceof RequestError)) return false;
+  const data = error.data;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { code?: unknown }).code === 'LOOP_DETECTED'
+  );
 }
 
 function recordDaemonToolCalls(
@@ -1537,6 +1570,7 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
@@ -1569,6 +1603,7 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -2870,6 +2905,13 @@ export class Session implements SessionContext {
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
     }
+    const shellActive =
+      this.config.getBackgroundShellRegistry().hasRunningEntries() ||
+      this.notificationQueue.some((item) => item.kind === 'shell') ||
+      this.currentShellNotificationActive;
+    if (shellActive) {
+      holds.push({ category: 'shell', id: 'background-shells' });
+    }
     return holds;
   }
 
@@ -3025,7 +3067,12 @@ export class Session implements SessionContext {
       this.#statusChangeCallback = undefined;
     }
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
-    this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    shellRegistry.setNotificationCallback(undefined);
+    if (this.#shellStatusChangeCallback) {
+      shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
+      this.#shellStatusChangeCallback = undefined;
+    }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
@@ -3546,6 +3593,19 @@ export class Session implements SessionContext {
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
+    const channelPromptTurn =
+      (params as { _meta?: Record<string, unknown> })._meta?.[
+        CHANNEL_PROMPT_META_KEY
+      ] === true;
+    // One server-side channel classification, consumed by both the
+    // rejection gate below and the guard-mode selection in
+    // #executePromptInner. Only the authenticated channel-prompt marker
+    // classifies a turn: the delivery meta is a caller-requested side
+    // effect (the response is still delivered on end_turn below), and
+    // letting it classify would let any caller opt its own turn out of
+    // loop-detected rejection and the repeated-failure guard. The ACP
+    // boundary strips the channel-prompt key from untrusted callers, so
+    // both decisions see only trusted values.
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -3553,6 +3613,7 @@ export class Session implements SessionContext {
       resolveCompletion = resolve;
     });
 
+    let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
     let promptFailed = false;
     try {
@@ -3562,7 +3623,18 @@ export class Session implements SessionContext {
         responseCapture,
         invocationContext,
         modelPrompt,
+        // Channel turns are non-interactive deliveries: like cron,
+        // background-notification, and goal turns they keep the graceful
+        // end-turn handling so the collected response text is still
+        // delivered. Only the authenticated CHANNEL_PROMPT_META_KEY turns
+        // sent by the channel bridges qualify; the delivery meta alone
+        // schedules the delivery but keeps the foreground rejection. Goal
+        // turns bypass the bridge entirely, so a rejection there would
+        // settle the turn as failed and pause the goal without any
+        // turn_error ever being published.
+        !channelPromptTurn && goalTurn === undefined,
         goalTurn,
+        channelPromptTurn,
       );
       promptResult = result;
       releasePendingSend();
@@ -3590,11 +3662,16 @@ export class Session implements SessionContext {
           errorKind: error.errorKind,
         });
       }
+      rejectedByLoopProtection = isLoopDetectedTurnError(error);
       throw error;
     } finally {
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
       releasePendingSend();
       const shouldDrainAutomaticQueues =
+        // Loop-detected turns resolved end_turn (and drained) before loop
+        // stops became rejections; keep that invariant on the new path so
+        // queued cron/notification work is not stranded.
+        rejectedByLoopProtection ||
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
         this.todoStopGuardDrainAutomaticQueuesWhenIdle ||
         this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -3789,7 +3866,9 @@ export class Session implements SessionContext {
     responseCapture: AgentResponseCapture,
     invocationContext?: InvocationContextV1,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -3813,7 +3892,9 @@ export class Session implements SessionContext {
             pendingSend,
             responseCapture,
             modelPrompt,
+            rejectOnLoopDetected,
             goalTurn,
+            channelTurn,
           ),
         ),
       );
@@ -3827,7 +3908,9 @@ export class Session implements SessionContext {
     pendingSend: AbortController,
     responseCapture: AgentResponseCapture,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -4232,9 +4315,7 @@ export class Session implements SessionContext {
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState(
-              promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
-                ? 'off'
-                : this.repeatedToolFailureGuardMode,
+              channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
 
             // conversation_finished must fire on every terminal path of the
@@ -4521,13 +4602,17 @@ export class Session implements SessionContext {
                       toolLoopState,
                       onFullTurnModel,
                       () => fullTurnModelOverride,
+                      rejectOnLoopDetected,
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                   if (toolRun.loopDetected) {
@@ -4537,9 +4622,12 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                     return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                 }
@@ -4560,6 +4648,7 @@ export class Session implements SessionContext {
                 true,
                 fullTurnModelOverride,
                 responseCapture,
+                rejectOnLoopDetected,
               );
               if (result.stopReason !== 'cancelled') {
                 responseCapture.agentOutput.writeToSpan(
@@ -4605,6 +4694,7 @@ export class Session implements SessionContext {
     allowExternalHooks = true,
     modelOverride?: string,
     responseCapture?: AgentResponseCapture,
+    rejectOnLoopDetected = false,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -4671,6 +4761,7 @@ export class Session implements SessionContext {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
               responseCapture,
+              rejectOnLoopDetected,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -4771,6 +4862,7 @@ export class Session implements SessionContext {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
                 responseCapture,
+                rejectOnLoopDetected,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -4905,6 +4997,7 @@ export class Session implements SessionContext {
           onFullTurnModel,
           getModelOverride: () => modelOverride,
           responseCapture,
+          rejectOnLoopDetected,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -4930,6 +5023,7 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
       responseCapture?: AgentResponseCapture;
+      rejectOnLoopDetected?: boolean;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -5483,16 +5577,28 @@ export class Session implements SessionContext {
               options.onFullTurnModel,
             ),
         );
-        if (
-          toolRun.stopAfterPermissionCancel ||
-          toolRun.loopDetected ||
-          pendingSend.signal.aborted
-        ) {
+        if (toolRun.stopAfterPermissionCancel || pendingSend.signal.aborted) {
           this.todoStopGuard.suspend();
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
             kind: 'terminal',
             stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
+        if (toolRun.loopDetected) {
+          this.todoStopGuard.suspend();
+          await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+          return {
+            kind: 'terminal',
+            // Only the foreground chain rejects a loop-detected stop; cron
+            // and background-notification turns keep the graceful end-turn
+            // handling they had before loop stops became rejections.
+            stopReason: options.rejectOnLoopDetected
+              ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
+              : getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -5505,6 +5611,7 @@ export class Session implements SessionContext {
           toolLoopState,
           options.onFullTurnModel,
           options.getModelOverride,
+          options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.hadMidTurnUserInput) {
@@ -5947,6 +6054,7 @@ export class Session implements SessionContext {
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
     getModelOverride?: () => string | undefined,
+    rejectOnLoopDetected = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -6041,14 +6149,19 @@ export class Session implements SessionContext {
         toolLoopState,
         { recordToQwenLogger: false },
       );
-      try {
-        await this.messageEmitter.emitAgentMessage(
-          REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
-        );
+      if (!rejectOnLoopDetected) {
+        // Rejecting turns publish the structured turn_error as the
+        // user-visible explanation; graceful (non-interactive) stops have
+        // no replacement, so keep the transcript stop message for them.
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
+          );
+        }
       }
       return {
         message: null,
@@ -7158,6 +7271,10 @@ export class Session implements SessionContext {
     });
 
     const shellRegistry = this.config.getBackgroundShellRegistry();
+    this.#shellStatusChangeCallback = () => {
+      this.#activeWorkChanged();
+    };
+    shellRegistry.setStatusChangeCallback(this.#shellStatusChangeCallback);
     shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
       const entry = shellRegistry.get(meta.shellId);
       this.#enqueueBackgroundNotification({
@@ -7382,6 +7499,7 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
           await runWithInvocationContext(undefined, () =>
@@ -7391,6 +7509,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }
       }
