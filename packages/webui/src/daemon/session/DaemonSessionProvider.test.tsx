@@ -3738,6 +3738,25 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([{ kind: 'assistant', text: 'hello' }]);
   });
 
+  it('requests summary live replay for summary transcript mode', async () => {
+    sdkMocks.sessions.push(createMockSession());
+
+    await renderWithProvider(null, {
+      autoConnect: true,
+      subagentTranscriptMode: 'summary',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({ liveReplayMode: 'summary' }),
+      expect.any(String),
+    );
+  });
+
   it('does not inject replay snapshot again after a normal SSE stream end', async () => {
     const events = vi.fn(async function* replayThenReusableEvents(
       opts: { signal?: AbortSignal } = {},
@@ -10190,7 +10209,10 @@ describe('DaemonSessionProvider', () => {
       return null;
     }
 
-    await renderWithProvider(<Harness />, { autoConnect: true });
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      subagentTranscriptMode: 'summary',
+    });
     sdkMocks.MockDaemonSessionClient.load.mockClear();
     sdkMocks.MockDaemonSessionClient.resume.mockResolvedValueOnce(
       createMockSession({ sessionId: 'session-b', clientId: 'client-b' }),
@@ -10202,6 +10224,9 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(sdkMocks.MockDaemonSessionClient.resume).toHaveBeenCalledOnce();
+    expect(
+      sdkMocks.MockDaemonSessionClient.resume.mock.calls[0]?.[2],
+    ).not.toHaveProperty('liveReplayMode');
     expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
     expect(connection).toMatchObject({
       status: 'connected',
@@ -10233,6 +10258,7 @@ describe('DaemonSessionProvider', () => {
     await renderWithProvider(<Harness />, {
       autoConnect: true,
       historyPageSize: 100,
+      subagentTranscriptMode: 'summary',
     });
     sdkMocks.MockDaemonSessionClient.load.mockClear();
     sdkMocks.MockDaemonSessionClient.load.mockImplementation(
@@ -10249,7 +10275,10 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-b',
-      expect.objectContaining({ historyPageSize: 100 }),
+      expect.objectContaining({
+        historyPageSize: 100,
+        liveReplayMode: 'summary',
+      }),
       expect.any(String),
     );
 
@@ -13441,6 +13470,7 @@ describe('DaemonSessionProvider', () => {
     await renderWithProvider(<Harness />, {
       autoConnect: true,
       autoReconnect: true,
+      subagentTranscriptMode: 'summary',
       reconnectDelayMs: 1,
       maxReconnectDelayMs: 1,
     });
@@ -13455,7 +13485,11 @@ describe('DaemonSessionProvider', () => {
     expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledWith(
       expect.anything(),
       'session-epoch-closed-tail',
-      { workspaceCwd: '/mock-workspace', timeoutMs: 70_000 },
+      {
+        workspaceCwd: '/mock-workspace',
+        timeoutMs: 70_000,
+        liveReplayMode: 'summary',
+      },
       expect.any(String),
     );
     expect(connection?.status).toBe('connected');
@@ -14517,6 +14551,7 @@ describe('DaemonSessionProvider', () => {
       });
       const sourceReady = createDeferred<void>();
       const sourceEvent = createDeferred<void>();
+      const sourceEventProcessed = createDeferred<void>();
       let sourceSignal: AbortSignal | undefined;
       let subscriptions = 0;
       const source = createMockSession({
@@ -14551,6 +14586,7 @@ describe('DaemonSessionProvider', () => {
               },
             },
           };
+          sourceEventProcessed.resolve();
           await new Promise<void>((resolve) =>
             opts.signal?.addEventListener('abort', () => resolve(), {
               once: true,
@@ -14597,7 +14633,7 @@ describe('DaemonSessionProvider', () => {
       });
       await act(async () => {
         sourceEvent.resolve();
-        await flushPromises();
+        await sourceEventProcessed.promise;
         await flushTranscriptDispatch();
       });
       expect(
@@ -16321,7 +16357,16 @@ async function flushPromises(): Promise<void> {
 // SSE events coalesces into one reducer pass. Stay-alive mock generators never
 // end the consumer loop (which would flush synchronously), so tests that assert
 // transcript state mid-stream drain the batched dispatch here.
+// Two chained timer hops, not one: the dispatch timer and this helper's first
+// timer are registered from concurrently-draining microtask chains, so their
+// registration order is unspecified, and Node drains microtasks between timer
+// callbacks — a single hop registered first would resume the test (and its
+// assertions) before the dispatch timer ever fires. The dispatch timer is
+// always registered during the microtask drain that precedes the first hop's
+// callback, so the second hop — registered after that callback — is
+// guaranteed to fire after the dispatch has run.
 async function flushTranscriptDispatch(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
   await Promise.resolve();
   await Promise.resolve();

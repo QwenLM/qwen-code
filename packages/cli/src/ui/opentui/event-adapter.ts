@@ -8,7 +8,7 @@
 /**
  * P1d integration seam: maps qwen-code's real agent-loop stream events
  * (`ServerGeminiStreamEvent`, packages/core) onto the framework-neutral
- * `StreamEvent` consumed by the OpenTUI backend / `ui/model/streamingModel`.
+ * `StreamEvent` consumed by the OpenTUI backend / `ui/model/streaming-model`.
  *
  * Pure + framework-agnostic (no UI-framework imports); unit-testable without
  * a renderer. The OpenTUI backend drains these into the neutral model; the
@@ -25,7 +25,7 @@ import type {
   RetryInfo,
   ServerGeminiStreamEvent,
 } from '@qwen-code/qwen-code-core';
-import type { StreamEvent } from '../model/streamingModel.js';
+import type { StreamEvent } from '../model/streaming-model.js';
 
 /**
  * Neutral-model union extension: tool detail events the backend folds into

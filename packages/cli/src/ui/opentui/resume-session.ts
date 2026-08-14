@@ -17,7 +17,7 @@ import {
   transcribeSession,
   type TranscriptResult,
 } from './transcript-adapter.js';
-import type { StreamEvent } from '../model/streamingModel.js';
+import type { StreamEvent } from '../model/streaming-model.js';
 
 export interface ResumableSession {
   conversation: { messages: readonly unknown[] };

@@ -11,7 +11,7 @@
  * imports this module.
  *
  * Mounts the OpenTUI chat backend (`../opentui/backend`), whose history is
- * driven by the framework-neutral streaming model (`../model/streamingModel`).
+ * driven by the framework-neutral streaming model (`../model/streaming-model`).
  *
  * Startup / lifecycle parity with the ink branch of `startInteractiveUI`:
  *  - writes the runtime.json sidecar + arms the session-swap refresh,
@@ -31,9 +31,10 @@ import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { App } from '../opentui/backend.js';
 import { probeKittyKeyboardSupport } from '../opentui/kitty-negotiation.js';
-import type { StreamEvent } from '../model/streamingModel.js';
+import type { StreamEvent } from '../model/streaming-model.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { RemoteInputWatcher } from '../../remoteInput/RemoteInputWatcher.js';
 import { registerCleanup } from '../../utils/cleanup.js';
 import { registerOpenTuiExitCleanup } from '../opentui/opentui-exit-cleanup.js';
 import { writeRuntimeSidecar } from '../opentui/runtime-sidecar.js';
@@ -44,11 +45,20 @@ import { startOpenTuiPostRenderPrefetches } from '../opentui/post-render.js';
 import { startMcpProgressiveDiscovery } from '../opentui/mcp-progressive.js';
 import { OpenTuiErrorBoundary } from '../opentui/opentui-error-boundary.js';
 
+/**
+ * @param events optional pre-adapted neutral stream (resume mode).
+ * @param config when provided, the backend submits prompts to the REAL client
+ *   (`liveSession`) for live conversations (requires credentials).
+ * @param remoteInputWatcher when provided (--input-file), remote `submit`
+ *   commands are routed into the backend like typed prompts.
+ */
 export interface OpenTuiStartOptions {
   /** Optional pre-adapted neutral stream (resume mode). */
   events?: AsyncIterable<StreamEvent>;
   /** When provided, the backend runs live conversations via the real client. */
   config?: Config;
+  /** Remote input watcher for `--input-file`; null when not requested. */
+  remoteInputWatcher?: RemoteInputWatcher | null;
   /** Loaded settings (window title, post-render prefetches, backend dialogs). */
   settings?: LoadedSettings;
   /** Post-render prefetch toggles (ink `StartInteractiveUIOptions` parity). */
@@ -61,7 +71,8 @@ export interface OpenTuiStartOptions {
 export async function startOpenTuiUI(
   opts?: OpenTuiStartOptions,
 ): Promise<void> {
-  const { events, config, settings, postRender } = opts ?? {};
+  const { events, config, settings, postRender, remoteInputWatcher } =
+    opts ?? {};
 
   // Drain the early-capture buffer BEFORE the renderer takes over stdin, so
   // startup keystrokes are recovered instead of leaking into the terminal.
@@ -109,6 +120,7 @@ export async function startOpenTuiUI(
         events={events}
         config={config}
         settings={settings}
+        remoteInputWatcher={remoteInputWatcher ?? undefined}
         initialCapturedInput={initialCapturedInput}
       />
     </OpenTuiErrorBoundary>,

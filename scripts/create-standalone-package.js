@@ -799,9 +799,12 @@ function validateBunRuntime(target, packageRoot) {
 // Temporary OpenTUI preview support: Bun release archives contain a single
 // executable (`bun` / `bun.exe`). It is installed under `bun/` and launched
 // by that name — Bun invoked as `node` enters its node-compat CLI mode,
-// which breaks the interactive TUI. A hardlink is also placed at the classic
-// `node/bin/node` path so installer scripts that validate that layout keep
-// working unchanged.
+// which breaks the interactive TUI. A placeholder is also placed at the
+// classic `node/bin/node` path so installer scripts that validate that
+// layout keep working unchanged. It must be a REGULAR file: the installers
+// refuse archives containing symlinks or hardlinks, and a hardlink mirror
+// tripped exactly that check. Unix gets a tiny exec shim (zero size cost);
+// Windows gets a plain copy because a `.sh` shim cannot impersonate an exe.
 function installBunRuntime(extractDir, nodeDir, target) {
   const executableName = target === 'win-x64' ? 'bun.exe' : 'bun';
   const sourcePath = findFileRecursive(extractDir, executableName);
@@ -820,15 +823,19 @@ function installBunRuntime(extractDir, nodeDir, target) {
   fs.copyFileSync(sourcePath, bunPath);
   fs.chmodSync(bunPath, 0o755);
 
-  // Installer-script compatibility: mirror the executable at the Node.js
-  // layout path. Hardlink keeps the archive lean; fall back to a copy where
-  // links are unavailable.
+  // Installer-script compatibility mirror at the Node.js layout path.
   const compatPath = path.join(nodeDir, ...targetConfig.nodeExecutable);
   fs.mkdirSync(path.dirname(compatPath), { recursive: true });
-  try {
-    fs.linkSync(bunPath, compatPath);
-  } catch {
+  if (target === 'win-x64') {
     fs.copyFileSync(bunPath, compatPath);
+  } else {
+    fs.writeFileSync(
+      compatPath,
+      '#!/usr/bin/env sh\n' +
+        '# OpenTUI preview: the bundled runtime is Bun; this placeholder keeps\n' +
+        '# installers that validate the classic Node.js layout working.\n' +
+        'exec "$(dirname "$0")/../../bun/bin/bun" "$@"\n',
+    );
   }
   fs.chmodSync(compatPath, 0o755);
 }

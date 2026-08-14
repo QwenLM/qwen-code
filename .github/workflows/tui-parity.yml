@@ -28,9 +28,10 @@ jobs:
         run: cd packages/cli && bun scripts/opentui-command-parity.ts
 
   noflicker:
-    # Real-model no-flicker gate; only when credentials are available.
+    # No-flicker gate; always runs. With secrets.QWEN_API_KEY it drives a
+    # real model conversation; without it (fork PRs never receive secrets)
+    # accept-noflicker.sh falls back to the offline scripted-stream gate.
     runs-on: ubuntu-latest
-    if: ${{ secrets.QWEN_API_KEY != '' }}
     env:
       QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
     steps:

@@ -15,7 +15,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import type { StreamEvent } from '../model/streamingModel.js';
+import type { StreamEvent } from '../model/streaming-model.js';
 
 interface SessionPart {
   text?: string;

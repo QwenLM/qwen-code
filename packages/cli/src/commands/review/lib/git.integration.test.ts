@@ -20,11 +20,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gitRawTolerateDiff, releaseWorktree } from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
+import { isolateHostGitConfig } from './test-utils.js';
 
 let repo: string;
-let home: string;
 let cwd: string;
-let savedEnv: NodeJS.ProcessEnv;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
@@ -32,20 +32,16 @@ function git(...args: string[]): string {
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'review-wt-'));
-  home = mkdtempSync(join(tmpdir(), 'review-wt-home-'));
-  writeFileSync(join(home, '.gitconfig'), '');
 
-  // Isolate the fixture from the developer's git environment. Without this,
+  // Isolate the fixture from the developer's git environment (shared
+  // helper — see isolateHostGitConfig for the incident class). Without it,
   // `git init` loads their templates and the commit below runs their
   // `core.hooksPath` hooks — a targeted run visibly executed configured
   // pre-commit, prepare-commit-msg, commit-msg, post-commit and post-checkout
-  // hooks — and a global `commit.gpgsign=true` fails the suite for want of a key.
-  // The wrappers under test read `process.env` per call, so setting it here
-  // reaches them.
-  savedEnv = { ...process.env };
-  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
-  process.env['GIT_CONFIG_GLOBAL'] = join(home, '.gitconfig');
-  process.env['HOME'] = home;
+  // hooks — and a global `commit.gpgsign=true` fails the suite for want of
+  // a key. The wrappers under test read `process.env` per call, so setting
+  // it here reaches them.
+  gitIsolation = isolateHostGitConfig();
 
   git('init', '-q', '--template=', '.');
   git('config', 'user.email', 'a@b');
@@ -61,9 +57,8 @@ beforeEach(() => {
 
 afterEach(() => {
   process.chdir(cwd);
-  process.env = savedEnv;
   rmSync(repo, { recursive: true, force: true });
-  rmSync(home, { recursive: true, force: true });
+  gitIsolation.dispose();
 });
 
 describe('releaseWorktree', () => {

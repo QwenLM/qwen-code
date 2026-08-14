@@ -6,13 +6,13 @@
 
 /**
  * History fold for the OpenTUI backend: reduces neutral stream events (the
- * `ui/model/streamingModel` union plus the local lossless extensions
+ * `ui/model/streaming-model` union plus the local lossless extensions
  * `tool-args` / `tool-result` / `confirm` / `segment-end` / `image`) into
  * render-ready history items. Tool cards additionally carry args text and
  * the approval state (pending → approved/rejected).
  */
 
-import type { HistoryItem } from '../model/streamingModel.js';
+import type { HistoryItem } from '../model/streaming-model.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';

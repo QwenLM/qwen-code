@@ -23,6 +23,7 @@ import {
   RENDERER_ENV_VAR,
   isExperimentalRenderer,
   pickRenderer,
+  rendererExplicitlyRequested,
   type RendererId,
 } from './dispatch.js';
 
@@ -47,11 +48,23 @@ function runAssertions(): void {
 
   assert.equal(isExperimentalRenderer('opentui'), true);
   assert.equal(isExperimentalRenderer('ink'), false);
+
+  assert.equal(rendererExplicitlyRequested({}), false);
+  assert.equal(rendererExplicitlyRequested({ QWEN_TUI_RENDERER: '' }), false);
+  assert.equal(
+    rendererExplicitlyRequested({ QWEN_TUI_RENDERER: 'garbage' }),
+    false,
+  );
+  assert.equal(
+    rendererExplicitlyRequested({ QWEN_TUI_RENDERER: 'opentui' }),
+    true,
+  );
+  assert.equal(rendererExplicitlyRequested({ QWEN_TUI_RENDERER: 'ink' }), true);
 }
 
 if (typeof describe === 'function' && typeof it === 'function') {
   describe('renderer dispatch', () => {
-    it('picks ink by default and opentui only on explicit request', () => {
+    it('defaults to opentui, honors explicit values, and reports explicit requests', () => {
       runAssertions();
     });
   });

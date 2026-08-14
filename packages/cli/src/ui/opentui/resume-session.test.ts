@@ -20,7 +20,7 @@ import {
 import {
   initialStreamingState,
   reduceStreamEvents,
-} from '../model/streamingModel.js';
+} from '../model/streaming-model.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 
 const CALL_ID = 'call_1bd0c3272fc749f6a25cd2c8';
