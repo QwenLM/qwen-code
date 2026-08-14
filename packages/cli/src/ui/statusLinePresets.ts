@@ -431,6 +431,11 @@ export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
-  const line = buildStatusLinePresetParts(config, data).join(' \u00b7 ');
+  // Collapse embedded newlines: dynamic fields (e.g. the working directory
+  // behind current-dir / project-name) can legally contain them on POSIX,
+  // and one status line must never render as multiple terminal rows.
+  const line = buildStatusLinePresetParts(config, data)
+    .join(' \u00b7 ')
+    .replace(/[\r\n]+/g, ' ');
   return line ? [line] : [];
 }

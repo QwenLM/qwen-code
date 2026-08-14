@@ -137,6 +137,33 @@ describe('statusLinePresets', () => {
     ]);
   });
 
+  it('collapses embedded newlines from dynamic fields into one line', () => {
+    // POSIX allows newlines in directory names; a single status line must
+    // never render as multiple terminal rows.
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      currentDir: '/repo/pro\nject',
+      branch: undefined,
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 1200,
+      totalOutputTokens: 340,
+      totalLinesAdded: 12,
+      totalLinesRemoved: 3,
+      streamingState: StreamingState.Idle,
+    });
+
+    const lines = buildStatusLinePresetLines(
+      { type: 'preset', items: ['current-dir'] },
+      data,
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('\n');
+    expect(lines[0]).toContain('/repo/pro ject');
+  });
+
   it('renders every preset item with representative data', () => {
     const data = buildStatusLinePresetData({
       sessionId: 'session-123',

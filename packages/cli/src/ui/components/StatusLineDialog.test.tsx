@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act } from 'react';
+import { act, type ReactElement } from 'react';
+import { EventEmitter } from 'node:events';
+import { render as inkRender } from 'ink';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -15,7 +17,57 @@ import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { MessageType, StreamingState } from '../types.js';
+import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
+import { truncateToWidth } from '../utils/textUtils.js';
 import { StatusLineDialog } from './StatusLineDialog.js';
+
+const stripAnsi = (s: string): string =>
+  // eslint-disable-next-line no-control-regex
+  s.replace(/\u001b\[[0-9;]*m/g, '');
+
+// ink-testing-library hard-codes a 100-column buffer, so wrap-driven
+// overflow below 100 columns can never fail a budget assertion. Render
+// through ink directly with a fake narrow stdout — same pattern as
+// DiffDialog.test.tsx's renderWide.
+const renderNarrow = (columns: number, ui: ReactElement) => {
+  let lastFrame = '';
+  const stdout = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 50,
+    write: (frame: string) => {
+      lastFrame = frame;
+    },
+  });
+  const stderr = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 50,
+    write: () => {},
+  });
+  const stdin = Object.assign(new EventEmitter(), {
+    isTTY: true,
+    setRawMode: () => {},
+    setEncoding: () => {},
+    resume: () => {},
+    pause: () => {},
+    ref: () => {},
+    unref: () => {},
+    read: () => null,
+  });
+  const instance = inkRender(ui, {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stderr: stderr as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    // debug:true writes the full frame synchronously (true widths) instead
+    // of throttled cursor-diff output, so row counts can be measured.
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  return {
+    lastFrame: () => lastFrame.replace(/\n+$/, ''),
+    unmount: instance.unmount,
+  };
+};
 
 function createSettings(): LoadedSettings {
   const dir = mkdtempSync(path.join(tmpdir(), 'qwen-statusline-'));
@@ -407,9 +459,12 @@ describe('StatusLineDialog', () => {
   it('caps option labels to the render width', () => {
     // ink-testing-library renders at 100 columns, so wrapping can't be
     // observed directly; assert the width-derived string cap instead —
-    // the ~80-cell model-with-reasoning label must be clipped with an
-    // ellipsis at mainAreaWidth 80 (cap = 80 - 10 overhead = 70).
-    const narrowUiState = { ...uiState, mainAreaWidth: 80 };
+    // the ~79-cell model-with-reasoning label must be clipped with an
+    // ellipsis at mainAreaWidth 60 (cap = 60 - 10 overhead = 50). A width
+    // below the component's ?? 80 fallback is used so a broken
+    // uiState.mainAreaWidth read (cap 70) renders a different string and
+    // fails this test.
+    const narrowUiState = { ...uiState, mainAreaWidth: 60 };
     const { lastFrame } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <StatusLineDialog
@@ -425,7 +480,15 @@ describe('StatusLineDialog', () => {
 
     const frame = lastFrame() ?? '';
     expect(frame.split('\n').length).toBeLessThanOrEqual(25);
-    expect(frame).toMatch(/model-with-reasoning.*…/);
+    // 24 = DESCRIPTION_COLUMN inside StatusLineDialog.
+    const item = STATUS_LINE_PRESET_ITEMS.find(
+      (preset) => preset.id === 'model-with-reasoning',
+    );
+    const expectedLabel = truncateToWidth(
+      `${item?.label.padEnd(24)} ${item?.description}`,
+      50,
+    );
+    expect(stripAnsi(frame)).toContain(expectedLabel);
   });
 
   it('uses every available row in an intermediate compact layout', () => {
@@ -474,5 +537,140 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()).toContain('current-dir');
     // The active item must stay inside the visible window.
     expect(lastFrame()).toMatch(/›.*current-dir/);
+  });
+
+  it('closes on escape in the compact layout', async () => {
+    // Below the full-layout threshold, query input and backspace are gated
+    // off and MultiSelect has no escape handling of its own — the
+    // fall-through to onClose() is the dialog's only dismissal path.
+    const onClose = vi.fn();
+    const { stdin } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={createSettings()}
+          config={config}
+          uiState={uiState}
+          addItem={vi.fn()}
+          onClose={onClose}
+          availableTerminalHeight={5}
+        />
+      </KeypressProvider>,
+    );
+
+    act(() => {
+      stdin.write('\u001b');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('matches search against untruncated label text at narrow widths', async () => {
+    // At mainAreaWidth 80 (cap 70) the model-with-reasoning label loses its
+    // tail — including "available" — to display truncation. Search must
+    // still match the full source text, so results stay width-independent.
+    const narrowUiState = { ...uiState, mainAreaWidth: 80 };
+    const { stdin, lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={createSettings()}
+          config={config}
+          uiState={narrowUiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={25}
+        />
+      </KeypressProvider>,
+    );
+
+    act(() => {
+      stdin.write('available');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(lastFrame()).toContain('model-with-reasoning');
+    expect(lastFrame()).toContain('project-name');
+  });
+
+  it('stays within the height budget at a 54-column terminal width', () => {
+    // Wrap-driven overflow below ink-testing-library's 100 columns: at 54
+    // columns the dialog content is 50 cells and the ~79-cell
+    // model-with-reasoning label (5th option, inside the budget-20 window)
+    // must stay on one capped row.
+    const narrowUiState = { ...uiState, mainAreaWidth: 54 };
+    const { lastFrame, unmount } = renderNarrow(
+      54,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={createSettings()}
+          config={config}
+          uiState={narrowUiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={20}
+        />
+      </KeypressProvider>,
+    );
+    try {
+      expect(lastFrame()).toContain('model-with-reasoning');
+      expect(lastFrame().split('\n').length).toBeLessThanOrEqual(20);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('keeps option rows single at a 30-column terminal width', () => {
+    // Below ~34 columns a labelCap floor at the 24-cell name column would
+    // exceed the available label width (30 - 10 overhead = 20) and wrap
+    // every option to 2 rows — the floor must be 1 instead.
+    const narrowUiState = { ...uiState, mainAreaWidth: 30 };
+    const { lastFrame, unmount } = renderNarrow(
+      30,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={createSettings()}
+          config={config}
+          uiState={narrowUiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={25}
+        />
+      </KeypressProvider>,
+    );
+    try {
+      expect(lastFrame().split('\n').length).toBeLessThanOrEqual(25);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('truncates the empty-preview fallback at narrow widths', () => {
+    // With nothing selected the preview renders a 48-cell fallback text;
+    // at 50 columns (46-cell content area) it must truncate, not wrap.
+    const settings = createSettings();
+    settings.user.settings.ui = {
+      statusLine: { type: 'preset', useThemeColors: false, items: [] },
+    };
+    settings.recomputeMerged();
+    const narrowUiState = { ...uiState, mainAreaWidth: 50 };
+    const { lastFrame, unmount } = renderNarrow(
+      50,
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={settings}
+          config={config}
+          uiState={narrowUiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={20}
+        />
+      </KeypressProvider>,
+    );
+    try {
+      expect(lastFrame()).toContain('Select at least one item');
+      expect(lastFrame().split('\n').length).toBeLessThanOrEqual(20);
+    } finally {
+      unmount();
+    }
   });
 });
