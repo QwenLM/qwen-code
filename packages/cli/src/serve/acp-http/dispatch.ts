@@ -55,7 +55,7 @@ import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTi
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import {
   translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,

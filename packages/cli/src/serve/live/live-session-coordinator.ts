@@ -42,10 +42,10 @@ import type { LiveProviderCredential } from './provider-credentials.js';
 import {
   isCompatibleLiveSessionSource,
   LIVE_SESSION_SOURCE_PREFIX,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
-export { LIVE_SESSION_SOURCE_PREFIX } from '../conversations/session-source.js';
+export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;

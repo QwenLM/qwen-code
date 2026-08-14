@@ -73,6 +73,26 @@ export default tseslint.config(
     },
   },
   {
+    // ACP integration and the daemon are separate runtime surfaces that happen
+    // to share a package directory. ACP may consume neutral contracts under
+    // `runtime/`, but never `serve/` implementation modules — see #8084.
+    files: ['packages/cli/src/acp-integration/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/serve/*', '**/serve/**'],
+              message:
+                'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // General overrides and rules for the project (TS/TSX files)
     files: [
       'packages/**/src/**/*.{ts,tsx}',

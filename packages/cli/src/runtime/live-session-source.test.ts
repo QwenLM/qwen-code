@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from './session-source.js';
+} from './live-session-source.js';
 
 describe('readLoadableLiveConversationMetadata', () => {
   const records = new Map([
