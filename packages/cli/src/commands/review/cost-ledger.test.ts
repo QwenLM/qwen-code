@@ -1527,38 +1527,44 @@ describe('cost-ledger — prior-session bounds, faults and wall time', () => {
     expect(ledger.totals.inputTokens).toBe(1_500);
   });
 
-  it('discloses an unreadable prior agent dir instead of silently flooring it', () => {
-    const { plan, env, project } = fixture();
-    runLedger(project);
-    writeFileSync(
-      join(project, 'chats', 'S0.jsonl'),
-      event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
-    );
-    const priorDir = join(project, 'subagents', 'S0');
-    mkdirSync(priorDir, { recursive: true });
-    chmodSync(priorDir, 0o000);
-    try {
-      const seen: string[] = [];
-      const spy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation((chunk: unknown) => {
-          seen.push(String(chunk));
-          return true;
-        });
-      let ledger;
+  // chmod 0o000 is a POSIX-only fault: on Windows it toggles the read-only
+  // attribute and readdir still succeeds, and root bypasses the mode
+  // entirely — the repo convention for this shape.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'discloses an unreadable prior agent dir instead of silently flooring it',
+    () => {
+      const { plan, env, project } = fixture();
+      runLedger(project);
+      writeFileSync(
+        join(project, 'chats', 'S0.jsonl'),
+        event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
+      );
+      const priorDir = join(project, 'subagents', 'S0');
+      mkdirSync(priorDir, { recursive: true });
+      chmodSync(priorDir, 0o000);
       try {
-        ledger = computeLedger(plan, env);
+        const seen: string[] = [];
+        const spy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation((chunk: unknown) => {
+            seen.push(String(chunk));
+            return true;
+          });
+        let ledger;
+        try {
+          ledger = computeLedger(plan, env);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(ledger.priorSessions).toBe(1);
+        expect(
+          seen.some((l) => l.includes("prior session's subagent transcripts")),
+        ).toBe(true);
       } finally {
-        spy.mockRestore();
+        chmodSync(priorDir, 0o755);
       }
-      expect(ledger.priorSessions).toBe(1);
-      expect(
-        seen.some((l) => l.includes("prior session's subagent transcripts")),
-      ).toBe(true);
-    } finally {
-      chmodSync(priorDir, 0o755);
-    }
-  });
+    },
+  );
 
   it('never reads a symlinked prior session directory', () => {
     const { plan, env, project } = fixture();
@@ -1577,6 +1583,55 @@ describe('cost-ledger — prior-session bounds, faults and wall time', () => {
     const ledger = computeLedger(plan, env);
     expect(ledger.agents).toHaveLength(0);
     expect(ledger.totals.inputTokens).toBe(500);
+  });
+
+  it('counts a prior session ONCE when it had both chat and agents', () => {
+    // The agent window is nested inside the session's own; pushing both a
+    // chat span and an agent span billed the nested minutes twice.
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      [
+        event('2026-08-03T10:00:40Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:02:40Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:01:00Z', { input: 100, output: 10 }),
+        event('2026-08-03T10:02:00Z', { input: 100, output: 10 }),
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'chats', `${SESSION}.jsonl`),
+      event('2026-08-03T10:10:00Z', { input: 100, output: 10 }),
+    );
+
+    // Prior session spans 10:00:40 → 10:02:40 = 120s, not 120 + a nested 60.
+    expect(computeLedger(plan, env).totals.wallSeconds).toBe(120);
+  });
+
+  it("clamps a prior session's AGENT transcripts to the next attempt too", () => {
+    // The operator kept using the interrupted CLI session and its later
+    // subagents wrote into the same dir — the mirror harm the chat ceiling
+    // already forbids.
+    const { plan, env, project } = fixture();
+    runLedger(project);
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
+      [
+        userRecord('You are review agent `2` — Agent 2: Security.'),
+        event('2026-08-03T10:02:00Z', { input: 2_000, output: 200 }),
+        event('2026-08-03T18:00:00Z', { input: 9_000, output: 900 }),
+      ].join('\n'),
+    );
+
+    expect(computeLedger(plan, env).totals.inputTokens).toBe(2_500);
   });
 
   it("sums each session's own span rather than spanning the dead gap", () => {

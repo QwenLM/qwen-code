@@ -409,27 +409,6 @@ export function readTranscripts(
 }
 
 /**
- * Every transcript directory this RUN may have written to: the current
- * session's, plus the directories of earlier attempts recorded in the run
- * ledger (a resumed run continues in a new session; see `run-ledger.ts`).
- *
- * Directory names are assembled here from the env's project dir and the
- * ledger's validated session ids — never taken from a caller. The current
- * session's directory is always first.
- */
-export function transcriptDirsForRun(
-  planPath: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string[] {
-  const { dir } = transcriptPaths(env);
-  const dirs = [dir];
-  for (const prior of priorSessionDirs(planPath, env)) {
-    if (!dirs.includes(prior.dir)) dirs.push(prior.dir);
-  }
-  return dirs;
-}
-
-/**
  * The EARLIER sessions of this run, as directories that are actually inside
  * the harness's own tree.
  *

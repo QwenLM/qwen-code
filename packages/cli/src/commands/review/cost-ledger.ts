@@ -370,7 +370,11 @@ export function computeLedger(
 
   const agents: StreamCost[] = [];
   const agentEvents: UsageEvent[] = [];
-  const readAgentDir = (agentDir: string, names: string[]): number => {
+  const readAgentDir = (
+    agentDir: string,
+    names: string[],
+    ceilingMs?: number,
+  ): number => {
     let streams = 0;
     for (const f of names) {
       const full = join(agentDir, f);
@@ -387,7 +391,7 @@ export function computeLedger(
       if (mtimeMs < floorMs) continue;
       let read: { events: UsageEvent[]; launch: string };
       try {
-        read = readUsage(full, floorMs);
+        read = readUsage(full, floorMs, ceilingMs);
       } catch {
         continue; // This agent's record is lost; the rest still count.
       }
@@ -434,12 +438,17 @@ export function computeLedger(
     } catch {
       // The prior attempt's chat is lost; its agents may still count.
     }
+    let priorAgentEvents: UsageEvent[] = [];
     if (paths !== undefined) {
       const before = agentEvents.length;
       try {
         contributed += readAgentDir(
           paths.dir,
           listAgentTranscriptFiles(paths.dir),
+          // The same window the chat gets: an interrupted CLI session whose
+          // operator kept working would otherwise fold unrelated subagent
+          // cost into this review.
+          entry.endsAtMs ?? undefined,
         );
       } catch (err) {
         // Absent is the legitimate state (the attempt died before launching
@@ -454,15 +463,15 @@ export function computeLedger(
           );
         }
       }
-      const priorAgentEvents = agentEvents.slice(before);
-      if (priorAgentEvents.length > 0) {
-        priorSpans.push(spanOf(priorAgentEvents));
-        for (const e of priorAgentEvents) priorEventSet.add(e);
-      }
+      priorAgentEvents = agentEvents.slice(before);
     }
-    if (events.length > 0) {
-      priorSpans.push(spanOf(events));
-      for (const e of events) priorEventSet.add(e);
+    // ONE span per session, from the union of its chat and agent events: the
+    // agent window is nested inside the session's, so pushing both would
+    // count the nested minutes twice.
+    const sessionEvents = [...events, ...priorAgentEvents];
+    if (sessionEvents.length > 0) {
+      priorSpans.push(spanOf(sessionEvents));
+      for (const e of sessionEvents) priorEventSet.add(e);
     }
     if (contributed > 0) priorSessions++;
   }

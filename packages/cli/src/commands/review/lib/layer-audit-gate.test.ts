@@ -281,6 +281,17 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
     );
   }
 
+  it('credits the prior attempt before this session has launched anything', () => {
+    // Without `currentDirOptional` the reader throws, the catch reports
+    // `identityMatched: 0`, and the gate DEFERS — failing open on exactly
+    // the layers the prior attempt never walked.
+    ledger('S0', 'S1');
+    auditorTranscript('S0', ['lexing', 'expansion']);
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(4);
+  });
+
   it("credits the interrupted attempt's walked layers through the ledger", () => {
     ledger('S0', 'S1');
     auditorTranscript('S0', LAYERS);

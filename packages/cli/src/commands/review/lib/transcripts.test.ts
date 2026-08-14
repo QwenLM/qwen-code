@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import {
   readTranscripts,
   readRunTranscripts,
-  transcriptDirsForRun,
+  priorSessionDirs,
   wasGivenTheDiff,
   transcriptDir,
   TranscriptsUnavailableError,
@@ -346,13 +346,12 @@ describe('readRunTranscripts — the run across its sessions', () => {
     expect(recs.map((r) => r.agentId)).toEqual(['a1']);
   });
 
-  it('lists the current session dir first, priors after, deduplicated', () => {
+  it('lists each prior session once, and only those that exist', () => {
     const plan = planWithLedger('S0', 'S0', 'S1');
     // A prior session that exists on disk: the accessor skips a ledgered id
     // whose directory is absent or symlinked, so the fixture must be real.
     priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
-    expect(transcriptDirsForRun(plan, ENV)).toEqual([
-      join(dir, 'subagents', 'S1'),
+    expect(priorSessionDirs(plan, ENV).map((p) => p.dir)).toEqual([
       join(dir, 'subagents', 'S0'),
     ]);
   });
@@ -443,33 +442,34 @@ describe('readRunTranscripts — containment and fault handling', () => {
 
     const recs = readRunTranscripts(plan, undefined, ENV);
     expect(recs.map((r) => r.agentId)).toEqual(['a1']);
-    expect(transcriptDirsForRun(plan, ENV)).toEqual([
-      join(dir, 'subagents', 'S1'),
-    ]);
+    expect(priorSessionDirs(plan, ENV)).toEqual([]);
   });
 
-  it('still throws when the current dir is unreadable, not merely absent', () => {
-    // EACCES on an EXISTING directory is a live fault; absorbing it would
-    // certify on prior evidence while the current records are unreadable.
-    const plan = planWithLedger('S0', 'S1');
-    mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
-    writeFileSync(
-      join(dir, 'subagents', 'S0', 'agent-a0.jsonl'),
-      transcript('a0'),
-    );
-    const cur = join(dir, 'subagents', 'S1');
-    mkdirSync(cur, { recursive: true });
-    chmodSync(cur, 0o000);
-    try {
-      expect(() =>
-        readRunTranscripts(plan, undefined, ENV, undefined, {
-          currentDirOptional: true,
-        }),
-      ).toThrow(TranscriptsUnavailableError);
-    } finally {
-      chmodSync(cur, 0o755);
-    }
-  });
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'still throws when the current dir is unreadable, not merely absent',
+    () => {
+      // EACCES on an EXISTING directory is a live fault; absorbing it would
+      // certify on prior evidence while the current records are unreadable.
+      const plan = planWithLedger('S0', 'S1');
+      mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+      writeFileSync(
+        join(dir, 'subagents', 'S0', 'agent-a0.jsonl'),
+        transcript('a0'),
+      );
+      const cur = join(dir, 'subagents', 'S1');
+      mkdirSync(cur, { recursive: true });
+      chmodSync(cur, 0o000);
+      try {
+        expect(() =>
+          readRunTranscripts(plan, undefined, ENV, undefined, {
+            currentDirOptional: true,
+          }),
+        ).toThrow(TranscriptsUnavailableError);
+      } finally {
+        chmodSync(cur, 0o755);
+      }
+    },
+  );
 
   it('throws on a missing current dir when the run has no prior evidence', () => {
     // No ledger: this is a run that has shown nothing, not a continuation.

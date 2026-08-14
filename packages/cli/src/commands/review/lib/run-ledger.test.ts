@@ -259,6 +259,41 @@ describe('the properties the threat model rests on', () => {
     expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
   });
 
+  it('drops a FUTURE-dated entry, which would outlive every rewrite', () => {
+    // One-sided fences let a hand-written far-future entry read as belonging
+    // to every later run of the same PR.
+    appendRunSession(plan, envOf('S1'), Date.now() + 3_600_000);
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
+  it('orders the cost clamp by time, not by file order', () => {
+    const past = new Date(Date.now() - 300_000);
+    utimesSync(plan, past, past);
+    const base = Math.floor(statSync(plan).mtimeMs);
+    // Written out of order, as a hand-edited ledger or a backwards clock
+    // step between attempts would leave it.
+    appendRunSession(plan, envOf('S1'), base + 60_000);
+    appendRunSession(plan, envOf('S0'), base);
+    expect(priorSessionEntries(plan, envOf('S2'))).toEqual([
+      { sessionId: 'S0', atMs: base, endsAtMs: base + 60_000 },
+      { sessionId: 'S1', atMs: base + 60_000, endsAtMs: null },
+    ]);
+  });
+
+  it('refuses a ledger path that is not a regular file', () => {
+    // A planted FIFO blocks readFileSync forever — a hang, not an error.
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    const target = join(root, 'elsewhere.json');
+    writeFileSync(
+      target,
+      JSON.stringify([{ sessionId: 'X', atMs: Date.now() }]),
+    );
+    symlinkSync(target, runSessionsPath(plan));
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+  });
+
   it('drops an entry older than the slack window', () => {
     const mtimeMs = statSync(plan).mtimeMs;
     appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs) - 3000);
@@ -281,7 +316,10 @@ describe('the properties the threat model rests on', () => {
   });
 
   it('bounds each prior session by the next attempt start', () => {
-    // Inside the epoch fence: entries date from the plan's own capture on.
+    // Inside BOTH halves of the fence: at or after the plan's capture, and
+    // not in the future. Backdate the plan so a later entry is still past.
+    const past = new Date(Date.now() - 300_000);
+    utimesSync(plan, past, past);
     const base = Math.floor(statSync(plan).mtimeMs);
     appendRunSession(plan, envOf('S0'), base);
     appendRunSession(plan, envOf('S1'), base + 60_000);
