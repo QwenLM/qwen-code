@@ -59,6 +59,8 @@ const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const getGoal = vi.fn();
+const controlGoal = vi.fn();
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -67,6 +69,8 @@ const daemonActions = {
   setModel,
   loadArtifacts,
   getTasks,
+  getGoal,
+  controlGoal,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -318,6 +322,8 @@ beforeEach(() => {
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  getGoal.mockReset();
+  controlGoal.mockReset();
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -386,6 +392,50 @@ function testid(id: string): HTMLElement | null {
 }
 
 describe('ChatPane', () => {
+  it('locks goal controls while the current snapshot refresh is in flight', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    connectionState.goalState = current;
+    let resolveGoal:
+      | ((value: { snapshot: typeof current }) => void)
+      | undefined;
+    getGoal.mockReturnValue(
+      new Promise((resolve) => {
+        resolveGoal = resolve;
+      }),
+    );
+    controlGoal.mockResolvedValue({ snapshot: current });
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+
+    expect(pause.disabled).toBe(true);
+    act(() => pause.click());
+    expect(getGoal).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveGoal?.({ snapshot: current });
+    });
+    expect(controlGoal).toHaveBeenCalledTimes(1);
+  });
+
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {
       features: ['session_monitor_tool_correlation'],

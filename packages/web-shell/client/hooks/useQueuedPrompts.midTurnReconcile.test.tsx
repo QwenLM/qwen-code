@@ -456,6 +456,36 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('falls back when a query admission is rejected after the turn settles', async () => {
+    let resolveAdmission:
+      | ((value: { accepted: boolean; messageId?: string }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockReturnValue(
+      new Promise((resolve) => {
+        resolveAdmission = resolve;
+      }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        harness.result().enqueuePrompt('query late response');
+      });
+      await harness.render({ streamingState: 'idle' });
+      await act(async () => {
+        resolveAdmission?.({ accepted: false });
+      });
+
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'query late response',
+        expect.objectContaining({ sessionId: 'session-a' }),
+      );
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('does not resubmit when an accepted response arrives after idle', async () => {
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)

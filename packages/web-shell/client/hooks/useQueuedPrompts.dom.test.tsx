@@ -273,7 +273,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     act(() => {
       insertPromise = latest.insertQueuedPrompt(1);
     });
-    render('responding', 'session-2', true, false, true);
+    render('idle', 'session-2', true, false, true);
     await act(async () => {
       admission.resolve({ accepted: true, messageId: 'mid-1' });
       await insertPromise;
@@ -332,6 +332,49 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('idle', 'session-1', false, false, true);
 
     expect(signal?.aborted).toBe(true);
+  });
+
+  it('lets an explicit insert settle into its source-session stash', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, opts) => {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => admission.reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+        return admission.promise;
+      },
+    );
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('insert once'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    render('idle', 'session-2', true, false, true);
+
+    await act(async () => {
+      if (!signal?.aborted) {
+        admission.resolve({ accepted: true, messageId: 'inserted-once' });
+      }
+      await insertion;
+    });
+    render('responding', 'session-1', true, false, true);
+
+    expect(signal?.aborted).toBe(false);
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'insert once',
+        midTurnState: 'queued',
+        midTurnMessageId: 'inserted-once',
+      },
+    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('submits locally held Goal follow-ups after the Goal stops', () => {

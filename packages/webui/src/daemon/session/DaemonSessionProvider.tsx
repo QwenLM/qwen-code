@@ -2263,6 +2263,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.context !== undefined);
           const configGeneration =
             sessionConfigGenerationRef.current.get(activeSession) ?? 0;
+          const goalStateAtLoadStart = connectionRef.current.goalState;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
@@ -2403,7 +2404,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: configSnapshotCurrent
                 ? (context ?? current.context)
                 : current.context,
-              goalState: goalState ?? current.goalState,
+              goalState:
+                current.goalState === goalStateAtLoadStart
+                  ? (goalState ?? current.goalState)
+                  : current.goalState,
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch

@@ -592,36 +592,38 @@ export function ChatPane({
       action: 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
       objective?: string,
     ) => {
-      const snapshot = (await actions.getGoal()).snapshot;
-      const goal = snapshot.goal;
-      let request: GoalControlRequest;
-      if (action === 'replace') {
-        if (!objective) throw new Error(t('goals.error.emptyCondition'));
-        request = goal
-          ? {
-              action,
-              objective,
-              expectedGoalId: goal.goalId,
-              expectedRevision: goal.revision,
-            }
-          : { action: 'create', objective };
-      } else {
-        if (!goal) throw new Error(t('goals.error.goalUnavailable'));
-        request = {
-          action,
-          ...(action === 'edit'
-            ? { objective: objective ?? goal.objective }
-            : {}),
-          expectedGoalId: goal.goalId,
-          expectedRevision: goal.revision,
-        } as GoalControlRequest;
-      }
       setGoalControlBusy(true);
       try {
-        return await actions.controlGoal(request);
-      } catch (error) {
-        await actions.getGoal().catch(() => undefined);
-        throw error;
+        const snapshot = (await actions.getGoal()).snapshot;
+        const goal = snapshot.goal;
+        let request: GoalControlRequest;
+        if (action === 'replace') {
+          if (!objective) throw new Error(t('goals.error.emptyCondition'));
+          request = goal
+            ? {
+                action,
+                objective,
+                expectedGoalId: goal.goalId,
+                expectedRevision: goal.revision,
+              }
+            : { action: 'create', objective };
+        } else {
+          if (!goal) throw new Error(t('goals.error.goalUnavailable'));
+          request = {
+            action,
+            ...(action === 'edit'
+              ? { objective: objective ?? goal.objective }
+              : {}),
+            expectedGoalId: goal.goalId,
+            expectedRevision: goal.revision,
+          } as GoalControlRequest;
+        }
+        try {
+          return await actions.controlGoal(request);
+        } catch (error) {
+          await actions.getGoal().catch(() => undefined);
+          throw error;
+        }
       } finally {
         setGoalControlBusy(false);
       }

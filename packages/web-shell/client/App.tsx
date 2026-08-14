@@ -8291,42 +8291,45 @@ export function App({
       action: 'create' | 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
       objective?: string,
     ) => {
-      const snapshot = await refreshGoal();
-      const goal = snapshot.goal;
-      let request: GoalControlRequest;
-      if (action === 'create' || action === 'replace') {
-        if (!objective) throw new Error(t('goals.error.emptyCondition'));
-        request = goal
-          ? {
-              action: 'replace',
-              objective,
-              expectedGoalId: goal.goalId,
-              expectedRevision: goal.revision,
-            }
-          : { action: 'create', objective };
-      } else {
-        if (!goal) throw new Error(t('goals.error.goalUnavailable'));
-        request = {
-          action,
-          ...(action === 'edit'
-            ? { objective: objective ?? goal.objective }
-            : {}),
-          expectedGoalId: goal.goalId,
-          expectedRevision: goal.revision,
-        } as GoalControlRequest;
-      }
-
-      const owner = sessionOwnerGuard.capture();
+      const busyOwner = sessionOwnerGuard.capture();
       setGoalControlBusy(true);
       try {
-        const response = await sessionActions.controlGoal(request);
-        if (owner.isCurrent()) setGoalSnapshot(response.snapshot);
-        return response.snapshot;
-      } catch (error) {
-        if (owner.isCurrent()) await refreshGoal().catch(() => undefined);
-        throw error;
+        const snapshot = await refreshGoal();
+        const goal = snapshot.goal;
+        let request: GoalControlRequest;
+        if (action === 'create' || action === 'replace') {
+          if (!objective) throw new Error(t('goals.error.emptyCondition'));
+          request = goal
+            ? {
+                action: 'replace',
+                objective,
+                expectedGoalId: goal.goalId,
+                expectedRevision: goal.revision,
+              }
+            : { action: 'create', objective };
+        } else {
+          if (!goal) throw new Error(t('goals.error.goalUnavailable'));
+          request = {
+            action,
+            ...(action === 'edit'
+              ? { objective: objective ?? goal.objective }
+              : {}),
+            expectedGoalId: goal.goalId,
+            expectedRevision: goal.revision,
+          } as GoalControlRequest;
+        }
+
+        const owner = sessionOwnerGuard.capture();
+        try {
+          const response = await sessionActions.controlGoal(request);
+          if (owner.isCurrent()) setGoalSnapshot(response.snapshot);
+          return response.snapshot;
+        } catch (error) {
+          if (owner.isCurrent()) await refreshGoal().catch(() => undefined);
+          throw error;
+        }
       } finally {
-        if (owner.isCurrent()) setGoalControlBusy(false);
+        if (busyOwner.isCurrent()) setGoalControlBusy(false);
       }
     },
     [refreshGoal, sessionActions, sessionOwnerGuard, t],
@@ -11707,6 +11710,7 @@ export function App({
                         ) {
                           return false;
                         }
+                        const owner = sessionOwnerGuard.capture();
                         try {
                           if (allocatedSessionId) {
                             await createGoalForAllocatedSession(
@@ -11717,11 +11721,14 @@ export function App({
                             await controlCurrentGoal('create', condition);
                           }
                         } catch (error) {
-                          strandedGoalSessionRef.current =
-                            allocatedSessionId ??
-                            connectionRef.current.sessionId;
+                          if (owner.isCurrent()) {
+                            strandedGoalSessionRef.current =
+                              allocatedSessionId ??
+                              connectionRef.current.sessionId;
+                          }
                           throw error;
                         }
+                        if (!owner.isCurrent()) return false;
                         strandedGoalSessionRef.current = undefined;
                         onSessionIdChange?.(undefined);
                         setMainView('chat');

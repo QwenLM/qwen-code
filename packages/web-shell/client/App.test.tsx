@@ -18923,6 +18923,77 @@ describe('App /goal command', () => {
     });
   });
 
+  it('does not reuse a session selected while goal creation is in flight', async () => {
+    const pendingCreate = deferred<{
+      snapshot: ReturnType<typeof activeGoalSnapshot>;
+    }>();
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.controlGoal.mockReturnValueOnce(pendingCreate.promise);
+
+    let firstCreate!: Promise<void>;
+    act(() => {
+      firstCreate = onCreateGoal('all tests pass');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.controlGoal).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'conversation-session';
+      rerender({});
+    });
+    pendingCreate.reject(new Error('daemon says no'));
+    await act(async () => {
+      await expect(firstCreate).rejects.toThrow('daemon says no');
+    });
+
+    const retryCreate = testState.latestGoalsProps?.onCreateGoal;
+    if (!retryCreate) throw new Error('onCreateGoal was not recaptured');
+    mockSessionActions.controlGoal.mockResolvedValueOnce({
+      snapshot: activeGoalSnapshot('all tests pass'),
+    });
+    await act(async () => {
+      await retryCreate('all tests pass');
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('locks goal controls while the current snapshot refresh is in flight', async () => {
+    const current = activeGoalSnapshot('ship it', 5);
+    const pendingGoal = deferred<{ snapshot: typeof current }>();
+    mockConnection.goalState = current;
+    mockSessionActions.getGoal.mockReturnValueOnce(pendingGoal.promise);
+    mockSessionActions.controlGoal.mockResolvedValueOnce({ snapshot: current });
+    const { container } = renderApp();
+    await flush();
+
+    const pause = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+
+    expect(pause.disabled).toBe(true);
+    act(() => pause.click());
+    expect(mockSessionActions.getGoal).toHaveBeenCalledTimes(1);
+
+    pendingGoal.resolve({ snapshot: current });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.controlGoal).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("opens a goal's session in the chat view", async () => {
     // The goal's session transcript IS its history, so the Goals page has to be
     // able to hand off to it. Nothing exercised this wiring before.

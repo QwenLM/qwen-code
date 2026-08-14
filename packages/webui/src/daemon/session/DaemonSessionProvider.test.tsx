@@ -87,6 +87,7 @@ interface MockSession {
   heartbeat: () => Promise<{ ok: boolean }>;
   shellCommand: (command: string, signal?: AbortSignal) => Promise<unknown>;
   goal: () => Promise<GoalStateResponse>;
+  controlGoal: (request: unknown) => Promise<GoalStateResponse>;
   context: () => Promise<{
     v: 1;
     sessionId: string;
@@ -1555,6 +1556,68 @@ describe('DaemonSessionProvider', () => {
         objective: 'ship goal sync',
       },
     });
+  });
+
+  it('does not overwrite a streamed goal update with the session-load snapshot', async () => {
+    const pendingGoal = createDeferred<GoalStateResponse>();
+    const streamedGoal: GoalStateResponse['snapshot'] = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-sync',
+        revision: 2,
+        objective: 'newer objective',
+        status: 'paused',
+        evidenceCursor: { recordId: 'goal-record' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1234,
+        updatedAt: 2345,
+      },
+    };
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn(() => pendingGoal.promise),
+        controlGoal: vi.fn(async () => ({ snapshot: streamedGoal })),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await act(async () => {
+      await actions?.controlGoal({
+        action: 'pause',
+        expectedGoalId: 'goal-sync',
+        expectedRevision: 1,
+      });
+    });
+    expect(connection?.goalState).toBe(streamedGoal);
+
+    pendingGoal.resolve({
+      snapshot: {
+        ...streamedGoal,
+        activity: 'running',
+        goal: { ...streamedGoal.goal!, revision: 1, status: 'active' },
+      },
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toBe(streamedGoal);
   });
 
   it('routes mid_turn_message_injected frames to the sidechannel and transcript', async () => {
@@ -16253,6 +16316,11 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     shellCommand: opts.shellCommand ?? vi.fn(async () => undefined),
     goal:
       opts.goal ??
+      vi.fn(async () => ({
+        snapshot: { v: 2 as const, goal: null, activity: 'idle' as const },
+      })),
+    controlGoal:
+      opts.controlGoal ??
       vi.fn(async () => ({
         snapshot: { v: 2 as const, goal: null, activity: 'idle' as const },
       })),

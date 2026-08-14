@@ -218,6 +218,9 @@ export function useQueuedPrompts({
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
+  const explicitInsertAbortControllersRef = useRef(
+    new Map<AbortController, typeof ownerToken>(),
+  );
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
   const removingServerPromptIdsRef = useRef<Set<string>>(new Set());
   const displayedServerPromptIdsRef = useRef<Set<string>>(new Set());
@@ -1168,9 +1171,25 @@ export function useQueuedPrompts({
               const pendingAdmissionStillOwned =
                 pendingMidTurnAdmissionsRef.current.delete(midTurnMessageId);
               if (!pendingAdmissionStillOwned) return;
-              const next = queuedPromptsRef.current.filter(
+              const retained = queuedPromptsRef.current.filter(
                 (prompt) => prompt.midTurnMessageId !== midTurnMessageId,
               );
+              if (latestStreamingStateRef.current === 'idle') {
+                const prompt: QueuedPrompt = {
+                  ...pendingAdmission,
+                  midTurnMessageId: undefined,
+                  admissionOutcome: undefined,
+                  serverState: 'submitting',
+                  onComplete,
+                  onAdmitted,
+                };
+                const next = [...retained, prompt];
+                queuedPromptsRef.current = next;
+                setQueuedPrompts(next);
+                submitPendingPrompt(prompt);
+                return;
+              }
+              const next = retained;
               queuedPromptsRef.current = next;
               setQueuedPrompts(next);
               restoreQueuedPromptsToEditor(
@@ -1376,6 +1395,14 @@ export function useQueuedPrompts({
     if (ctrl) {
       ctrl.abort();
       midTurnEnqueueAbortRef.current = null;
+    }
+    for (const [
+      controller,
+      insertionOwnerToken,
+    ] of explicitInsertAbortControllersRef.current) {
+      if (insertionOwnerToken !== ownerTokenRef.current) continue;
+      controller.abort();
+      explicitInsertAbortControllersRef.current.delete(controller);
     }
     if (holdQueuedPromptsLocally) return;
     for (const prompt of queuedPromptsRef.current) {
@@ -1757,8 +1784,8 @@ export function useQueuedPrompts({
         isInserting: true,
         isRemoving: false,
       });
-      const abort = midTurnEnqueueAbortRef.current ?? new AbortController();
-      midTurnEnqueueAbortRef.current = abort;
+      const abort = new AbortController();
+      explicitInsertAbortControllersRef.current.set(abort, insertionOwnerToken);
       let result: Awaited<
         ReturnType<typeof sessionActions.enqueueMidTurnMessage>
       >;
@@ -1772,6 +1799,8 @@ export function useQueuedPrompts({
         setQueuedPromptFlags(prompt.id, { isInserting: false });
         reportError(error, t('queue.insertFailed'));
         return;
+      } finally {
+        explicitInsertAbortControllersRef.current.delete(abort);
       }
       if (!result.accepted) {
         setQueuedPromptFlags(prompt.id, { isInserting: false });
@@ -1785,6 +1814,7 @@ export function useQueuedPrompts({
       const current = queuedPromptsRef.current;
       const index = current.findIndex((item) => item.id === prompt.id);
       const deliveredAtIdle =
+        isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
         (latestStreamingStateRef.current as DaemonStreamingState) === 'idle' &&
         !canQueryMidTurn;
       if (index === -1) {
