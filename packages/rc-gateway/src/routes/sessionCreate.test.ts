@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { createSessionCreateRoute } from './sessionCreate.js';
+import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 
 let gateway: Server | undefined;
@@ -43,7 +44,7 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
 }
 
 async function mountGateway(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
   audit?: AuditRecorder,
 ): Promise<string> {
   const app = express();
@@ -141,6 +142,29 @@ describe('POST /session (create)', () => {
     expect(body.code).toBe('invalid_workspace');
     // Rejected before any daemon call.
     expect(stub.createdSessionCount).toBe(0);
+  });
+
+  it('returns 503 workspace_pool_full when the pool is full (not the generic 502)', async () => {
+    const dir = makeTmpDir('qwen-session-create-full-');
+    // A fake pool whose createOrAttachSession throws the pool's own
+    // WorkspacePoolFullError (max concurrent workspace daemons, all busy) —
+    // the route must map this to a distinct, retryable 503, not the generic
+    // 502 daemon_unavailable used for every other daemon failure.
+    const fullPool = {
+      async createOrAttachSession() {
+        throw new WorkspacePoolFullError(3);
+      },
+    } as unknown as SessionDaemon;
+    const url = await mountGateway(fullPool);
+
+    const res = await fetch(`${url}/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: dir }),
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('workspace_pool_full');
   });
 
   it("defaults scope to 'single'; passes 'thread' through; omits empty cwd", async () => {

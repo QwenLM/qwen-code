@@ -5,7 +5,8 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { SessionDaemon } from '../daemonPool.js';
+import { stat } from 'node:fs/promises';
+import { WorkspacePoolFullError, type SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
@@ -52,7 +53,6 @@ export function createSessionCreateRoute(
     // a non-directory target collapses to the same 400 — the error message
     // never echoes the path (audit/error-hygiene invariant below).
     if (workspaceCwd !== undefined) {
-      const { stat } = await import('node:fs/promises');
       let isDir = false;
       try {
         isDir = (await stat(workspaceCwd)).isDirectory();
@@ -74,7 +74,18 @@ export function createSessionCreateRoute(
         workspaceCwd,
         sessionScope,
       });
-    } catch {
+    } catch (err) {
+      // A full workspace daemon pool (max concurrent workspace daemons, all
+      // busy — see DaemonPool.evictLruIdle) is a distinct, RETRYABLE
+      // condition, not a daemon failure — surface it as its own 503 rather
+      // than collapsing it into the generic 502 below.
+      if (err instanceof WorkspacePoolFullError) {
+        res.status(503).json({
+          error: 'Workspace pool full',
+          code: 'workspace_pool_full',
+        });
+        return;
+      }
       res
         .status(502)
         .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });

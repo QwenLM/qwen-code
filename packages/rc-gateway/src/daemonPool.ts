@@ -485,4 +485,23 @@ export class DaemonPool implements SessionDaemon {
   workspaces() {
     return [...this.byWorkspace.keys()];
   }
+
+  /**
+   * Stop the pool: cancel the background reaper and stop EVERY pooled
+   * workspace daemon so none is orphaned when the gateway process exits.
+   * The default/boot daemon is NOT touched here — its lifecycle belongs to
+   * whoever constructed the pool (cli.ts stops it separately via its own
+   * `handle.stop()`, alongside this call). Tolerates an individual entry's
+   * `stop()` rejecting (`Promise.allSettled`) — one stuck daemon must not
+   * block the others from being asked to stop. Intended for shutdown; not
+   * safe to call mid-lifetime (any in-flight session routing is dropped).
+   */
+  async stopAll(): Promise<void> {
+    clearInterval(this.reapTimer);
+    const entries = [...this.byWorkspace.values()];
+    await Promise.allSettled(entries.map((e) => e.stop()));
+    this.byWorkspace.clear();
+    this.ownerOf.clear();
+    this.pendingCreates.clear();
+  }
 }

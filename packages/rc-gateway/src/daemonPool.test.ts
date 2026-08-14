@@ -513,4 +513,54 @@ describe('DaemonPool', () => {
     expect(session.sessionId).toBe('/proj/a-s');
     expect(pool.workspaces()).toEqual(['/proj/a']); // untouched throughout
   });
+
+  it('stopAll() stops every pooled daemon and empties the pool', async () => {
+    const stopped: string[] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: fakeClient(cwd),
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+
+    await pool.getOrSpawn('/proj/a');
+    await pool.getOrSpawn('/proj/b');
+    expect(pool.size()).toBe(2);
+
+    await pool.stopAll();
+
+    expect(stopped.sort()).toEqual(['/proj/a', '/proj/b']);
+    expect(pool.size()).toBe(0);
+    expect(pool.workspaces()).toEqual([]);
+  });
+
+  it('stopAll() tolerates an individual entry stop() rejecting', async () => {
+    const stopped: string[] = [];
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: fakeClient(cwd),
+        stop: async () => {
+          if (cwd === '/proj/flaky') throw new Error('stop failed');
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+
+    await pool.getOrSpawn('/proj/flaky');
+    await pool.getOrSpawn('/proj/ok');
+
+    // One entry's stop() rejects; the other must still be asked to stop, and
+    // stopAll() itself must not reject.
+    await expect(pool.stopAll()).resolves.toBeUndefined();
+    expect(stopped).toEqual(['/proj/ok']);
+    expect(pool.size()).toBe(0);
+  });
 });

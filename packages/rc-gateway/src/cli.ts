@@ -1321,6 +1321,11 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (mdnsAdvertiser) await mdnsAdvertiser.stop(500);
     if (pump) await pump.stop();
     acmeManager?.stop();
+    // Stop every workspace daemon the pool spawned (add-multi-workspace
+    // -daemon-pool) alongside the boot daemon below — otherwise a POST
+    // /session { cwd } that spawned a pooled `qwen serve` leaves it running
+    // as an orphan after the gateway exits.
+    await daemonPool.stopAll();
     await handle.stop();
     process.exit(0);
   };
