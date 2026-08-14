@@ -11598,6 +11598,41 @@ describe('CoreToolScheduler telemetry spans', () => {
     ).toHaveLength(0);
   });
 
+  it('preserves a successful result when the producer owner predicate throws', async () => {
+    const { completedCalls } = await runSingleTool({
+      shouldObserveProducer: () => {
+        throw new Error('owner predicate failed');
+      },
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('preserves an execution error when the producer owner predicate throws', async () => {
+    const { completedCalls } = await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('tool failed')),
+      shouldObserveProducer: () => {
+        throw new Error('owner predicate failed');
+      },
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('tool failed');
+    }
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
   it('observes a settled producer when post-processing throws', async () => {
     const resultFilePaths: string[] = [];
     Object.defineProperty(resultFilePaths, Symbol.iterator, {

@@ -4458,9 +4458,9 @@ export class CoreToolScheduler {
     const observeSyntheticProducer = (
       response: CoreToolCallResponseInfo,
     ): void => {
-      if (producerObserved || !this.shouldObserveProducer(callId)) return;
-      producerObserved = true;
       try {
+        if (producerObserved || !this.shouldObserveProducer(callId)) return;
+        producerObserved = true;
         observeToolResultBoundary({
           stage: 'producer',
           sessionId: this.config.getSessionId(),
@@ -4849,9 +4849,9 @@ export class CoreToolScheduler {
       }
       producerToolResult = toolResult;
       observeProducerOutput = (response: CoreToolCallResponseInfo) => {
-        if (producerObserved || !this.shouldObserveProducer(callId)) return;
-        producerObserved = true;
         try {
+          if (producerObserved || !this.shouldObserveProducer(callId)) return;
+          producerObserved = true;
           let producerInputValues: ToolResultBoundaryValue[] | undefined;
           const getProducerInputValues = () =>
             (producerInputValues ??= [
