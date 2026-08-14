@@ -6,11 +6,11 @@
 
 import type { Response } from 'express';
 import type { DaemonLogger } from '../daemon-logger.js';
-import {
-  isInternalWorkspaceRuntime,
-  type WorkspaceRegistry,
-  type WorkspaceRuntime,
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,

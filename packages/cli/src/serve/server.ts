@@ -192,12 +192,12 @@ import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
-  isInternalWorkspaceRuntime,
   WorkspaceGenerationClosedError,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,

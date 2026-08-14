@@ -12,6 +12,7 @@ import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-regis
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
@@ -179,12 +180,6 @@ export interface WorkspaceRegistry {
 export interface WorkspaceRegistryOptions {
   readonly sessionOwnerIndex?: WorkspaceSessionOwnerIndex;
   readonly scanUnindexedOwners?: boolean;
-}
-
-export function isInternalWorkspaceRuntime(
-  runtime: Pick<WorkspaceRuntime, 'provenance'>,
-): boolean {
-  return runtime.provenance === 'live-conversation';
 }
 
 export function createWorkspaceSessionOwnerIndex(): WorkspaceSessionOwnerIndex {

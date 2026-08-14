@@ -15,11 +15,11 @@ import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
-import {
-  isInternalWorkspaceRuntime,
-  type WorkspaceRegistry,
-  type WorkspaceRuntime,
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
 import {
   isPortableAbsolutePath,

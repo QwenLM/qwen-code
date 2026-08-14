@@ -8,12 +8,12 @@ import * as fs from 'node:fs';
 import path from 'node:path';
 import type { Request, Response } from 'express';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
-import {
-  isInternalWorkspaceRuntime,
-  type WorkspaceEntry,
-  type WorkspaceRegistry,
-  type WorkspaceRuntime,
+import type {
+  WorkspaceEntry,
+  WorkspaceRegistry,
+  WorkspaceRuntime,
 } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 export interface WorkspaceRouteContext {
   readonly runtime: WorkspaceRuntime;

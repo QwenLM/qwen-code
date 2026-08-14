@@ -124,13 +124,13 @@ import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
-import {
-  isInternalWorkspaceRuntime,
-  type WorkspaceEntry,
-  type WorkspaceRegistry,
-  type WorkspaceRuntime,
-  type WorkspaceRuntimeGeneration,
+import type {
+  WorkspaceEntry,
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+  WorkspaceRuntimeGeneration,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,

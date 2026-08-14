@@ -23,11 +23,11 @@ import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
 import { AcpDispatcher, type LiveSessionIsolation } from './dispatch.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
-import {
-  isInternalWorkspaceRuntime,
-  type WorkspaceRegistry,
-  type WorkspaceRuntime,
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import {
   isPortableAbsolutePath,
   resolveManagedWorkspaceRuntimeByPathSelector,

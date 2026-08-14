@@ -42,10 +42,8 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
-import {
-  isInternalWorkspaceRuntime,
-  type WorkspaceRegistry,
-} from './workspace-registry.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
