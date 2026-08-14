@@ -27,6 +27,7 @@ import yargs from 'yargs';
 import type { Argv } from 'yargs';
 import { recoverFindings, recoverFindingsCommand } from './recover-findings.js';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -48,13 +49,14 @@ beforeEach(() => {
   utimesSync(plan, old, old);
   const recordDir = promptRecordDir(plan);
   mkdirSync(recordDir, { recursive: true });
-  writeFileSync(
-    join(recordDir, 'run-sessions.json'),
-    JSON.stringify([
-      { sessionId: 'S0', atMs: Date.now() },
-      { sessionId: 'S1', atMs: Date.now() },
-    ]),
-  );
+  // Written by the real writers: the entries carry the plan mtime they are
+  // keyed on, and reading prior evidence at all requires this session's own
+  // recorded resume. The current attempt is stamped last, since each
+  // attempt's window closes when the next one opened.
+  const now = Date.now();
+  appendRunSession(plan, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+  appendRunSession(plan, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+  recordResume(plan, ENV, now + 1500);
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -75,7 +77,11 @@ function transcript(
   launch: string,
   opts: { opens?: string[]; finalText?: string } = {},
 ): void {
-  const base = { agentId: id, agentName: 'general-purpose' };
+  const base = {
+    agentId: id,
+    agentName: 'general-purpose',
+    sessionId: session,
+  };
   const lines = [
     JSON.stringify({
       ...base,
@@ -234,6 +240,8 @@ describe('recover-findings', () => {
       finalText: 'Recovered before any new launch.',
     });
     const freshEnv = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S9' };
+    appendRunSession(plan, freshEnv, Date.now() + 1500);
+    recordResume(plan, freshEnv, Date.now() + 1500);
     const r = recoverFindings({ plan, out: out() }, freshEnv);
     expect(r.recoveredKeys).toEqual(['1a']);
     expect(readFileSync(out(), 'utf8')).toContain(
