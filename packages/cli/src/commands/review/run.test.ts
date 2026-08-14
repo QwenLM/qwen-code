@@ -87,6 +87,17 @@ describe('buildReviewPrompt', () => {
     );
   });
 
+  it('rejects a separators-only target', () => {
+    // `/` names no file: it survives basename extraction as the empty
+    // string, pinning the unmatchable `qwen-review--composed.json` — a whole
+    // child review burned before the parent reports "no composed verdict".
+    for (const target of ['/', '//', '\\']) {
+      expect(() => buildReviewPrompt({ target })).toThrow(
+        /Invalid review target/,
+      );
+    }
+  });
+
   it('rejects a target carrying quote characters', () => {
     // tokenizeArgs strips quotes, so `src/it's-a-file.ts` would re-tokenize
     // to `src/its-a-file.ts` — silently re-targeting a file never named.

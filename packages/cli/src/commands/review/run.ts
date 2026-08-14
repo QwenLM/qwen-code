@@ -226,7 +226,12 @@ export function buildReviewPrompt(args: {
     if (
       /\s/.test(args.target) ||
       args.target.startsWith('-') ||
-      /['"]/.test(args.target)
+      /['"]/.test(args.target) ||
+      // A separators-only path (`/`, `//`, `\`) names no file: it survives
+      // basename extraction as the empty string, which pins the unmatchable
+      // `qwen-review--composed.json` and burns a whole child review before
+      // reporting "no composed verdict". Refuse it here instead.
+      /^[\\/]+$/.test(args.target)
     ) {
       throw new Error(
         `Invalid review target ${JSON.stringify(args.target)}: expected a single PR number, PR URL, or file path`,
