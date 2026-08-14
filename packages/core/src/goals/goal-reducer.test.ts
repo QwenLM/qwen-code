@@ -647,6 +647,17 @@ describe('goal reducer', () => {
     expect(parseGoalSnapshotV2(value)).toBeUndefined();
   });
 
+  it.each(['active', 'paused', 'blocked', 'complete'] as const)(
+    'rejects a %s snapshot carrying a limitKind',
+    (status) => {
+      const value = snapshot(
+        goalRecord({ status, limitKind: 'evidence_catalog' }),
+      );
+
+      expect(parseGoalSnapshotV2(value)).toBeUndefined();
+    },
+  );
+
   it.each([
     ['zero count', { fingerprint: 'same', count: 0, turnIds: [] }],
     [

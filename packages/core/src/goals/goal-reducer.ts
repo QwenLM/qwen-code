@@ -428,7 +428,9 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
     (value['lastReason'] !== undefined &&
       typeof value['lastReason'] !== 'string') ||
-    (value['limitKind'] !== undefined && !isGoalLimitKind(value['limitKind']))
+    (value['limitKind'] !== undefined &&
+      (!isGoalLimitKind(value['limitKind']) ||
+        value['status'] !== 'usage_limited'))
   ) {
     return undefined;
   }
