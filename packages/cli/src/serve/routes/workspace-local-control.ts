@@ -23,6 +23,7 @@ export interface RegisterWorkspaceLocalControlRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   isDaemonDraining?: () => boolean;
+  webShellAvailable?: boolean;
 }
 
 async function withUiData(status: LocalControlStatus) {
@@ -76,6 +77,13 @@ export function registerWorkspaceLocalControlRoutes(
     deps.mutate(),
     async (req, res) => {
       if (!requirePrimaryListener(req, res)) return;
+      if (deps.webShellAvailable === false) {
+        res.status(409).json({
+          error: 'Local Control requires the Web Shell.',
+          code: 'local_control_web_shell_unavailable',
+        });
+        return;
+      }
       if (deps.isDaemonDraining?.()) {
         res.status(503).json({
           error: 'Daemon is shutting down.',
@@ -108,18 +116,13 @@ export function registerWorkspaceLocalControlRoutes(
     deps.mutate(),
     async (req, res) => {
       if (listenerIdentityOf(req).kind === 'local-control') {
-        let started = false;
-        const disable = () => {
-          if (started) return;
-          started = true;
+        queueMicrotask(() => {
           void deps.service.disable().catch((error) => {
             writeStderrLine(
               `qwen serve: Local Control disable failed: ${error instanceof Error ? error.message : String(error)}`,
             );
           });
-        };
-        res.once('finish', disable);
-        res.once('close', disable);
+        });
         res.status(200).json({ active: false });
         return;
       }

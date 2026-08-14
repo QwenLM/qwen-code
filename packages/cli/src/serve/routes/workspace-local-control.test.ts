@@ -73,4 +73,21 @@ describe('Local Control routes', () => {
     expect(response.body.active).toBe(true);
     expect(enable).toHaveBeenCalledOnce();
   });
+
+  it('rejects enable when the Web Shell is unavailable', async () => {
+    const app = express();
+    const enable = vi.fn();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: { enable } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+      webShellAvailable: false,
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('local_control_web_shell_unavailable');
+    expect(enable).not.toHaveBeenCalled();
+  });
 });

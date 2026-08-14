@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { CopyIcon, WifiIcon } from 'lucide-react';
-import { getDaemonAuthHeaders, getDaemonBaseUrl } from '../../config/daemon';
+import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -30,12 +30,15 @@ interface LocalControlStatus {
 }
 
 async function requestLocalControl(
+  baseUrl: string,
+  token: string | undefined,
   method: 'GET' | 'POST',
   path: string,
   body?: object,
 ): Promise<LocalControlStatus> {
-  const baseUrl = getDaemonBaseUrl() || window.location.origin;
-  const headers = new Headers(getDaemonAuthHeaders());
+  const headers = new Headers(
+    token ? { Authorization: `Bearer ${token}` } : undefined,
+  );
   if (body) headers.set('Content-Type', 'application/json');
   const response = await fetch(new URL(path, baseUrl), {
     method,
@@ -64,13 +67,14 @@ function getLocalControlTarget(): string {
 
 export function LocalControlSettingsCard() {
   const { t } = useI18n();
+  const { baseUrl, token } = useWorkspace();
   const [status, setStatus] = useState<LocalControlStatus>();
   const [selectedAddress, setSelectedAddress] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    requestLocalControl('GET', '/workspace/local-control')
+    requestLocalControl(baseUrl, token, 'GET', '/workspace/local-control')
       .then((next) => {
         setStatus(next);
         const interfaces = next.interfaces ?? [];
@@ -81,7 +85,7 @@ export function LocalControlSettingsCard() {
       .catch((failure: unknown) =>
         setError(failure instanceof Error ? failure.message : String(failure)),
       );
-  }, []);
+  }, [baseUrl, token]);
 
   const toggle = async () => {
     if (!status) return;
@@ -97,7 +101,7 @@ export function LocalControlSettingsCard() {
             address: selectedAddress || undefined,
             target: getLocalControlTarget(),
           };
-      setStatus(await requestLocalControl('POST', path, body));
+      setStatus(await requestLocalControl(baseUrl, token, 'POST', path, body));
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
