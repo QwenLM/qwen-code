@@ -11,14 +11,17 @@
 // construction: the shared helper carries no memo.
 
 import type { CommandModule } from 'yargs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import { isGitIgnored } from '@qwen-code/qwen-code-core';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { safeTarget } from '../../utils/paths.js';
 import {
+  AUDIT_TMP_DIR,
   auditTimestamp,
   checkLocalOnlyGuard,
   gitGeometry,
+  guardProbeShapes,
   type GuardReport,
 } from './lib/files-plan.js';
 import { readJsonFile } from './lib/read-json.js';
@@ -50,29 +53,71 @@ export function guardTripped(
 
 function planRelocated(planPath: string, fallbackRoot: string): boolean {
   if (fallbackRoot === '') return false;
-  const rel = relative(resolve(fallbackRoot), resolve(planPath));
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  // The handed plan must BE the relocated file: a symlink leaves its
+  // target where it was committable, so only a regular file counts, and
+  // both sides resolve before the containment test (a lexical compare
+  // credited plans reached through a link).
+  let realPlan: string;
+  let realRoot: string;
+  try {
+    if (!lstatSync(planPath).isFile()) return false;
+    realPlan = realpathSync(planPath);
+    realRoot = realpathSync(fallbackRoot);
+  } catch {
+    return false;
+  }
+  const rel = relative(realRoot, realPlan);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return false;
+  // A copy credits while the original stays stageable under .qwen/tmp (a
+  // killed mid-relocation leaves exactly that): the original must be gone
+  // from its pre-relocation home for the suppression to stand.
+  return !existsSync(join(process.cwd(), AUDIT_TMP_DIR, basename(realPlan)));
 }
 
 /** Credit the relocation only once the fallback landing itself is
  *  verified: QWEN_HOME is user-settable and can place the fallback root
  *  inside a worktree that has no ignore rule for it. Outside every
- *  worktree git can never commit the landing; inside one every durable
- *  artifact shape written there must be ignored — the dated report and
- *  the sidecar (the undated bare slug is never written), and one exposed
- *  shape is an exposed directory. A probe without an answer keeps
- *  relocated=false so exit 5 re-fires. */
+ *  worktree git can never commit the landing; inside one EVERY artifact
+ *  shape the relocation lands there must be ignored — the dated report,
+ *  the sidecar, and the whole tmp class (the relocation moves them all),
+ *  and one exposed shape is an exposed directory. A probe without an
+ *  answer keeps relocated=false so exit 5 re-fires. */
 function fallbackLandingSafe(
   fallbackRoot: string,
   reportFileName: string,
+  planTs?: string,
 ): boolean {
   const geometry = gitGeometry(fallbackRoot);
   if (geometry.probeFailed) return false;
   if (!geometry.inWorktree || geometry.root === undefined) return true;
-  const prefix = relative(geometry.root, fallbackRoot).split(sep).join('/');
-  const ts = auditTimestamp(new Date());
+  // Both sides symlink-resolved before differencing: geometry.root is
+  // git's resolved toplevel while the fallback root arrives un-resolved,
+  // and an unresolved pair under a symlinked checkout emits a ../../
+  // prefix that probes paths outside the worktree (exit 5 at every
+  // checkpoint forever). Resolution failure fails closed like probeFailed.
+  let prefix: string;
+  try {
+    prefix = relative(realpathSync(geometry.root), realpathSync(fallbackRoot))
+      .split(sep)
+      .join('/');
+  } catch {
+    return false;
+  }
+  if (prefix === '..' || prefix.startsWith('../') || isAbsolute(prefix)) {
+    // Outside this worktree the repo can never commit the landing.
+    return true;
+  }
+  // Probes carry the check-time timestamp AND, when known, the plan-time
+  // one: the relocated files keep the plan ts, and a post-midnight
+  // checkpoint's fresh-ts probes would ask about names never written.
+  const shapes = guardProbeShapes(reportFileName, auditTimestamp(new Date()));
+  if (planTs) {
+    const relocated = guardProbeShapes(reportFileName, planTs);
+    shapes.audits.push(...relocated.audits);
+    shapes.tmp.push(...relocated.tmp);
+  }
   const root = geometry.root;
-  return [`${ts}-${reportFileName}`, `audit-${ts}.sidecar`].every((shape) =>
+  return [...shapes.audits, ...shapes.tmp].every((shape) =>
     isGitIgnored(root, prefix === '' ? shape : `${prefix}/${shape}`),
   );
 }
@@ -102,6 +147,11 @@ function isGuardReport(value: unknown): value is GuardReport {
     )
   );
 }
+
+/** The plan filename SKILL.md pins: audit-plan-<ts>.json. The captured
+ *  group is the auditTimestamp shape, digits and dashes only — safe to
+ *  interpolate into probe paths. */
+const PLAN_TS_RE = /^audit-plan-(\d{4}-\d{2}-\d{2}-\d{6})\.json$/;
 
 export const guardCheckCommand: CommandModule = {
   command: 'guard-check',
@@ -169,11 +219,15 @@ export const guardCheckCommand: CommandModule = {
     }.md`;
     const guard = checkLocalOnlyGuard(process.cwd(), reportFileName);
     writeStdoutLine(JSON.stringify(guard, null, 2));
+    // The relocated artifacts carry the plan-time timestamp; recover it
+    // from the SKILL-pinned plan filename so the landing probes cover it.
+    const planTs =
+      plan === undefined ? undefined : PLAN_TS_RE.exec(basename(plan))?.[1];
     const relocated =
       plan !== undefined &&
       slugSafe &&
       planRelocated(plan, guard.fallbackRoot) &&
-      fallbackLandingSafe(guard.fallbackRoot, reportFileName);
+      fallbackLandingSafe(guard.fallbackRoot, reportFileName, planTs);
     if (guardTripped(guard, planTime, relocated)) {
       process.exitCode = 5;
     }

@@ -626,25 +626,28 @@ describe('captureSidecar inside a worktree', () => {
     expect(drift.headUnknown).toBeFalsy();
   });
 
-  it('reports headUnknown when the checkpoint probe has no answer on an unborn sidecar', () => {
-    // A failed probe at checkpoint is NOT "still unborn": treating the
-    // silence as unmoved would pass a moved HEAD clean under a broken git.
-    const repo = join(dir, 'repo-unborn-probe');
-    mkdirSync(join(repo, 'mod'), { recursive: true });
-    git(['init', '-q'], repo);
-    writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
-    const modPlan = buildFilesPlan(
-      join(repo, 'mod'),
-      join(repo, 'mod'),
-      'medium',
-      collectAuditFiles(join(repo, 'mod')),
-    );
-    const captured = captureSidecar(modPlan, sidecarDir);
-    expect(captured.meta.headUnborn).toBe(true);
-    const drift = withBrokenGit(() => driftCheck(modPlan, sidecarDir));
-    expect(drift.headUnknown).toBe(true);
-    expect(drift.headMoved).toBe(false);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'reports headUnknown when the checkpoint probe has no answer on an unborn sidecar',
+    () => {
+      // A failed probe at checkpoint is NOT "still unborn": treating the
+      // silence as unmoved would pass a moved HEAD clean under a broken git.
+      const repo = join(dir, 'repo-unborn-probe');
+      mkdirSync(join(repo, 'mod'), { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'mod', 'a.ts'), 'const a = 1;\n');
+      const modPlan = buildFilesPlan(
+        join(repo, 'mod'),
+        join(repo, 'mod'),
+        'medium',
+        collectAuditFiles(join(repo, 'mod')),
+      );
+      const captured = captureSidecar(modPlan, sidecarDir);
+      expect(captured.meta.headUnborn).toBe(true);
+      const drift = withBrokenGit(() => driftCheck(modPlan, sidecarDir));
+      expect(drift.headUnknown).toBe(true);
+      expect(drift.headMoved).toBe(false);
+    },
+  );
 
   // The shim fails only `rev-parse HEAD` (exit 3, no git message) and
   // passes every other invocation through to the real git.
@@ -695,38 +698,91 @@ describe('captureSidecar inside a worktree', () => {
     },
   );
 
-  it('repairs a probe-failed capture on the extend re-run once git answers', () => {
-    const repo = join(dir, 'repo-repair');
-    mkdirSync(repo, { recursive: true });
+  it.skipIf(process.platform === 'win32')(
+    'repairs a probe-failed capture on the extend re-run once git answers',
+    () => {
+      const repo = join(dir, 'repo-repair');
+      mkdirSync(repo, { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'a.ts'), 'const a = 1;\n');
+      git(['add', '.'], repo);
+      git(['commit', '-m', 'first', '-q'], repo);
+      const repoPlan = buildFilesPlan(
+        repo,
+        repo,
+        'medium',
+        collectAuditFiles(repo),
+      );
+      // Git is down at capture: the toplevel probe fails without an answer,
+      // so both arms AND the HEAD/subtree baselines are skipped.
+      const captured = withBrokenGit(() =>
+        captureSidecar(repoPlan, sidecarDir),
+      );
+      expect(captured.meta.vcsProbeFailed).toBe(true);
+      expect(captured.meta.noVcs).toBe(true);
+      expect(captured.meta.headSha).toBeUndefined();
+      expect(captured.meta.subtreeHash).toBeUndefined();
+      // Git recovers; the extend re-run (caller registration) is the only
+      // command that can retry — it must re-probe and re-capture the
+      // baselines and both arms against the preserved hash baselines.
+      const caller = join(repo, 'caller.ts');
+      writeFileSync(caller, 'call();\n');
+      const extended = captureSidecar(repoPlan, sidecarDir, [caller]);
+      expect(extended.meta.vcsProbeFailed).toBeUndefined();
+      expect(extended.meta.noVcs).toBe(false);
+      expect(extended.meta.headSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(extended.meta.subtreeHash).toMatch(/^[0-9a-f]{40}$/);
+      expect(extended.meta.captureDegraded ?? []).toEqual([]);
+      expect(extended.callerNames).toEqual([caller]);
+      expect(extended.hashes['a.ts']).toBe(captured.hashes['a.ts']);
+    },
+  );
+
+  it('scopes the diff arm literally when the audited dir name carries glob syntax', () => {
+    // A raw pathspec fnmatch-expands a[b] onto the sibling 'ab'; the
+    // :(literal) magic keeps the capture scoped to the audited directory.
+    const repo = join(dir, 'repo-glob');
+    mkdirSync(join(repo, 'a[b]'), { recursive: true });
     git(['init', '-q'], repo);
-    writeFileSync(join(repo, 'a.ts'), 'const a = 1;\n');
+    writeFileSync(join(repo, 'a[b]', 'f.ts'), 'const f = 1;\n');
+    writeFileSync(join(repo, 'ab.ts'), 'const s = 1;\n');
     git(['add', '.'], repo);
-    git(['commit', '-m', 'first', '-q'], repo);
-    const repoPlan = buildFilesPlan(
-      repo,
-      repo,
+    git(['commit', '-m', 'init', '-q'], repo);
+    writeFileSync(join(repo, 'a[b]', 'f.ts'), 'const f = 2;\n'); // dirty
+    writeFileSync(join(repo, 'ab.ts'), 'const s = 2;\n'); // dirty sibling
+    const modPlan = buildFilesPlan(
+      join(repo, 'a[b]'),
+      join(repo, 'a[b]'),
       'medium',
-      collectAuditFiles(repo),
+      collectAuditFiles(join(repo, 'a[b]')),
     );
-    // Git is down at capture: the toplevel probe fails without an answer,
-    // so both arms AND the HEAD/subtree baselines are skipped.
-    const captured = withBrokenGit(() => captureSidecar(repoPlan, sidecarDir));
-    expect(captured.meta.vcsProbeFailed).toBe(true);
-    expect(captured.meta.noVcs).toBe(true);
-    expect(captured.meta.headSha).toBeUndefined();
-    expect(captured.meta.subtreeHash).toBeUndefined();
-    // Git recovers; the extend re-run (caller registration) is the only
-    // command that can retry — it must re-probe and re-capture the
-    // baselines and both arms against the preserved hash baselines.
-    const caller = join(repo, 'caller.ts');
-    writeFileSync(caller, 'call();\n');
-    const extended = captureSidecar(repoPlan, sidecarDir, [caller]);
-    expect(extended.meta.vcsProbeFailed).toBeUndefined();
-    expect(extended.meta.noVcs).toBe(false);
-    expect(extended.meta.headSha).toMatch(/^[0-9a-f]{40}$/);
-    expect(extended.meta.subtreeHash).toMatch(/^[0-9a-f]{40}$/);
-    expect(extended.meta.captureDegraded ?? []).toEqual([]);
-    expect(extended.callerNames).toEqual([caller]);
-    expect(extended.hashes['a.ts']).toBe(captured.hashes['a.ts']);
+    captureSidecar(modPlan, sidecarDir);
+    const diff = readFileSync(join(sidecarDir, 'diff.patch'), 'utf8');
+    expect(diff).toContain('a[b]/f.ts');
+    expect(diff).not.toContain('ab.ts');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO planted at sidecar.json instead of hanging the write',
+    () => {
+      const repo = join(dir, 'repo-fifo');
+      mkdirSync(repo, { recursive: true });
+      git(['init', '-q'], repo);
+      writeFileSync(join(repo, 'a.ts'), 'const a = 1;\n');
+      const repoPlan = buildFilesPlan(
+        repo,
+        repo,
+        'medium',
+        collectAuditFiles(repo),
+      );
+      mkdirSync(sidecarDir, { recursive: true });
+      execFileSync('mkfifo', [join(sidecarDir, 'sidecar.json')]);
+      // loadSidecar rejects the FIFO; the fresh-capture recovery must
+      // refuse the incumbent too — writeFileSync would open it O_WRONLY
+      // and block forever.
+      expect(() => captureSidecar(repoPlan, sidecarDir)).toThrow(
+        /not a regular file/,
+      );
+    },
+  );
 });

@@ -465,6 +465,21 @@ describe('collectAuditFiles', () => {
     expect(c.subjects.map((f) => f.path)).not.toContain('src/huge.ts');
   });
 
+  it('records an over-cap NUL binary as non-text with zero lines', () => {
+    // The NUL arm runs BEFORE the size cap: an over-cap binary must not
+    // steer the gate arms with its raw 0x0A count.
+    const chunk = `a\0${'b'.repeat(100)}\n`;
+    const overCap = 10 * 1024 * 1024 + chunk.length;
+    writeFileSync(
+      join(dir, 'src', 'huge-binary.ts'),
+      chunk.repeat(Math.ceil(overCap / chunk.length)),
+    );
+    const c = collectAuditFiles(dir);
+    const entry = c.uncoverable.find((u) => u.path === 'src/huge-binary.ts');
+    expect(entry?.reason).toBe('non-text');
+    expect(entry?.lines).toBe(0);
+  });
+
   it('detects an over-cap line as uncoverable with its lines counted', () => {
     writeFileSync(
       join(dir, 'src', 'bundle.ts'),
@@ -1035,6 +1050,7 @@ describe('git-backed checks', () => {
     delete env['GIT_WORK_TREE'];
     delete env['GIT_INDEX_FILE'];
     delete env['GIT_OBJECT_DIRECTORY'];
+    delete env['GIT_COMMON_DIR'];
     return execFileSync('git', args, { cwd, encoding: 'utf8', env });
   }
 
@@ -1084,6 +1100,37 @@ describe('git-backed checks', () => {
     expect(rootWalk.excludedDirs).toEqual([]);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'keeps a name-excluded directory excluded when the git probe has no answer',
+    () => {
+      // A no-answer probe (broken git, timeout) has established no
+      // tracking: the exclusion stands, fail-closed like the module's
+      // other guards — the old fail-open walked node_modules and every
+      // excluded dir on exactly the runs where nothing is verified.
+      const repo = join(dir, 'repo-noanswer');
+      mkdirSync(join(repo, 'node_modules', 'dep'), { recursive: true });
+      writeFileSync(
+        join(repo, 'node_modules', 'dep', 'index.js'),
+        'module.exports = 1;\n',
+      );
+      writeFileSync(join(repo, 'main.ts'), 'export const m = 1;\n');
+      const shimDir = join(dir, 'git-shim-noanswer');
+      mkdirSync(shimDir, { recursive: true });
+      writeFileSync(join(shimDir, 'git'), '#!/bin/sh\nexit 3\n');
+      chmodSync(join(shimDir, 'git'), 0o755);
+      const savedPath = process.env['PATH'];
+      process.env['PATH'] = `${shimDir}${delimiter}${savedPath ?? ''}`;
+      try {
+        const { files, excludedDirs } = walkAuditTree(repo);
+        expect(files).toContain('main.ts');
+        expect(files).not.toContain('node_modules/dep/index.js');
+        expect(excludedDirs).toContain('node_modules');
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
+    },
+  );
+
   it('never walks the audit artifact dirs, even under the tracked override', () => {
     // This repository itself tracks files under .qwen/: the override
     // descends into .qwen, but the command group's own artifact dirs must
@@ -1109,6 +1156,29 @@ describe('git-backed checks', () => {
     expect(excludedDirs).toEqual(
       expect.arrayContaining(['.qwen/audits', '.qwen/tmp']),
     );
+  });
+
+  it('refuses a root inside the artifact dirs or .git', () => {
+    // Auditing .qwen/tmp or .qwen/audits walks the previous run's
+    // findings and plan as subjects (self-contamination); a .git child
+    // walks git internals. The descent exclusion never fires for roots.
+    const repo = join(dir, 'repo-root-artifacts');
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    mkdirSync(join(repo, '.qwen', 'audits'), { recursive: true });
+    writeFileSync(join(repo, '.qwen', 'tmp', 'plan.json'), '{}');
+    writeFileSync(join(repo, '.qwen', 'audits', 'old.md'), '# old\n');
+    expect(walkAuditTree(join(repo, '.qwen', 'tmp'))).toMatchObject({
+      files: [],
+      excludedDirs: ['.'],
+    });
+    expect(walkAuditTree(join(repo, '.qwen', 'audits'))).toMatchObject({
+      files: [],
+      excludedDirs: ['.'],
+    });
+    expect(walkAuditTree(join(repo, '.git', 'hooks'))).toMatchObject({
+      files: [],
+      excludedDirs: ['.'],
+    });
   });
 
   it('still excludes a name-excluded directory git does not track', () => {
@@ -1450,6 +1520,27 @@ describe('git-backed checks', () => {
     } finally {
       if (saved === undefined) delete process.env['GIT_CEILING_DIRECTORIES'];
       else process.env['GIT_CEILING_DIRECTORIES'] = saved;
+    }
+  });
+
+  it('scrubs GIT_COMMON_DIR from the worktree probes', () => {
+    // An unusable ambient GIT_COMMON_DIR makes rev-parse exit 128 "not a
+    // git repository" inside a live worktree; without the scrub the guard
+    // reads git-failed instead of probing the real landing.
+    const repo = initRepo();
+    const foreign = join(dir, 'foreign-common-dir');
+    mkdirSync(foreign, { recursive: true });
+    const saved = process.env['GIT_COMMON_DIR'];
+    process.env['GIT_COMMON_DIR'] = foreign;
+    try {
+      const guard = checkLocalOnlyGuard(repo, 'x.md');
+      expect(guard.dirs.map((d) => d.status)).toEqual([
+        'unprotected',
+        'unprotected',
+      ]);
+    } finally {
+      if (saved === undefined) delete process.env['GIT_COMMON_DIR'];
+      else process.env['GIT_COMMON_DIR'] = saved;
     }
   });
 

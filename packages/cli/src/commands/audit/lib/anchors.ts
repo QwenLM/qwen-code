@@ -115,14 +115,20 @@ function normalizeLocation(raw: string): string {
   while (value.length >= 2 && value.startsWith('`') && value.endsWith('`')) {
     value = value.slice(1, -1).trim();
   }
-  return value
-    .replace(/\*{1,2}$/, '')
-    .replace(/\\/g, '/')
-    .replace(/^\.\//, '')
-    .replace(/#L\d+(?:-L?\d+)?$/i, '')
-    .replace(/\s+lines?\s+\d+(?:-\d+)?$/i, '')
-    .replace(/(?::\d+)+(?:-\d+)?$/, '')
-    .trim();
+  return (
+    value
+      .replace(/\*{1,2}$/, '')
+      // Trailing sentence punctuation (a prose citation ending 'unique.ts:1,')
+      // blocks the line-suffix peels below, and the unknown whole value would
+      // replace the correctly parsed fragment.
+      .replace(/[,;.]+$/, '')
+      .replace(/\\/g, '/')
+      .replace(/^\.\//, '')
+      .replace(/#L\d+(?:-L?\d+)?$/i, '')
+      .replace(/\s+lines?\s+\d+(?:-\d+)?$/i, '')
+      .replace(/(?::\d+)+(?:-\d+)?$/, '')
+      .trim()
+  );
 }
 
 /** The brief template instructs pairs to cite both locations on the one
@@ -134,6 +140,21 @@ function parseLocations(value: string): string[] {
     .split(/,|\s+and\s+/)
     .map(normalizeLocation)
     .filter((l) => l !== '');
+}
+
+/** The next non-blank line after a would-be terminator: only a recognized
+ *  field or finding header confirms the terminator is a real report field
+ *  and not a field-shaped line quoted inside an UNFENCED anchor. EOF
+ *  confirms — collection ends there anyway. */
+function nextLineFieldShaped(lines: string[], i: number): boolean {
+  for (let k = i + 1; k < lines.length; k++) {
+    const next = lines[k].trim();
+    if (next === '') continue;
+    return (
+      FINDING_RE.test(next) || FIELD_END_RE.test(next) || headerNetted(next)
+    );
+  }
+  return true;
 }
 
 /** Parse the finding blocks of a report draft: `### [sev] title` opens a
@@ -165,6 +186,11 @@ export function parseReportFindings(report: string): ReportFinding[] {
   // it (an indented finding block must still yield a matchable needle), and
   // only fields indented at or shallower terminate collection.
   let anchorIndent = 0;
+  // The collected anchor carried a fence pair: only then does a following
+  // second Location/Anchor pair read unambiguously as the author rewriting
+  // the block — an unfenced anchor cannot rule out the quoted-pair reading
+  // (a snippet quoting a prior round's fields).
+  let anchorFenced = false;
 
   const push = (): void => {
     if (!current) return;
@@ -243,6 +269,7 @@ export function parseReportFindings(report: string): ReportFinding[] {
     pendingLocations = null;
     inAnchor = false;
     inFence = false;
+    anchorFenced = false;
   };
 
   const handleField = (rawLine: string, trimmed: string): void => {
@@ -253,15 +280,24 @@ export function parseReportFindings(report: string): ReportFinding[] {
       // A well-formed finding carries exactly one Anchor field: a second
       // one starts over, whatever came between (a bare `- Location:` in
       // between turned collection off but must not merge the blocks).
-      if (current.anchorLines.length > 0) {
-        // The restart is confirmed — commit any held second Location with
-        // it (the pinned pair-wise rewrite shape), THEN reset.
-        if (pendingLocations) {
+      if (current.anchorLines.length > 0 && pendingLocations) {
+        // The restart is confirmed by the pair shape — a second Location
+        // preceded this second Anchor. An ISOLATED second Anchor (no held
+        // Location) is a quoted line, not a rewrite: it was dropped at
+        // termination and the original needle stands.
+        if (anchorFenced) {
+          // The fence pair shielded the first anchor's interior, so the
+          // pair is the author rewriting the block — commit it.
           current.locations = pendingLocations.locations;
           current.locationRaw = pendingLocations.raw;
-          pendingLocations = null;
+        } else {
+          // Unfenced: the quoted-pair reading cannot be ruled out, so
+          // neither binding may win — downgrade to fail-closed.
+          current.severity = '';
         }
+        pendingLocations = null;
         current.anchorLines = [];
+        anchorFenced = false;
       }
       inAnchor = true;
       const value = field[2].trim();
@@ -271,6 +307,7 @@ export function parseReportFindings(report: string): ReportFinding[] {
       inFence =
         value.startsWith('```') &&
         !(value.length >= 6 && value.endsWith('```'));
+      if (inFence) anchorFenced = true;
       anchorIndent = leadingIndent(rawLine);
       current.anchorLines.push(field[2].trimEnd());
     } else {
@@ -292,7 +329,8 @@ export function parseReportFindings(report: string): ReportFinding[] {
     }
   };
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     const line = raw.trim();
     const header = FINDING_RE.exec(line);
     if (header) {
@@ -315,11 +353,15 @@ export function parseReportFindings(report: string): ReportFinding[] {
       }
     }
     if (current && inAnchor) {
-      if (line.startsWith('```')) inFence = !inFence;
+      if (line.startsWith('```')) {
+        inFence = !inFence;
+        if (inFence) anchorFenced = true;
+      }
       if (
         !inFence &&
         FIELD_END_RE.test(line) &&
-        leadingIndent(raw) <= anchorIndent
+        leadingIndent(raw) <= anchorIndent &&
+        nextLineFieldShaped(lines, i)
       ) {
         inAnchor = false;
         // The terminating line is itself a field (the reordered
@@ -395,14 +437,35 @@ export function parseReportFindings(report: string): ReportFinding[] {
 
 /** One window of consecutive haystack lines against the needle, tolerating
  *  indent: the needle arrives dedented to column 0, while code quoted from
- *  an indented body keeps its indent in the file. The window base is the
- *  MINIMUM indent across its non-empty lines — the needle is dedented by
- *  its own minimum, so a snippet whose first quoted line sits deeper than
- *  the minimum must still match. Window lines compare right-trimmed (the
+ *  an indented body keeps its indent in the file. The window is dedented by
+ *  the MINIMUM indent across its non-empty lines, with the FIRST line's own
+ *  indent tried as a second base, so an occurrence whose first line sits
+ *  deeper than the rest still matches. Window lines compare right-trimmed (the
  *  needle's lines are right-trimmed at collection). The LAST needle line
  *  compares by prefix: an agent trimming a trailing comment when quoting
  *  (`const b = 2;` against `const b = 2; // TODO`) cites code that is
- *  present at the location. */
+ *  present at the location. The tolerance is BOUNDED — only whitespace or
+ *  a comment introducer may follow — or it fuses tokens (`const b = 2`
+ *  against `const b = 22;`), certifying a line that does not exist. */
+function windowMatchesWithBase(
+  hayLines: string[],
+  start: number,
+  needleLines: string[],
+  base: number,
+): boolean {
+  for (let j = 0; j < needleLines.length; j++) {
+    const windowLine = dedent(hayLines[start + j], base).trimEnd();
+    if (j === needleLines.length - 1) {
+      if (!windowLine.startsWith(needleLines[j])) return false;
+      const rest = windowLine.slice(needleLines[j].length);
+      if (rest !== '' && !/^(?:\s|\/\/|\/\*|#)/.test(rest)) return false;
+    } else if (windowLine !== needleLines[j]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function windowMatchesAt(
   hayLines: string[],
   start: number,
@@ -417,15 +480,15 @@ function windowMatchesAt(
     if (indent < base) base = indent;
   }
   if (base === Number.POSITIVE_INFINITY) base = leadingIndent(hayLines[start]);
-  for (let j = 0; j < needleLines.length; j++) {
-    const windowLine = dedent(hayLines[start + j], base).trimEnd();
-    const matches =
-      j === needleLines.length - 1
-        ? windowLine.startsWith(needleLines[j])
-        : windowLine === needleLines[j];
-    if (!matches) return false;
-  }
-  return true;
+  // The minimum-indent base covers uniformly indented occurrences; an
+  // occurrence whose FIRST line sits deeper than the minimum needs its
+  // own indent tried too, or it matches no base and escapes the count.
+  const firstIndent = leadingIndent(hayLines[start]);
+  return (
+    windowMatchesWithBase(hayLines, start, needleLines, base) ||
+    (firstIndent !== base &&
+      windowMatchesWithBase(hayLines, start, needleLines, firstIndent))
+  );
 }
 
 function countIndentTolerantMatches(
@@ -487,7 +550,7 @@ export function resolveAnchors(
       (finding.locationRaw ?? '')
         .split(/,|\s+and\s+/)
         .filter((fragment) => fragment.trim() !== '')
-        .every((fragment) => /:\d+/.test(fragment));
+        .every((fragment) => /(?::\d+|#L\d+)/i.test(fragment));
     const locations = wholeKnown
       ? [whole]
       : fragmentsLined
@@ -527,10 +590,9 @@ export function resolveAnchors(
         // Multi-line needles match indent-tolerantly: the needle is
         // dedented to column 0, so a snippet quoted from an indented body
         // must still resolve (a raw substring search would never find it).
-        // The window matcher's last-line prefix compare subsumes every
-        // line-start raw occurrence (the needle is present there verbatim,
-        // whole on every line but the last, prefix on the last); add only
-        // raw matches starting MID-line.
+        // The window matcher tries both the window-minimum and the first
+        // line's indent as bases, so it subsumes every line-start raw
+        // occurrence; add only raw matches starting MID-line.
         const needleLines = needle.split('\n');
         const hayLines = haystack.split('\n');
         locationMatches = countIndentTolerantMatches(hayLines, needleLines);

@@ -170,10 +170,11 @@ function dirHasTrackedFiles(dirAbs: string): boolean {
   if (basename(dirAbs) === '.git') return false;
   const probe = probeGit(dirAbs, ['ls-files', '--', dirAbs], GIT_TIMEOUT_MS);
   if (probe.ok) return probe.out.trim().length > 0;
-  // Git's definitive not-a-worktree answer lets the name heuristic stand;
-  // a FAILED probe has no answer, so walk instead of silently dropping a
-  // tracked directory the heuristic caught.
-  return !probe.notRepo;
+  // A probe without an answer (broken git, dubious ownership, timeout) has
+  // established no tracking: the name exclusion stands, fail-closed like
+  // the module's other guards — a fail-open here walked node_modules and
+  // every other excluded dir on exactly the runs where nothing is verified.
+  return false;
 }
 
 function isExcludedDirName(name: string, underVendor: boolean): boolean {
@@ -282,6 +283,19 @@ export function walkAuditTree(rootAbs: string): WalkResult {
     }
   } else {
     rootUnderVendor = toPosix(rootAbs).split('/').includes('vendor');
+  }
+  // A root INSIDE an artifact class is the same self-contamination from
+  // the other direction: auditing .qwen/tmp or .qwen/audits walks the
+  // previous run's findings and plan as subjects, and a .git child walks
+  // git internals — the descent exclusion above never fires for them.
+  const rootSegments = toPosix(rootAbs).split('/');
+  for (let i = 0; i < rootSegments.length; i++) {
+    const insideArtifacts =
+      rootSegments[i] === '.qwen' &&
+      (rootSegments[i + 1] === 'audits' || rootSegments[i + 1] === 'tmp');
+    if (insideArtifacts || (rootSegments[i] === '.git' && i > 0)) {
+      return { files, excludedDirs: ['.'], structuralUncoverable };
+    }
   }
   if (
     isExcludedDirName(basename(rootAbs), rootUnderVendor) &&
@@ -529,6 +543,15 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
       uncoverable.push({ path: relPath, kind, reason: 'unreadable', lines: 0 });
       continue;
     }
+    // NUL is scanned over the WHOLE content — a windowed scan let late-NUL
+    // binaries escape — and non-text entries record zero lines: raw 0x0A
+    // bytes are not code lines and must not steer the gate arms. Checked
+    // BEFORE the size cap so an over-cap binary records non-text/zero
+    // instead of its raw 0x0A count.
+    if (measured.hasNul) {
+      uncoverable.push({ path: relPath, kind, reason: 'non-text', lines: 0 });
+      continue;
+    }
     // Anchor resolution reads capped at AUDIT_READ_MAX_BYTES: a subject
     // over the cap is a citation target whose anchors can never resolve,
     // so the plan excludes it up front instead of refusing at write time.
@@ -539,13 +562,6 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
         reason: 'over-cap-bytes',
         lines: measured.lines,
       });
-      continue;
-    }
-    // NUL is scanned over the WHOLE content — a windowed scan let late-NUL
-    // binaries escape — and non-text entries record zero lines: raw 0x0A
-    // bytes are not code lines and must not steer the gate arms.
-    if (measured.hasNul) {
-      uncoverable.push({ path: relPath, kind, reason: 'non-text', lines: 0 });
       continue;
     }
     if (measured.maxLine > MAX_LINE_CHARS) {
@@ -604,17 +620,22 @@ export function collectAuditFiles(rootAbs: string): AuditCollection {
 /** GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE override `-C` path resolution, so
  *  an ambient value makes every probe answer against a foreign repository;
  *  strip them (plus GIT_OBJECT_DIRECTORY) so `-C` is the sole repository
- *  selector. GIT_CEILING_DIRECTORIES defeats repository discovery for a
- *  probe run from a subdirectory — the 128 reads as "definitively not a
- *  worktree" and every guard passes vacuously inside a live worktree.
- *  LC_ALL pins the C locale: probeGit matches git's ENGLISH fatal text,
- *  and git localizes it under an ambient locale. */
+ *  selector. GIT_COMMON_DIR is the same class: an unusable ambient value
+ *  makes rev-parse exit 128 "not a git repository" inside a live worktree,
+ *  and a valid foreign one re-homes --git-common-dir (the exclude remedy
+ *  would write a foreign repo's info/exclude). GIT_CEILING_DIRECTORIES
+ *  defeats repository discovery for a probe run from a subdirectory — the
+ *  128 reads as "definitively not a worktree" and every guard passes
+ *  vacuously inside a live worktree. LC_ALL pins the C locale: probeGit
+ *  matches git's ENGLISH fatal text, and git localizes it under an ambient
+ *  locale. */
 function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env['GIT_DIR'];
   delete env['GIT_WORK_TREE'];
   delete env['GIT_INDEX_FILE'];
   delete env['GIT_OBJECT_DIRECTORY'];
+  delete env['GIT_COMMON_DIR'];
   delete env['GIT_CEILING_DIRECTORIES'];
   env['LC_ALL'] = 'C';
   return env;
@@ -858,7 +879,9 @@ function guardDir(
         status: 'unprotected',
       };
     }
-    const rel = relative(realpathSync(gitRoot), target);
+    // toPosix: on Windows relative() emits '..\\other', which fails all
+    // three checks and would trap symlink-outside setups at exit 5 forever.
+    const rel = toPosix(relative(realpathSync(gitRoot), target));
     if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
       // The link points outside THIS worktree. ('..' alone or a leading
       // '../' — a repo-relative name that merely STARTS with '..' is a
@@ -940,6 +963,38 @@ export function auditTimestamp(date: Date): string {
   );
 }
 
+/** The artifact name shapes a guard must probe for one timestamp: the
+ *  dated report form and the sidecar under .qwen/audits, and one
+ *  representative per tmp artifact class — check-ignore answers per path
+ *  name and re-includes can be name-selective, so every shape written is
+ *  a shape probed. Shared with guard-check's fallback-landing probes: the
+ *  relocation lands this same set at the fallback root. */
+export function guardProbeShapes(
+  reportFileName: string,
+  ts: string,
+): { audits: string[]; tmp: string[] } {
+  return {
+    audits: [`${ts}-${reportFileName}`, `audit-${ts}.sidecar`],
+    tmp: [
+      `audit-args-${ts}.json`,
+      `audit-raw-args-${ts}.txt`,
+      `audit-plan-${ts}.json`,
+      `audit-callers-${ts}.json`,
+      // The report draft (Step 7's check-anchors input) carries every
+      // finding's verbatim anchor snippets; SKILL.md pins its name.
+      `audit-draft-${ts}.md`,
+      // One representative per findings shape the skill writes: the
+      // low-tier reader plus every roster role of the high tier (which
+      // contains the medium roster), plus the reserved specialist shape
+      // (SKILL.md constrains specialist findings to it).
+      ...['low', ...rosterForEffort('high')].map(
+        (role) => `audit-findings-${role}-${ts}.md`,
+      ),
+      `audit-findings-specialist-01-${ts}.md`,
+    ],
+  };
+}
+
 /** Probe both module-derived directories (.qwen/audits, .qwen/tmp) so the
  *  report, plan, and prompt records can never land in version control.
  *  Probes use the name shapes actually written, ALL carrying the CURRENT
@@ -954,6 +1009,7 @@ export function checkLocalOnlyGuard(
 ): GuardReport {
   const geometry = gitGeometry(projectRoot);
   const ts = auditTimestamp(new Date());
+  const shapes = guardProbeShapes(reportFileName, ts);
   // Runs are hours-long: the report is written at write time, so its
   // date can legitimately roll past the probe instant — probe the next
   // calendar date's report shape too.
@@ -964,27 +1020,10 @@ export function checkLocalOnlyGuard(
   return {
     dirs: [
       guardDir(projectRoot, geometry, AUDITS_DIR, [
-        `${ts}-${reportFileName}`,
+        ...shapes.audits,
         `${nextDate}-000000-${reportFileName}`,
-        `audit-${ts}.sidecar`,
       ]),
-      guardDir(projectRoot, geometry, AUDIT_TMP_DIR, [
-        `audit-args-${ts}.json`,
-        `audit-raw-args-${ts}.txt`,
-        `audit-plan-${ts}.json`,
-        `audit-callers-${ts}.json`,
-        // The report draft (Step 7's check-anchors input) carries every
-        // finding's verbatim anchor snippets; SKILL.md pins its name.
-        `audit-draft-${ts}.md`,
-        // One representative per findings shape the skill writes: the
-        // low-tier reader plus every roster role of the high tier (which
-        // contains the medium roster), plus the reserved specialist shape
-        // (SKILL.md constrains specialist findings to it).
-        ...['low', ...rosterForEffort('high')].map(
-          (role) => `audit-findings-${role}-${ts}.md`,
-        ),
-        `audit-findings-specialist-01-${ts}.md`,
-      ]),
+      guardDir(projectRoot, geometry, AUDIT_TMP_DIR, shapes.tmp),
     ],
     fallbackRoot: Storage.getAuditFallbackDir(projectRoot),
   };

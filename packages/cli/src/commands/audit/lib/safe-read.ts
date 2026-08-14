@@ -11,14 +11,7 @@
 // content read — the same discipline walkAuditTree and recordCaller apply.
 
 import { createHash } from 'node:crypto';
-import {
-  closeSync,
-  fstatSync,
-  openSync,
-  readFileSync,
-  readSync,
-  constants,
-} from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync, constants } from 'node:fs';
 
 /** Far beyond any honest plan JSON or gate-bounded source file, far below
  *  an OOM. */
@@ -53,6 +46,20 @@ export function streamSha256(abs: string): string | undefined {
   }
 }
 
+/** Read an already-open fd into a buffer sized by `cap`, never past it: a
+ *  file that grows between the caller's gate and the read stops at the
+ *  buffer's bound instead of reading to EOF. */
+export function readFdCapped(fd: number, cap: number): Buffer {
+  const buf = Buffer.allocUnsafe(cap);
+  let off = 0;
+  while (off < cap) {
+    const read = readSync(fd, buf, off, cap - off, null);
+    if (read <= 0) break;
+    off += read;
+  }
+  return buf.subarray(0, off);
+}
+
 /** Read a regular file, capped. Returns null for a path that is missing,
  *  not a regular file (FIFO / device / directory), or over the cap.
  *  O_NONBLOCK keeps even an open() raced onto a FIFO from hanging. */
@@ -66,7 +73,11 @@ export function readGuarded(abs: string, maxBytes: number): Buffer | null {
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.size > maxBytes) return null;
-    return readFileSync(fd);
+    // The cap is a point-in-time fstat check; reading to EOF would let
+    // growth between the check and the read exceed maxBytes arbitrarily
+    // (the audited agent writes the very files being read). The buffer is
+    // sized from the gate, so the read can never pass it.
+    return readFdCapped(fd, Math.min(st.size, maxBytes));
   } catch {
     return null;
   } finally {

@@ -318,16 +318,95 @@ const y = x;
     const headerless = [
       '### [Critical] doubled',
       '- Location: dup.ts:1',
-      '- Anchor: const x = 1;',
+      '- Anchor: ```',
+      'const x = 1;',
+      '```',
       '- Location: unique.ts:1',
       '- Anchor: export const uniqueToken = 42;',
     ].join('\n');
     const findings = parseReportFindings(headerless);
     expect(findings).toHaveLength(1);
-    // The second pair wins whole — no merged location, no concatenated
-    // anchor bleeding across blocks.
+    // The second pair wins whole — the fence-wrapped first anchor shields
+    // its interior, so the second pair is a confirmed pair-wise rewrite:
+    // no merged location, no concatenated anchor bleeding across blocks.
     expect(findings[0].locations).toEqual(['unique.ts']);
     expect(findings[0].anchor).toBe('export const uniqueToken = 42;');
+  });
+
+  it('fails closed when an UNFENCED anchor is followed by a second pair', () => {
+    // An unfenced anchor cannot rule out the quoted-pair reading (a
+    // snippet quoting a prior round's fields), so neither binding may
+    // win: the block downgrades instead of silently rebinding.
+    const quoted = [
+      '### [Critical] quoted pair',
+      '- Location: dup.ts:1',
+      '- Anchor: the previous round said',
+      '- Location: unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(quoted);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe('');
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
+  });
+
+  it('does not leak the fence state into the next block', () => {
+    // A fenced FIRST finding must not certify an UNFENCED second block's
+    // pair-wise rebind: the quoted-pair reading is open again there.
+    const two = [
+      '### [Critical] fenced first',
+      '- Location: dup.ts:1',
+      '- Anchor: ```',
+      'const x = 1;',
+      '```',
+      '- Issue: a',
+      '',
+      '### [Critical] unfenced second',
+      '- Location: dup.ts:1',
+      '- Anchor: the previous round said',
+      '- Location: unique.ts:1',
+      '- Anchor: export const uniqueToken = 42;',
+    ].join('\n');
+    const findings = parseReportFindings(two);
+    expect(findings).toHaveLength(2);
+    expect(findings[1].severity).toBe('');
+    expect(resolveAnchors(findings, plan)[1].verdict).toBe('unresolved');
+  });
+
+  it('does not restart on an isolated quoted second Anchor line', () => {
+    // No held second Location precedes it, so the line is a quote, not a
+    // rewrite: the original anchor stands (and fails to resolve) instead
+    // of rebinding onto the quoted content.
+    const quoted = [
+      '### [Critical] isolated quote',
+      '- Location: dup.ts:1',
+      '- Anchor: the other finding read',
+      '- Anchor: const x = 1;',
+    ].join('\n');
+    const findings = parseReportFindings(quoted);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].anchor).toContain('the other finding read');
+    expect(findings[0].locations).toEqual(['dup.ts']);
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
+  });
+
+  it('keeps collecting past a quoted column-0 field line followed by content', () => {
+    // The field-shaped line is followed by a non-field line, so it is a
+    // quote inside the anchor, not the finding's next field: truncating
+    // there could certify the misquoted snippet tail.
+    const quoted = [
+      '### [Critical] quoted issue line',
+      '- Location: dup.ts:1',
+      '- Anchor: const x = 1;',
+      '- Issue: quoted line',
+      'const y = x;',
+    ].join('\n');
+    const findings = parseReportFindings(quoted);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].anchor).toBe(
+      'const x = 1;\n- Issue: quoted line\nconst y = x;',
+    );
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('unresolved');
   });
 
   it('resolves a pair whose anchor binds exactly once at each end', () => {
@@ -983,5 +1062,80 @@ describe('resolveAnchors', () => {
     expect(resolveAnchors(findings, ephemeralPlan)[0].verdict).toBe(
       'unresolved',
     );
+  });
+
+  it('grades a last-line token fusion unresolved', () => {
+    // The prefix tolerance exists for a dropped trailing comment; an
+    // unbounded startsWith fuses tokens and certifies a final line that
+    // does not exist in the file ('const b = 2' into 'const b = 22;').
+    writeFileSync(
+      join(dir, 'fuse.ts'),
+      'const a = 1;\nconst b = 22;\nreturn x2;\n',
+    );
+    const fusePlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [
+        {
+          title: 'fused',
+          severity: 'Critical',
+          locations: ['fuse.ts'],
+          anchor: 'const a = 1;\nconst b = 2',
+        },
+        {
+          title: 'fused return',
+          severity: 'Critical',
+          locations: ['fuse.ts'],
+          anchor: 'const b = 22;\nreturn x',
+        },
+      ],
+      fusePlan,
+    );
+    expect(results[0].verdict).toBe('unresolved');
+    expect(results[1].verdict).toBe('unresolved');
+  });
+
+  it('counts an occurrence whose first line sits deeper than the window minimum', () => {
+    // The window matcher's base is the window minimum, so an occurrence
+    // with an indented FIRST line matches neither matcher unless the raw
+    // loop counts it — two occurrences must grade ambiguous, not resolved.
+    writeFileSync(join(dir, 'deep.ts'), 'alpha\nbeta\n alpha\nbeta\n');
+    const deepPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const result = resolveAnchors(
+      [
+        {
+          title: 'deep first line',
+          severity: 'Critical',
+          locations: ['deep.ts'],
+          anchor: 'alpha\nbeta',
+        },
+      ],
+      deepPlan,
+    )[0];
+    expect(result.verdict).toBe('ambiguous');
+    expect(result.matchCount).toBe(2);
+  });
+
+  it('peels trailing sentence punctuation before the line suffix', () => {
+    // A prose citation ending 'unique.ts:1,' must bind like the unpunctuated
+    // form instead of grading the unknown whole value out-of-scope.
+    const findings = parseReportFindings(
+      '### [Critical] trailing comma\n- Location: unique.ts:1,\n- Anchor: export const uniqueToken = 42;\n',
+    );
+    expect(findings[0].locations).toEqual(['unique.ts']);
+    expect(resolveAnchors(findings, plan)[0].verdict).toBe('resolved');
+  });
+
+  it('resolves a pair cited in the GitHub #L form', () => {
+    writeFileSync(join(dir, 'dup2.ts'), 'const x = 1;\n');
+    const pairPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const findings = parseReportFindings(
+      [
+        '### [Critical] github pair',
+        '- Location: dup.ts#L1, dup2.ts#L1',
+        '- Anchor: const x = 1;',
+      ].join('\n'),
+    );
+    expect(findings[0].locations).toEqual(['dup.ts', 'dup2.ts']);
+    expect(resolveAnchors(findings, pairPlan)[0].verdict).toBe('resolved');
   });
 });

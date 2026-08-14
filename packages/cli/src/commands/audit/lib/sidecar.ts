@@ -16,9 +16,9 @@ import {
   constants,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
@@ -26,6 +26,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { probeGit, runGit, type FilesPlan } from './files-plan.js';
 import {
   AUDIT_READ_MAX_BYTES,
+  readFdCapped,
   readGuarded,
   streamSha256,
 } from './safe-read.js';
@@ -149,7 +150,9 @@ function copyGuarded(src: string, dest: string, maxBytes: number): void {
     if (!st.isFile() || st.size > maxBytes) {
       throw new Error('not a copyable regular file');
     }
-    writeFileSync(dest, readFileSync(fd));
+    // Bounded like readGuarded: growth between the gate and the read must
+    // not land a copy larger than maxBytes.
+    writeFileSync(dest, readFdCapped(fd, Math.min(st.size, maxBytes)));
   } finally {
     closeSync(fd);
   }
@@ -166,9 +169,15 @@ function captureDiffArm(
   sidecarDir: string,
   headUnborn: boolean,
 ): boolean {
+  // :(literal): the audited directory name is user/repository-controlled —
+  // a raw pathspec fnmatch-expands */[...]/? in it and pulls sibling dirt
+  // into the capture (the magic already used by files-plan's ls-files).
+  const literalRoot = `:(literal)${rootAbs}`;
   const diff = git(
     rootAbs,
-    headUnborn ? ['diff', '--', rootAbs] : ['diff', 'HEAD', '--', rootAbs],
+    headUnborn
+      ? ['diff', '--', literalRoot]
+      : ['diff', 'HEAD', '--', literalRoot],
   );
   if (diff === null) return false;
   if (diff.length > 0) {
@@ -191,7 +200,13 @@ function captureUntrackedArm(
     ...plan.subjectFiles.map((f) => f.path),
     ...plan.testCorpus.map((f) => f.path),
   ]);
-  const others = git(rootAbs, ['ls-files', '-z', '--others', '--', rootAbs]);
+  const others = git(rootAbs, [
+    'ls-files',
+    '-z',
+    '--others',
+    '--',
+    `:(literal)${rootAbs}`,
+  ]);
   if (others === null) return false;
   const listed = others.split('\0').filter((p) => p.length > 0);
   // A collapsed trailing-/ entry is a nested git repository: expand it
@@ -230,6 +245,24 @@ function captureUntrackedArm(
   // failures still received hash baselines above the arm, so drift
   // alignment survives — the marker covers the archived evidence set.)
   return failed === 0;
+}
+
+/** Write sidecar.json behind a regular-file gate: a writer-less FIFO at
+ *  the path blocks writeFileSync's open forever, and this write is exactly
+ *  where loadSidecar's friendly error sends the orchestrator — the hang
+ *  would greet every retry of the prescribed remedy. */
+function writeSidecarJson(path: string, sidecar: Sidecar): void {
+  try {
+    if (!lstatSync(path).isFile()) {
+      throw new Error(
+        `audit: sidecar ${path} is not a regular file — remove it and ` +
+          're-run `qwen audit snapshot`.',
+      );
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  writeFileSync(path, JSON.stringify(sidecar, null, 2), 'utf8');
 }
 
 /** Capture the run-start sidecar: the path-scoped diff, the untracked
@@ -324,7 +357,7 @@ export function captureSidecar(
           existing.meta.captureDegraded = still.length > 0 ? still : undefined;
         }
       }
-      writeFileSync(existingPath, JSON.stringify(existing, null, 2), 'utf8');
+      writeSidecarJson(existingPath, existing);
       return existing;
     } catch {
       // A capture killed mid-write leaves a truncated sidecar.json; without
@@ -406,11 +439,7 @@ export function captureSidecar(
     callerNames: [...new Set(callerPaths)],
     uncoverableNames: plan.uncoverable.map((u) => u.path),
   };
-  writeFileSync(
-    join(sidecarDir, 'sidecar.json'),
-    JSON.stringify(sidecar, null, 2),
-    'utf8',
-  );
+  writeSidecarJson(join(sidecarDir, 'sidecar.json'), sidecar);
   return sidecar;
 }
 
@@ -434,15 +463,18 @@ export interface DriftReport {
   subtreeUnknown?: boolean;
 }
 
+/** Far beyond any honest sidecar JSON — the plan's gates bound the walked
+ *  set this artifact scales with — far below an OOM: a planted multi-GB
+ *  sidecar.json must hit the over-cap branch and the friendly re-run
+ *  error, not memory. */
+const SIDECAR_READ_MAX_BYTES = 64 * 1024 * 1024;
+
 export function loadSidecar(sidecarDir: string): Sidecar {
   const file = join(sidecarDir, 'sidecar.json');
   // Guarded read: the sidecar path is orchestrator-handled — a writer-less
-  // FIFO in its place must not hang every downstream command. The size
-  // cap does NOT apply: this artifact is written by this same module and
-  // scales with the enumeration, so a capped read would produce a sidecar
-  // a large audit can never load again (every re-run looping on the same
-  // oversized write). The FIFO/regular-file protection stays.
-  const content = readGuarded(file, Number.POSITIVE_INFINITY);
+  // FIFO in its place must not hang every downstream command, and the
+  // audited agent can swap the file, so the read stays size-bounded.
+  const content = readGuarded(file, SIDECAR_READ_MAX_BYTES);
   if (content === null) {
     throw new Error(
       `audit: cannot read sidecar ${file} — re-run \`qwen audit snapshot\`.`,

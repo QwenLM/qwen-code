@@ -11,9 +11,10 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { basename, delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Storage } from '@qwen-code/qwen-code-core';
 import { guardCheckCommand, guardTripped } from './guard-check.js';
@@ -279,6 +280,71 @@ describe('guardCheckCommand handler', () => {
       }
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not credit a symlinked plan: the original stays committable',
+    () => {
+      writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
+      const fallback = Storage.getAuditFallbackDir(repo);
+      const planTime = report('unprotected', 'unprotected');
+      planTime.fallbackRoot = fallback;
+      // The plan "lands" at the fallback only as a symlink; its target
+      // remains where it can be committed.
+      const original = join(repo, 'plan.json');
+      writeFileSync(original, JSON.stringify({ guard: planTime }));
+      const linked = join(fallback, 'plan.json');
+      symlinkSync(original, linked);
+      run({ reportSlug: 'mod', plan: linked });
+      expect(process.exitCode).toBe(5);
+    },
+  );
+
+  it('does not credit a copied plan whose original remains in .qwen/tmp', () => {
+    writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
+    const fallback = Storage.getAuditFallbackDir(repo);
+    const planTime = report('unprotected', 'unprotected');
+    planTime.fallbackRoot = fallback;
+    // A killed mid-relocation leaves the original under .qwen/tmp while a
+    // copy sits at the fallback: the stageable original voids the credit.
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    const original = join(
+      repo,
+      '.qwen',
+      'tmp',
+      'audit-plan-2026-08-13-120000.json',
+    );
+    const body = JSON.stringify({ guard: planTime });
+    writeFileSync(original, body);
+    const copied = join(fallback, 'audit-plan-2026-08-13-120000.json');
+    writeFileSync(copied, body);
+    run({ reportSlug: 'mod', plan: copied });
+    expect(process.exitCode).toBe(5);
+  });
+
+  it('does not credit a relocation when a tmp shape is re-included at the landing', () => {
+    // The relocation lands the whole tmp class at the fallback root; a
+    // name-selective re-include of ONE shape must void the credit even
+    // when the probed report and sidecar shapes stay ignored.
+    const fallback = Storage.getAuditFallbackDir(repo);
+    const hash = basename(fallback);
+    writeFileSync(
+      join(repo, '.gitignore'),
+      [
+        'qwen-home/*',
+        '!qwen-home/audits/',
+        'qwen-home/audits/*',
+        `!qwen-home/audits/${hash}/`,
+        `qwen-home/audits/${hash}/*`,
+        `!qwen-home/audits/${hash}/audit-findings-specialist-01-*.md`,
+      ].join('\n'),
+    );
+    const planTime = report('unprotected', 'unprotected');
+    planTime.fallbackRoot = fallback;
+    const relocatedPlan = join(fallback, 'plan.json');
+    writeFileSync(relocatedPlan, JSON.stringify({ guard: planTime }));
+    run({ reportSlug: 'mod', plan: relocatedPlan });
+    expect(process.exitCode).toBe(5);
+  });
 
   it('probes the plan’s own reportSlug over the agent-transcribed argv slug', () => {
     // A name-selective re-include keyed on the REAL slug stays invisible

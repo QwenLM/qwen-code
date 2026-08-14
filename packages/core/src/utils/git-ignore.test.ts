@@ -46,6 +46,7 @@ describe('isGitIgnored', () => {
     delete initEnv['GIT_WORK_TREE'];
     delete initEnv['GIT_OBJECT_DIRECTORY'];
     delete initEnv['GIT_INDEX_FILE'];
+    delete initEnv['GIT_COMMON_DIR'];
     execFileSync('git', ['init', '-q'], { cwd: dir, env: initEnv });
     // A genuinely repo-less location: a sibling temp dir the repo walk
     // cannot reach. (A subdirectory of the repo would let git walk up and
@@ -123,6 +124,25 @@ describe('isGitIgnored', () => {
       }
     });
   }
+
+  it('answers for the -C worktree even when GIT_COMMON_DIR points elsewhere', () => {
+    // GIT_COMMON_DIR selects where check-ignore resolves info/exclude and
+    // config, so the foreign rule must sit in the foreign COMMON DIR's
+    // info/exclude (a worktree .gitignore would not reach through it).
+    const foreign = mkdtempSync(join(tmpdir(), 'git-ignore-common-'));
+    execFileSync('git', ['init', '-q'], { cwd: foreign });
+    mkdirSync(join(foreign, '.git', 'info'), { recursive: true });
+    writeFileSync(join(foreign, '.git', 'info', 'exclude'), '.qwen/\n');
+    const saved = process.env['GIT_COMMON_DIR'];
+    process.env['GIT_COMMON_DIR'] = join(foreign, '.git');
+    try {
+      expect(isGitIgnored(dir, '.qwen/audits/x.md')).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env['GIT_COMMON_DIR'];
+      else process.env['GIT_COMMON_DIR'] = saved;
+      rmSync(foreign, { recursive: true, force: true });
+    }
+  });
 
   // ':' is a reserved Win32 filename character, so the fixture directory
   // cannot be created on Windows.
