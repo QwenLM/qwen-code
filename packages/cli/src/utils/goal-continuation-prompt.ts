@@ -5,6 +5,7 @@
  */
 
 import type { GoalTurnPermit } from '@qwen-code/qwen-code-core';
+import type { Part } from '@google/genai';
 
 export interface GoalContinuationPromptInput {
   permit: Pick<GoalTurnPermit, 'goalId' | 'revision'>;
@@ -43,4 +44,22 @@ export function renderGoalContinuationPrompt(
       ? [`Verifier feedback: ${input.verifierFeedback}`]
       : []),
   ].join('\n');
+}
+
+export function buildGoalContinuationParts(turn: {
+  permit: Pick<GoalTurnPermit, 'goalId' | 'revision'>;
+  continuationContext: string;
+  verifierFeedback?: string;
+}): Part[] {
+  return [
+    {
+      text: renderGoalContinuationPrompt({
+        permit: turn.permit,
+        objective: turn.continuationContext,
+        ...(turn.verifierFeedback
+          ? { verifierFeedback: turn.verifierFeedback }
+          : {}),
+      }),
+    },
+  ];
 }

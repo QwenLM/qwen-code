@@ -15477,6 +15477,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          verifierFeedback: 'Verifier rejected: missing evidence',
         });
 
         await vi.waitFor(() => {
@@ -15499,6 +15500,20 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordGoalRuntimeMessage,
         ).toHaveBeenCalledWith(expect.any(Array), permit);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          currentModel,
+          expect.objectContaining({
+            message: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Verifier feedback: Verifier rejected: missing evidence',
+                ),
+              }),
+            ]),
+          }),
+          expect.any(String),
+          permit,
+        );
         expect(
           mockChatRecordingService.recordUserMessage,
         ).not.toHaveBeenCalled();

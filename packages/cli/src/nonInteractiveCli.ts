@@ -93,7 +93,7 @@ import {
   subscribeToHeadlessChatRecordingFailures,
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
-import { renderGoalContinuationPrompt } from './utils/goal-continuation-prompt.js';
+import { buildGoalContinuationParts } from './utils/goal-continuation-prompt.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
@@ -228,20 +228,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: HeadlessGoalTurn): Part[] {
-  return [
-    {
-      text: renderGoalContinuationPrompt({
-        permit: turn.permit,
-        objective: turn.continuationContext,
-        ...(turn.verifierFeedback
-          ? { verifierFeedback: turn.verifierFeedback }
-          : {}),
-      }),
-    },
-  ];
 }
 
 function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {

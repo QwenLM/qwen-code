@@ -278,7 +278,7 @@ import {
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { renderGoalContinuationPrompt } from '../../utils/goal-continuation-prompt.js';
+import { buildGoalContinuationParts } from '../../utils/goal-continuation-prompt.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
@@ -491,20 +491,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
-  return [
-    {
-      text: renderGoalContinuationPrompt({
-        permit: turn.permit,
-        objective: turn.continuationContext,
-        ...(turn.verifierFeedback
-          ? { verifierFeedback: turn.verifierFeedback }
-          : {}),
-      }),
-    },
-  ];
 }
 
 async function claimGoalTurn(

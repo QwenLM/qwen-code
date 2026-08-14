@@ -682,6 +682,16 @@ describe('runNonInteractive', () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('paused');
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            verifierFeedback: 'Verifier rejected: missing evidence',
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
     mockFinishedGoalWorker();
 
     await runNonInteractive(
@@ -695,6 +705,9 @@ describe('runNonInteractive', () => {
     const [parts, , , options] =
       mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain(
+      'Verifier feedback: Verifier rejected: missing evidence',
+    );
     expect(parts[0]?.text).toContain(
       JSON.stringify({
         goalId: options.goalPermit.goalId,
