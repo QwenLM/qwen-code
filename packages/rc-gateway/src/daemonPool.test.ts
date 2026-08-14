@@ -428,7 +428,7 @@ describe('DaemonPool', () => {
     );
   });
 
-  it('also prunes on a client_evicted frame (best-effort terminal signal)', async () => {
+  it('does NOT prune on a client_evicted frame -- it describes stream liveness, not session liveness', async () => {
     let t = 0;
     async function* evictedEvents(): AsyncGenerator<DaemonEvent> {
       yield {
@@ -452,9 +452,17 @@ describe('DaemonPool', () => {
     for await (const _ev of pool.subscribeEvents(s.sessionId)) {
       /* drain */
     }
+    // The session should still be considered live -- client_evicted only
+    // means THIS stream got dropped, not that the daemon session ended --
+    // so reapIdle must NOT reclaim the entry even past idleReapMs, and the
+    // session id must still resolve.
     t = 5000;
     pool.reapIdle();
-    expect(pool.size()).toBe(0);
+    expect(pool.size()).toBe(1);
+    const ctx = (await pool.sessionContext(s.sessionId)) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('/proj/a');
   });
 
   it('does not evict an entry mid-createOrAttachSession; the pending reservation protects it from a concurrent cap eviction', async () => {

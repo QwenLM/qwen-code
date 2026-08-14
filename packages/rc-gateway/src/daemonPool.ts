@@ -292,24 +292,17 @@ export class DaemonPool {
    * type === 'session_closed'`) — so both reliably mean the daemon session
    * itself ended; pruning on them lets the entry become reapable.
    *
-   * `client_evicted` is included too, but it is NOT one of those terminals:
-   * `daemon/events.ts`'s own doc on `DaemonSessionViewState.alive` says
-   * plainly "For client_evicted and stream_error this only describes the
-   * current stream, not the remote daemon session's lifetime." Pruning on
-   * it is a known-imprecise trade-off, kept only because the pool has no
-   * other lifecycle hook for a session it isn't actively watching: without
-   * *something* here, a crashed/unreachable session's id can stay in
-   * `sessions` forever and wedge the pool at `WorkspacePoolFullError`
-   * (`reapIdle`/`evictLruIdle` gate on `sessions.size === 0`). The
-   * documented risk of keeping `client_evicted` here: a slow SSE consumer
-   * gets evicted from ITS OWN stream while the session is still alive on
-   * the daemon; this prunes the id anyway, so the client's reconnect gets
-   * `UnknownSessionError` (404) instead of resuming, and — worse — the
-   * entry can look idle and later get reaped, stopping a still-live
-   * daemon session out from under any other attached client. Recommend
-   * dropping `client_evicted` from this condition (handle `session_died` /
-   * `session_closed` only) unless a client is expected to treat eviction
-   * as terminal anyway.
+   * `client_evicted` is deliberately NOT included here, despite also being
+   * a stream-terminal frame. `daemon/events.ts`'s own doc on
+   * `DaemonSessionViewState.alive` says plainly: "For client_evicted and
+   * stream_error this only describes the current stream, not the remote
+   * daemon session's lifetime." Pruning on it would be actively wrong: a
+   * slow SSE consumer can get evicted from ITS OWN stream while the
+   * session is still alive on the daemon (and possibly still attached to
+   * OTHER clients); treating that as session-terminal would drop the id
+   * from tracking and let `reapIdle`/`evictLruIdle` reclaim (and `stop()`)
+   * a daemon that is still serving a live session out from under those
+   * other clients — worse than the wedge this pruning exists to prevent.
    */
   async *subscribeEvents(
     sessionId: string,
@@ -317,11 +310,7 @@ export class DaemonPool {
   ): AsyncGenerator<DaemonEvent> {
     const client = this.daemonForSession(sessionId);
     for await (const event of client.subscribeEvents(sessionId, opts)) {
-      if (
-        event.type === 'session_died' ||
-        event.type === 'session_closed' ||
-        event.type === 'client_evicted'
-      ) {
+      if (event.type === 'session_died' || event.type === 'session_closed') {
         this.removeSession(sessionId);
       }
       yield event;
