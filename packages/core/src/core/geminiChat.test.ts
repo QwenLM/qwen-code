@@ -6653,6 +6653,52 @@ describe('GeminiChat', async () => {
       });
     });
 
+    it('should not yield a split placeholder tail when the stream errors before any yield', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [{ content: { parts: [{ text: '(request ' }] } }],
+          } as unknown as GenerateContentResponse;
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'timeout)' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw new Error('stream failed');
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-split-placeholder-error-path',
+      );
+      const events: StreamEvent[] = [];
+      await expect(
+        (async () => {
+          for await (const event of stream) {
+            events.push(event);
+          }
+        })(),
+      ).rejects.toThrow('stream failed');
+
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.some((part) =>
+              part.text?.includes('timeout)'),
+            ),
+        ),
+      ).toBe(false);
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'test' }] },
+      ]);
+    });
+
     it('should yield a deferred function call before surfacing a stream error', async () => {
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         (async function* () {

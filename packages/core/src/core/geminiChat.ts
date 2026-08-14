@@ -4549,22 +4549,6 @@ export class GeminiChat {
     let pendingDegradedPlaceholderChunks: GenerateContentResponse[] = [];
     // Fresh attempt: clear any handoff a previous attempt's error path staged.
     this.pendingHeldPlaceholderText = '';
-    const isDegradedPlaceholderPrefixChunk = (
-      chunk: GenerateContentResponse,
-    ) => {
-      const parts =
-        chunk.candidates?.flatMap(
-          (candidate) => candidate.content?.parts ?? [],
-        ) ?? [];
-      if (parts.some((part) => part.functionCall !== undefined)) return false;
-      return isDegradedPlaceholderPrefix(
-        parts
-          .filter((part) => !part.thought && part.text)
-          .map((part) => part.text)
-          .join(''),
-      );
-    };
-
     try {
       for await (const chunk of streamResponse) {
         const preparations = getToolCallPreparations(chunk);
@@ -4799,11 +4783,25 @@ export class GeminiChat {
       streamError = e;
     }
     if (streamError !== null) {
-      if (
-        deferredFirstChunk &&
-        !isDegradedPlaceholderPrefixChunk(deferredFirstChunk)
-      ) {
-        yieldedAnyChunk = true;
+      // Judge the deferred chunk against the ACCUMULATED attempt text — the
+      // same expression the in-loop hold uses — rather than in isolation: a
+      // placeholder split into a held prefix and a finishReason-bearing tail
+      // ('(request ' + 'timeout)') fails a per-chunk prefix check on the tail
+      // alone, which would leak the fragment to consumers and scramble the
+      // continuation handoff below. While the accumulation is still a
+      // placeholder prefix no chunk can have been yielded inline (divergence
+      // is irreversible), so the accumulated text is exactly held + deferred,
+      // in delivery order.
+      const accumulatedText = allModelParts
+        .filter((part) => !part.thought && part.text)
+        .map((part) => part.text)
+        .join('')
+        .trim();
+      const deferredIsPlaceholderBound =
+        deferredFirstChunk !== null &&
+        !hasToolCall &&
+        isDegradedPlaceholderPrefix(accumulatedText);
+      if (deferredFirstChunk && !deferredIsPlaceholderBound) {
         yield deferredFirstChunk;
       }
       deferredFirstChunk = null;
@@ -4821,8 +4819,11 @@ export class GeminiChat {
           getPlainTextFromParts(chunk.candidates?.[0]?.content?.parts),
         )
         .join('');
+      const handoffText = deferredIsPlaceholderBound
+        ? accumulatedText
+        : heldText;
       this.pendingHeldPlaceholderText =
-        heldText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER ? '' : heldText;
+        handoffText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER ? '' : handoffText;
       pendingDegradedPlaceholderChunks = [];
     }
 
@@ -5103,11 +5104,9 @@ export class GeminiChat {
     for (const pendingChunk of pendingDegradedPlaceholderChunks) {
       yield pendingChunk;
     }
-    pendingDegradedPlaceholderChunks = [];
     if (deferredFirstChunk) {
       yield deferredFirstChunk;
     }
-    deferredFirstChunk = null;
     if (
       willPersistToHistory &&
       (thoughtContentPart || contentText || hasToolCall || usageMetadata)
