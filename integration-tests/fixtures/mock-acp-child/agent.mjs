@@ -46,16 +46,14 @@ const delayMs = parseInt(process.env.MOCK_ACP_PROMPT_DELAY_MS || '100', 10);
 const emitChunks = parseInt(process.env.MOCK_ACP_EMIT_CHUNKS || '3', 10);
 let sessionCounter = 0;
 
-// The daemon installs its built-in tool guard for every session and passes
-// this private marker to the child it spawns; the child must consume the
-// marker and acknowledge it in the initialize response, or the daemon refuses
-// the session. Mirror the production child (runAcpAgent) so sessions created
-// through this mock pass the same handshake.
-const externalToolGuardRequired =
-  process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
-  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
+// Mirror the real child (acpAgent.ts): `qwen serve` requires the guard ack
+// in the initialize response, and the markers are consumed + deleted before
+// anything else can inherit them.
+const externalToolGuardMarker = process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
 delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
 delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
+const externalToolGuardRequired =
+  externalToolGuardMarker === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
 
 // SERVE_CONTROL_EXT_METHODS.sessionClose from @qwen-code/acp-bridge/status,
 // hardcoded because that module runtime-imports @qwen-code/qwen-code-core
@@ -66,18 +64,24 @@ const SESSION_CLOSE_EXT_METHOD = 'qwen/control/session/close';
 new AgentSideConnection(
   (connection) => ({
     async initialize() {
+      // Build ONE meta record and attach `_meta` once, exactly like the
+      // real child (acpAgent.ts), so a future conditional meta source
+      // merges instead of clobbering the guard ack via duplicate keys.
+      const responseMeta = {
+        ...(externalToolGuardRequired
+          ? {
+              [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+                EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+            }
+          : {}),
+      };
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: 'mock-acp', version: '0.0.1' },
         authMethods: [],
         agentCapabilities: {},
-        ...(externalToolGuardRequired
-          ? {
-              _meta: {
-                [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
-                  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
-              },
-            }
+        ...(Object.keys(responseMeta).length > 0
+          ? { _meta: responseMeta }
           : {}),
       };
     },
