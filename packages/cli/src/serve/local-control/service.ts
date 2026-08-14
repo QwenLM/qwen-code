@@ -26,7 +26,6 @@ const KEEP_ALIVE_TIMEOUT_MS = 5_000;
 interface PairingToken {
   readonly id: string;
   readonly secret: string;
-  readonly issuedAt: number;
 }
 
 export interface LocalControlStatus {
@@ -50,7 +49,6 @@ export interface LocalControlStatus {
    * about the specific session rather than assume the common case.
    */
   encrypted?: boolean;
-  issuedAt?: number;
 }
 
 export interface LocalControlEnableOptions {
@@ -133,7 +131,6 @@ export class LocalControlService {
       port: this.#deps.getPort(),
       sleepInhibited: this.#sleep !== undefined && sleepInhibitor.isRunning(),
       encrypted: this.#deps.tlsPaths !== undefined,
-      issuedAt: this.#token.issuedAt,
     };
   }
 
@@ -266,7 +263,7 @@ export class LocalControlService {
 
 function mintPairingToken(): PairingToken {
   const secret = randomBytes(32).toString('base64url');
-  return { id: randomUUID(), secret, issuedAt: Date.now() };
+  return { id: randomUUID(), secret };
 }
 
 function buildPairedUrl(

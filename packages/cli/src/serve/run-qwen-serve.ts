@@ -3371,16 +3371,10 @@ async function runQwenServeImpl(
       }
     }
 
-    // Before the ACP handle: `disable()` detaches the LAN listener's upgrade
-    // registration through that handle, and detaching after it is disposed
-    // would be a no-op on an already-torn-down mount.
-    //
-    // This scope is synchronous and `dispose()` is not, but the part that has
-    // to happen before the daemon goes away — revoking the pairing token and
-    // dropping the LAN origin from the CORS allowlist — runs synchronously
-    // inside it. Only closing the socket is deferred, and a socket that
-    // outlives the process by a few milliseconds can no longer authenticate
-    // anyone.
+    // Queue Local Control teardown before disposing the ACP handle. The
+    // serialized disable runs on the next microtask and wins before further IO;
+    // ACP disposal below also removes the upgrade listeners while the daemon
+    // mount is being torn down.
     const localControlService = app.locals?.['localControlService'] as
       | LocalControlService
       | undefined;

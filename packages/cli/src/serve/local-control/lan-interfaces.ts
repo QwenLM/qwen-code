@@ -36,7 +36,7 @@ function isLanIpv4(address: string): boolean {
 }
 
 function isSoftwareNetwork(interfaceName: string): boolean {
-  return /(^|[\s_-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt|hamachi|nordlynx|proton|vpn|docker|veth|vmnet|vboxnet|v?ethernet|virbr|br|bridge)(\d|[\s_-]|$)/i.test(
+  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt|hamachi|nordlynx|proton|vpn|docker|veth|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br|bridge)(\d|[\s_.-]|$)/i.test(
     interfaceName,
   );
 }

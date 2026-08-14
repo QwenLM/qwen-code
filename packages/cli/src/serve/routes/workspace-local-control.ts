@@ -73,7 +73,7 @@ export function registerWorkspaceLocalControlRoutes(
 
   app.post(
     '/workspace/local-control/enable',
-    deps.mutate({ strict: true }),
+    deps.mutate(),
     async (req, res) => {
       if (!requirePrimaryListener(req, res)) return;
       if (deps.isDaemonDraining?.()) {
@@ -105,7 +105,7 @@ export function registerWorkspaceLocalControlRoutes(
 
   app.post(
     '/workspace/local-control/disable',
-    deps.mutate({ strict: true }),
+    deps.mutate(),
     async (req, res) => {
       if (listenerIdentityOf(req).kind === 'local-control') {
         let started = false;

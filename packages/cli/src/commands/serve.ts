@@ -367,8 +367,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .check((argv) => {
         // A wildcard or LAN primary bind already owns the port Local Control
-        // needs on its selected address. Token, Origin, and ephemeral-port
-        // settings remain independent because the second listener owns those.
+        // needs on its selected address. Token and Origin settings remain
+        // independent because the second listener owns those.
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }

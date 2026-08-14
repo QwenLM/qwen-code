@@ -49,4 +49,28 @@ describe('Local Control routes', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it('allows tokenless loopback enable through the route listener gate', async () => {
+    const app = express();
+    const enable = vi.fn(async () => ({ active: true }));
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable,
+      } as unknown as LocalControlService,
+      mutate: (opts) => (_req, res, next) => {
+        if (opts?.strict) {
+          res.status(401).json({ code: 'token_required' });
+          return;
+        }
+        next();
+      },
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(200);
+    expect(response.body.active).toBe(true);
+    expect(enable).toHaveBeenCalledOnce();
+  });
 });
