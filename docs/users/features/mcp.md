@@ -430,6 +430,9 @@ Example:
   [Chrome extension README](../../../packages/chrome-extension/README.md).
   Restart Qwen Code after editing MCP settings to reapply the shared route.
   Set `QWEN_NO_SHARED_CHROME_BRIDGE=1` to keep dialing Chrome directly.
+  A second concurrent `/cdp` client may need the shared tab to navigate before
+  script-based tools receive a fresh execution context; use one `/cdp` client
+  when immediate script execution on the current page is required.
 
 ## Reference
 

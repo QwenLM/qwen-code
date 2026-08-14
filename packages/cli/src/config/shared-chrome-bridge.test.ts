@@ -86,6 +86,22 @@ describe('isAutoConnectChromeDevToolsServer', () => {
     ).toBe(false);
   });
 
+  it.each([
+    ['--ws-endpoint', 'ws://127.0.0.1:9222/dev'],
+    ['--ws-endpoint=ws://127.0.0.1:9222/dev'],
+    ['--browser-url', 'http://127.0.0.1:9222'],
+    ['--browser-url=http://127.0.0.1:9222'],
+    ['-w', 'ws://127.0.0.1:9222/dev'],
+    ['-u', 'http://127.0.0.1:9222'],
+  ])('ignores servers pinned with adapter alias %s', (...endpointArgs) => {
+    expect(
+      isAutoConnectChromeDevToolsServer('chrome-devtools', {
+        command: 'npx',
+        args: ['--autoConnect', ...endpointArgs],
+      }),
+    ).toBe(false);
+  });
+
   it('ignores unrelated stdio servers', () => {
     expect(
       isAutoConnectChromeDevToolsServer('filesystem', {

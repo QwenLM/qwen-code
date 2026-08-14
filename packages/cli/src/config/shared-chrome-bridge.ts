@@ -28,7 +28,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { QWEN_CODE_SERVE_ENV } from './acp-channel-fallback.js';
 import { QWEN_DAEMON_URL_ENV } from '../serve/channel-worker-env.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 /** Opt out of the shared Chrome bridge reroute. */
 export const SHARED_CHROME_BRIDGE_OPT_OUT_ENV = 'QWEN_NO_SHARED_CHROME_BRIDGE';
@@ -96,8 +96,14 @@ export function isAutoConnectChromeDevToolsServer(
       typeof a === 'string' &&
       (a === '--wsEndpoint' ||
         a.startsWith('--wsEndpoint=') ||
+        a === '--ws-endpoint' ||
+        a.startsWith('--ws-endpoint=') ||
+        a === '-w' ||
         a === '--browserUrl' ||
-        a.startsWith('--browserUrl=')),
+        a.startsWith('--browserUrl=') ||
+        a === '--browser-url' ||
+        a.startsWith('--browser-url=') ||
+        a === '-u'),
   );
   return args.includes('--autoConnect') && !hasExplicitEndpoint;
 }
@@ -175,7 +181,7 @@ export function cdpWsEndpointFor(env: Readonly<NodeJS.ProcessEnv>): string {
 export async function maybeRouteChromeDevToolsViaDaemonBridge(
   config: Config,
   env: Readonly<NodeJS.ProcessEnv> = process.env,
-  log: (line: string) => void = writeStderrLine,
+  log: (line: string) => void = writeStderrLineSafe,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   try {

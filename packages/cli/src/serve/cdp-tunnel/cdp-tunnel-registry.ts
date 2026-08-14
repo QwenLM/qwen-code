@@ -22,7 +22,7 @@
  * untagged frames route to the sole link.
  */
 
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 import {
   CDP_FRAME_TYPES,
   isValidLinkId,
@@ -84,7 +84,7 @@ export class CdpTunnelRegistry {
     // links — violating the single-extension design.
     const previous = this.active;
     if (previous && previous !== endpoint) {
-      writeStderrLine(
+      writeStderrLineSafe(
         `qwen serve: /cdp tunnel — extension bridge '${endpoint.connectionId}' ` +
           `superseded the stale '${previous.connectionId}'`,
       );
@@ -161,14 +161,14 @@ export class CdpTunnelRegistry {
     const rawLinkId = frame['linkId'];
     if (rawLinkId !== undefined) {
       if (!isValidLinkId(rawLinkId)) {
-        writeStderrLine(
+        writeStderrLineSafe(
           `qwen serve: /cdp dropped ${String(frameType)} frame with malformed linkId`,
         );
         return true;
       }
       const link = this.links.get(rawLinkId);
       if (!link) {
-        writeStderrLine(
+        writeStderrLineSafe(
           `qwen serve: /cdp dropped ${String(frameType)} frame for unknown linkId '${rawLinkId}'`,
         );
         return true;
@@ -192,7 +192,7 @@ export class CdpTunnelRegistry {
       return sole.routeInbound(frame);
     }
     if (this.links.size > 1) {
-      writeStderrLine(
+      writeStderrLineSafe(
         `qwen serve: /cdp dropped untagged ${String(frameType)} frame with ${this.links.size} links bound`,
       );
       return true;
@@ -219,7 +219,7 @@ export class CdpTunnelRegistry {
       }
     }
     if (bindings.length > 0) {
-      writeStderrLine(
+      writeStderrLineSafe(
         `qwen serve: /cdp tunnel dropped ${bindings.length} link(s) (${reason})`,
       );
     }

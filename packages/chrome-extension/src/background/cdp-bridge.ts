@@ -120,7 +120,7 @@ let releasedDuringAttach = new Set<string>();
  * Every link joining that attach honors it the same way as a per-link
  * release; cleared when the next fresh attach starts.
  */
-let releaseAllDuringAttach = false;
+let bridgeGeneration = 0;
 
 function linkIdOf(frame: { linkId?: unknown }): string {
   return typeof frame.linkId === 'string' ? frame.linkId : DEFAULT_LINK_ID;
@@ -302,7 +302,6 @@ function ensureAttachment(
 async function runAttachFlow(
   linkId: string,
 ): Promise<{ url?: string; title?: string }> {
-  releaseAllDuringAttach = false;
   try {
     const tabId = await getActiveTabId();
 
@@ -345,6 +344,9 @@ async function runAttachFlow(
         });
       });
     }
+    if (attachedTabId !== tabId) {
+      throw new Error('debugger detached during attach');
+    }
     ensureAttachObservers();
 
     return await tabInfoOf(tabId);
@@ -360,6 +362,7 @@ async function handleAttach(
   send: CdpSend,
 ): Promise<void> {
   const linkId = linkIdOf(frame);
+  const generation = bridgeGeneration;
   try {
     const { url, title } = await ensureAttachment(linkId);
 
@@ -367,7 +370,10 @@ async function handleAttach(
     // was awaiting couldn't tear down an attachment that hadn't landed yet.
     // Now that it has, honor that release immediately so we never leak a
     // debugger attachment with no live `/cdp` client.
-    if (releaseAllDuringAttach || releasedDuringAttach.delete(linkId)) {
+    if (
+      generation !== bridgeGeneration ||
+      releasedDuringAttach.delete(linkId)
+    ) {
       console.log(
         LOG_PREFIX,
         'release arrived during attach; dropping link',
@@ -534,8 +540,9 @@ export function shutdownCdpBridge(): void {
   // moment wiring finishes — and the last one detaches — instead of leaving a
   // debugger attachment with no live `/cdp` client behind it.
   if (attachInFlight) {
-    releaseAllDuringAttach = true;
+    bridgeGeneration++;
   }
+  stopAttachKeepalive();
   releasedDuringAttach = new Set();
   const tabId = attachedTabId;
   teardownAttachment();
