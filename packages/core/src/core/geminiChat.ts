@@ -1791,6 +1791,20 @@ export class GeminiChat {
   private manualPlanExitNoticesEnabled = false;
 
   /**
+   * One-shot flag for #9026: set by the invalid-stream retry loop when
+   * it schedules the FINAL retry for a `NO_TOOL_RESULT_PROGRESS` error.
+   * The next `processStreamResponse` attempt captures and clears it at
+   * entry; while captured, a still-quiet post-tool-result completion
+   * (valid finish reason, no visible progress) is accepted as a
+   * legitimate turn end instead of throwing again. Some model families
+   * legitimately end turns silently after a tool result — once the retry
+   * budget is exhausted, re-throwing loses the whole run's work. The
+   * `NO_TOOL_RESULT_PROGRESS_MAX_TOKENS` variant stays fatal: a truncated
+   * turn is genuinely incomplete.
+   */
+  private acceptQuietToolResultCompletion = false;
+
+  /**
    * Reset both partial-push markers in lockstep. Every history-mutation
    * site uses this — single-field resets are a bug because the fields
    * are always paired by lifecycle.
@@ -3218,6 +3232,16 @@ export class GeminiChat {
               } else {
                 transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
               }
+              if (
+                (error as InvalidStreamError).type ===
+                  'NO_TOOL_RESULT_PROGRESS' &&
+                nextInvalidStreamRetryCount === maxInvalidStreamRetries
+              ) {
+                // The attempt this retry schedules is the LAST one. If it
+                // still ends quietly after the tool result, accept that as
+                // a completion instead of re-throwing (#9026).
+                self.acceptQuietToolResultCompletion = true;
+              }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
                 nextInvalidStreamRetryCount;
@@ -3340,6 +3364,15 @@ export class GeminiChat {
                 protocolTagLeakRetryCount = nextContinuationRetryCount;
               } else {
                 transientRetryCount = nextContinuationRetryCount;
+              }
+              if (
+                error.type === 'NO_TOOL_RESULT_PROGRESS' &&
+                nextContinuationRetryCount === maxContinuationRetries
+              ) {
+                // Same final-retry quiet-completion acceptance as the main
+                // send loop (#9026) — continuation streams hit the same
+                // guard through the same processStreamResponse path.
+                self.acceptQuietToolResultCompletion = true;
               }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -4487,6 +4520,13 @@ export class GeminiChat {
     const isToolResultContinuation =
       currentUserTurn?.role === 'user' &&
       currentUserTurn.parts?.some((part) => part.functionResponse) === true;
+    // One-shot acceptance from the invalid-stream retry loop (#9026):
+    // captured and cleared per attempt so it can only ever apply to the
+    // exact attempt scheduled as the final NO_TOOL_RESULT_PROGRESS retry —
+    // never to an unrelated later send.
+    const acceptQuietToolResultCompletion =
+      this.acceptQuietToolResultCompletion;
+    this.acceptQuietToolResultCompletion = false;
     let deferredFinishReason: FinishReason | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
@@ -4846,12 +4886,17 @@ export class GeminiChat {
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
     // 2. There's a finish reason AND we have non-empty response text or thought text
     //
-    // Thought-only responses remain valid for ordinary user turns. After a tool
-    // result, they do not advance the agent without text or another tool call.
+    // Thought-only responses remain valid for ordinary user turns. After a
+    // tool result, they do not advance the agent without text or another
+    // tool call, so they retry (#7039) — and once that retry budget is
+    // exhausted the quiet completion is accepted rather than failing the
+    // run (#9026): some model families legitimately end turns silently
+    // after a tool result.
     const hasAnyContent = contentText || thoughtText;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    let acceptedQuietToolResultCompletion = false;
     if (
       streamError === null &&
       !hasToolCall &&
@@ -4864,17 +4909,37 @@ export class GeminiChat {
         );
       }
       if (lacksVisibleToolResultProgress) {
+        const truncatedAtMaxTokens =
+          deferredFinishReason === FinishReason.MAX_TOKENS;
+        if (truncatedAtMaxTokens || !acceptQuietToolResultCompletion) {
+          throw new InvalidStreamError(
+            'Model stream ended after a tool result without visible progress.',
+            truncatedAtMaxTokens
+              ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
+              : 'NO_TOOL_RESULT_PROGRESS',
+          );
+        }
+        // Retry budget exhausted and the model still ends the turn quietly
+        // with a valid finish reason (#9026). Accept it as completion.
+        // When the attempt produced nothing at all, surface the canonical
+        // placeholder as the turn's text: it keeps user/model alternation
+        // well-formed for the next request, is already filtered out of
+        // tool-result continuation rendering, and rides into the JSONL
+        // record through `contentText` so transcript and history agree.
+        acceptedQuietToolResultCompletion = true;
+        if (!thoughtContentPart && consolidatedHistoryParts.length === 0) {
+          contentText = GEMINI_EMPTY_CONTENT_PLACEHOLDER;
+        }
+        debugLogger.warn(
+          'Accepting quiet post-tool-result completion after retry budget ' +
+            'exhaustion (#9026)',
+        );
+      } else {
         throw new InvalidStreamError(
-          'Model stream ended after a tool result without visible progress.',
-          deferredFinishReason === FinishReason.MAX_TOKENS
-            ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
-            : 'NO_TOOL_RESULT_PROGRESS',
+          'Model stream ended with empty response text.',
+          'NO_RESPONSE_TEXT',
         );
       }
-      throw new InvalidStreamError(
-        'Model stream ended with empty response text.',
-        'NO_RESPONSE_TEXT',
-      );
     }
 
     if (recoveredChunk) {
@@ -5056,12 +5121,16 @@ export class GeminiChat {
       throw streamError;
     }
 
+    const acceptedTurnParts: Part[] = [
+      ...(thoughtContentPart ? [thoughtContentPart] : []),
+      ...consolidatedHistoryParts,
+    ];
+    if (acceptedQuietToolResultCompletion && acceptedTurnParts.length === 0) {
+      acceptedTurnParts.push({ text: GEMINI_EMPTY_CONTENT_PLACEHOLDER });
+    }
     this.history.push({
       role: 'model',
-      parts: [
-        ...(thoughtContentPart ? [thoughtContentPart] : []),
-        ...consolidatedHistoryParts,
-      ],
+      parts: acceptedTurnParts,
     });
     if (deferredFinishReason) {
       yield {

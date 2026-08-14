@@ -1911,7 +1911,7 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should surface the last empty tool result continuation after retry exhaustion', async () => {
+    it('should accept a thought-only tool result continuation once the retry budget is exhausted (#9026)', async () => {
       vi.useFakeTimers();
       try {
         chat.setHistory([
@@ -1952,31 +1952,101 @@ describe('GeminiChat', async () => {
           },
           'prompt-id-tool-result-empty-response-exhausted',
         );
-        const collecting = (async () => {
-          for await (const _ of stream) {
-            // consume stream
-          }
-        })();
-        const resultPromise = collecting.then(
-          () => {
-            throw new Error('Expected stream to reject');
-          },
-          (error: unknown) => {
-            expect(error).toMatchObject({
-              message:
-                'Model stream ended after a tool result without visible progress.',
-              type: 'NO_TOOL_RESULT_PROGRESS',
-            });
-          },
+        const events = await collectStreamWithFakeTimers(stream, 35_000);
+
+        // Retries still run first (#7039): the quiet completion is only
+        // accepted once the budget is spent, never on first occurrence.
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        // The run completes instead of aborting (#9026), and the final
+        // thought-only turn survives in history.
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ thought: true, text: 'I should keep working.' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should accept a fully quiet tool result completion after retry exhaustion and keep history well-formed (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
         );
-        await vi.advanceTimersByTimeAsync(0);
-        await vi.advanceTimersByTimeAsync(35_000);
-        await resultPromise;
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        // Every attempt ends with a valid STOP and nothing else — the
+        // deterministic shape that aborted whole headless runs before.
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streamResponse(stopResponse([])));
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-quiet-completion',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 35_000);
 
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(5);
         expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        // The accepted turn must not leave history ending on the user's
+        // functionResponse: a placeholder model turn keeps user/model
+        // alternation intact for the next request, and the JSONL record
+        // carries the same text so transcript and history agree.
+        expect(chatWithRecording.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: '(empty content)' }],
+        });
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+        expect(recordAssistantTurn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: [{ text: '(empty content)' }],
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }
