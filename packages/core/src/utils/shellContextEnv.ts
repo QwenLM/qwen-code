@@ -44,9 +44,14 @@ import {
  * script passes the header check and then dies on EACCES. Only script files are
  * gated; a native binary needs neither. Cached per path: this runs on every
  * shell spawn, and the answer for a given entry does not change in-process.
+ *
+ * Exported because a producer of the stamp has to apply the same test the
+ * consumer here does: `qwen review run` stamps the entry it re-enters, and a
+ * stamp this function would blank is worse than no stamp — it names a path the
+ * skill's `"${QWEN_CODE_CLI:-qwen}"` cannot exec, instead of falling back.
  */
 const unusableCache = new Map<string, boolean>();
-function isUnusableScriptEntry(path: string): boolean {
+export function isUnusableScriptEntry(path: string): boolean {
   if (!/\.(?:mjs|cjs|js)$/i.test(path)) return false;
   const cached = unusableCache.get(path);
   if (cached !== undefined) return cached;

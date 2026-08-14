@@ -23,7 +23,7 @@ import {
   fullCommentBody,
   type PrMetadata,
   type RawComment,
-  latestOwnLedger,
+  latestLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
@@ -997,7 +997,7 @@ describe('prContextCommand builder', () => {
   });
 });
 
-describe('latestOwnLedger', () => {
+describe('latestLedger — the split trust surface', () => {
   const marker = (round: number) =>
     `LGTM <!-- qwen-review-ledger {"v":1,"round":${round},"findings":[{"id":"R${round}-1","sev":"C","file":"a.ts","title":"t"}]} -->`;
   const review = (login: string, at: string, body: string) => ({
@@ -1006,49 +1006,61 @@ describe('latestOwnLedger', () => {
     submitted_at: at,
     body,
   });
+  const anchored: Ledger = {
+    v: 1,
+    round: 2,
+    findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+    sha: 'abc1234def567890',
+  };
 
-  it('takes the LATEST marker from the reviewing account only', () => {
-    const ledger = latestOwnLedger(
+  it('takes the LATEST marker whoever posted it', () => {
+    // Own-account-only shut the mechanism off exactly where it was designed
+    // to work: CI posts as a bot and the maintainer runs as themselves, so
+    // the accounts differ in the common case. Measured on PRs #9113 / #9094 —
+    // the bot's markers were on the PR and invisible to a local re-run, which
+    // then re-reviewed the full diff of a PR that had not changed a line.
+    const found = latestLedger(
       [
         review('bot', '2026-01-01T00:00:00Z', marker(1)),
         review('bot', '2026-01-03T00:00:00Z', marker(3)),
-        review('bot', '2026-01-02T00:00:00Z', marker(2)),
-        // Another account's marker is data about THEIR review — ignored.
         review('stranger', '2026-01-09T00:00:00Z', marker(9)),
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(3);
+    expect(found?.ledger.round).toBe(9);
+    expect(found?.foreign).toBe(true);
+    expect(found?.author).toBe('stranger');
   });
 
-  it('breaks a submitted_at tie on the review id, not on array order', () => {
-    // Two rounds posted in the same second (or with the timestamp missing) are
-    // ordered only by id. Keeping the earlier one hands the next round the
-    // older work list — the one failure the whole recovery exists to prevent.
-    const at = '2026-01-01T00:00:00Z';
-    const ledger = latestOwnLedger(
-      [
-        { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
-        { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
-      ],
+  it('reports an own-account ledger as not foreign', () => {
+    const found = latestLedger(
+      [review('bot', '2026-01-03T00:00:00Z', marker(3))],
       'bot',
     );
-    expect(ledger?.round).toBe(4);
+    expect(found?.foreign).toBe(false);
+    expect(found?.author).toBe('bot');
   });
 
-  it('carries the anchor sha through the recovery seam intact', () => {
-    // The PR's payoff depends on this seam: posted marker → latestOwnLedger →
-    // the prev-ledger side file (a JSON.stringify of exactly this return).
-    // A future normalization that projects the return onto known fields
-    // would silently drop `sha` with every other test still green; this
-    // pins the recovered object, anchor included.
-    const anchored: Ledger = {
-      v: 1,
-      round: 2,
-      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
-      sha: 'abc1234def567890',
-    };
-    const recovered = latestOwnLedger(
+  it('drops the anchor from ANOTHER account, keeping the work list', () => {
+    // The two halves are not the same claim. The findings are a work list
+    // Step 6 re-rules entry by entry against the code at HEAD; the sha scopes
+    // the next round's incremental diff, so a foreign one would let an
+    // untrusted body decide which lines this pipeline stops looking at.
+    const foreign = latestLedger(
+      [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(anchored))],
+      'maintainer',
+    );
+    expect(foreign?.ledger.sha).toBeUndefined();
+    expect(foreign?.ledger.findings).toEqual(anchored.findings);
+    expect(foreign?.ledger.round).toBe(2);
+  });
+
+  it('carries the anchor through intact for the OWN account', () => {
+    // The seam the incremental range depends on: posted marker → latestLedger
+    // → the prev-ledger side file (a JSON.stringify of exactly this ledger).
+    // A future normalization that projects onto known fields would silently
+    // drop `sha` with every other test still green.
+    const own = latestLedger(
       [
         review(
           'bot',
@@ -1058,18 +1070,57 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(recovered).toEqual(anchored);
+    expect(own?.ledger).toEqual(anchored);
   });
 
-  it('yields nothing with no login, no marker, or a malformed one', () => {
+  it('treats an unknown login as foreign — an anchor needs a proven owner', () => {
+    const found = latestLedger(
+      [review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored))],
+      null,
+    );
+    expect(found?.foreign).toBe(true);
+    expect(found?.ledger.sha).toBeUndefined();
+    expect(found?.ledger.findings).toHaveLength(1);
+  });
+
+  it('breaks a submitted_at tie on the review id, not on array order', () => {
+    // Two rounds posted in the same second (or with the timestamp missing) are
+    // ordered only by id. Keeping the earlier one hands the next round the
+    // older work list — the one failure the whole recovery exists to prevent.
+    const at = '2026-01-01T00:00:00Z';
+    const found = latestLedger(
+      [
+        { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
+        { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
+      ],
+      'bot',
+    );
+    expect(found?.ledger.round).toBe(4);
+  });
+
+  it('prefers the OWN review on a full tie — same claim, but it may be anchored', () => {
+    const at = '2026-01-01T00:00:00Z';
+    const found = latestLedger(
+      [
+        {
+          id: 7,
+          user: { login: 'stranger' },
+          submitted_at: at,
+          body: marker(5),
+        },
+        { id: 7, user: { login: 'bot' }, submitted_at: at, body: marker(5) },
+      ],
+      'bot',
+    );
+    expect(found?.foreign).toBe(false);
+  });
+
+  it('yields nothing with no marker, or a malformed one', () => {
     expect(
-      latestOwnLedger([review('bot', '2026-01-01', marker(1))], null),
+      latestLedger([review('bot', '2026-01-01', 'plain body')], 'bot'),
     ).toBeNull();
     expect(
-      latestOwnLedger([review('bot', '2026-01-01', 'plain body')], 'bot'),
-    ).toBeNull();
-    expect(
-      latestOwnLedger(
+      latestLedger(
         [review('bot', '2026-01-01', '<!-- qwen-review-ledger nope -->')],
         'bot',
       ),
@@ -1105,6 +1156,26 @@ describe('renderLedgerSection', () => {
         .find((l) => l.startsWith('| R1-1'))!;
       expect(liveSeparators(row)).toBe(5);
     }
+  });
+
+  it("names the other account when the ledger is not this one's", () => {
+    // A foreign work list must not read as this account's own certified
+    // round: the reader has to know whose claims these are, and that no
+    // incremental anchor came with them.
+    const ledger: Ledger = {
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+    };
+    const foreign = renderLedgerSection(ledger, 'qwen-code-ci-bot');
+    expect(foreign).toContain('**@qwen-code-ci-bot**');
+    expect(foreign).toContain('THEIR claims');
+    expect(foreign).toContain('no incremental anchor');
+
+    // The own-account rendering is unchanged, and says nothing about accounts.
+    const own = renderLedgerSection(ledger);
+    expect(own).toContain("this account's last posted review");
+    expect(own).not.toContain('THEIR claims');
   });
 
   it('says so when the ledger is PARTIAL, and stays silent when it is not', () => {

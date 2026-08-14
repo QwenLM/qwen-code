@@ -1568,6 +1568,23 @@ describe('composeReview — input validation (the producer is a model that omits
     ).toThrow(/suggestionsInline/);
   });
 
+  it('tells a caller that sent a LIST for a count what to send instead', () => {
+    // The wrong shape callers actually write: `suggestionsDiscarded` sits
+    // between two list fields in the skill's field list and is described in
+    // list language, and two of four live runs (PRs #9094, #9109) sent `[]`
+    // — one recovering by rewriting its own state file with `perl -pi`. The
+    // generic message left them to guess which end was wrong.
+    expect(() =>
+      composeReview({
+        suggestionsDiscarded: [
+          'src/a.ts:1 — anchor lost',
+          'src/b.ts:2 — anchor lost',
+        ] as unknown as number,
+        modelId: MODEL,
+      }),
+    ).toThrow(/suggestionsDiscarded.*COUNT, not a list: send 2/s);
+  });
+
   it('rejects a non-array list field and a missing or blank modelId', () => {
     expect(() =>
       composeReview({
@@ -4367,7 +4384,6 @@ describe('the ledger marker reaches the POSTED body', () => {
     // raw check and only this case fails (measured — a mutant keeping only
     // `cappedBy.length > 0` survived every other test in the suite).
     for (const failClosed of [
-      { unreviewedDimensions: ['security — the agent whiffed twice'] },
       { cannotTellCriticals: ['a.ts:3 — could not fetch the full body'] },
       { uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
       { contextUnavailable: true },
@@ -4399,6 +4415,60 @@ describe('the ledger marker reaches the POSTED body', () => {
         expect(r.cappedBy).toEqual([]);
       }
     }
+  });
+
+  it('still ANCHORS a round whose only cap is an unreviewable dimension', () => {
+    // The one cap that no longer withholds. `unreviewedDimensions` is the
+    // orchestrator's prose about DEPTH — on this repo, "the integration suite
+    // CI skipped did not run locally", true of every round because
+    // `build-test`'s whole-call budget cannot fit the suites. Withholding on
+    // it closed a loop with no exit: an untestable dimension capped the
+    // verdict, the cap withheld the anchor, and the missing anchor made the
+    // next round re-review the full diff — 119 minutes and 34M tokens on a PR
+    // whose code had not changed since the round before (measured, #9113 r2).
+    // A dimension nobody could run says nothing about WHICH LINES were read,
+    // and the anchor's only claim is about lines.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [
+        'build-and-test — the integration suite never ran',
+      ],
+    });
+
+    expect(r.cappedBy).toEqual(['unreviewed-dimension']);
+    expect(r.scopeUnproven).toBe(false);
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('withholds it again as soon as the COVERAGE evidence is short', () => {
+    // The safety property the relaxation must not cost: when the machine
+    // evidence itself leaves doubt that the diff was read, the cap wears the
+    // same name (`unreviewed-dimension`) but `scopeUnproven` is what decides.
+    transcript('a1', goodPrompt(1), { toolCalls: 0 });
+    transcript('a2', goodPrompt(2), { toolCalls: 0 });
+    const r = composeReview({
+      planPath: plan({ prNumber: 8255, fetchedSha: 'deadbeef00112233' }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+    });
+
+    expect(r.scopeUnproven).toBe(true);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
   });
 
   it('carries NO marker on a local review — there is no PR to hold it', () => {

@@ -25,6 +25,7 @@ import {
   type WorkspacePackage,
 } from './workspaces.js';
 import { resolveTestScope, type TestScope } from './workspace-scope.js';
+import { DEFAULT_WHOLE_CALL_BUDGET_S } from './build-budget.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 /**
@@ -92,18 +93,215 @@ export function unresolvedWorkspaceDeps(
   return [...found];
 }
 
+/** Did this command exit cleanly? A timeout's exitCode is null, not 0. */
+const succeeded = (r: CommandResult): boolean => r.exitCode === 0;
+
+/**
+ * Continue a previous call's run: the suites it could not reach, and the ones
+ * it killed on a deadline its budget had shortened.
+ *
+ * Install and build are NOT re-run. That is the whole point of a continuation —
+ * the tree the previous call installed and compiled is still there, and paying
+ * for it again inside a second 600s ceiling would leave no room for the suites
+ * this call exists to run. It also means a continuation cannot repair a tree
+ * the previous call left half-built, which is why it refuses that case below
+ * rather than running suites against artifacts that were never compiled.
+ */
+function resumeNpmToolchain(
+  args: ToolchainRunArgs,
+  previous: BuildTestReport,
+): BuildTestReport {
+  const { root, exec } = args;
+  const perCommandMs = args.timeout * 1000;
+  const callBudgetMs =
+    (args.budget ?? Math.max(args.timeout, DEFAULT_WHOLE_CALL_BUDGET_S)) * 1000;
+  const runStarted = Date.now();
+  const remainingMs = (): number => callBudgetMs - (Date.now() - runStarted);
+
+  const withNote = (note: string): BuildTestReport => ({
+    ...previous,
+    note: previous.note ? `${previous.note} ${note}` : note,
+  });
+
+  if (previous.toolchain !== 'npm') {
+    return withNote(
+      'Nothing to resume: the run being continued did not scope an npm ' +
+        'toolchain, so it never had suites to leave unrun.',
+    );
+  }
+  if (previous.notBuilt?.length) {
+    // A suite against artifacts that were never compiled manufactures failures
+    // the diff did not cause — the exact cascade the build phase's own budget
+    // stop exists to prevent. A continuation skips the build, so it cannot
+    // clear this; say so instead of pretending.
+    return withNote(
+      `Cannot resume the suites: the run being continued left ` +
+        `${previous.notBuilt.join(', ')} unbuilt, and a suite run against ` +
+        `packages that were never compiled measures nothing about the diff. ` +
+        `Re-run build-test without --resume.`,
+    );
+  }
+
+  // Two kinds of unfinished work, in the order that spends the budget best:
+  // the suites a shortened deadline killed first (they are the expensive ones,
+  // and they now get a full deadline), then the ones never reached at all.
+  const retryCommands = previous.test
+    .filter((t) => t.clamped)
+    .map((t) => t.command);
+  const pendingDirs = [...(previous.testScope?.notRun ?? [])];
+  const work: Array<{ command: string; dir: string | null }> = [
+    ...retryCommands.map((command) => ({ command, dir: null })),
+    ...pendingDirs.map((dir) => ({ command: testCommand(dir), dir })),
+  ];
+  if (work.length === 0) {
+    return withNote(
+      'Nothing to resume: the run being continued reached every suite in ' +
+        'scope.',
+    );
+  }
+
+  const ranDirs: string[] = [];
+  const fresh: CommandResult[] = [];
+  const stillPending: string[] = [];
+  for (let i = 0; i < work.length; i++) {
+    const { command, dir } = work[i];
+    const remaining = remainingMs();
+    if (remaining < BUDGET_MIN_ATTEMPT_MS) {
+      // Same floor the first call uses: below it an attempt cannot boot npm,
+      // and a fake timeout is worse than an honest "still to run".
+      stillPending.push(
+        ...work
+          .slice(i)
+          .map((w) => w.dir)
+          .filter((d): d is string => d !== null),
+      );
+      break;
+    }
+    const deadline = Math.min(perCommandMs, remaining);
+    const r = exec(command, root, deadline);
+    const clamped = r.timedOut && deadline < perCommandMs;
+    fresh.push(clamped ? { ...r, clamped: true } : r);
+    if (dir !== null) ranDirs.push(dir);
+  }
+
+  // A retried command REPLACES its provisional entry: two entries for one
+  // command would double-count in every consumer that walks `test[]` — the
+  // failing-file attribution above all — and the older of the two is a result
+  // this call exists to supersede.
+  const replaced = new Map(
+    fresh
+      .filter((r) => retryCommands.includes(r.command))
+      .map((r) => [r.command, r]),
+  );
+  const mergedTest = [
+    ...previous.test.map((t) => replaced.get(t.command) ?? t),
+    ...fresh.filter((r) => !replaced.has(r.command)),
+  ];
+
+  const ranSet = new Set(ranDirs);
+  const prevScope = previous.testScope;
+  const testScope: TestScope | undefined = prevScope
+    ? {
+        workspaces: [...prevScope.workspaces, ...ranDirs],
+        ...(stillPending.length > 0 ? { notRun: stillPending } : {}),
+        ...(prevScope.caveat ? { caveat: prevScope.caveat } : {}),
+      }
+    : undefined;
+  if (testScope) {
+    // The caveat the previous call wrote names suites this one has now run;
+    // leaving it would tell the reader the review skipped work it did.
+    const resumedNote =
+      stillPending.length > 0
+        ? `a --resume call ran ${ranDirs.length + replaced.size} more command(s); ` +
+          `${stillPending.length} suite(s) still to run: ${stillPending.join(', ')}`
+        : `a --resume call ran the remaining ${ranDirs.length + replaced.size} command(s)`;
+    testScope.caveat = testScope.caveat
+      ? `${testScope.caveat}; ${resumedNote}`
+      : resumedNote;
+    testScope.workspaces = testScope.workspaces.filter(
+      (d) => !stillPending.includes(d) || ranSet.has(d),
+    );
+  }
+
+  const timedOut = [
+    ...previous.timedOut.filter((c) => !replaced.has(c)),
+    ...fresh.filter((r) => r.timedOut).map((r) => r.command),
+  ];
+  const merged: BuildTestReport = {
+    ...previous,
+    test: mergedTest,
+    // Recomputed, not inherited: the previous `false` may have been nothing
+    // but the clamped timeout this call just replaced with a pass.
+    ok: previous.build.every(succeeded) && mergedTest.every(succeeded),
+    timedOut,
+    // REPLACED, not appended. The note being continued says things that were
+    // true when it was written and are not now — "the whole-call budget was
+    // spent with 4 suite(s) still to run" reads as this run's verdict, and an
+    // agent trusts the prose it is handed. The structured fields (`install`,
+    // `build`, `notBuilt`, `testScope`) carry everything the old note
+    // summarised; this one describes the run as it now stands.
+    note: resumedNote(previous, mergedTest, timedOut, stillPending),
+    ...(testScope ? { testScope } : {}),
+  };
+  return merged;
+}
+
+/** The merged report's one-line story, rewritten for the continued run. */
+function resumedNote(
+  previous: BuildTestReport,
+  test: CommandResult[],
+  timedOut: string[],
+  stillPending: string[],
+): string {
+  const failures = test.filter((r) => !succeeded(r) && !r.timedOut);
+  const parts = [
+    `Continued from a previous build-test call (install and build reused: ` +
+      `${previous.build.length} build command(s) already ran).`,
+  ];
+  if (failures.length > 0) {
+    parts.push(
+      `${failures.length} command(s) failed. Correlate each error with the ` +
+        `diff: a failure in a file the PR changed is a Critical; one in a file ` +
+        `it did not touch is pre-existing.`,
+    );
+  }
+  if (timedOut.length > 0) {
+    parts.push(
+      `${timedOut.length} command(s) ran out of time — infrastructure, not a ` +
+        `defect in the diff.`,
+    );
+  }
+  if (stillPending.length > 0) {
+    parts.push(
+      `The budget was spent with ${stillPending.length} suite(s) still to ` +
+        `run — not run: ${stillPending.join(', ')}. Resume again to reach them.`,
+    );
+  } else if (failures.length === 0 && timedOut.length === 0) {
+    parts.push('Every suite in scope has now run, and everything passed.');
+  } else {
+    parts.push('Every suite in scope has now run.');
+  }
+  return parts.join(' ');
+}
+
 function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
+  if (args.previous) return resumeNpmToolchain(args, args.previous);
   const { root, changedFiles: changed, exec } = args;
   const perCommandMs = args.timeout * 1000;
   // The whole-call wall-clock budget for the call, in milliseconds — measured
   // from the TOP of the run, so install and build time count against it. The
-  // default keeps 30s of headroom under the 600-second tool timeout the brief
-  // welds onto the call: the clock outside starts before node does, and the
-  // report write must still fit. The floor is one command deadline: a tiny
-  // --timeout must not turn the headroom into a negative budget that starves
-  // every suite.
+  // default is what the shell tool's hard 600s ceiling leaves usable: the clock
+  // outside starts before node does, and the report write must still fit. The
+  // floor is one command deadline: a tiny --timeout must not turn the headroom
+  // into a negative budget that starves every suite.
+  //
+  // It no longer derives from `--timeout` (it was `2 × timeout − 30`). That
+  // arithmetic equalled the ceiling only while the timeout was 300s, so raising
+  // the deadline to fit a real suite would have pushed the derived budget PAST
+  // the ceiling — a call the outer kill was guaranteed to discard. The budget
+  // belongs to the ceiling; the deadline belongs to the slowest command.
   const callBudgetMs =
-    (args.budget ?? Math.max(args.timeout, args.timeout * 2 - 30)) * 1000;
+    (args.budget ?? Math.max(args.timeout, DEFAULT_WHOLE_CALL_BUDGET_S)) * 1000;
   const runStarted = Date.now();
   /** Budget left for the whole call; every phase spends from it. */
   const remainingMs = (): number => callBudgetMs - (Date.now() - runStarted);
@@ -659,8 +857,18 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       notRun.push(...runnableDirs.slice(i));
       break;
     }
-    const r = exec(testCommand(dir), root, Math.min(perCommandMs, remaining));
-    results.test.push(r);
+    // A suite still gets whatever remains — a partial attempt is signal where
+    // a never-attempted suite is none, and the tail of the budget has nowhere
+    // better to go. What changes is what a kill at that boundary MEANS: a
+    // suite that died on a deadline the budget shortened was not too slow,
+    // it was started too late, and `--resume` re-runs it with a full one.
+    // Measured on PR #9113: `npm test --workspace="packages/cli"` (real cost
+    // 401s) was admitted with 286s of its 300s deadline and killed, and
+    // nothing downstream could tell that from a suite that genuinely hangs.
+    const deadline = Math.min(perCommandMs, remaining);
+    const r = exec(testCommand(dir), root, deadline);
+    const clamped = r.timedOut && deadline < perCommandMs;
+    results.test.push(clamped ? { ...r, clamped: true } : r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
   }

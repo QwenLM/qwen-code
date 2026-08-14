@@ -389,6 +389,7 @@ export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
 export * from './utils/sanitize-child-env.js';
+export { isUnusableScriptEntry } from './utils/shellContextEnv.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================

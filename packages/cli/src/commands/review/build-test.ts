@@ -42,6 +42,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  DEFAULT_COMMAND_TIMEOUT_S,
+  DEFAULT_WHOLE_CALL_BUDGET_S,
+} from './lib/build-budget.js';
+import { failingFilesOf } from './lib/failing-files.js';
 import { npmToolchainAdapter } from './lib/npm-toolchain.js';
 import {
   selectToolchainAdapter,
@@ -67,11 +72,40 @@ export interface CommandResult {
   /** Trimmed output: enough to correlate a failure with the diff. */
   output: string;
   /**
+   * Test files the runner named as failing, measured off the UNTRIMMED output
+   * at capture time. Absent when the command named none.
+   *
+   * `output` is bounded, and a failing suite's FAIL lines do not fit inside the
+   * bound: measured on a live review of PR #9113, a `packages/core` run whose
+   * rescued summary line read `Test Files  11 failed` reached `test-delta` with
+   * exactly ONE FAIL line still in the report. Everything downstream that
+   * attributes a failure — `test-delta`'s netNew/shared sets above all — was
+   * re-parsing that bounded text, so ten failing files were invisible to the
+   * measurement: absent from `shared` (understating what is pre-existing) and
+   * absent from `netNew` (the direction that loses a failure the PR caused).
+   * The raw text exists here and nowhere else; record the set while it does.
+   */
+  failingFiles?: string[];
+  /**
    * The deadline the command was actually given (ms) — the whole-call budget
    * shortens it below the per-command default, and the timeout note must
    * quote the number that fired, not the flag default.
    */
   deadlineMs?: number;
+  /**
+   * True when the deadline this command got was shortened by the whole-call
+   * budget rather than being its own — i.e. it was started with less time than
+   * `--timeout` allows.
+   *
+   * A clamped timeout is a PROVISIONAL result: the command was not too slow,
+   * the call was too late. Measured on PR #9113, `npm test
+   * --workspace="packages/cli"` was admitted with 286s of a 300s deadline and
+   * killed — half the whole call spent to learn nothing, and the suite was
+   * recorded as timed-out rather than as still-to-run, so nothing downstream
+   * could retry it. `--resume` reads this flag and re-runs those commands with
+   * a full deadline in the next call.
+   */
+  clamped?: boolean;
 }
 
 export interface BuildTestReport {
@@ -213,7 +247,16 @@ export function buildRunEnv(
   };
 }
 
-function run(command: string, cwd: string, timeoutMs: number): CommandResult {
+/**
+ * Exported for the one thing an injected `exec` cannot cover: that the failing
+ * set is measured HERE, off the raw text, and survives a trim that drops the
+ * FAIL lines it was parsed from.
+ */
+export function run(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
   // budget arithmetic can hand it a fractional value (a decimal --timeout
@@ -236,13 +279,21 @@ function run(command: string, cwd: string, timeoutMs: number): CommandResult {
   // also matches an external SIGTERM (a container stop), and it misses a non-default
   // `killSignal`. Check the authoritative one first.
   const timedOut = spawnTimedOut(r);
+  const raw = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  // Parsed from `raw`, not from the trimmed field below — that is the whole
+  // point (see CommandResult.failingFiles). Omitted when empty so an install or
+  // a build, which name no test file, does not carry an empty list; a consumer
+  // reads absent as "this seam supplied no measurement" and falls back to
+  // re-parsing `output`, exactly as it did before this field existed.
+  const failingFiles = failingFilesOf(raw, cwd);
   return {
     command,
     exitCode: r.status,
     seconds: Math.round((Date.now() - started) / 1000),
     timedOut,
-    output: trimOutput(`${r.stdout ?? ''}${r.stderr ?? ''}`),
+    output: trimOutput(raw),
     deadlineMs,
+    ...(failingFiles.length > 0 ? { failingFiles } : {}),
   };
 }
 
@@ -266,17 +317,28 @@ interface BuildTestArgs {
    */
   buildOnly?: boolean;
   /**
-   * Whole-call wall-clock budget in seconds (default: 2× `timeout` − 30s of
-   * headroom for process startup and the report write, floored at one
-   * per-command deadline). Measured from the top of the call — install and
-   * build time count against it. The closure's per-command deadlines SUM, and
-   * a large one sums past the tool timeout the brief welds onto the call —
-   * whose outer kill discards the report. Each suite is attempted with
-   * whatever of this budget remains (a suite killed at the boundary is
-   * reported as a timeout — infrastructure, not a finding); only suites never
-   * attempted are named in `notRun`.
+   * Whole-call wall-clock budget in seconds. Defaults to what the shell tool's
+   * hard 600s ceiling leaves usable (`DEFAULT_WHOLE_CALL_BUDGET_S`), floored at
+   * one per-command deadline. Measured from the top of the call — install and
+   * build time count against it. The closure's per-command deadlines SUM, and a
+   * large one sums past the tool timeout the brief welds onto the call — whose
+   * outer kill discards the report. Suites the budget cannot reach are named in
+   * `notRun`, and `--resume` continues them in the next call.
    */
   budget?: number;
+  /**
+   * Continue the run recorded in `--out` instead of starting a new one.
+   *
+   * The ceiling is per CALL, not per run: one shell invocation cannot exceed
+   * 600s, and this repo needs more than that to finish its suites (install 24s
+   * + the builds + `packages/core` 106s + `packages/cli` 401s, before four more
+   * suites). A resumed call skips install and build — the tree is already
+   * installed and compiled by the call being continued — and runs the suites
+   * that call could not reach (`testScope.notRun`) plus any it started with a
+   * budget-clamped deadline and killed (`clamped`). Results merge into the same
+   * report, so every consumer keeps reading one artifact.
+   */
+  resume?: boolean;
   /**
    * How to run a command. Injectable so the tests can build the states that are
    * hard to force out of real npm — chiefly the one that cost a live review: an
@@ -311,6 +373,43 @@ function changedFilesFrom(planPath: string): string[] {
     .filter((p): p is string => typeof p === 'string' && p.length > 0);
 }
 
+/**
+ * The report a `--resume` call continues, read from where it will be rewritten.
+ *
+ * Refusing is the whole value: a resume with no report to continue would run
+ * install and build inside a budget the caller sized for suites, and produce a
+ * report that looks like a complete run of a tree it never finished compiling.
+ */
+function previousReport(out: string | undefined): BuildTestReport {
+  if (!out) {
+    throw new Error(
+      'build-test: --resume needs --out — it continues the run recorded there.',
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(out, 'utf8'));
+  } catch (err) {
+    throw new Error(
+      `build-test: --resume cannot read the report it would continue ` +
+        `(${out}): ${(err as Error).message}. Run build-test without ` +
+        `--resume first.`,
+    );
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !Array.isArray((parsed as { test?: unknown }).test)
+  ) {
+    throw new Error(
+      `build-test: --resume expected a build-test report at ${out}, and that ` +
+        `file is not one.`,
+    );
+  }
+  return parsed as BuildTestReport;
+}
+
 export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // yargs `type: 'number'` coerces `--timeout abc` to NaN rather than
   // rejecting it; NaN defeats every budget-floor comparison and reaches
@@ -328,6 +427,10 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   }
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
+  // A resumed call continues a report; without one there is nothing to
+  // continue, and silently starting a fresh run would re-install and re-build
+  // inside a budget the caller sized for suites alone. Fail loudly instead.
+  const previous = args.resume ? previousReport(args.out) : undefined;
   const runArgs = {
     root,
     changedFiles,
@@ -335,6 +438,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     install: args.install,
     buildOnly: args.buildOnly,
     budget: args.budget,
+    previous,
     exec: args.exec ?? run,
   };
   const { adapter, applicable } = selectToolchainAdapter(
@@ -421,25 +525,28 @@ export const buildTestCommand: CommandModule = {
       })
       .option('timeout', {
         type: 'number',
-        default: 300,
+        default: DEFAULT_COMMAND_TIMEOUT_S,
         describe:
           'Per-command deadline in seconds. Kept strictly below the 600s (600000ms) ' +
           "tool timeout the agent's brief welds onto the whole call, so a single hung " +
           "command's own deadline fires — and build-test reports it as data — before " +
-          'the outer shell kill would discard the report. Commands that would SUM ' +
-          'past the whole call are stopped and disclosed instead — see --budget.',
+          'the outer shell kill would discard the report. The default is sized to ' +
+          "this repo's slowest single command (`npm test --workspace=packages/cli`, " +
+          'measured at 401s): a deadline below the slowest suite is not a margin, it ' +
+          'is a guaranteed timeout. Commands that would SUM past the whole call are ' +
+          'stopped and disclosed instead — see --budget and --resume.',
       })
       .option('budget', {
         type: 'number',
         describe:
           'Whole-call wall-clock budget in seconds, measured from the top of ' +
-          'the call — install and build time count against it (default: 2× ' +
-          '--timeout minus 30s of headroom for process startup and the report ' +
-          'write). Each suite is attempted with whatever of the budget ' +
-          'remains — a suite killed at the boundary is a timeout, reported as ' +
-          'infrastructure — and only suites never attempted are named notRun. ' +
-          'A partial report survives where the outer shell kill would discard ' +
-          'the whole one.',
+          'the call — install and build time count against it (default: ' +
+          `${DEFAULT_WHOLE_CALL_BUDGET_S}s, what the shell tool's hard 600s ` +
+          'ceiling leaves after headroom for process startup and the report ' +
+          'write). A suite the budget cannot give a full deadline is left to ' +
+          'notRun rather than started and killed, and --resume continues it in ' +
+          'the next call. A partial report survives where the outer shell kill ' +
+          'would discard the whole one.',
       })
       .option('install', {
         type: 'boolean',
@@ -454,6 +561,17 @@ export const buildTestCommand: CommandModule = {
           "Build, then stop — skip the changed workspaces' tests. For the " +
           'merge-base tree an A/B probe compares against, whose suite says ' +
           'nothing about this PR.',
+      })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue the run recorded in --out instead of starting a new one: ' +
+          'skip install and build (the tree is already installed and compiled) ' +
+          'and run the suites the previous call left in notRun, plus any it ' +
+          'started with a budget-shortened deadline and killed. Results merge ' +
+          'into the same report. The 600s ceiling is per CALL, so this is how a ' +
+          'repo whose suites do not fit one call still finishes them.',
       }),
   handler: (argv) => {
     const args = argv as unknown as BuildTestArgs;

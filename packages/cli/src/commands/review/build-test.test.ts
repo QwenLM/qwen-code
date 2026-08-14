@@ -9,10 +9,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  run,
   runBuildTest,
   trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
+  type CommandResult,
 } from './build-test.js';
 import {
   npmToolchainAdapter,
@@ -93,6 +95,56 @@ describe('buildRunEnv', () => {
     buildRunEnv(base);
     expect(base).toEqual({ PATH: '/x' });
   });
+});
+
+describe('run (capture-time failing-file measurement)', () => {
+  it.skipIf(process.platform === 'win32')(
+    'records failing files the trim then drops from the report',
+    () => {
+      // The live shape (PR #9113): a failing `packages/core` suite printed its
+      // FAIL lines, then 100k of per-test prose, so the report kept a summary
+      // saying `11 failed` and one FAIL line. `test-delta` re-parsed THAT and
+      // measured a 1-file PR side — nine files it could neither call
+      // pre-existing nor attribute to the PR. Parse before the trim instead.
+      const failLines = [
+        'FAIL src/early-a.test.ts > case',
+        'FAIL src/early-b.test.ts > case',
+      ].join('\n');
+      // The FAIL lines have to land in the OMITTED MIDDLE, which is what the
+      // live shape does: KEEP_HEAD (2k) of runner preamble in front of them,
+      // and more than KEEP_TAIL (6k) of per-test prose behind them.
+      const r = run(
+        `printf '%s\\n' "${'p'.repeat(4_000)}" "${failLines}" ` +
+          `"${'x'.repeat(20_000)}" "Tests 2 failed | 5 passed"`,
+        process.cwd(),
+        30_000,
+      );
+
+      expect(r.failingFiles).toEqual([
+        'src/early-a.test.ts',
+        'src/early-b.test.ts',
+      ]);
+      // Prove the loss is real: the field is not a restatement of `output`.
+      expect(r.output).toContain('characters omitted');
+      expect(r.output).not.toContain('src/early-a.test.ts');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'omits the field for a command that named no test file',
+    () => {
+      // An install or a build carries no measurement, and an empty list would
+      // read as one. Absent means "ask the output", which is the old behaviour.
+      const r = run(
+        "printf 'added 2054 packages in 24s\\n'",
+        process.cwd(),
+        30_000,
+      );
+
+      expect(r.failingFiles).toBeUndefined();
+      expect('failingFiles' in r).toBe(false);
+    },
+  );
 });
 
 describe('runBuildTest', () => {
@@ -2736,5 +2788,339 @@ describe('runBuildTest', () => {
 
     expect(receivedExec).toBeTypeOf('function');
     runSpy.mockRestore();
+  });
+  it('marks a suite killed on a BUDGET-shortened deadline as clamped', () => {
+    // Provisional, not a verdict: the suite was not too slow, the call was too
+    // late. Without the flag the entry is indistinguishable from a genuinely
+    // hanging suite, and `--resume` has no way to know it is worth retrying —
+    // which is how PR #9113 spent 286s of a 570s call on a suite that needed
+    // 401s and left no trace that it deserved another window.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 600,
+      budget: 20,
+      install: false,
+      exec: (command, _cwd, timeoutMs) => ({
+        command,
+        exitCode: command.startsWith('npm test') ? null : 0,
+        seconds: 1,
+        timedOut: command.startsWith('npm test'),
+        output: '',
+        deadlineMs: timeoutMs,
+      }),
+    });
+
+    const suite = rep.test[0];
+    expect(suite.timedOut).toBe(true);
+    expect(suite.clamped).toBe(true);
+    // Its own deadline was never in play — the budget's remainder was.
+    expect(suite.deadlineMs).toBeLessThan(600_000);
+  });
+
+  it('does NOT mark a suite that timed out on its OWN deadline', () => {
+    // The opposite case, and the reason the flag is not just "timedOut": a
+    // suite given its full deadline and still hanging is a real timeout, and
+    // resuming it would spend another whole call reproducing it.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+    );
+    pkg('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 5,
+      budget: 600,
+      install: false,
+      exec: (command, _cwd, timeoutMs) => ({
+        command,
+        exitCode: command.startsWith('npm test') ? null : 0,
+        seconds: 1,
+        timedOut: command.startsWith('npm test'),
+        output: '',
+        deadlineMs: timeoutMs,
+      }),
+    });
+
+    expect(rep.test[0].timedOut).toBe(true);
+    expect(rep.test[0].clamped).toBeUndefined();
+  });
+
+  describe('--resume: the ceiling is per call, not per run', () => {
+    // The arithmetic that forces this: on the reviewed repo, install (24s) +
+    // the builds + `packages/core` (106s) + `packages/cli` (401s, measured) is
+    // already past a 570s budget, before four more suites. One call cannot
+    // finish; a second one can carry on where it stopped.
+    const threePackages = (): void => {
+      writeFileSync(
+        join(root, 'package.json'),
+        JSON.stringify({ name: 'r', workspaces: ['packages/*'] }),
+      );
+      pkg('packages/core', {
+        name: '@x/core',
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      });
+      pkg('packages/a', {
+        name: '@x/a',
+        dependencies: { '@x/core': '*' },
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      });
+      pkg('packages/b', {
+        name: '@x/b',
+        dependencies: { '@x/core': '*' },
+        scripts: { build: 'exit 0', test: 'exit 0' },
+      });
+      writePlan(['packages/core/src/a.ts']);
+    };
+
+    const okResult = (command: string): CommandResult => ({
+      command,
+      exitCode: 0,
+      seconds: 1,
+      timedOut: false,
+      output: '',
+    });
+
+    it('runs what the previous call left, and re-runs nothing it already did', () => {
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a', 'packages/b'],
+          widenedWith: [],
+          install: okResult('npm ci --no-audit --no-fund'),
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'the whole-call budget was spent with 2 suite(s) still to run',
+          testScope: {
+            workspaces: ['packages/core'],
+            notRun: ['packages/a', 'packages/b'],
+            caveat: 'the whole-call budget was spent',
+          },
+        }),
+      );
+
+      const calls: string[] = [];
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          calls.push(command);
+          return okResult(command);
+        },
+      });
+
+      // Only the two unrun suites. No install, no build: the tree the previous
+      // call compiled is still there, and paying for it inside a second
+      // ceiling is exactly the budget this exists to protect.
+      expect(calls).toEqual([
+        'npm test --workspace="packages/a"',
+        'npm test --workspace="packages/b"',
+      ]);
+      expect(rep.test.map((t) => t.command)).toEqual([
+        'npm test --workspace="packages/core"',
+        'npm test --workspace="packages/a"',
+        'npm test --workspace="packages/b"',
+      ]);
+      expect(rep.build).toHaveLength(1);
+      expect(rep.testScope?.workspaces).toEqual([
+        'packages/core',
+        'packages/a',
+        'packages/b',
+      ]);
+      expect(rep.testScope?.notRun).toBeUndefined();
+      expect(rep.ok).toBe(true);
+      // The note being continued said suites were still to run. They are not.
+      expect(rep.note).not.toContain('still to run');
+      expect(rep.note).toContain('Continued from a previous build-test call');
+    });
+
+    it('replaces a CLAMPED timeout with its full-deadline result', () => {
+      // The #9113 shape: the suite was admitted with 286s of its 300s deadline
+      // and killed. It is not a slow suite — it is a late start, and the
+      // report must not carry both the kill and the real result.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const killed = {
+        command: 'npm test --workspace="packages/a"',
+        exitCode: null,
+        seconds: 286,
+        timedOut: true,
+        output: '',
+        deadlineMs: 286_000,
+        clamped: true,
+      };
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"'), killed],
+          ok: false,
+          timedOut: [killed.command],
+          note: '1 command(s) ran out of time',
+          testScope: { workspaces: ['packages/core', 'packages/a'] },
+        }),
+      );
+
+      const deadlines: number[] = [];
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: (command, _cwd, timeoutMs) => {
+          deadlines.push(timeoutMs);
+          return okResult(command);
+        },
+      });
+
+      // One entry for the command, and it is the one that finished.
+      const entries = rep.test.filter((t) => t.command === killed.command);
+      expect(entries).toHaveLength(1);
+      expect(entries[0].timedOut).toBe(false);
+      expect(entries[0].clamped).toBeUndefined();
+      // A full deadline, not the shortened one that killed it.
+      expect(deadlines).toEqual([60_000]);
+      // `ok` is recomputed: the only failure was the timeout just superseded.
+      expect(rep.ok).toBe(true);
+      expect(rep.timedOut).toEqual([]);
+    });
+
+    it('refuses to run suites against packages the previous call never built', () => {
+      // A suite against artifacts that were never compiled manufactures
+      // failures the diff did not cause. A continuation skips the build, so it
+      // cannot clear this — it says so instead of pretending.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a'],
+          notBuilt: ['packages/a'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [],
+          ok: false,
+          timedOut: [],
+          note: 'the build phase reached the whole-call budget',
+          testScope: { workspaces: [], notRun: ['packages/a'] },
+        }),
+      );
+
+      const calls: string[] = [];
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          calls.push(command);
+          return okResult(command);
+        },
+      });
+
+      expect(calls).toEqual([]);
+      expect(rep.note).toContain('unbuilt');
+      expect(rep.note).toContain('without --resume');
+    });
+
+    it('refuses a resume with no report to continue, naming the fix', () => {
+      threePackages();
+      expect(() =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        }),
+      ).toThrow(/--resume needs --out/);
+
+      expect(() =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: join(root, 'no-such-report.json'),
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        }),
+      ).toThrow(/without\n?\s*--resume first|Run build-test without/);
+    });
+
+    it('says so when the run it continues had already finished', () => {
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core'],
+          widenedWith: [],
+          install: null,
+          build: [],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'ran everything',
+          testScope: { workspaces: ['packages/core'] },
+        }),
+      );
+      const calls: string[] = [];
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          calls.push(command);
+          return okResult(command);
+        },
+      });
+      expect(calls).toEqual([]);
+      expect(rep.note).toContain('Nothing to resume');
+    });
   });
 });

@@ -56,13 +56,19 @@ export interface Ledger {
    * local cache could never do for CI: a fresh environment recovers the
    * previous findings from the posted body but had nowhere to recover "last
    * reviewed at", so its incremental range always degraded to the full diff.
-   * Absent on a fail-closed round ON PURPOSE — a run that left scope
-   * unreviewed must not hand the next round an anchor that scopes past it.
-   * "Fail-closed" here is the net `ledgerMarkerFor` computes (any undecided
-   * blocker, or any cap in the verdict the module itself derived), and Step
-   * 8's cache-skip rule names the same net for `lastCommitSha` — the two
+   * Absent on a fail-closed round ON PURPOSE — a run that could not show it
+   * READ the whole diff must not hand the next round an anchor that scopes
+   * past the part it missed. "Fail-closed" here is the net `ledgerMarkerFor`
+   * computes (any undecided blocker, unproven coverage, or any cap in the
+   * verdict the module derived other than `unreviewed-dimension` — a
+   * dimension nobody could run says nothing about which lines were read), and
+   * Step 8's cache-skip rule names the same net for `lastCommitSha` — the two
    * anchors must not disagree about what a clean round is. The findings
    * still ride; only the anchor is withheld.
+   *
+   * It also never crosses accounts: `pr-context` strips it from a marker
+   * another account posted, so a foreign body can never decide which lines
+   * this pipeline stops looking at.
    */
   sha?: string;
 }

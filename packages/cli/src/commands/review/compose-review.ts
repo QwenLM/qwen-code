@@ -237,6 +237,23 @@ export interface ComposeReviewResult {
    * coverage would have capped — and `srcDiffLines` the plan's own count.
    */
   lowSignal: { agents: number; srcDiffLines: number } | null;
+  /**
+   * True when the machine-derived coverage evidence leaves doubt that the
+   * whole diff was READ — a chunk with no receipt, an uncoverable chunk, an
+   * idle/blind/never-opened agent, unreadable transcripts, a context fetch
+   * that failed. Deliberately narrower than `cappedBy`: it says nothing about
+   * how DEEPLY the diff was reviewed, only about whether it was reached.
+   *
+   * The incremental anchor is the one consumer (`ledgerMarkerFor`). Emitted in
+   * the composed artifact too, because "why did this round not certify a
+   * range?" was otherwise unanswerable from the artifact alone.
+   *
+   * Optional for readers, always written by this module: a composed artifact
+   * from a build that predates the field has no answer, and a reader that
+   * needs one must fail closed (treat absent as unproven) rather than read
+   * `undefined` as "proven".
+   */
+  scopeUnproven?: boolean;
 }
 
 /**
@@ -436,8 +453,19 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
 function toCount(value: unknown, field: string): number {
   if (value === undefined || value === null) return 0;
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    // An ARRAY is the one wrong shape worth naming, because it is the one the
+    // callers actually write: `suggestionsDiscarded` sits in the skill's field
+    // list between `bodyCriticals` and `cannotTellCriticals`, which ARE lists,
+    // and it is described in list language ("Suggestions whose anchors
+    // failed…"). Two of four live runs (PRs #9094 and #9109) sent `[]` and
+    // spent a turn each recovering — one of them by rewriting its own state
+    // file with `perl -pi`. A generic "must be an integer" leaves the caller
+    // to guess whether the list itself was wrong; this says what to send.
+    const hint = Array.isArray(value)
+      ? ` — it is a COUNT, not a list: send ${value.length}`
+      : '';
     throw new TypeError(
-      `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`,
+      `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}${hint}`,
     );
   }
   return value;
@@ -481,7 +509,14 @@ export function composeReview(
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input, result.cappedBy);
+  // Absent means "not recorded", never "proven" — fail closed, as the field's
+  // own contract says. This module always sets it, so the fallback is for a
+  // result assembled elsewhere.
+  const marker = ledgerMarkerFor(
+    input,
+    result.cappedBy,
+    result.scopeUnproven ?? true,
+  );
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -493,6 +528,7 @@ export function composeReview(
 function ledgerMarkerFor(
   input: ComposeReviewInput,
   cappedBy: string[],
+  scopeUnproven: boolean,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -521,24 +557,36 @@ function ledgerMarkerFor(
     } catch {
       // No previous posted round recovered: this is round 1.
     }
-    // The anchor rides only when this round's scope was clean, and "clean" is
-    // the verdict this module just computed: `cappedBy` aggregates every
-    // fail-closed state — each named input pushes its own cap entry, plus the
-    // caps with no input channel at all (a chunk nobody read, findings still
-    // `— [unverified]`, the deterministic gates' enrichments). The input
-    // fields alone were measured leaking exactly those channel-less caps: a
-    // round the module stamped "could not certify that any of this diff was
-    // reviewed" still carried the anchor. One raw check stays alongside, for
-    // the sliver the cap list deliberately drops: a whitespace-only
+    // The anchor rides only when this round's SCOPE was clean. An anchor
+    // written past unreviewed scope scopes the NEXT round's incremental diff
+    // past it, and no later round ever re-covers the gap — so every cap that
+    // could mean "part of this diff went unread" withholds it, plus one raw
+    // check for the sliver the cap list drops (a whitespace-only
     // `cannotTellCriticals` entry is filtered out of the rendered caps, but
     // Step 8's contract is "any entry" — an undecided blocker whose text was
-    // lost is still an undecided blocker. An anchor written past unreviewed
-    // or undecided scope scopes the NEXT round's incremental diff past it,
-    // and no later round ever re-covers the gap. The findings always ride —
-    // a fail-closed round's work list is still a work list; it just cannot
+    // lost is still an undecided blocker). The findings always ride: a
+    // fail-closed round's work list is still a work list; it just cannot
     // certify a range.
+    //
+    // `unreviewed-dimension` is the ONE cap that does not withhold on its own,
+    // and the exception is measured, not theoretical. That cap fires for the
+    // orchestrator's `unreviewedDimensions` prose — on this repo, "the
+    // integration suite CI skipped did not run locally", which is true of
+    // every round because `build-test`'s whole-call budget cannot fit the
+    // suites (measured on PR #9113: 4 of 7 suites `notRun`, 50% of the budget
+    // spent on one SIGTERM'd suite). The result was a closed loop: an
+    // untestable dimension capped the verdict, the cap withheld the anchor,
+    // the missing anchor forced the next round to re-review the full diff —
+    // 119 minutes and 34M tokens on a PR whose code had not changed a line
+    // since the round before (measured, PR #9113 round 2). A dimension nobody
+    // could run says nothing about WHICH LINES were read, and the anchor's
+    // only claim is about lines. When the machine coverage evidence does show
+    // doubt about the reading itself, `scopeUnproven` carries it here and the
+    // anchor is withheld exactly as before.
     const failClosed =
-      (input.cannotTellCriticals?.length ?? 0) > 0 || cappedBy.length > 0;
+      (input.cannotTellCriticals?.length ?? 0) > 0 ||
+      scopeUnproven ||
+      cappedBy.some((cap) => cap !== 'unreviewed-dimension');
     const sha =
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
@@ -1093,6 +1141,22 @@ function composeReviewBody(
     cappedBy.push('findings-unverified-at-compose');
   }
 
+  // Is there any doubt that the whole diff was READ? That is a narrower
+  // question than "did anything cap the verdict", and it is the only one the
+  // incremental anchor needs — see `ledgerMarkerFor`. Every entry counted here
+  // is machine-derived (recomputed from the harness's own transcripts a few
+  // hundred lines above), never the orchestrator's prose: an agent that made
+  // no tool call, one launched without the diff in its prompt, one that never
+  // opened it, a chunk with no receipt, a plan or transcript set that could
+  // not be read, a context fetch that failed. `budgetEntry` is excluded on
+  // purpose — a disclosed budget gap is the ceiling working, and it says
+  // something about DEPTH, not about which lines were read.
+  const scopeUnproven =
+    missingReceipts.length > 0 ||
+    uncoverable.length > 0 ||
+    contextUnavailable ||
+    coverageEntries.some((entry) => entry !== budgetEntry);
+
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
   // The caps that reach a Request changes — because they remove the premise
@@ -1570,6 +1634,7 @@ function composeReviewBody(
       downgradedFrom,
       remediation,
       lowSignal,
+      scopeUnproven,
     };
   }
 
@@ -1603,6 +1668,7 @@ function composeReviewBody(
       downgradedFrom,
       remediation,
       lowSignal,
+      scopeUnproven,
     };
   }
 
@@ -1765,6 +1831,7 @@ function composeReviewBody(
     downgradedFrom,
     remediation,
     lowSignal,
+    scopeUnproven,
   };
 }
 

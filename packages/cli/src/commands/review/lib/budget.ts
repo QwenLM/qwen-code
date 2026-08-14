@@ -423,9 +423,51 @@ const BUDGET_QUALIFIED =
   '(?:under|within|below|inside)\\s+(?:the\\s+)?(?:tool(?:[- ]call)?\\s+)?budget';
 const COMPLETION_TAIL = `(?:\\s+${BUDGET_QUALIFIED})?`;
 
+/**
+ * The same non-answer, written in Chinese.
+ *
+ * The line DETECTOR above has always been bilingual (`预算缺口` and the
+ * full-width colon are in `GAP_HINT_RE`), but this classifier was not — so
+ * under `general.outputLanguage: 中文` an agent's "nothing to disclose" became
+ * a real gap. Measured on a live review of PR #9094: a reverse-audit agent
+ * returned `Budget gap: 无 — 所有检查均完成，未触及工具预算上限。` ("none — all
+ * checks completed, the tool budget was NOT reached") and the composed body
+ * published `Not explored to full depth (tool budget reached)` quoting that
+ * very sentence — the disclosure asserted the opposite of its own evidence.
+ *
+ * Shapes are the English branch's, narrowed the same way:
+ *
+ *  - a bare token (`无`, `没有`, `不适用`), optionally with the noun the brief
+ *    uses (`无缺口`, `没有跳过的检查`);
+ *  - a token, a dash or comma, then a completion clause the text ENDS with
+ *    (`无 — 所有检查均完成`), tolerating a trailing budget adverbial
+ *    (`未触及工具预算上限`).
+ *
+ * The token needs an explicit boundary — Chinese has no `\b`. `无` is a
+ * prefix of `无法…` ("unable to…"), which is a REAL gap and must survive, so
+ * a token is only a token when what follows it is punctuation, whitespace,
+ * or the end of the text. And as on the English side, the completion clause
+ * must not cross an exception (`但`, `除`) or a negation of the completion
+ * itself (`未完成`, `均未完成`).
+ */
+const ZH_TOKEN = '(?:无|没有|不适用|暂无)(?:缺口|跳过的?检查|检查)?';
+const ZH_EXCEPTION = '但|除|除了|例外';
+const ZH_COMPLETION = '(?:完成|完毕|结束)';
+const ZH_TAIL = '[。．.!！…,，;；:：\\s]*$';
+// Both spans are BOUNDED, unlike the English branch's `.*`: this classifier
+// runs on every agent return before the length cap applies, and two unbounded
+// quantifiers separated by a literal is the shape that backtracks. A real
+// "nothing to disclose" sentence fits in far less than 40 characters a side.
+const ZH_PLACEHOLDER =
+  `${ZH_TOKEN}(?:${ZH_TAIL}` +
+  `|\\s*[-—–、,，]\\s*(?:(?!${ZH_EXCEPTION}).){0,40}` +
+  `(?<!未)(?<!没)(?<!无法)${ZH_COMPLETION}` +
+  `(?:(?!${ZH_EXCEPTION}).){0,40}${ZH_TAIL})`;
+
 const PLACEHOLDER_GAP_RE = new RegExp(
   '^(?:<[^>]*>$' +
     '|[-—*_~`]+$' +
+    `|${ZH_PLACEHOLDER}` +
     '|(?:none|n/a|nothing|no (?:gaps?|checks?))\\b(?:' +
     '[.!…,;:\\s]*$' +
     '|\\s+(?:skipped|found|to report)\\b[.!…,;:\\s]*$' +

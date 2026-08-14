@@ -641,39 +641,88 @@ function blockerSection(
 }
 
 /**
- * The latest machine ledger the REVIEWING account itself posted, if any.
+ * The latest machine ledger posted on this PR — with the trust surface split.
  *
- * Own-account only: the ledger claims "these are the findings the previous
- * /review round stood behind", and only this account's reviews can make that
- * claim. Another user's marker — pasted, forged, or their own tooling's — is
- * data about THEIR review, not ours, and is ignored rather than trusted.
- * Latest by submitted_at wins: each posted round embeds a fresh full copy.
- * Ties — same second, or both timestamps missing — break on the review id,
- * which is monotonic: keeping the earlier review on a tie would hand the next
- * round the older work list, the one failure this whole recovery exists to
- * prevent.
+ * The two halves of a marker are not the same claim, and treating them as one
+ * cost the mechanism its main use case. The **findings** are a work list: Step
+ * 6 owes every entry a fresh ruling against the code at HEAD before repeating
+ * or retiring it, so a list from another account is at worst a few claims to
+ * re-check — and the same pipeline already ingests other accounts' inline
+ * comments as prior-round findings (`comment-status`), which is strictly more
+ * trusting than this. The **sha** is different in kind: it scopes the next
+ * round's incremental diff, so accepting a foreign one lets an untrusted body
+ * decide which lines this pipeline never looks at again. So: the list travels,
+ * the anchor does not.
+ *
+ * Own-account-only was measured shutting the feature off exactly where it was
+ * designed to work. The skill's own words are "the file being absent is the
+ * NORMAL state everywhere except the machine that ran the last review — CI,
+ * another clone, a colleague's checkout", and the marker exists to survive
+ * that. But CI posts as a bot and a maintainer runs as themselves, so the
+ * accounts differ in the common case: on PRs #9113 and #9094 the CI bot's
+ * markers were on the PR and invisible to a local re-run, which then
+ * re-reviewed the full diff of an unchanged PR (measured: 119 and 128
+ * minutes, ~34M tokens each).
+ *
+ * Latest by submitted_at wins regardless of author — a newer round's work list
+ * is the relevant one — and `foreign` says whether it came from someone else,
+ * for the caller to render and for the anchor to be dropped. Ties — same
+ * second, or both timestamps missing — break on the review id, which is
+ * monotonic: keeping the earlier review on a tie would hand the next round the
+ * older work list, the one failure this whole recovery exists to prevent. A
+ * tie between an own and a foreign review keeps the OWN one: same content
+ * claim, and the own copy is the one that may carry an anchor.
  */
-export function latestOwnLedger(
+export function latestLedger(
   reviews: RawReview[],
   login: string | null,
-): Ledger | null {
-  if (!login) return null;
-  let best: { at: string; id: number; ledger: Ledger } | null = null;
+): { ledger: Ledger; foreign: boolean; author: string | null } | null {
+  let best: {
+    at: string;
+    id: number;
+    ledger: Ledger;
+    foreign: boolean;
+    author: string | null;
+  } | null = null;
   for (const r of reviews) {
-    if (r.user?.login !== login) continue;
     const ledger = parseLedger(r.body);
     if (!ledger) continue;
+    const author = r.user?.login ?? null;
+    const foreign = !login || author !== login;
     const at = r.submitted_at ?? '';
     const id = typeof r.id === 'number' ? r.id : 0;
-    if (!best || at > best.at || (at === best.at && id > best.id)) {
-      best = { at, id, ledger };
-    }
+    const newer =
+      !best ||
+      at > best.at ||
+      (at === best.at && (id > best.id || (id === best.id && !foreign)));
+    if (newer) best = { at, id, ledger, foreign, author };
   }
-  return best?.ledger ?? null;
+  if (!best) return null;
+  // The anchor never crosses accounts. Dropped here, at the recovery seam, so
+  // no consumer downstream has to remember the rule.
+  const ledger = best.foreign ? stripAnchor(best.ledger) : best.ledger;
+  return { ledger, foreign: best.foreign, author: best.author };
 }
 
-/** Render the previous round's ledger for the context file. */
-export function renderLedgerSection(ledger: Ledger): string {
+/** The same ledger with its incremental anchor removed. */
+function stripAnchor(ledger: Ledger): Ledger {
+  if (ledger.sha === undefined) return ledger;
+  const { sha: _dropped, ...rest } = ledger;
+  return rest;
+}
+
+/**
+ * Render the previous round's ledger for the context file.
+ *
+ * `author` is set only when the marker came from ANOTHER account (the CI bot,
+ * typically). The section then says whose claims these are and that no anchor
+ * travelled with them, because a reader — human or model — must not read a
+ * foreign work list as this account's own certified round.
+ */
+export function renderLedgerSection(
+  ledger: Ledger,
+  author: string | null = null,
+): string {
   // Cell contents come from a marker in a PR body — untrusted text. A `|` or a
   // newline would break the table structure (and could forge rows), so both are
   // neutralised before interpolation. The location cell is rendered inside a
@@ -696,7 +745,7 @@ export function renderLedgerSection(ledger: Ledger): string {
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`` : ''}, recovered from the marker this account's last posted review carried. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` The reviewed-at sha is the incremental anchor Step 1's recovered-anchor check reads from the side file — validate it is an ancestor of the fetched head before scoping to it.` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`` : ''}, recovered from the marker ${author ? `**@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` The reviewed-at sha is the incremental anchor Step 1's recovered-anchor check reads from the side file — validate it is an ancestor of the fetched head before scoping to it.` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
@@ -721,6 +770,8 @@ export function buildMarkdown(
   issue: RawComment[],
   reviews: RawReview[],
   prevLedger: Ledger | null = null,
+  /** Set only when the ledger came from another account — see the section. */
+  prevLedgerAuthor: string | null = null,
 ): string {
   const {
     openRoots,
@@ -795,7 +846,7 @@ export function buildMarkdown(
   // applicable to the current diff"). Empty bodies and "LGTM" templates are
   // filtered to keep the section signal-rich.
   if (prevLedger) {
-    parts.push(renderLedgerSection(prevLedger));
+    parts.push(renderLedgerSection(prevLedger, prevLedgerAuthor));
   }
 
   const meaningfulReviews = reviews
@@ -962,14 +1013,18 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // the side file for the round number, and Step 6 owes each entry a ruling.
   // Best-effort — offline/unauthenticated just means no ledger, never a failure.
   let prevLedger: Ledger | null = null;
+  let prevLedgerAuthor: string | null = null;
   try {
     // `currentUser()` is a network round-trip; with no reviews on the PR there
-    // is nothing for its answer to match against, so it is not made.
-    prevLedger = reviews.length
-      ? latestOwnLedger(reviews, currentUser())
-      : null;
+    // is nothing for its answer to match against, so it is not made. It is
+    // still needed with the split trust surface — not to FIND the ledger, but
+    // to decide whether this one is ours and may carry an anchor.
+    const found = reviews.length ? latestLedger(reviews, currentUser()) : null;
+    prevLedger = found?.ledger ?? null;
+    prevLedgerAuthor = found?.foreign ? found.author : null;
   } catch {
     prevLedger = null;
+    prevLedgerAuthor = null;
   }
   if (prevLedger) {
     // mkdir FIRST and guard: this write precedes the one below that creates the
@@ -999,6 +1054,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     issue,
     reviews,
     prevLedger,
+    prevLedgerAuthor,
   );
 
   mkdirSync(dirname(out), { recursive: true });

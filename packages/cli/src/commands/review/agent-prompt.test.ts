@@ -11,6 +11,7 @@
 // is in the prompt, the read call is in the prompt, and the agent is not handed a
 // sentence to recite when it finds nothing.
 
+import { SHELL_TOOL_MAX_TIMEOUT_MS } from './lib/build-budget.js';
 import {
   describe,
   it,
@@ -2335,7 +2336,23 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // 120s shell timeout would kill it — the very failure this command prevents, one
     // level up. So the block tells the agent to pass the tool's max, 600000ms.
     const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
-    expect(p).toContain('timeout: 600000');
+    expect(p).toContain(`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}`);
+  });
+
+  it('tells Agent 7 how to CONTINUE a run one call could not finish', () => {
+    // The ceiling is per call. On this repo one call cannot reach every suite
+    // (install + builds + `packages/core` at 106s leaves 285s, and
+    // `packages/cli` alone needs 401s), so a brief that stops at the first
+    // call teaches the agent to report a truncated dimension as a finished
+    // one — which is what three live reviews did.
+    const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
+    expect(p).toContain('--resume');
+    expect(p).toContain('testScope.notRun');
+    expect(p).toContain('"clamped": true');
+    // The continuation runs the same command, so the block must carry the same
+    // plan and out paths — an agent that has to re-derive them gets them wrong.
+    const resumeBlock = p.slice(p.indexOf('--resume') - 400);
+    expect(resumeBlock).toContain('/abs/tmp/plan.json');
   });
 
   it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {

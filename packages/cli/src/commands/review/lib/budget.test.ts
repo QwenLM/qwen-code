@@ -354,6 +354,50 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('drops the SAME non-answers written in Chinese', () => {
+    // Measured on a live review of PR #9094 under `outputLanguage: 中文`: the
+    // reverse-audit agent returned the first line below — "none — all checks
+    // completed, the tool budget was NOT reached" — and the composed body
+    // published `Not explored to full depth (tool budget reached)` quoting it.
+    // The line DETECTOR was already bilingual; only this classifier was not.
+    for (const line of [
+      'Budget gap: 无 — 所有检查均完成，未触及工具预算上限。',
+      '预算缺口：无 — 所有检查均完成，未触及工具预算上限。',
+      'Budget gap: 无',
+      'Budget gap: 无。',
+      'Budget gap: 没有',
+      'Budget gap: 不适用',
+      'Budget gap: 暂无缺口',
+      'Budget gap: 没有跳过的检查',
+      'Budget gap: 无，所有计划内的检查均已完成',
+      'Budget gap: 无 — 所有计划检查均已完成。',
+      'Budget gap: (无 — 所有检查均完成)',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+  });
+
+  it('keeps a REAL Chinese gap — 无法 is a prefix of the token, not the token', () => {
+    // Chinese has no word boundary, so a token is only a token when
+    // punctuation, whitespace or end-of-text follows it. `无法验证…`
+    // ("unable to verify…") is the exact failure this guard exists for:
+    // dropping it would certify work that never happened.
+    expect(
+      budgetGapDisclosures('Budget gap: 无法验证 Windows 矩阵的集成测试'),
+    ).toEqual(['无法验证 Windows 矩阵的集成测试']);
+    // A completion clause that is negated, or that carves out an exception,
+    // is a real gap in either language.
+    expect(budgetGapDisclosures('Budget gap: 无 — 所有检查均未完成')).toEqual([
+      '无 — 所有检查均未完成',
+    ]);
+    expect(
+      budgetGapDisclosures('Budget gap: 无 — 除 Windows 矩阵外均已完成'),
+    ).toEqual(['无 — 除 Windows 矩阵外均已完成']);
+    expect(budgetGapDisclosures('Budget gap: 无障碍检查未运行')).toEqual([
+      '无障碍检查未运行',
+    ]);
+  });
+
   it('keeps a REAL gap in parentheses — the paren strip fires only for placeholders', () => {
     // The strip exists for `(none — all planned checks completed)`; a
     // genuine parenthesized disclosure must survive it …
