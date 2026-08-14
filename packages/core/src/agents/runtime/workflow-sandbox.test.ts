@@ -231,7 +231,7 @@ describe('extractAndStripMeta', () => {
   it('rejects meta that references an unknown identifier', () => {
     const src = `export const meta = { name: totallyUnknown, description: 'd' }\nreturn 1`;
     expect(() => extractAndStripMeta(src)).toThrow(
-      /failed to evaluate meta object literal/,
+      /totallyUnknown is not defined/,
     );
   });
 
@@ -337,8 +337,30 @@ describe('extractAndStripMeta', () => {
       );
     });
 
+    it('stops walking a holey array after the size budget is exhausted', () => {
+      const src = `export const meta = { name: 'x', description: 'd', phases: new Array(1e8) }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /meta literal is too large/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
     it('bounds a looping then getter', () => {
       const src = `export const meta = { name: 'x', description: 'd', extra: { get then() { while (true) {} } } }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    it('bounds a Promise subclass with a hostile species getter', () => {
+      const src = `export const meta = {
+        name: 'x',
+        description: 'd',
+        extra: new (class extends Promise {
+          static get [Symbol.species]() { while (true) {} }
+        })((resolve) => resolve(1)),
+      }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
         /failed to evaluate meta object literal/,
       );
@@ -365,6 +387,92 @@ describe('extractAndStripMeta', () => {
         phases: [{ title: 'One' }],
       });
     });
+  });
+
+  it.each([
+    [
+      'literal timeout',
+      `export const meta = { name: (function () { Promise.reject(new Error('boom')); while (true) {} })(), description: 'd' }\nreturn 1`,
+    ],
+    [
+      'async literal timeout',
+      `export const meta = { name: (function () { (async () => { throw new Error('boom'); })(); while (true) {} })(), description: 'd' }\nreturn 1`,
+    ],
+    [
+      'proxy timeout before a sibling rejection',
+      `export const meta = { name: 'x', description: 'd', blocked: new Proxy({}, { ownKeys() { while (true) {} } }), rejected: Promise.reject(new Error('boom')) }\nreturn 1`,
+    ],
+    [
+      'throwing getter after creating a rejection',
+      `export const meta = { name: 'x', description: 'd', get extra() { Promise.reject(new Error('boom')); throw new Error('getter'); } }\nreturn 1`,
+    ],
+    [
+      'looping getter after creating a rejection',
+      `export const meta = { name: 'x', description: 'd', get extra() { Promise.reject(new Error('boom')); while (true) {} } }\nreturn 1`,
+    ],
+  ])(
+    'contains rejected Promises when %s aborts evaluation',
+    async (_name, src) => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        expect(() => extractAndStripMeta(src)).toThrow(
+          /failed to evaluate meta object literal/,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    },
+  );
+
+  it.each([
+    [
+      'symbol key',
+      `export const meta = { name: 'x', description: 'd', [Symbol('hidden')]: Promise.reject(new Error('boom')) }\nreturn 1`,
+    ],
+    [
+      'prototype',
+      `export const meta = { __proto__: { hidden: Promise.reject(new Error('boom')) }, name: 'x', description: 'd' }\nreturn 1`,
+    ],
+    [
+      'function property',
+      `export const meta = { name: 'x', description: 'd', extra: Object.assign(function () {}, { hidden: Promise.reject(new Error('boom')) }) }\nreturn 1`,
+    ],
+    [
+      'species sabotage',
+      `export const meta = { name: 'x', description: 'd', extra: (function () { const p = Promise.reject(new Error('boom')); p.constructor = { [Symbol.species]: function () { throw new Error('species'); } }; return p; })() }\nreturn 1`,
+    ],
+    [
+      'Promise proxy',
+      `export const meta = { name: 'x', description: 'd', extra: new Proxy(Promise.reject(new Error('boom')), {}) }\nreturn 1`,
+    ],
+    [
+      'non-enumerable property',
+      `export const meta = { name: 'x', description: 'd', extra: Object.defineProperty({}, 'hidden', { value: Promise.reject(new Error('boom')) }) }\nreturn 1`,
+    ],
+  ])('rejects a Promise hidden behind a %s', async (_name, src) => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /meta values must not be Promises/,
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('uses the Promise diagnostic for a top-level thenable', () => {
+    const src = `export const meta = { then: () => {}, name: 'x', description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
   });
 
   // The literal is evaluated as its own program, so it never shares a lexical
@@ -417,7 +525,7 @@ describe('extractAndStripMeta', () => {
       description: 'd',
       extra: Object.defineProperty({}, 'value', { enumerable: true, get: function () {
         const serializerGlobal = arguments.callee.caller.constructor('return globalThis')();
-        if (serializerGlobal.__qwenWorkflowMetaIsPromise) throw new Error('host helper exposed');
+        if (typeof serializerGlobal.copy !== 'undefined') throw new Error('host helper exposed');
         return 'safe';
       } }),
     }\nreturn 1`;
@@ -425,6 +533,41 @@ describe('extractAndStripMeta', () => {
       name: 'x',
       description: 'd',
     });
+  });
+
+  it('rejects serializer-envelope forgery through Object.prototype', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      phases: Promise.resolve(1),
+      extra: Object.defineProperty({}, 'value', { enumerable: true, get: function () {
+        const serializerGlobal = arguments.callee.caller.constructor('return globalThis')();
+        serializerGlobal.Object.prototype.toJSON = () => ({
+          hasThenable: false,
+          tooLarge: false,
+          value: { name: 'forged', description: 'forged' },
+        });
+        return 'safe';
+      } }),
+    }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow();
+  });
+
+  it('rejects an oversized payload after attempted envelope forgery', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      get whenToUse() {
+        const serializerGlobal = arguments.callee.caller.constructor('return globalThis')();
+        serializerGlobal.Object.prototype.toJSON = () => ({
+          hasThenable: false,
+          tooLarge: false,
+          value: { name: 'forged', description: 'forged', whenToUse: 'A'.repeat(10 * 1024 * 1024) },
+        });
+        return 'A'.repeat(10 * 1024 * 1024);
+      },
+    }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow();
   });
 
   it('prefers a Promise error after the size budget is exceeded', () => {

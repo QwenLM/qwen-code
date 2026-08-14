@@ -148,6 +148,56 @@ export interface WorkflowMeta {
   phases?: Array<{ title: string; detail?: string; model?: string }>;
 }
 
+function observePromiseRejections<T>(run: () => T): T {
+  const nativeThen = Promise.prototype.then;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const defineProperty = Object.defineProperty;
+  const deleteProperty = Reflect.deleteProperty;
+  let attaching = false;
+  const hook = createHook({
+    init(_asyncId, type, _triggerAsyncId, resource) {
+      if (type !== 'PROMISE' || attaching) return;
+      attaching = true;
+      const ownConstructor = getOwnPropertyDescriptor(resource, 'constructor');
+      try {
+        defineProperty(resource, 'constructor', {
+          value: Promise,
+          configurable: true,
+        });
+        Reflect.apply(nativeThen, resource, [undefined, () => undefined]);
+      } catch {
+        // Non-native thenables are rejected by the bounded serializer.
+      } finally {
+        if (ownConstructor) {
+          defineProperty(resource, 'constructor', ownConstructor);
+        } else {
+          Reflect.apply(deleteProperty, Reflect, [resource, 'constructor']);
+        }
+        attaching = false;
+      }
+    },
+  });
+  hook.enable();
+  try {
+    return run();
+  } finally {
+    hook.disable();
+  }
+}
+
+function formatMetaEvaluationError(error: unknown): string {
+  const context = vm.createContext(Object.create(null));
+  Object.defineProperty(context, META_ERROR_SLOT, { value: error });
+  try {
+    const message = new vm.Script(META_ERROR_SOURCE).runInContext(context, {
+      timeout: META_EVAL_TIMEOUT_MS,
+    });
+    return typeof message === 'string' ? message : 'unknown error';
+  } catch {
+    return 'unknown error';
+  }
+}
+
 /**
  * Strip `export const meta = {...}` from the script AND extract the meta
  * object as a plain host-realm value, ready to surface on `WorkflowRunOutcome`.
@@ -179,10 +229,11 @@ export interface WorkflowMeta {
  * under the timeout.
  *
  * The two scripts must stay separate programs for a second reason: the copy
- * helper's source is fixed and interpolates nothing, so the model's literal
- * never shares a lexical scope with it. Interpolating the literal into the
- * helper's own scope would let it read and overwrite the helper's bindings —
- * including the flag that decides whether a thenable was found.
+ * helper interpolates only fixed host constants, never model-authored source,
+ * so the model's literal never shares a lexical scope with it. Interpolating
+ * the literal into the helper's own scope would let it read and overwrite the
+ * helper's bindings — including the flag that decides whether a thenable was
+ * found.
  *
  * Returns `{ stripped, meta: null }` when no meta declaration is present
  * (callers treat this as "no meta"). Throws when meta is present but
@@ -208,23 +259,25 @@ export function extractAndStripMeta(source: string): {
   const metaContext = vm.createContext(Object.create(null));
   let raw: unknown;
   let serialized: unknown;
-  try {
-    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext, {
-      timeout: META_EVAL_TIMEOUT_MS,
-    });
+  observePromiseRejections(() => {
+    try {
+      raw = new vm.Script(`(${metaSource})`).runInContext(metaContext, {
+        timeout: META_EVAL_TIMEOUT_MS,
+      });
 
-    const serializeContext = vm.createContext(Object.create(null));
-    Object.defineProperty(serializeContext, META_SLOT, { value: raw });
-    serialized = new vm.Script(META_SERIALIZE_SOURCE).runInContext(
-      serializeContext,
-      { timeout: META_EVAL_TIMEOUT_MS },
-    );
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : 'unknown error';
-    throw new Error(
-      `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
-    );
-  }
+      const serializeContext = vm.createContext(Object.create(null));
+      Object.defineProperty(serializeContext, META_SLOT, { value: raw });
+      serialized = new vm.Script(META_SERIALIZE_SOURCE).runInContext(
+        serializeContext,
+        { timeout: META_EVAL_TIMEOUT_MS },
+      );
+    } catch (e) {
+      throw new Error(
+        'extractAndStripMeta: failed to evaluate meta object literal: ' +
+          formatMetaEvaluationError(e),
+      );
+    }
+  });
 
   let walked: {
     hasThenable: boolean;
@@ -235,13 +288,15 @@ export function extractAndStripMeta(source: string): {
     if (typeof serialized !== 'string') {
       throw new Error('unexpected serializer result');
     }
+    if (serialized.length > META_SERIALIZED_MAX_CHARS) {
+      throw new Error('meta literal is too large');
+    }
     const parsed: unknown = JSON.parse(serialized);
     if (
       parsed === null ||
       typeof parsed !== 'object' ||
       typeof (parsed as { hasThenable?: unknown }).hasThenable !== 'boolean' ||
-      typeof (parsed as { tooLarge?: unknown }).tooLarge !== 'boolean' ||
-      !Object.hasOwn(parsed, 'value')
+      typeof (parsed as { tooLarge?: unknown }).tooLarge !== 'boolean'
     ) {
       throw new Error('unexpected serializer result');
     }
@@ -271,6 +326,12 @@ export function extractAndStripMeta(source: string): {
     throw new Error(
       'extractAndStripMeta: failed to evaluate meta object literal: ' +
         'meta literal is too large',
+    );
+  }
+  if (!Object.hasOwn(walked, 'value')) {
+    throw new Error(
+      'extractAndStripMeta: failed to evaluate meta object literal: ' +
+        'unexpected serializer result',
     );
   }
 
@@ -375,6 +436,7 @@ function isRegexContext(source: string, i: number): boolean {
   return /[{[(,;:=!&|?+\-*/%^~<>]/.test(prev);
 }
 
+import { createHook } from 'node:async_hooks';
 import * as vm from 'node:vm';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import type { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
@@ -410,9 +472,30 @@ const META_SERIALIZED_MAX_CHARS = 64 * 1024;
 
 // Context slot that carries the evaluated literal from script 1 to script 2.
 const META_SLOT = '__qwenWorkflowMetaValue';
+const META_ERROR_SLOT = '__qwenWorkflowMetaError';
+
+const META_ERROR_SOURCE = `(() => {
+  const apply = Reflect.apply;
+  const get = Reflect.get;
+  const slice = String.prototype.slice;
+  const error = globalThis[${JSON.stringify(META_ERROR_SLOT)}];
+  if (typeof error === 'string') return apply(slice, error, [0, 1000]);
+  if (error === null || (typeof error !== 'object' && typeof error !== 'function')) {
+    return 'unknown error';
+  }
+  try {
+    const message = get(error, 'message');
+    return typeof message === 'string'
+      ? apply(slice, message, [0, 1000])
+      : 'unknown error';
+  } catch {
+    return 'unknown error';
+  }
+})()`;
 
 /**
- * Fixed source for the meta serializer. Interpolates NOTHING — the model's
+ * Fixed source for the meta serializer. Interpolates only fixed host constants
+ * (the size cap and slot name), never model-authored source. The model's
  * literal is evaluated by a separate program (see `extractAndStripMeta`), so
  * it never shares a lexical scope with these bindings and cannot read or
  * overwrite `hasThenable`, `copy`, or the visited set.
@@ -425,11 +508,15 @@ const META_SLOT = '__qwenWorkflowMetaValue';
  * walk.
  */
 const META_SERIALIZE_SOURCE = `(() => {
+  Object.freeze(Object.prototype);
+  Object.freeze(Array.prototype);
   const apply = Reflect.apply;
   const isArray = Array.isArray;
   const getOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
+  const getPrototypeOf = Object.getPrototypeOf;
   const objectKeys = Object.keys;
   const objectCreate = Object.create;
+  const ownKeys = Reflect.ownKeys;
   const jsonStringify = JSON.stringify;
   const push = Array.prototype.push;
   const thenCall = Promise.prototype.then;
@@ -466,19 +553,34 @@ const META_SERIALIZE_SOURCE = `(() => {
   }
 
   function markPromises(value) {
-    if (value === null || typeof value !== 'object') return;
+    if (
+      value === null ||
+      (typeof value !== 'object' && typeof value !== 'function')
+    ) {
+      return;
+    }
     if (handlePromise(value)) return;
+    try {
+      if (typeof value.then === 'function') {
+        hasThenable = true;
+        return;
+      }
+    } catch {
+      // Keep scanning data properties after a hostile then getter throws.
+    }
     if (apply(setHas, promiseScanSeen, [value])) return;
     apply(setAdd, promiseScanSeen, [value]);
     const descriptors = getOwnPropertyDescriptors(value);
-    const keys = objectKeys(descriptors);
+    const keys = ownKeys(descriptors);
     for (let i = 0; i < keys.length; i++) {
       const descriptor = descriptors[keys[i]];
       if ('value' in descriptor) markPromises(descriptor.value);
     }
+    markPromises(getPrototypeOf(value));
   }
 
   function copy(value) {
+    if (tooLarge) return undefined;
     const type = typeof value;
     if (value === null) return null;
     if (type === 'string') return spend(value.length) ? value : undefined;
@@ -497,6 +599,7 @@ const META_SERIALIZE_SOURCE = `(() => {
       if (isArray(value)) {
         const out = [];
         for (let i = 0; i < value.length; i++) {
+          if (tooLarge) break;
           const keep = spend(2);
           const copied = copy(value[i]);
           if (keep) apply(push, out, [copied]);
@@ -506,6 +609,7 @@ const META_SERIALIZE_SOURCE = `(() => {
       const out = objectCreate(null);
       const keys = objectKeys(value);
       for (let i = 0; i < keys.length; i++) {
+        if (tooLarge) break;
         const key = keys[i];
         const keep = spend(key.length + 4);
         const copied = copy(value[key]);
