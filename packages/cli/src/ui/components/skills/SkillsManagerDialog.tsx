@@ -248,15 +248,35 @@ export function SkillsManagerDialog({
     setSelectedKeys([...initialSelectedKeys]);
   }, [unlockedSkills, initialSelectedKeys, selectedKeys]);
 
+  // Height-budget tiers. `compact` sheds border, paddingY, and footer
+  // (6 rows) — mirroring the /statusline compact path. `bare` sheds the
+  // remaining 5-row compact frame (title/subtitle/search/margin) too, so
+  // budgets ≤ 5 render only the always-present list row — otherwise the
+  // frame floors at 6 rows and the interactive list is the row that clips.
+  const compact =
+    availableTerminalHeight !== undefined &&
+    availableTerminalHeight <= SKILLS_DIALOG_FIXED_ROWS;
+  const bare =
+    availableTerminalHeight !== undefined &&
+    availableTerminalHeight <= SKILLS_DIALOG_FIXED_ROWS - 6;
+  const frameRows = bare
+    ? 0
+    : compact
+      ? SKILLS_DIALOG_FIXED_ROWS - 6
+      : SKILLS_DIALOG_FIXED_ROWS;
+
+  // The search row is hidden in bare mode, so a retained query must not
+  // filter the list invisibly (mirrors the /statusline `hasFullLayout`
+  // gate).
   const filteredUnlocked = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return unlockedSkills;
+    if (!normalizedQuery || bare) return unlockedSkills;
     return unlockedSkills.filter(
       (s) =>
         s.name.toLowerCase().includes(normalizedQuery) ||
         s.description.toLowerCase().includes(normalizedQuery),
     );
-  }, [unlockedSkills, query]);
+  }, [unlockedSkills, query, bare]);
 
   // `activeValue` is what Enter operates on. MultiSelect's `onHighlight`
   // populates it on arrow-key navigation, but NOT on initial mount or
@@ -284,13 +304,13 @@ export function SkillsManagerDialog({
 
   const filteredLocked = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return lockedSkills;
+    if (!normalizedQuery || bare) return lockedSkills;
     return lockedSkills.filter(
       (s) =>
         s.name.toLowerCase().includes(normalizedQuery) ||
         s.description.toLowerCase().includes(normalizedQuery),
     );
-  }, [lockedSkills, query]);
+  }, [lockedSkills, query, bare]);
 
   // Cap labels to the render width so each item is exactly one terminal
   // row — an uncapped label wraps to 2 rows below ~115 columns and
@@ -522,7 +542,9 @@ export function SkillsManagerDialog({
         return;
       }
 
-      if (key.name === 'backspace' || key.name === 'delete') {
+      // Search-row inputs are also suppressed in bare mode (the query is
+      // hidden there and bypassed in filtering) — same rationale as above.
+      if (!bare && (key.name === 'backspace' || key.name === 'delete')) {
         setQuery((current) => current.slice(0, -1));
         return;
       }
@@ -546,6 +568,7 @@ export function SkillsManagerDialog({
       }
 
       if (
+        !bare &&
         !key.ctrl &&
         !key.meta &&
         key.sequence.length === 1 &&
@@ -558,20 +581,9 @@ export function SkillsManagerDialog({
     { isActive: true },
   );
 
-  const hasQuery = query.trim().length > 0;
+  const hasQuery = !bare && query.trim().length > 0;
   const showsLockedSearchResults =
     hasQuery && items.length === 0 && filteredLocked.length > 0;
-  // When even the frame alone overflows the budget, shed border, paddingY,
-  // and footer (6 rows) — mirroring the /statusline compact path — so the
-  // always-rendered list row fits.
-  // ponytail: compact floors at 6 rows; below that the 5-row compact frame
-  // itself clips — drop title/subtitle/search too if users hit it.
-  const compact =
-    availableTerminalHeight !== undefined &&
-    availableTerminalHeight <= SKILLS_DIALOG_FIXED_ROWS;
-  const frameRows = compact
-    ? SKILLS_DIALOG_FIXED_ROWS - 6
-    : SKILLS_DIALOG_FIXED_ROWS;
   // Rows left for the unlocked list + locked block after the fixed chrome.
   const residual =
     availableTerminalHeight === undefined
@@ -696,40 +708,48 @@ export function SkillsManagerDialog({
       paddingY={compact ? 0 : 1}
       width="100%"
     >
-      <Text bold wrap="truncate">
-        {t('Manage Skills')}
-      </Text>
-      <Text color={theme.text.secondary} wrap="truncate">
-        {hasQuery
-          ? t('{{matched}} / {{total}} skills · ', {
-              matched: String(matchedCount),
-              total: String(totalCount),
-            })
-          : t('{{count}} skills · ', { count: String(totalCount) })}
-        {!showsLockedSearchResults &&
-        hiddenLockedCount > 0 &&
-        lockedRowBudget === 0
-          ? t('(+{{count}} locked)', { count: String(hiddenLockedCount) }) + ' '
-          : ''}
-        {t(
-          'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
-        )}
-      </Text>
-
-      <Box marginTop={1} flexDirection="column">
-        <Text wrap="truncate">
-          <Text color={hasQuery ? theme.text.accent : theme.text.secondary}>
-            {t('Search:')}{' '}
+      {!bare && (
+        <>
+          <Text bold wrap="truncate">
+            {t('Manage Skills')}
           </Text>
-          {query || (
-            <Text color={theme.text.secondary} dimColor>
-              {t('type to filter…')}
-            </Text>
-          )}
-        </Text>
-      </Box>
+          <Text color={theme.text.secondary} wrap="truncate">
+            {hasQuery
+              ? t('{{matched}} / {{total}} skills · ', {
+                  matched: String(matchedCount),
+                  total: String(totalCount),
+                })
+              : t('{{count}} skills · ', { count: String(totalCount) })}
+            {!showsLockedSearchResults &&
+            hiddenLockedCount > 0 &&
+            lockedRowBudget === 0
+              ? t('(+{{count}} locked)', {
+                  count: String(hiddenLockedCount),
+                }) + ' '
+              : ''}
+            {t(
+              'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
+            )}
+          </Text>
+        </>
+      )}
 
-      <Box marginTop={1} flexDirection="column">
+      {!bare && (
+        <Box marginTop={1} flexDirection="column">
+          <Text wrap="truncate">
+            <Text color={hasQuery ? theme.text.accent : theme.text.secondary}>
+              {t('Search:')}{' '}
+            </Text>
+            {query || (
+              <Text color={theme.text.secondary} dimColor>
+                {t('type to filter…')}
+              </Text>
+            )}
+          </Text>
+        </Box>
+      )}
+
+      <Box marginTop={bare ? 0 : 1} flexDirection="column">
         {allSkills.length === 0 ? (
           <Text color={theme.text.secondary} wrap="truncate">
             {t('No skills are currently available.')}

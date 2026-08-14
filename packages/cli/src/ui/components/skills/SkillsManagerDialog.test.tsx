@@ -225,9 +225,11 @@ describe('SkillsManagerDialog', () => {
   it('sheds chrome to fit budgets the fixed frame cannot', async () => {
     // Budgets below the 11-row frame used to render 12 rows regardless
     // (round-5 R5-1); compact mode drops border, paddingY, and footer so
-    // the always-rendered list row fits.
+    // the always-rendered list row fits. Budgets ≤ 5 (round-7 R7-1) go one
+    // tier deeper — bare mode sheds title/subtitle/search too, so even a
+    // 1-row budget keeps the interactive list visible.
     const unlocked = mixedSkills.slice(5);
-    for (const budget of [11, 10, 8]) {
+    for (const budget of [11, 10, 8, 5, 3, 1]) {
       const { lastFrame, unmount } = render(
         <KeypressProvider kittyProtocolEnabled={false}>
           <SkillsManagerDialog
