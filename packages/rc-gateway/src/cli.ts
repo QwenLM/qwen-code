@@ -32,6 +32,8 @@ import {
 } from './mdns/advertiser.js';
 import { browseDaemons, type BrowserFactory } from './mdns/browser.js';
 import { startDaemon } from './daemonSupervisor.js';
+import { DaemonPool } from './daemonPool.js';
+import { getFreePort } from './freePort.js';
 import { buildAcmeManager } from './tls/acme/buildAcmeStack.js';
 import type { AcmeManager } from './tls/acme/acmeManager.js';
 import { createLiveTlsContext, type LiveTlsContext } from './tls/acmeHttps.js';
@@ -400,6 +402,33 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         'workspace — path-based policy rules may not match as expected',
     );
   }
+  // Multi-workspace daemon pool (add-multi-workspace-daemon-pool): the boot
+  // daemon above stays the DEFAULT daemon (an empty/omitted `cwd` on
+  // POST /session routes there, unchanged), while `POST /session { cwd }`
+  // naming a DIFFERENT workspace spawns (or reuses) its own `qwen serve` on a
+  // fresh loopback port. `defaultWorkspaceCwd` falls back to the gateway
+  // process's own cwd when the boot daemon's capabilities() failed above —
+  // the same degraded fallback already used for policy/routing pathGlob
+  // anchoring (mirrors lines 614/783 below). NOTE: if capabilities() merely
+  // failed transiently (the boot daemon IS healthy, just didn't answer in
+  // time) and a later POST /session names that same true boot workspace, the
+  // pool won't recognise it as the default and will spawn a REDUNDANT second
+  // daemon for it — a known residual of resolving this fallback once at boot.
+  const defaultWorkspaceCwd = workspaceCwd ?? process.cwd();
+  const daemonPool = new DaemonPool({
+    defaultDaemon: handle.daemon,
+    defaultWorkspaceCwd,
+    // Reuses the exact boot path above (startDaemon → defaultSpawner →
+    // `qwen serve`), parameterized with the requested workspace on a freshly
+    // allocated loopback port instead of the fixed boot port.
+    spawn: async (cwd) => {
+      const port = await getFreePort();
+      const spawned = await startDaemon({ port, workspaceCwd: cwd });
+      return { client: spawned.daemon, stop: spawned.stop, workspaceCwd: cwd };
+    },
+    maxDaemons: 3,
+    idleReapMs: 15 * 60_000,
+  });
   const { matcher: routing, ruleCount: routingRuleCount } =
     await loadLayeredRoutingMatcher(
       join(homedir(), '.qwen', 'rc', 'routing.yaml'),
@@ -562,7 +591,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     agentLifecycle,
     reviewLifecycle,
   } = createGatewayApp({
-    daemon: handle.daemon,
+    daemon: daemonPool,
     store,
     pairing,
     vapid,

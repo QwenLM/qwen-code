@@ -5,7 +5,8 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { DaemonClient, PromptContentBlock } from '@qwen-code/sdk';
+import type { PromptContentBlock } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { PromptQueue, QueueTimeoutError } from './promptQueue.js';
 import type { PromptEventBroadcaster } from './promptEventBroadcaster.js';
@@ -52,7 +53,7 @@ export interface PromptRouteOptions {
 }
 
 export function createPromptRoute(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
   audit?: AuditRecorder,
   onAccepted?: PromptAcceptedHook,
   opts: PromptRouteOptions = {},

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk';
 import type {
   AgentSpawner,
   AgentSpawnRequest,
@@ -12,11 +11,12 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { validateAgainstSchema } from '@qwen-code/qwen-code-core';
 import type { AgentRegistry } from '../agents/agentRegistry.js';
+import type { SessionDaemon } from '../daemonPool.js';
 
 const SCHEMA_RETRIES = 2;
 
 export interface SessionSpawnerDeps {
-  daemon: DaemonClient;
+  daemon: SessionDaemon;
   registry: AgentRegistry;
   runId: string;
   spawnedByTokenId: string;

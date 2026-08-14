@@ -32,6 +32,66 @@ export interface PooledDaemonSpawn {
   workspaceCwd: string;
 }
 
+/**
+ * The session-routing surface of `DaemonClient` that the gateway's routes
+ * actually call through `deps.daemon` — exactly the 13 methods, signatures
+ * copied verbatim from `DaemonClient` (packages/sdk-typescript/src/daemon/
+ * DaemonClient.ts) so a real `DaemonClient` structurally satisfies this
+ * interface with zero changes. `DaemonPool` is the other implementation: a
+ * drop-in that routes each call to the pooled daemon owning the session (or
+ * workspace) instead of a single daemon connection. Both are accepted
+ * wherever the gateway holds `GatewayDeps.daemon`.
+ */
+export interface SessionDaemon {
+  prompt(
+    sessionId: string,
+    req: PromptRequest,
+    signal?: AbortSignal,
+    clientId?: string,
+  ): Promise<PromptResult>;
+  capabilities(): Promise<DaemonCapabilities>;
+  endSession(sessionId: string, clientId?: string): Promise<void>;
+  subscribeEvents(
+    sessionId: string,
+    opts?: SubscribeOptions,
+  ): AsyncGenerator<DaemonEvent>;
+  respondToSessionPermission(
+    sessionId: string,
+    requestId: string,
+    response: PermissionResponse,
+    clientId?: string,
+  ): Promise<boolean>;
+  health(): Promise<{ status: string }>;
+  createOrAttachSession(
+    req: CreateSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonSession>;
+  sessionSupportedCommands(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSupportedCommandsStatus>;
+  rewindSession(
+    sessionId: string,
+    req: RewindSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRewindResult>;
+  listWorkspaceSessions(workspaceCwd: string): Promise<DaemonSessionSummary[]>;
+  setSessionApprovalMode(
+    sessionId: string,
+    mode: DaemonApprovalMode,
+    opts?: { persist?: boolean; clientId?: string },
+  ): Promise<DaemonApprovalModeResult>;
+  sessionContext(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionContextStatus>;
+  loadSession(
+    sessionId: string,
+    req?: RestoreSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRestoredSession>;
+}
+
 export interface DaemonPoolOptions {
   /** The boot daemon, already running, used when a create omits cwd. */
   defaultDaemon: DaemonClient;
@@ -85,7 +145,7 @@ export class WorkspacePoolFullError extends Error {
  * routes can hold a `DaemonPool` wherever they previously held a single
  * `DaemonClient`.
  */
-export class DaemonPool {
+export class DaemonPool implements SessionDaemon {
   private readonly byWorkspace = new Map<string, Entry>();
   private readonly spawning = new Map<string, Promise<DaemonClient>>();
   /** sessionId -> owning workspace key (`defaultWorkspaceCwd` for sessions

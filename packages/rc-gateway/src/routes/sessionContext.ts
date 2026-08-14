@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /**
@@ -22,7 +22,7 @@ import { isValidSessionId } from '../sessions/chatsPath.js';
  * the event stream's own idle polling) with no mutation and no path/arg payload.
  */
 export function createSessionContextRoute(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;

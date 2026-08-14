@@ -6,16 +6,16 @@
 
 import type { RequestHandler } from 'express';
 import type {
-  DaemonClient,
   PermissionResponse,
   PermissionOutcomeCancelled,
   PermissionOutcomeSelected,
 } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /** POST /session/:id/permission/:requestId { outcome, optionId? } → vote. */
 export function createPermissionVoteRoute(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
   audit?: AuditRecorder,
 ): RequestHandler {
   return async (req, res) => {

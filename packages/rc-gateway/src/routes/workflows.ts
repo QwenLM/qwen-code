@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { RequestHandler } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import {
   WorkflowEngine,
   parseWorkflowScript,
@@ -24,7 +24,7 @@ import type {
 } from '../workflows/workflowRegistry.js';
 
 export interface WorkflowRoutesDeps {
-  daemon: DaemonClient;
+  daemon: SessionDaemon;
   agentRegistry: AgentRegistry;
   runRegistry: WorkflowRunRegistry;
   ownerEvents: OwnerEventBus;

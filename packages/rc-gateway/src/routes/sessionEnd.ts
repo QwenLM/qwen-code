@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
@@ -19,7 +19,7 @@ import type { AuditRecorder } from '../auditLog.js';
  * `session_died` event flows naturally through the live SSE relay.
  */
 export function createSessionEndRoute(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
   audit?: AuditRecorder,
 ): RequestHandler {
   return async (req, res) => {

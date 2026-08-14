@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 
 /**
@@ -15,20 +15,27 @@ import type { AuditRecorder } from '../auditLog.js';
  * `POST /session` 1:1 (transparent-proxy topology).
  *
  * Body: `{ cwd?: string; scope?: 'single' | 'thread' }`.
- *  - `cwd` omitted/empty → the daemon falls back to its bound workspace.
+ *  - `cwd` omitted/empty → routes to the default (boot) daemon/workspace,
+ *    unchanged.
+ *  - `cwd` non-empty → MUST name an existing directory (checked here, before
+ *    any daemon call) or the request is rejected `400 invalid_workspace`; a
+ *    valid `cwd` is handed to `daemon` (a `DaemonPool` in production), which
+ *    spawns or reuses the `qwen serve` bound to that workspace and routes the
+ *    call there (add-multi-workspace-daemon-pool).
  *  - `scope` defaults to `'single'` (coalesce onto the workspace's session);
  *    `'thread'` opens a fresh independent session.
  *
- * The gateway itself never spawns sessions — it holds the daemon token and the
- * daemon's `createOrAttachSession` does the real work. On success returns the
- * new session's id (+ its workspace) so the caller can immediately watch it.
+ * The gateway itself never spawns the SESSION — it holds the daemon token and
+ * `createOrAttachSession` does the real work (whether against a single daemon
+ * or the pool). On success returns the new session's id (+ its workspace) so
+ * the caller can immediately watch it.
  *
  * Audit carries only the session id (`target`) and the scope enum — never the
  * `cwd` path (audit records stay free of paths/args per the gateway's data
  * contract).
  */
 export function createSessionCreateRoute(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
   audit?: AuditRecorder,
 ): RequestHandler {
   return async (req, res) => {
@@ -39,6 +46,27 @@ export function createSessionCreateRoute(
         : undefined;
     const sessionScope = body.scope === 'thread' ? 'thread' : 'single';
     const actorTokenId = req.rcClient?.id;
+
+    // Validate a non-empty cwd BEFORE any daemon call: it must name an
+    // existing directory. Any stat failure (ENOENT, EACCES, not-a-dir, …) or
+    // a non-directory target collapses to the same 400 — the error message
+    // never echoes the path (audit/error-hygiene invariant below).
+    if (workspaceCwd !== undefined) {
+      const { stat } = await import('node:fs/promises');
+      let isDir = false;
+      try {
+        isDir = (await stat(workspaceCwd)).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      if (!isDir) {
+        res.status(400).json({
+          error: 'cwd must be an existing directory',
+          code: 'invalid_workspace',
+        });
+        return;
+      }
+    }
 
     let session;
     try {

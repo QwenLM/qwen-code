@@ -6,7 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import type { RequestHandler } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { SESSION_READ, WRITE, APPROVE, type RcScope } from '../scopes.js';
 import type { CommandLoader, CommandScope } from '../commands/loader.js';
@@ -96,7 +96,7 @@ export function createListCommandsRoute(loader: CommandLoader): RequestHandler {
  * session pipeline (requireScope(WRITE) → recordActivity → enforceSessionLock).
  */
 export function createInvokeCommandRoute(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
   loader: CommandLoader,
   audit?: AuditRecorder,
 ): RequestHandler {

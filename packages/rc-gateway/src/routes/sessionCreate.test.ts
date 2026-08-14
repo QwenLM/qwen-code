@@ -8,6 +8,9 @@ import { describe, it, expect, afterEach } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { createSessionCreateRoute } from './sessionCreate.js';
@@ -15,12 +18,23 @@ import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
+const tmpDirs: string[] = [];
+
+/** Real existing directory for tests that exercise the cwd-must-exist check. */
+function makeTmpDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
 
 afterEach(async () => {
   if (gateway) await new Promise<void>((r) => gateway!.close(() => r()));
   if (stub) await stub.close();
   gateway = undefined;
   stub = undefined;
+  for (const dir of tmpDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
@@ -66,14 +80,15 @@ async function pollAudit(
 
 describe('POST /session (create)', () => {
   it('creates a session and returns its id + workspace', async () => {
-    stub = await startStubDaemon({ workspaceCwd: '/proj' });
+    const projDir = makeTmpDir('qwen-session-create-proj-');
+    stub = await startStubDaemon({ workspaceCwd: projDir });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const url = await mountGateway(daemon);
 
     const res = await fetch(`${url}/session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cwd: '/proj' }),
+      body: JSON.stringify({ cwd: projDir }),
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -81,15 +96,16 @@ describe('POST /session (create)', () => {
       workspaceCwd: string;
     };
     expect(body.sessionId).toBe('stub-agent-1');
-    expect(body.workspaceCwd).toBe('/proj');
+    expect(body.workspaceCwd).toBe(projDir);
     // The cwd + default scope are forwarded to the daemon.
     expect(stub.lastCreateSessionBody).toMatchObject({
-      cwd: '/proj',
+      cwd: projDir,
       sessionScope: 'single',
     });
   });
 
   it('audits session_created with the id + scope, never the cwd path', async () => {
+    const secretDir = makeTmpDir('qwen-session-create-secret-');
     stub = await startStubDaemon();
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
@@ -98,7 +114,7 @@ describe('POST /session (create)', () => {
     await fetch(`${url}/session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cwd: '/secret/project/path' }),
+      body: JSON.stringify({ cwd: secretDir }),
     });
 
     const row = await pollAudit(audit, 'session_created');
@@ -107,7 +123,24 @@ describe('POST /session (create)', () => {
     expect(row!.target).toBe('stub-agent-1');
     expect(row!.detail).toEqual({ scope: 'single' });
     // Path hygiene: the cwd must never reach the audit record.
-    expect(JSON.stringify(row)).not.toContain('/secret/project/path');
+    expect(JSON.stringify(row)).not.toContain(secretDir);
+  });
+
+  it('rejects a create whose cwd is not an existing directory', async () => {
+    stub = await startStubDaemon();
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon);
+
+    const res = await fetch(`${url}/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd: '/does/not/exist', scope: 'thread' }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code: string };
+    expect(body.code).toBe('invalid_workspace');
+    // Rejected before any daemon call.
+    expect(stub.createdSessionCount).toBe(0);
   });
 
   it("defaults scope to 'single'; passes 'thread' through; omits empty cwd", async () => {

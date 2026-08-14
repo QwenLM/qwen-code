@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import {
   TERMINAL_AGENT_STATUSES,
@@ -26,7 +26,7 @@ const AGENT_STATUSES: readonly AgentStatus[] = [
 ];
 
 export interface AgentRoutesDeps {
-  daemon: DaemonClient;
+  daemon: SessionDaemon;
   registry: AgentRegistry;
   lifecycle: AgentLifecycle;
   audit?: AuditRecorder;

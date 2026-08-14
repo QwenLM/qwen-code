@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Express } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from './daemonPool.js';
 import type { TokenStore } from './tokenStore.js';
 import type { PairingService } from './pairing.js';
 import type { VapidStore } from './webpush/vapid.js';
@@ -162,7 +162,7 @@ import {
 } from './routing/workingDevice.js';
 
 export interface GatewayDeps {
-  daemon: DaemonClient;
+  daemon: SessionDaemon;
   store: TokenStore;
   pairing: PairingService;
   /** Audit log path; defaults to ~/.qwen/rc/audit.log. */

@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler, Response } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
 import type { AuditRecorder } from '../auditLog.js';
 import type { UsageTickBroadcaster } from '../cost/usageTickBroadcaster.js';
@@ -76,7 +76,7 @@ function firstFrameOrIdle<T>(
 }
 
 export function createSessionEventsRoute(
-  daemon: DaemonClient,
+  daemon: SessionDaemon,
   registry: ConnectionRegistry,
   audit?: AuditRecorder,
   usageBroadcaster?: UsageTickBroadcaster,

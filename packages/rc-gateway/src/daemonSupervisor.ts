@@ -55,6 +55,13 @@ export interface StartDaemonOptions {
    * `url` is the daemon's base URL; `token` its `QWEN_SERVER_TOKEN`.
    */
   attach?: { url: string; token: string };
+  /**
+   * Bind the spawned `qwen serve` to a specific project workspace (`--workspace
+   * <cwd>`), used by the `DaemonPool`'s per-workspace spawner (add-
+   * multi-workspace-daemon-pool). Undefined → the daemon binds to its own
+   * process cwd (the boot daemon's default, unchanged).
+   */
+  workspaceCwd?: string;
 }
 
 export interface DaemonHandle {
@@ -219,7 +226,7 @@ export async function startDaemon(
     const port = opts.port ?? 0;
     const spawned = opts.spawner
       ? opts.spawner(token)
-      : defaultSpawner(token, opts.qwenBin ?? 'qwen', port, undefined);
+      : defaultSpawner(token, opts.qwenBin ?? 'qwen', port, opts.workspaceCwd);
     daemon = new DaemonClient({
       baseUrl: spawned.baseUrl,
       token: spawned.token,

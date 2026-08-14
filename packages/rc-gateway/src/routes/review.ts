@@ -5,7 +5,7 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { SessionDaemon } from '../daemonPool.js';
 import type { AuditRecorder } from '../auditLog.js';
 import { OWNER, hasScope } from '../scopes.js';
 import {
@@ -36,7 +36,7 @@ const REVIEW_STATUSES: readonly ReviewStatus[] = [
  * saga OWNS neither, it only drives `open`/`close` and lifecycle emits.
  */
 export interface ReviewRoutesDeps {
-  daemon: DaemonClient;
+  daemon: SessionDaemon;
   registry: ReviewRegistry;
   lifecycle: ReviewLifecycle;
   bridge: ReviewPermissionBridge;
