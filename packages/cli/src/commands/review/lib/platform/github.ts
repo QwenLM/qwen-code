@@ -32,11 +32,17 @@ function ghJson<T>(...args: string[]): T {
   return JSON.parse(gh(...args)) as T;
 }
 
-/** Shape of `gh repo view --json owner,name,url` (fields we read). */
+/** Shape of `gh repo view --json owner,name,url,parent` (fields we read). */
 interface GhRepoView {
   owner: { login: string };
   name: string;
   url: string;
+  /** Present only when the resolved repo is a fork. */
+  parent?: {
+    owner: { login: string };
+    name: string;
+    url: string;
+  };
 }
 
 /** Shape of `gh pr view --json headRefOid,url`. */
@@ -82,14 +88,25 @@ export const githubReader: ReviewPlatformReader = {
   ensureAuthenticated,
 
   resolveRepo(): RepoIdentity {
-    // `gh repo view` resolves through gh's default-repo — in a fork clone the
-    // UPSTREAM, where the PR actually lives. That is the resolution the bare
-    // PR-number flow wants; do not substitute the origin remote.
-    const view = ghJson<GhRepoView>('repo', 'view', '--json', 'owner,name,url');
+    // `gh repo view` resolves through gh's default-repo. That preference is a
+    // remote literally NAMED `upstream` when one exists — it is NOT an API
+    // fork check: an origin-only fork clone (no `upstream` remote) resolves
+    // to the FORK, where the PR does not live, and a same-numbered PR there
+    // would hand the review the wrong head SHA. Fetch `parent` and prefer it
+    // when the resolved repo is a fork, so a bare PR number always targets
+    // the repo that actually hosts PRs (the measured "guessed fork repo"
+    // incident the deleted prose recorded).
+    const view = ghJson<GhRepoView>(
+      'repo',
+      'view',
+      '--json',
+      'owner,name,url,parent',
+    );
+    const target = view.parent ?? view;
     return {
-      host: hostOfRepoUrl(view.url),
-      owner: view.owner.login,
-      repo: view.name,
+      host: hostOfRepoUrl(target.url),
+      owner: target.owner.login,
+      repo: target.name,
     };
   },
 

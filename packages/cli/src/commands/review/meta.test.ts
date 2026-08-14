@@ -67,13 +67,26 @@ describe('runMeta', () => {
       'repo',
       'view',
       '--json',
-      'owner,name,url',
+      'owner,name,url,parent',
     );
     expect(result).toEqual({
       platform: 'github',
       host: 'github.com',
       ownerRepo: 'QwenLM/qwen-code',
     });
+  });
+
+  it('resolves a fork clone to its PARENT, where the PR actually lives', () => {
+    // gh's default-repo preference is a remote literally named `upstream`, not
+    // an API fork check — an origin-only fork clone resolves to the fork.
+    // resolveRepo fetches `parent` and prefers it, so a bare PR number never
+    // targets a fork's same-numbered PR.
+    ghMock.mockReturnValue(
+      '{"owner":{"login":"contributor"},"name":"qwen-code","url":"https://github.com/contributor/qwen-code","parent":{"owner":{"login":"QwenLM"},"name":"qwen-code","url":"https://github.com/QwenLM/qwen-code"}}',
+    );
+    const result = runMeta({});
+    expect(result.ownerRepo).toBe('QwenLM/qwen-code');
+    expect(result.host).toBe('github.com');
   });
 
   it('keeps an explicit port in the derived host', () => {
@@ -175,11 +188,21 @@ describe('metaCommand handler', () => {
 
   afterEach(restoreGhHost);
 
-  it('exits 2 on a non-positive PR number without calling gh', () => {
+  it('exits 2 on a non-positive or non-integer PR number without calling gh', () => {
     (metaCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
       pr_number: 0,
+    });
+    expect(process.exitCode).toBe(2);
+    // Reset so the second assertion verifies the guard assigns the code,
+    // not that it rides the first invocation's residue. A non-integer must
+    // also be rejected (yargs coerces 'abc' to NaN; NaN <= 0 is false).
+    process.exitCode = undefined;
+    (metaCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1.5,
     });
     expect(process.exitCode).toBe(2);
     expect(ghMock).not.toHaveBeenCalled();
@@ -196,6 +219,22 @@ describe('metaCommand handler', () => {
     expect(ghMock).not.toHaveBeenCalled();
     // The usage error must preempt the auth gate — `gh auth login` can
     // never repair the invocation.
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a malformed --host (setGhHost TypeError → usage class)', () => {
+    setGhHostMock.mockImplementationOnce(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    (metaCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'o/r',
+      host: 'bad host; rm -rf /',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 

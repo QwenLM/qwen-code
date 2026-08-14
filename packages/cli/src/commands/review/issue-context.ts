@@ -23,6 +23,7 @@ import { dirname, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
+import { assertWritableOutPath } from './lib/paths.js';
 import type { ClosingIssueRef, LinkedIssue } from './lib/platform/types.js';
 import {
   writeStdoutLine,
@@ -112,11 +113,9 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
       `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
-  // An empty --out resolves to the cwd and dies EISDIR AFTER the fetches —
-  // classify it before fetching.
-  if (args.out.trim() === '') {
-    throw new TypeError('--out must name a file path');
-  }
+  // An empty or directory --out resolves to the cwd or dies EISDIR AFTER the
+  // fetches — classify it before fetching.
+  assertWritableOutPath(args.out);
   const platform = getPlatformReader();
   platform.ensureAuthenticated();
 

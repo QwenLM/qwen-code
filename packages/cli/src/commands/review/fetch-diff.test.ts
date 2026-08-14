@@ -186,7 +186,7 @@ describe('fetchDiffCommand handler', () => {
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
-  it('exits 2 on a non-positive pr_number, without calling gh or auth', () => {
+  it('exits 2 on a non-positive or non-integer pr_number, without calling gh or auth', () => {
     (fetchDiffCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -195,6 +195,9 @@ describe('fetchDiffCommand handler', () => {
       out: OUT,
     });
     expect(process.exitCode).toBe(2);
+    // Reset so the second assertion verifies the guard assigns the code,
+    // not that it rides the first invocation's residue.
+    process.exitCode = undefined;
     (fetchDiffCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -214,6 +217,36 @@ describe('fetchDiffCommand handler', () => {
       pr_number: 1,
       repo: 'QwenLM/qwen-code',
       out: '',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a whitespace-only --out', () => {
+    (fetchDiffCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: ' ',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a malformed --host (setGhHost TypeError → usage class)', () => {
+    setGhHostMock.mockImplementationOnce(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    (fetchDiffCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: OUT,
+      host: 'bad host; rm -rf /',
     });
     expect(process.exitCode).toBe(2);
     expect(ghRawMock).not.toHaveBeenCalled();

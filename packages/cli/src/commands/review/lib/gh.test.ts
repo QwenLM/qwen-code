@@ -78,12 +78,19 @@ describe('setGhHost / ghEnv', () => {
 });
 
 describe('resolveGhHost precedence', () => {
-  it('trims the flag and falls through to the env on all-whitespace', () => {
+  it('trims the flag; an all-whitespace flag stays a real value, not an env fall-through', () => {
     expect(resolveGhHost(' ghe.example.com ')).toBe('ghe.example.com');
     const saved = process.env['GH_HOST'];
     process.env['GH_HOST'] = 'env.example.com';
     try {
-      expect(resolveGhHost(' ')).toBe('env.example.com');
+      // A NON-EMPTY all-whitespace flag must NOT silently fall through to the
+      // env (that would retarget a write at github.com). It is returned as ''
+      // so callers validating the raw flag via setGhHost see a real value and
+      // the documented TypeError fires.
+      expect(resolveGhHost(' ')).toBe('');
+      // Genuinely-absent input still inherits the env.
+      expect(resolveGhHost(undefined)).toBe('env.example.com');
+      expect(resolveGhHost('')).toBe('env.example.com');
     } finally {
       if (saved === undefined) delete process.env['GH_HOST'];
       else process.env['GH_HOST'] = saved;

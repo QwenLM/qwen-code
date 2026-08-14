@@ -76,10 +76,11 @@ function runPlanDiff(args: PlanDiffArgs): void {
 
   // Exactly one of the pair is a call error: the roster requires Agent 0 only
   // when the plan carries both, and a plan with half an identity would silently
-  // drop the requirement the caller meant to add.
+  // drop the requirement the caller meant to add. (No `plan-diff:` prefix here
+  // — the handler's catch prepends it once; a doubled prefix is a bug.)
   if ((args.pr === undefined) !== (args.repo === undefined)) {
     throw new TypeError(
-      'plan-diff: --pr and --repo go together — the roster requires the ' +
+      '--pr and --repo go together — the roster requires the ' +
         'issue-fidelity agent only when the plan carries the full PR identity.',
     );
   }
@@ -87,10 +88,13 @@ function runPlanDiff(args: PlanDiffArgs): void {
   // The plan is a file on disk and the role-0 weld interpolates this host
   // unquoted into a shell command the agent runs verbatim — validate before
   // recording, as fetch-pr's handler does via setGhHost's HOSTNAME_RE.
-  const host = args.host?.trim() || undefined;
+  // A NON-EMPTY all-whitespace `--host` must be rejected, not dropped from
+  // the plan (dropping would route the welded evidence fetch at github.com).
+  const host =
+    args.host === undefined || args.host === '' ? undefined : args.host.trim();
   if (host !== undefined && !HOSTNAME_RE.test(host)) {
     throw new TypeError(
-      `plan-diff: --host is not a hostname: ${JSON.stringify(args.host)}`,
+      `--host is not a hostname: ${JSON.stringify(args.host)}`,
     );
   }
 

@@ -20,6 +20,7 @@ import { dirname, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { isOwnerRepo, setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
+import { assertWritableOutPath } from './lib/paths.js';
 import { COMMENT_KINDS, type CommentKind } from './lib/platform/types.js';
 import {
   writeStdoutLine,
@@ -42,6 +43,9 @@ export function runCommentBody(args: CommentBodyArgs): {
 } {
   // Usage errors precede the auth gate: `gh auth login` can never fix the
   // invocation, and exit 2 is the caller's "repair the invocation" signal.
+  // Scope: this covers the guards validated HERE. Missing required arguments
+  // and an invalid `--kind` choice are rejected by the yargs layer before
+  // the handler runs and exit 1 — a known gap in the exit-code contract.
   if (args.kind === 'review' && args.prNumber === undefined) {
     throw new TypeError(
       '--kind review needs --pr (review bodies are addressed per-PR)',
@@ -52,10 +56,10 @@ export function runCommentBody(args: CommentBodyArgs): {
       `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
-  // An empty --out (a bare flag or an empty variable expansion) resolves to
-  // the cwd and dies EISDIR AFTER the fetch — classify it before fetching.
-  if (args.out !== undefined && args.out.trim() === '') {
-    throw new TypeError('--out must name a file path');
+  // An empty or directory --out resolves to the cwd or dies EISDIR AFTER the
+  // fetch — classify it before fetching.
+  if (args.out !== undefined) {
+    assertWritableOutPath(args.out);
   }
   const platform = getPlatformReader();
   platform.ensureAuthenticated();

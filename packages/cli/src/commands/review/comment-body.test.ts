@@ -225,6 +225,9 @@ describe('commentBodyCommand handler', () => {
       repo: 'QwenLM/qwen-code',
     });
     expect(process.exitCode).toBe(2);
+    // Reset so the second assertion verifies the guard assigns the code,
+    // not that it rides the first invocation's residue.
+    process.exitCode = undefined;
     (commentBodyCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -246,6 +249,20 @@ describe('commentBodyCommand handler', () => {
       kind: 'inline',
       repo: 'QwenLM/qwen-code',
       out: '',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a whitespace-only --out', () => {
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 5,
+      kind: 'inline',
+      repo: 'QwenLM/qwen-code',
+      out: ' ',
     });
     expect(process.exitCode).toBe(2);
     expect(ghRawMock).not.toHaveBeenCalled();

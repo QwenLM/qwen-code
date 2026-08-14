@@ -159,14 +159,17 @@ export function getGhHost(): string | undefined {
  * `??`, being non-nullish) must read as "no host", not as a host named ""
  * that fails every comparison. The flag branch normalises the same way:
  * yargs delivers `''` for a bare `--host`, and `setGhHost('')` documents
- * empty as "restore default", so an empty flag falls through to the env
- * instead of surviving as a host label that matches nothing.
+ * empty as "restore default", so an empty flag falls through to the env.
+ * A NON-EMPTY all-whitespace flag is different: it is returned as `''`
+ * (it does NOT fall through to the env), so callers that validate the raw
+ * flag via setGhHost see a real value and the documented TypeError fires,
+ * instead of the flag silently retargeting a write at the env/default host.
  */
 export function resolveGhHost(
   flagHost: string | undefined,
 ): string | undefined {
   return (
-    (flagHost?.trim() || undefined) ??
+    (flagHost === undefined || flagHost === '' ? undefined : flagHost.trim()) ??
     (process.env['GH_HOST']?.trim() || undefined)
   );
 }

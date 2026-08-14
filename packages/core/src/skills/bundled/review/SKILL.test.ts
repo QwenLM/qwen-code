@@ -150,7 +150,18 @@ describe('bundled review skill', () => {
     expect(body).toMatch(
       /meta <n> --repo <owner>\/<repo>` \(add `--host <host>` for Enterprise\)/,
     );
-    expect(body).toContain('compare its `headSha`');
+    // The drift ruling's load-bearing semantic — what `headSha` is compared
+    // against — must stay pinned, or a rewrite truncating the comparison
+    // clause leaves the agent guessing (and a stale `commit_id` resubmits).
+    expect(body).toContain(
+      'compare its `headSha` to the `commit_id` in your review JSON',
+    );
+    // The anchor-recovery rename: `gh pr diff` output → `fetch-diff` output.
+    // A revert re-runs `gh pr diff`, which (no GH_HOST recipe taught anymore)
+    // routes at github.com on an auth-config-only GHE clone.
+    expect(body).toContain(
+      '(in lightweight mode, against the `fetch-diff` output you already have)',
+    );
   });
 
   it('routes Step 7 owner/repo and head-SHA resolution through review meta', () => {
@@ -174,7 +185,7 @@ describe('bundled review skill', () => {
     // a hand-restored gh call silently routes at github.com.
     const body = skillBody();
     expect(body).toContain(
-      'review fetch-diff <number> --repo <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt',
+      'review fetch-diff <number> --repo <owner>/<repo> --out .qwen/tmp/qwen-review-pr-<number>-diff.txt` (add `--host <host>` for Enterprise)',
     );
     expect(body).toContain(
       '# GitHub Enterprise: add --host <host> — plan-diff records it',
@@ -183,6 +194,31 @@ describe('bundled review skill', () => {
     // fetch-diff would re-download it (and could race a head advance).
     expect(body).toContain(
       "Step 1's `fetch-diff` already wrote it, so this block only plans it",
+    );
+  });
+
+  it('keeps rule 4 on the welded issue-context command, not prose gh calls', () => {
+    // Revert guard: restoring `gh pr view … --json closingIssuesReferences` /
+    // `gh issue view` prose drops every `--host`, and on an auth-config-only
+    // GHE clone those fetches route at github.com's same-named repo.
+    const body = skillBody();
+    expect(body).toContain(
+      'review issue-context <pr> --repo <owner/repo> --out <evidence-file>',
+    );
+    expect(body).not.toContain('--json closingIssuesReferences');
+  });
+
+  it('keeps the Step 6 comment-body tail-fetch and the Posted: fallback grounded', () => {
+    // Revert guard: the tail-fetch must stay `--out … to the command the note
+    // names` (a restored `--jq .body > file` redirect is rejected by yargs on
+    // the welded command-body notes, so the tail is never fetched), and the
+    // Posted: fallback must stay grounded on Step 1's meta output / the pr-url.
+    const body = skillBody();
+    expect(body).toContain(
+      'add `--out .qwen/tmp/qwen-review-{target}-body-<id>.md` to the command the note names',
+    );
+    expect(body).toContain(
+      'the URL a `pr-url` target carried, or else assemble',
     );
   });
 });

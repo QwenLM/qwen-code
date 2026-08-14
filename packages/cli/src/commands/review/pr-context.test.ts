@@ -15,6 +15,7 @@ const {
   ghApiAllMock,
   currentUserMock,
   ensureAuthenticatedMock,
+  setGhHostMock,
   writeFileSyncMock,
   mkdirSyncMock,
 } = vi.hoisted(() => ({
@@ -22,6 +23,7 @@ const {
   ghApiAllMock: vi.fn(),
   currentUserMock: vi.fn(),
   ensureAuthenticatedMock: vi.fn(),
+  setGhHostMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
 }));
@@ -34,7 +36,7 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     ghApiAll: ghApiAllMock,
     currentUser: currentUserMock,
     ensureAuthenticated: ensureAuthenticatedMock,
-    setGhHost: vi.fn(),
+    setGhHost: setGhHostMock,
   };
 });
 
@@ -1366,12 +1368,18 @@ describe('runPrContext host baking (handler level)', () => {
     expect(written).toContain(
       'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
     );
+    // The routing half is pinned alongside the baking half: pr-context's own
+    // gh calls must run at the flag's host, not github.com's same-named repo.
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
   });
 
   it('bakes an operator-exported GH_HOST when no flag is passed', async () => {
     process.env['GH_HOST'] = 'ghe.example.com';
     const written = await runHandler({});
     expect(written).toContain('--host ghe.example.com');
+    // No flag → setGhHost(undefined): the gh calls inherit the exported
+    // GH_HOST from the parent env rather than being pinned to github.com.
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
   });
 
   it('does not bake a host gh tolerates but the refetch validator rejects', async () => {

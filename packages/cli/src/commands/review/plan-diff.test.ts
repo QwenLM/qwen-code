@@ -128,6 +128,12 @@ describe('plan-diff', () => {
       host: 'ghe.example.com; touch /tmp/pwned',
     });
     expect(process.exitCode).toBe(2);
+    // The no-record half of "the payload must die here": validation runs
+    // BEFORE the write, so the plan on disk never carries the metacharacter
+    // host the role-0 weld would interpolate unquoted into a shell command.
+    expect(JSON.parse(readFileSync(out, 'utf8')).host).not.toBe(
+      'ghe.example.com; touch /tmp/pwned',
+    );
   });
 
   it('records the effort the caller passed, so the roster reads it from the plan', () => {

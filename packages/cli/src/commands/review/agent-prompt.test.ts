@@ -2311,6 +2311,18 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     );
   });
 
+  it('trims a padded-but-valid plan host before welding (fetch-pr records the raw flag)', () => {
+    // The weld must not drop a padded host to null: fetch-pr records the raw
+    // `--host` flag, and a GHE review whose host is padded would otherwise
+    // lose `--host` and fetch issue evidence from github.com's same-named repo.
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p = buildRoleBrief({ ...PR_PLAN, host: ' ghe.example.com ' }, '0', {
+      planPath,
+    });
+    expect(p).toContain('--host ghe.example.com');
+    expect(p).not.toContain('--host  ghe.example.com ');
+  });
+
   it('shell-quotes the evidence path (spaces/apostrophes in workspace paths)', () => {
     const planPath = join(
       resolve("/x's proj"),

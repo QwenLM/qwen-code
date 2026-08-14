@@ -503,6 +503,9 @@ describe('issueContextCommand handler', () => {
       out: '/tmp/ic.md',
     });
     expect(process.exitCode).toBe(2);
+    // Reset so the second assertion verifies the guard assigns the code,
+    // not that it rides the first invocation's residue.
+    process.exitCode = undefined;
     (issueContextCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -527,5 +530,50 @@ describe('issueContextCommand handler', () => {
     expect(process.exitCode).toBe(2);
     expect(ghMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a whitespace-only --out', () => {
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: ' ',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a malformed --host (setGhHost TypeError → usage class)', () => {
+    setGhHostMock.mockImplementationOnce(() => {
+      throw new TypeError('--host must be a hostname');
+    });
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
+      host: 'bad host; rm -rf /',
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 1 on an auth failure (runtime class, not usage)', () => {
+    ensureAuthenticatedMock.mockImplementationOnce(() => {
+      throw new Error('gh CLI is not authenticated');
+    });
+    (issueContextCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      pr_number: 1,
+      repo: 'QwenLM/qwen-code',
+      out: '/tmp/ic.md',
+    });
+    expect(process.exitCode).toBe(1);
+    expect(ghMock).not.toHaveBeenCalled();
   });
 });
