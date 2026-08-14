@@ -16,7 +16,6 @@ import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 
 const registerSession = vi.hoisted(() => vi.fn());
-const unregisterSession = vi.hoisted(() => vi.fn());
 const registerCleanup = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -25,7 +24,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     registerSession: (...args: unknown[]) => registerSession(...args),
-    unregisterSession: (...args: unknown[]) => unregisterSession(...args),
   };
 });
 
@@ -53,20 +51,23 @@ vi.mock('../utils/earlyInputCapture.js', () => ({
 const { startInteractiveUI } = await import('./startInteractiveUI.js');
 
 function makeConfig(): Config & {
-  markSessionRegistered: ReturnType<typeof vi.fn>;
+  trackSessionRegistration: ReturnType<typeof vi.fn>;
+  unregisterSessionRegistry: ReturnType<typeof vi.fn>;
 } {
+  const trackSessionRegistration = vi.fn((registration: Promise<boolean>) => {
+    void registration.catch(() => undefined);
+  });
   return {
     getSessionId: () => 'session-123',
     getTargetDir: () => '/work/app',
     getScreenReader: () => false,
     getChatRecordingService: () => undefined,
     isTelemetryInitializationDeferred: () => false,
-    // Must exist: the production success path calls it, and a missing
-    // member would throw a TypeError that the catch under test swallows —
-    // leaving every assertion green while registration silently no-ops.
-    markSessionRegistered: vi.fn(),
+    trackSessionRegistration,
+    unregisterSessionRegistry: vi.fn().mockResolvedValue(undefined),
   } as unknown as Config & {
-    markSessionRegistered: ReturnType<typeof vi.fn>;
+    trackSessionRegistration: ReturnType<typeof vi.fn>;
+    unregisterSessionRegistry: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -107,45 +108,44 @@ describe('startInteractiveUI session registration', () => {
       cwd: '/work/app',
       qwenVersion: '9.9.9',
     });
-    // Arms the mid-session /clear and /cd registry patches on this
-    // Config; if this never fires, `ps` shows stale values until exit.
-    expect(config.markSessionRegistered).toHaveBeenCalledTimes(1);
+    expect(config.trackSessionRegistration).toHaveBeenCalledTimes(1);
+    await expect(
+      config.trackSessionRegistration.mock.calls[0]?.[0],
+    ).resolves.toBe(true);
   });
 
-  it('arms the unregister cleanup only when registration succeeded', async () => {
-    // startInteractiveUI registers exactly one other cleanup (the UI
-    // teardown) unconditionally, so the count differs by exactly one
-    // depending on whether the unregister callback was armed.
+  it('arms teardown before serialized registry cleanup', async () => {
     registerSession.mockResolvedValue(true);
-    const successConfig = makeConfig();
-    await start(successConfig);
-    expect(registerCleanup).toHaveBeenCalledTimes(2);
-    expect(unregisterSession).not.toHaveBeenCalled();
-    expect(successConfig.markSessionRegistered).toHaveBeenCalledTimes(1);
-    // Armed is not the contract — invoke the armed callback: a future
-    // edit emptying its body would pass the call-count pins while every
-    // session's record survives exit and `ps` lists it as running.
-    const armUnregister = registerCleanup.mock
-      .calls[0]?.[0] as () => Promise<void>;
-    await armUnregister();
-    expect(unregisterSession).toHaveBeenCalledTimes(1);
+    const config = makeConfig();
+    await start(config);
 
-    vi.clearAllMocks();
-    registerSession.mockResolvedValue(false);
-    const refusedConfig = makeConfig();
-    await start(refusedConfig);
-    expect(registerCleanup).toHaveBeenCalledTimes(1);
-    expect(refusedConfig.markSessionRegistered).not.toHaveBeenCalled();
+    expect(registerCleanup).toHaveBeenCalledTimes(2);
+    const armUnregister = registerCleanup.mock
+      .calls[1]?.[0] as () => Promise<void> | void;
+    await armUnregister();
+    expect(config.unregisterSessionRegistry).toHaveBeenCalledTimes(1);
   });
 
-  it('swallows a registration rejection without aborting startup', async () => {
-    // A read-only home must not keep the TUI from launching; the
-    // registration is wrapped precisely so its failure cannot propagate.
+  it('does not await a stalled registration before returning startup', async () => {
+    registerSession.mockReturnValue(new Promise<boolean>(() => undefined));
+    const config = makeConfig();
+
+    const result = await Promise.race([
+      start(config).then(() => 'started'),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('timed-out'), 50),
+      ),
+    ]);
+
+    expect(result).toBe('started');
+    expect(registerCleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it('tracks a registration rejection without aborting startup', async () => {
     registerSession.mockRejectedValue(new Error('read-only home'));
     const config = makeConfig();
 
     await expect(start(config)).resolves.toBeUndefined();
-    expect(registerCleanup).toHaveBeenCalledTimes(1);
-    expect(config.markSessionRegistered).not.toHaveBeenCalled();
+    expect(config.trackSessionRegistration).toHaveBeenCalledTimes(1);
   });
 });

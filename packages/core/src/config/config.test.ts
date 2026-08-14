@@ -6327,7 +6327,7 @@ describe('Server Config (config.ts)', () => {
   it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.markSessionRegistered();
+    config.trackSessionRegistration(Promise.resolve(true));
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -6396,7 +6396,7 @@ describe('Server Config (config.ts)', () => {
     // state is reachable and the /cd patch must survive it.
     const config = new Config(baseParams);
     // No markRuntimeStatusEnabled(): models the failed sidecar write.
-    config.markSessionRegistered();
+    config.trackSessionRegistration(Promise.resolve(true));
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
@@ -6434,11 +6434,11 @@ describe('Server Config (config.ts)', () => {
     // The opposite divergence: the sidecar write succeeded at startup
     // but registerSession returned false (foreign-identity refusal,
     // unwritable global dir), so only the sidecar gate is armed. A gate
-    // regressed to `if (!this.sessionRegistered) return;` would silently
+    // regressed to `if (!this.sessionRegistryActive) return;` would silently
     // stop refreshing runtime.json on /cd for these sessions.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    // No markSessionRegistered(): models the failed registration.
+    // No trackSessionRegistration(): models the failed registration.
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const newStorage = new Storage(newDir);
@@ -6483,7 +6483,7 @@ describe('Server Config (config.ts)', () => {
     // until process exit.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.markSessionRegistered();
+    config.trackSessionRegistration(Promise.resolve(true));
     const writeRuntimeStatusSpy = vi
       .spyOn(runtimeStatus, 'writeRuntimeStatus')
       .mockRejectedValue(new Error('read-only project fs'));
@@ -6504,13 +6504,69 @@ describe('Server Config (config.ts)', () => {
     patchSessionRecordSpy.mockRestore();
   });
 
+  it('serializes pending registration, transitions, and unregister', async () => {
+    const config = new Config(baseParams);
+    let finishRegistration!: (registered: boolean) => void;
+    const registration = new Promise<boolean>((resolve) => {
+      finishRegistration = resolve;
+    });
+    let finishPatch!: () => void;
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPatch = resolve;
+          }),
+      );
+    const unregisterSessionSpy = vi
+      .spyOn(sessionRegistry, 'unregisterSession')
+      .mockResolvedValue(undefined);
+
+    config.trackSessionRegistration(registration);
+    const newSessionId = config.startNewSession('replacement-session');
+    const cleanup = config.unregisterSessionRegistry();
+
+    expect(patchSessionRecordSpy).not.toHaveBeenCalled();
+    expect(unregisterSessionSpy).not.toHaveBeenCalled();
+
+    finishRegistration(true);
+    await vi.waitFor(() => {
+      expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+        sessionId: newSessionId,
+        cwd: config.getTargetDir(),
+      });
+    });
+    expect(unregisterSessionSpy).not.toHaveBeenCalled();
+
+    finishPatch();
+    await cleanup;
+    expect(unregisterSessionSpy).toHaveBeenCalledTimes(1);
+
+    patchSessionRecordSpy.mockRestore();
+    unregisterSessionSpy.mockRestore();
+  });
+
+  it('does not unregister when initial registration was refused', async () => {
+    const config = new Config(baseParams);
+    const unregisterSessionSpy = vi
+      .spyOn(sessionRegistry, 'unregisterSession')
+      .mockResolvedValue(undefined);
+
+    config.trackSessionRegistration(Promise.resolve(false));
+    await config.unregisterSessionRegistry();
+
+    expect(unregisterSessionSpy).not.toHaveBeenCalled();
+    unregisterSessionSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory patches the registry even when the sidecar write rejects', async () => {
     // The /cd-side mirror of the /clear pin: a rejecting sidecar write
     // must not skip the directory patch, and its rejection must not
     // surface through relocateWorkingDirectory either.
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
-    config.markSessionRegistered();
+    config.trackSessionRegistration(Promise.resolve(true));
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {

@@ -13,7 +13,6 @@ import {
   isDebugLogFileEnabled,
   registerSession,
   type Config,
-  unregisterSession,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
@@ -286,39 +285,6 @@ export async function startInteractiveUI(
       config.isTelemetryInitializationDeferred(),
   });
 
-  // Announce this session in the session registry so sibling
-  // sessions can discover it (`qwen sessions ps`). Unlike the runtime.json
-  // sidecar above, this record is unlinked on exit — the registry's whole
-  // value is that presence means "running right now".
-  //
-  // Deliberately after render(): the write is an mkdir + chmod + fsync'd
-  // atomic write, and nothing on the first screen depends on it, so it
-  // belongs with the other post-first-paint work rather than in front of
-  // the user's first frame.
-  //
-  // Wrapped like every other startup side-effect in this function (the
-  // sidecar above, the dual-output bridge, the remote-input watcher):
-  // discovery is a convenience and must not be able to abort a session.
-  try {
-    if (
-      await registerSession({
-        sessionId: config.getSessionId(),
-        cwd: config.getTargetDir(),
-        qwenVersion: version,
-      })
-    ) {
-      // Only arm cleanup for a record that exists; registration fails on
-      // a read-only home, and there is then nothing to unlink.
-      registerCleanup(() => unregisterSession());
-      // Arms the mid-session registry patches (`/clear`, `/cd`) on this
-      // Config; without it the record would keep advertising the values
-      // the session started with.
-      config.markSessionRegistered();
-    }
-  } catch (err) {
-    debugLogger.debug(`session registration skipped: ${String(err)}`);
-  }
-
   // Periodic memory-pressure check for the interactive session. The interval
   // is unref'd (can't keep the loop alive on its own) and cleared on cleanup.
   const pressureMonitor = config.getMemoryPressureMonitor?.();
@@ -411,6 +377,20 @@ export async function startInteractiveUI(
       // Best-effort: a hint must never block or break exit.
     }
   });
+
+  // Announce this session only after the terminal teardown cleanup above is
+  // armed. Registration writes HOME and can stall independently of the
+  // project filesystem, so startup and terminal restoration must not await it.
+  // Config owns the ordering with /clear, /cd, and exit: transitions queued
+  // while registration is pending run after it, and unregister runs last.
+  config.trackSessionRegistration(
+    registerSession({
+      sessionId: config.getSessionId(),
+      cwd: config.getTargetDir(),
+      qwenVersion: version,
+    }),
+  );
+  registerCleanup(() => config.unregisterSessionRegistry());
 }
 
 function setWindowTitle(settings: LoadedSettings, folderName?: string) {

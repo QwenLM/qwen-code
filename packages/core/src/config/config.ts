@@ -221,6 +221,7 @@ import {
 import {
   deriveSessionName,
   patchSessionRecord,
+  unregisterSession,
 } from '../services/session-registry.js';
 import {
   SessionService,
@@ -2020,6 +2021,7 @@ export class Config {
 
   private readonly cliVersion?: string;
   private runtimeStatusEnabled = false;
+  private sessionRegistryActive = false;
   private sessionRegistered = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly sessionWriterLeaseEnabled: boolean = false;
@@ -4057,22 +4059,19 @@ export class Config {
           });
         });
       }
-      if (this.sessionRegistered) {
+      if (this.sessionRegistryActive) {
         const workDir = this.targetDir;
         const newSessionId = this.sessionId;
         // Keep the session registry in step: this PID's record would
         // otherwise point discovery at the previous transcript. Keyed by
         // PID, so a swap is a patch rather than a delete-and-rewrite.
         //
-        // Gated on registration success rather than the sidecar's
-        // `runtimeStatusEnabled`: the failure domains are independent
-        // (project-local `chats/` dir vs the global dir), and riding the
-        // sidecar gate would skip every patch for a whole session when
-        // the sidecar write failed at startup while registration
-        // succeeded — `ps` would keep advertising the pre-/clear session
-        // id and the pre-/cd directory until exit. The inverse
-        // divergence is safe on its own: `patchSessionRecord` no-ops on
-        // a missing record.
+        // Gated on the registry lifecycle rather than the sidecar's
+        // `runtimeStatusEnabled`: the failure domains are independent.
+        // When registration is still pending, this patch queues behind it;
+        // when registration fails, `patchSessionRecord` no-ops on the
+        // missing record. Either way a sidecar failure cannot leave `ps`
+        // advertising the pre-/clear session id until exit.
         //
         // `name` is deliberately not patched: it is the handle a user
         // just read out of `qwen sessions ps`, and re-deriving it here
@@ -4101,14 +4100,41 @@ export class Config {
   }
 
   /**
-   * Marks this Config as registered in the session registry. Call once
-   * after `registerSession` returned true (from the interactive UI
-   * bootstrap). Gates the mid-session registry patches
-   * (startNewSession, refreshCurrentRuntimeStatus), so they ride the
-   * registry's own success rather than the sidecar's.
+   * Serializes initial registration with mid-session patches and cleanup.
+   * The registration promise is deliberately not awaited by UI startup.
    */
-  markSessionRegistered(): void {
-    this.sessionRegistered = true;
+  trackSessionRegistration(registration: Promise<boolean>): void {
+    this.sessionRegistryActive = true;
+    this.sessionRegistryWrite = this.sessionRegistryWrite
+      .catch(() => {
+        // Keep registration independent from an earlier best-effort write.
+      })
+      .then(async () => {
+        this.sessionRegistered = await registration;
+        if (!this.sessionRegistered) this.sessionRegistryActive = false;
+      })
+      .catch(() => {
+        this.sessionRegistered = false;
+        this.sessionRegistryActive = false;
+      });
+  }
+
+  /** Drain queued patches, then remove this process's registered record. */
+  async unregisterSessionRegistry(): Promise<void> {
+    this.sessionRegistryActive = false;
+    this.sessionRegistryWrite = this.sessionRegistryWrite
+      .catch(() => {
+        // Keep cleanup alive after a best-effort patch failure.
+      })
+      .then(async () => {
+        if (!this.sessionRegistered) return;
+        this.sessionRegistered = false;
+        await unregisterSession();
+      })
+      .catch(() => {
+        // ignored: registry cleanup must not disrupt process teardown.
+      });
+    await this.sessionRegistryWrite;
   }
 
   private queueRuntimeStatusWrite(write: () => Promise<void>): void {
@@ -4126,7 +4152,7 @@ export class Config {
    * Queue a session-registry patch on its own serial chain.
    *
    * The chain is separate from `runtimeStatusWrite` and is deliberately
-   * never awaited by `flushRuntimeStatusWrites`:
+   * never awaited by session-transition paths:
    *
    * - A sidecar write that rejects or hangs must not skip or block the
    *   patch — the two target independent failure domains (project-local
@@ -4135,7 +4161,8 @@ export class Config {
    *   sidecar chain: awaiting the patch there would hang `/cd` whenever
    *   HOME stalls while the project directory is healthy. Registry
    *   patches are best-effort by contract — `ps` settles a tick after
-   *   the transition returns — so nothing ever awaits this chain.
+   *   the transition returns. Process cleanup drains the chain before
+   *   unregistering so a late patch cannot recreate the deleted record.
    *
    * Patches still serialize among themselves so back-to-back /clear and
    * /cd transitions cannot interleave their read-modify-write.
@@ -4173,7 +4200,7 @@ export class Config {
         });
       });
     }
-    if (this.sessionRegistered) {
+    if (this.sessionRegistryActive) {
       this.queueSessionRegistryWrite(async () => {
         // The registry's DIRECTORY column is how a user tells two live
         // sessions apart, so a mid-session directory switch has to reach

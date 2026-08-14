@@ -190,7 +190,7 @@ describe('Config.startNewSession session-registry patch', () => {
         qwenVersion: '0.0.0-test',
       }),
     ).toBe(true);
-    config.markSessionRegistered();
+    config.trackSessionRegistration(Promise.resolve(true));
 
     const [before] = await listLiveSessions();
 
@@ -228,7 +228,7 @@ describe('Config.startNewSession session-registry patch', () => {
         qwenVersion: '0.0.0-test',
       }),
     ).toBe(true);
-    config.markSessionRegistered();
+    config.trackSessionRegistration(Promise.resolve(true));
 
     config.startNewSession(sessionB);
 
