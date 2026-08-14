@@ -3334,6 +3334,23 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('workflowsEnabled scope handling', () => {
+    it.each([
+      ['system defaults', getSystemDefaultsPath()],
+      ['system', getSystemSettingsPath()],
+    ])('should honor %s scope settings', (_scope, settingsPath) => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === settingsPath)
+            return JSON.stringify({ tools: { workflowsEnabled: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowsEnabled).toBe(true);
+    });
+
     it('should ignore workspace scope while preserving the user value', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
