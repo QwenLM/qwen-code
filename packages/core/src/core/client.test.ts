@@ -9203,6 +9203,58 @@ Other open files:
       );
     });
 
+    it('reports a safe actionable Arena category for API errors', async () => {
+      const arenaAgentClient = {
+        checkControlSignal: vi.fn().mockResolvedValue(null),
+        reportCancelled: vi.fn().mockResolvedValue(undefined),
+        reportCompleted: vi.fn().mockResolvedValue(undefined),
+        reportError: vi.fn().mockResolvedValue(undefined),
+        updateStatus: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getArenaAgentClient).mockReturnValue(
+        arenaAgentClient as unknown as ReturnType<
+          Config['getArenaAgentClient']
+        >,
+      );
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.Error,
+            value: {
+              error: {
+                message: 'Bearer secret-token in /private/user/path',
+                status: 429,
+              },
+            },
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+        'prompt-id-arena-error',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(arenaAgentClient.reportError).toHaveBeenCalledWith(
+        'Rate limit exceeded',
+      );
+      expect(
+        JSON.stringify(arenaAgentClient.reportError.mock.calls),
+      ).not.toContain('secret-token');
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-id-arena-error',
+          errorMessage: 'unknown error',
+          errorType: 'api_error',
+        },
+      );
+    });
+
     it('should not call checkNextSpeaker when turn.run() yields a value then an error', async () => {
       // Arrange
       const { checkNextSpeaker } = await import(

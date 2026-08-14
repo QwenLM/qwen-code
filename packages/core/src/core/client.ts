@@ -3427,7 +3427,18 @@ export class GeminiClient {
           if (event.type === GeminiEventType.Error) {
             this.forceFullIdeContext = true;
             if (arenaAgentClient) {
-              await arenaAgentClient.reportError('Unknown error');
+              const status = event.value.error?.status;
+              const arenaError =
+                status === 401 || status === 403
+                  ? 'Authentication failed'
+                  : status === 429
+                    ? 'Rate limit exceeded'
+                    : status !== undefined && status >= 500
+                      ? 'Provider service unavailable'
+                      : status !== undefined
+                        ? `API request failed (${status})`
+                        : 'Provider request failed';
+              await arenaAgentClient.reportError(arenaError);
             }
             this.lastApiCompletionTimestamp = Date.now();
             // Sanitize: do not pass raw API error messages to span status.

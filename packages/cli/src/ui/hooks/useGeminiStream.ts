@@ -4916,7 +4916,9 @@ export const useGeminiStream = (
       releaseGoalTurn,
     ],
   );
-  handleCompletedToolsRef.current = handleCompletedTools;
+  useLayoutEffect(() => {
+    handleCompletedToolsRef.current = handleCompletedTools;
+  }, [handleCompletedTools]);
 
   const pendingHistoryItems = useMemo(
     () =>

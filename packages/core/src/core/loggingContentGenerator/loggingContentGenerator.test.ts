@@ -761,6 +761,7 @@ describe('LoggingContentGenerator', () => {
       cancelled: true,
       error: 'API call aborted',
     });
+    expect(logApiResponse).not.toHaveBeenCalled();
     expect(
       genAiExchangeState.controllers.at(-1)?.finalize,
     ).toHaveBeenCalledWith(false);
@@ -1295,6 +1296,7 @@ describe('LoggingContentGenerator', () => {
       cancelled: true,
       error: 'API call aborted',
     });
+    expect(logApiResponse).not.toHaveBeenCalled();
   });
 
   it('forwards usage attached to the final response after it was yielded', async () => {
@@ -2291,6 +2293,7 @@ describe('LoggingContentGenerator', () => {
       cancelled: true,
       error: 'API call aborted',
     });
+    expect(logApiResponse).not.toHaveBeenCalled();
   });
 
   it('does not let an abort after stream completion rewrite success', async () => {
@@ -2405,6 +2408,11 @@ describe('LoggingContentGenerator', () => {
       }
       return realSetTimeout(...args);
     }) as typeof setTimeout);
+    const abortController = new AbortController();
+    const removeAbortListener = vi.spyOn(
+      abortController.signal,
+      'removeEventListener',
+    );
 
     try {
       let releaseStream: (() => void) | undefined;
@@ -2450,6 +2458,7 @@ describe('LoggingContentGenerator', () => {
       const request = {
         model: 'test-model',
         contents: 'Hello',
+        config: { abortSignal: abortController.signal },
       } as unknown as GenerateContentParameters;
 
       const stream = await generator.generateContentStream(
@@ -2464,6 +2473,10 @@ describe('LoggingContentGenerator', () => {
 
       // Fire the idle timeout — span should end as timed-out.
       idleCallback?.();
+      expect(removeAbortListener).toHaveBeenCalledWith(
+        'abort',
+        expect.any(Function),
+      );
 
       const spanRecord = getStreamSpanRecord();
       expect(spanRecord.attributes['stream.timed_out']).toBe(true);
@@ -2629,6 +2642,62 @@ describe('LoggingContentGenerator', () => {
       error: 'API call aborted',
     });
     expect(record.statuses).toHaveLength(0);
+  });
+
+  it('keeps an observed provider error when abort races blocked error logging', async () => {
+    vi.useFakeTimers();
+    const abortController = new AbortController();
+    let releaseErrorLog: (() => void) | undefined;
+    const errorLogGate = new Promise<void>((resolve) => {
+      releaseErrorLog = resolve;
+    });
+    const providerError = new Error('provider failed');
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield* [];
+          throw providerError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockReturnValueOnce(errorLogGate);
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as unknown as GenerateContentParameters,
+      'prompt-error-abort-timeout',
+    );
+    const pendingNext = stream.next();
+    await vi.waitFor(() => expect(logApiError).toHaveBeenCalledTimes(1));
+
+    abortController.abort();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+
+    const record = getStreamSpanRecord();
+    expect(record.attributes['stream.timed_out']).toBe(true);
+    expect(record.endMetadata).toMatchObject({
+      success: false,
+      cancelled: false,
+      error: 'API call failed',
+    });
+    expect(record.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+
+    releaseErrorLog?.();
+    await expect(pendingNext).rejects.toThrow('provider failed');
+    vi.useRealTimers();
   });
 
   it('preserves stream errors when error logging fails', async () => {
