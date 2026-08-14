@@ -23,6 +23,9 @@ vi.mock('node:fs', async (importOriginal) => {
     ...actual,
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
+    // R7-16 — the Gemini hooks probe calls statSync().isFile() to reject
+    // directory-valued hooks/hooks.json. Tests mock this directly.
+    statSync: vi.fn(),
     // The symlink-confinement guard (realPathWithin) resolves both the config
     // path and its dir via realpathSync. These unit tests use in-memory mock
     // dirs that don't exist on disk; normalize via path.resolve (as the real
@@ -93,12 +96,17 @@ describe('convertGeminiToQwenConfig', () => {
     vi.mocked(fs.readFileSync).mockReturnValue(
       JSON.stringify({ name: 'x', version: '1.0.0' }),
     );
-    // Manifest exists; hooks/hooks.json also exists.
+    // Manifest exists; hooks/hooks.json also exists as a regular file
+    // (R7-16 isRegularFile probe shares the statSync mock with existsSync).
     vi.mocked(fs.existsSync).mockImplementation(
       (p: unknown) =>
         String(p).endsWith('gemini-extension.json') ||
         String(p).endsWith(path.join('hooks', 'hooks.json')),
     );
+    vi.mocked(fs.statSync).mockReturnValue({
+      isFile: () => true,
+      isDirectory: () => false,
+    } as fs.Stats);
 
     const result = convertGeminiToQwenConfig(mockDir);
 

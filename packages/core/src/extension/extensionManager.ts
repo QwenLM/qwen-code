@@ -1505,7 +1505,7 @@ export class ExtensionManager {
           !realPathWithin(configHooksPath, effectiveExtensionPath)
         ) {
           debugLogger.warn(
-            `Dropping hooks path "${stripAnsiAndControl(String(config.hooks))}" that escapes the extension; hooks will not load.`,
+            `Dropping hooks path "${stripAnsiAndControl(String(config.hooks))}" that escapes the extension; falling back to hooks/hooks.json if present.`,
           );
           configHooksPath = null;
         }
@@ -1514,10 +1514,27 @@ export class ExtensionManager {
           fs.existsSync(hooksJsonPath) ||
           (configHooksPath && fs.existsSync(configHooksPath))
         ) {
-          const hooksFilePath =
-            configHooksPath && fs.existsSync(configHooksPath)
-              ? configHooksPath
-              : hooksJsonPath;
+          // Warn when the user-set hooks path is missing but the default
+          // hooks/hooks.json exists; otherwise the fallback happens silently
+          // and a typo or packaging miss produces no diagnostic.
+          if (
+            typeof config.hooks === 'string' &&
+            configHooksPath &&
+            !fs.existsSync(configHooksPath)
+          ) {
+            debugLogger.warn(
+              `Referenced hooks path "${stripAnsiAndControl(config.hooks)}" was not found; falling back to hooks/hooks.json.`,
+            );
+          }
+          // Pass raw config.hooks (not the pre-joined absolute) so
+          // readExtraJsonFile's relative branch enforces `..` rejection —
+          // its absolute branch skips confinement when trustSymlinks is set.
+          const rawHooksFileRef =
+            configHooksPath &&
+            typeof config.hooks === 'string' &&
+            fs.existsSync(configHooksPath)
+              ? config.hooks
+              : 'hooks/hooks.json';
 
           // readExtraJsonFile tolerantly reads a subsidiary hooks file
           // (missing/unparseable/non-object/escaping → warn + null) and
@@ -1525,7 +1542,7 @@ export class ExtensionManager {
           // against symlink escapes.
           const parsedHooks = readExtraJsonFile(
             effectiveExtensionPath,
-            hooksFilePath,
+            rawHooksFileRef,
             trustSymlinks,
           );
           if (parsedHooks) {

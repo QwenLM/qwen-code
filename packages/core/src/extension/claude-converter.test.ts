@@ -25,6 +25,7 @@ import type { MCPServerConfig } from '../config/config.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import { recursivelyHydrateStrings } from './variables.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -167,6 +168,38 @@ describe('normalizeMcpServers', () => {
       true,
     );
     expect(result['__proto__']).toEqual({ command: 'echo hi' });
+  });
+
+  // End-to-end pin: the conversion-time `__proto__` preservation (the unit
+  // test above) is necessary but not sufficient. At install time the
+  // manifest is JSON.stringify/parsed round-tripped (preserved as an own
+  // property), then at LOAD time `recursivelyHydrateStrings` rebuilds the
+  // object to substitute `${extensionPath}` placeholders. A plain `{}` +
+  // `newObj[key] = ...` hydration (pre-fix) silently invokes the prototype
+  // setter and drops the entry. Build the object the way loadExtension sees
+  // it (post JSON.parse, pre-hydration) and assert the `__proto__` server
+  // survives hydration.
+  it('keeps a __proto__ MCP server across load-time hydration', () => {
+    // Shape mirrors what loadExtension sees after reading the installed
+    // qwen-extension.json back from disk — `JSON.parse` produces `__proto__`
+    // as an own property (a fresh literal `{}` would hit the prototype
+    // setter and mutate Object.prototype instead).
+    const installed = JSON.parse(
+      '{"name":"x","version":"1","mcpServers":{"__proto__":{"command":"echo hi"}}}',
+    );
+    const hydrated = recursivelyHydrateStrings(installed, {
+      extensionPath: '/test/ext',
+      CLAUDE_PLUGIN_ROOT: '/test/ext',
+      workspacePath: '/test/ws',
+      '/': '/',
+      pathSeparator: '/',
+    }) as { mcpServers: Record<string, unknown> };
+    // The unit test above was insufficient: hydration silently drops the
+    // entry by mutating Object.prototype instead of creating a property.
+    expect(
+      Object.prototype.hasOwnProperty.call(hydrated.mcpServers, '__proto__'),
+    ).toBe(true);
+    expect(hydrated.mcpServers['__proto__']).toEqual({ command: 'echo hi' });
   });
 });
 

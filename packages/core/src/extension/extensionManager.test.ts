@@ -344,10 +344,7 @@ describe('extension tests', () => {
       'installs an Agent Plugin through a symlinked source root',
       async () => {
         const sourcePath = path.join(tempWorkspaceDir, 'portable-source-real');
-        const symlinkPath = path.join(
-          tempWorkspaceDir,
-          'portable-source-link',
-        );
+        const symlinkPath = path.join(tempWorkspaceDir, 'portable-source-link');
         createAgentPlugin(sourcePath, { name: 'symlinked-plugin' });
         fs.symlinkSync(sourcePath, symlinkPath, 'dir');
 
@@ -457,10 +454,10 @@ describe('extension tests', () => {
     });
 
     it('loads a link-mode extension whose manifest and hooks are shared symlinks', async () => {
-      // R6-11/29: a link install reads the user's own dev tree, where the
-      // manifest/hooks files may be symlinks into a shared monorepo location.
-      // Those must load (base behavior), not be silently dropped by the
-      // symlink guard designed for untrusted conversion products.
+      // A link install reads the user's own dev tree, where the manifest/hooks
+      // files may be symlinks into a shared monorepo location. Those must
+      // load (base behavior), not be silently dropped by the symlink guard
+      // designed for untrusted conversion products.
       const sharedDir = path.join(tempWorkspaceDir, 'linked-shared');
       fs.mkdirSync(sharedDir, { recursive: true });
       fs.writeFileSync(
@@ -501,6 +498,52 @@ describe('extension tests', () => {
       // config.hooks proves the symlinked manifest mounted; PreToolUse proves
       // the symlinked hooks file was read and hydrated.
       expect(linked.hooks?.['PreToolUse']).toHaveLength(1);
+    });
+
+    // Link-mode + literal `..` traversal must NOT load the outside file.
+    // Pre-fix joined the path to an absolute before readExtraJsonFile, and
+    // that absolute branch skips confinement when trustSymlinks=true —
+    // letting "../shared/hooks.json" reach a file outside the dev tree
+    // while the sibling lspServers path already enforced the contract
+    // (LspConfigLoader passes raw). Post-fix passes the raw relative string
+    // so readExtraJsonFile's relative-branch `..` rejection applies
+    // uniformly with lspServers.
+    it('link-mode install refuses to load a ../hooks.json outside the dev tree', async () => {
+      const sharedDir = path.join(tempWorkspaceDir, 'outside-hooks-r7');
+      fs.mkdirSync(sharedDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sharedDir, 'hooks.json'),
+        JSON.stringify({
+          hooks: {
+            PreToolUse: [{ type: 'command', command: 'echo outside' }],
+          },
+        }),
+      );
+
+      const sourcePath = path.join(tempWorkspaceDir, 'r7-escape-devdir');
+      fs.mkdirSync(sourcePath, { recursive: true });
+      fs.writeFileSync(
+        path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'escape-attempt',
+          version: '1.0.0',
+          hooks: `../${path.basename(sharedDir)}/hooks.json`,
+        }),
+      );
+
+      const manager = createExtensionManager();
+      const linked = await manager.installExtension(
+        { type: 'link', source: sourcePath },
+        async () => {},
+      );
+      expect(linked.path).toBe(sourcePath);
+      // The referenced path is kept on the config (so the runtime knows what
+      // the author intended), but the hooks file itself was not loaded —
+      // escape refusal means `extension.hooks` stays unset.
+      expect(linked.config.hooks).toBe(
+        `../${path.basename(sharedDir)}/hooks.json`,
+      );
+      expect(linked.hooks).toBeUndefined();
     });
 
     it.each([undefined, 42, ''])(

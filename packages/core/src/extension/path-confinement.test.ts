@@ -316,10 +316,25 @@ describe('readExtraJsonFile', () => {
 
   it('returns null for a relative path escaping the extension', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
     try {
-      expect(readExtraJsonFile(dir, '../outside')).toBeNull();
+      // Create the escape target on disk so the assertion can
+      // distinguish "guard rejected the path" from "guard absent, file
+      // simply missing" (the missing-file branch also returns null).
+      // Without the target existing, a guard-free implementation passes
+      // the assertion silently.
+      const siblingName = path.basename(outside);
+      fs.writeFileSync(
+        path.join(outside, 'hooks.json'),
+        JSON.stringify({ escape: true }),
+        'utf-8',
+      );
+      expect(
+        readExtraJsonFile(dir, path.join('..', siblingName, 'hooks.json')),
+      ).toBeNull();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
     }
   });
 

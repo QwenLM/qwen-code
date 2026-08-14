@@ -316,11 +316,7 @@ describe('detectManifest', () => {
       '{',
       'utf-8',
     );
-    fs.writeFileSync(
-      path.join(root, 'gemini-extension.json'),
-      '{',
-      'utf-8',
-    );
+    fs.writeFileSync(path.join(root, 'gemini-extension.json'), '{', 'utf-8');
     fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
     fs.writeFileSync(
       path.join(root, QODER_PLUGIN_MANIFEST),
@@ -384,6 +380,48 @@ describe('convertCompatibleExtension', () => {
     fs.writeFileSync(
       path.join(root, 'qwen-extension.json'),
       JSON.stringify({ name: 'native', version: '1.0.0' }),
+      'utf-8',
+    );
+    await expect(convertCompatibleExtension(root)).resolves.toEqual({
+      extensionDir: root,
+      originSource: 'QwenCode',
+      externalContent: false,
+    });
+  });
+
+  // Pin the documented "Native Qwen extension wins" contract. A
+  // directory that ships both `qwen-extension.json` and a Claude/Gemini
+  // manifest must load natively, not be converted. Without this, a
+  // regression that runs `detectManifest` before the native `existsSync`
+  // check would install different config than the author shipped.
+  it('native qwen-extension.json wins over a co-shipped Claude manifest', async () => {
+    fs.writeFileSync(
+      path.join(root, 'qwen-extension.json'),
+      JSON.stringify({ name: 'native', version: '1.0.0' }),
+      'utf-8',
+    );
+    fs.mkdirSync(path.join(root, '.claude-plugin'));
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'should-not-be-used', version: '1.0.0' }),
+      'utf-8',
+    );
+    await expect(convertCompatibleExtension(root)).resolves.toEqual({
+      extensionDir: root,
+      originSource: 'QwenCode',
+      externalContent: false,
+    });
+  });
+
+  it('native qwen-extension.json wins over a co-shipped Gemini manifest', async () => {
+    fs.writeFileSync(
+      path.join(root, 'qwen-extension.json'),
+      JSON.stringify({ name: 'native', version: '1.0.0' }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      JSON.stringify({ name: 'gemini-shadow', version: '1.0.0' }),
       'utf-8',
     );
     await expect(convertCompatibleExtension(root)).resolves.toEqual({
@@ -469,20 +507,21 @@ describe('convertCompatibleExtension', () => {
     const policy = 'public' as const;
     const signal = new AbortController().signal;
 
-    await convertCompatibleExtension(root, 'selected', policy, signal);
+    const result = await convertCompatibleExtension(
+      root,
+      'selected',
+      policy,
+      signal,
+    );
 
     expect(spy).toHaveBeenCalledWith(root, 'selected', policy, signal);
     spy.mockRestore();
     // The spy wraps without replacing the implementation, so the real
-    // conversion ran and wrote a temp dir — clean it up too.
-    const realCall = spy.mock.results[0];
-    if (
-      realCall?.type === 'return' &&
-      realCall.value &&
-      typeof realCall.value === 'object' &&
-      'extensionDir' in realCall.value
-    ) {
-      trackConvertedDir(realCall.value as { extensionDir: string });
-    }
+    // conversion ran and wrote a temp dir — clean it up too. Capture the
+    // awaited result (with the actual `convertedDir` field) rather than
+    // reading from the spy: spy.mockRestore() clears mock.results, and the
+    // spy wraps an async function so results[0].value is a Promise that
+    // resolves to { config, convertedDir, externalContent }.
+    trackConvertedDir(result as unknown as { convertedDir: string });
   });
 });

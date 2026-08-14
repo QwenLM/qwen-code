@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -13,6 +13,7 @@ import {
   convertQoderPlugin,
   QODER_PLUGIN_MANIFEST,
 } from './qoder-converter.js';
+import { debugLogger } from '../utils/debugLogger.js';
 
 describe('convertQoderPlugin', () => {
   let root: string;
@@ -349,6 +350,56 @@ describe('convertQoderPlugin', () => {
         /server entries must be JSON objects/,
       );
       expect((rejected as Error).message).not.toContain('\u001b');
+    },
+  );
+
+  // Restore the two warn-path sanitization pins that the collapsed
+  // .each deleted. The defects and no-object branches now log via
+  // debugLogger.warn instead of throwing, so the regression coverage shifts
+  // from "match the throw message" to "capture the warn call". Without
+  // these, a future edit interpolating raw fileRef/relativePath re-opens
+  // the control-byte diagnostic-injection class this test family was
+  // written to prevent.
+  it.skipIf(process.platform === 'win32')(
+    'sanitizes control sequences in the qoder mcpServers-object warn',
+    async () => {
+      const mcpFile = 'no-object\u001b[2J.json';
+      writeManifest({ name: 'sample-qoder-plugin', mcpServers: mcpFile });
+      // File exists with an object body but no usable mcpServers wrapper
+      // (the qoder loadMcpServersFile branch that warns at
+      // qoder-converter.ts:87).
+      fs.writeFileSync(
+        path.join(root, mcpFile),
+        JSON.stringify({ notServers: 'x' }),
+        'utf-8',
+      );
+      const warnSpy = vi.spyOn(debugLogger, 'warn');
+      await convertQoderPlugin(root);
+      const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+      const matching = messages.find((m) =>
+        m.includes(`Invalid Qoder MCP configuration at ${mcpFile}`),
+      );
+      expect(matching).toBeDefined();
+      expect(matching).not.toContain('\u001b');
+      warnSpy.mockRestore();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'sanitizes control sequences in the readExtraJsonFile non-object warn',
+    async () => {
+      const mcpFile = 'array\u001b[31m.json';
+      writeManifest({ name: 'sample-qoder-plugin', mcpServers: mcpFile });
+      // File parses to an array (not an object) — readExtraJsonFile warns
+      // with the fileRef; the path must be sanitized.
+      fs.writeFileSync(path.join(root, mcpFile), '[1, 2, 3]', 'utf-8');
+      const warnSpy = vi.spyOn(debugLogger, 'warn');
+      await convertQoderPlugin(root);
+      const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+      const matching = messages.find((m) => m.includes(`Invalid ${mcpFile}`));
+      expect(matching).toBeDefined();
+      expect(matching).not.toContain('\u001b');
+      warnSpy.mockRestore();
     },
   );
 

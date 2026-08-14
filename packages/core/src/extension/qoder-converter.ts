@@ -64,10 +64,17 @@ function loadMcpServersFile(
   relativePath: string,
   requireWrapper: boolean,
 ): Record<string, MCPServerConfig> | undefined {
-  // A subsidiary file: missing/unparseable/escaping values are tolerated
-  // (warn inside readExtraJsonFile) rather than failing the conversion.
+  // requireWrapper=false → author's explicit reference; a defective file
+  // throws a precise error rather than silently installing zero servers.
+  // requireWrapper=true → auto-detected `.mcp.json` fallback; tolerated.
   const parsed = readExtraJsonFile(extensionDir, relativePath);
   if (!parsed) {
+    if (!requireWrapper) {
+      const safePath = stripAnsiAndControl(relativePath);
+      throw new Error(
+        `Invalid Qoder MCP configuration at ${safePath}: file could not be read`,
+      );
+    }
     return undefined;
   }
   const safeMcpPath = stripAnsiAndControl(relativePath);

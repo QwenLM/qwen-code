@@ -65,7 +65,10 @@ export function recursivelyHydrateStrings(
     return obj.map((item) => recursivelyHydrateStrings(item, values));
   }
   if (typeof obj === 'object' && obj !== null) {
-    const newObj: JsonObject = {};
+    // Object.create(null) so a literal `__proto__` key from an untrusted
+    // manifest is set as an own property instead of triggering the
+    // prototype setter (mirrors normalizeMcpServers).
+    const newObj = Object.create(null) as JsonObject;
     for (const key in obj) {
       if (Object.prototype.hasOwnProperty.call(obj, key)) {
         newObj[key] = recursivelyHydrateStrings(obj[key], values);

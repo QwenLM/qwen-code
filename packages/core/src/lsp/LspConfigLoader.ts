@@ -143,7 +143,10 @@ export class LspConfigLoader {
       extension.path,
     );
     configs.push(
-      ...this.parseConfigSource(hydrated, `${originBase} (${lspServers})`),
+      ...this.parseConfigSource(
+        hydrated,
+        `${originBase} (${stripAnsiAndControl(lspServers)})`,
+      ),
     );
   }
 

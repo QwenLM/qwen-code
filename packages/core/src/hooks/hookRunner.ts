@@ -36,14 +36,14 @@ import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 /**
- * A hook command that is a bare quoted path (`"C:/Program Files/x.cmd"` or the
- * single-quoted variant) — PowerShell evaluates such a value as a string
- * literal and echoes it instead of executing it. The cmd→powershell fallback
- * must prefix it with the call operator; an explicit powershell shell must
- * error. Matching both quote styles keeps the guard from silently missing the
- * single-quoted form escapeShellArg itself produces.
+ * Match a hook command that is a bare quoted path (`"C:/Program Files/x.cmd"`
+ * or single-quoted). PowerShell evaluates it as a string literal and echoes
+ * it instead of executing it, so the cmd→powershell fallback must prefix
+ * it with `&` and an explicit powershell shell must error. The trailing
+ * operator check excludes `"literal" | pipeline` / `"literal"; next`
+ * where the leading quoted token is data, not a path.
  */
-const BARE_QUOTED_COMMAND_RE = /^\s*["']/;
+const BARE_QUOTED_COMMAND_RE = /^\s*["'][^"']*["']\s*(?:(?![|>;]).)*$/;
 
 /**
  * Default timeout for hook execution (60 seconds)
@@ -846,17 +846,42 @@ export class HookRunner {
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     if (shellType === 'powershell') {
-      // A placeholder inside the author's own double quotes must not get the
-      // single-quoted form escapeShellArg produces: `"$CLAUDE_PROJECT_DIR/…"`
-      // would become `"'C:\proj'/…"`, which PowerShell cannot parse. Emit the
-      // double-quote-escaped path instead, so the author's surrounding quotes
-      // stay the only string boundary.
+      // Pick the right escape per placeholder depending on its surrounding
+      // quote region: outside → wrap in single quotes; inside the author's
+      // own double quotes → backtick-escape without wrapping (the author's
+      // outer quotes provide the string boundary, so wrap-quoting again
+      // would yield `"'C:\proj'"`); inside single quotes → double the `'`
+      // without wrapping.
       const doubleQuotedCwd = input.cwd.replace(/([$`"])/g, '`$1');
+      const singleQuotedCwd = input.cwd.replace(/'/g, "''");
+      const replaceWithContext = (
+        command: string,
+        match: string,
+        offset: number,
+      ): string => {
+        let state: 'outside' | 'in-double' | 'in-single' = 'outside';
+        for (let i = 0; i < offset; i++) {
+          const ch = command[i];
+          if (state === 'outside') {
+            if (ch === '"') state = 'in-double';
+            else if (ch === "'") state = 'in-single';
+          } else if (state === 'in-double' && ch === '"') {
+            state = 'outside';
+          } else if (state === 'in-single' && ch === "'") {
+            state = 'outside';
+          }
+        }
+        if (state === 'in-double') return doubleQuotedCwd;
+        if (state === 'in-single') return singleQuotedCwd;
+        return escapedCwd;
+      };
       return command
-        .replace(/"\$GEMINI_PROJECT_DIR/g, () => `"${doubleQuotedCwd}`)
-        .replace(/"\$CLAUDE_PROJECT_DIR/g, () => `"${doubleQuotedCwd}`)
-        .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-        .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd);
+        .replace(/\$GEMINI_PROJECT_DIR/g, (match, offset) =>
+          replaceWithContext(command, match, offset as number),
+        )
+        .replace(/\$CLAUDE_PROJECT_DIR/g, (match, offset) =>
+          replaceWithContext(command, match, offset as number),
+        );
     }
     return command
       .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)

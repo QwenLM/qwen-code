@@ -21,7 +21,7 @@ import {
   readExtensionManifest,
   realPathWithin,
 } from './path-confinement.js';
-import { normalizeMcpServers } from './claude-converter.js';
+import { isRegularFile, normalizeMcpServers } from './claude-converter.js';
 
 const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
@@ -71,15 +71,16 @@ export function convertGeminiToQwenConfig(
     : undefined;
 
   // Declare hooks explicitly when the extension ships the default
-  // hooks/hooks.json file, so the manifest is self-contained instead of relying
-  // on the runtime's implicit default-route load. The path string is kept (not
-  // expanded) so loadExtension hydrates `${extensionPath}`/variables at load.
-  // The symlink-following existsSync must be paired with realPathWithin:
-  // copyDirectory refuses to ship an escaping hooks symlink, so advertising one
-  // would leave the installed manifest pointing at a file that never exists.
+  // hooks/hooks.json file, so the manifest is self-contained instead of
+  // relying on the runtime's implicit default-route load. The path string is
+  // kept (not expanded) so loadExtension hydrates `${extensionPath}`/variables
+  // at load. existsSync + realPathWithin catches escaping symlinks;
+  // isRegularFile rejects a directory named hooks/hooks.json.
   const hooksFile = path.join(extensionDir, 'hooks', 'hooks.json');
   const hooks =
-    fs.existsSync(hooksFile) && realPathWithin(hooksFile, extensionDir)
+    fs.existsSync(hooksFile) &&
+    realPathWithin(hooksFile, extensionDir) &&
+    isRegularFile(hooksFile)
       ? 'hooks/hooks.json'
       : undefined;
 

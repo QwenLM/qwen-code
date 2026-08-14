@@ -50,7 +50,7 @@ const sanitizeForError = stripAnsiAndControl;
  * reject a directory-valued hooks reference at conversion time and after
  * resource collection.
  */
-const isRegularFile = (filePath: string): boolean => {
+export const isRegularFile = (filePath: string): boolean => {
   try {
     return fs.statSync(filePath).isFile();
   } catch {
@@ -431,6 +431,15 @@ export function convertClaudeToQwenConfig(
       debugLogger.warn(
         `[Claude Converter] MCP servers path not yet supported: ${claudeConfig.mcpServers}`,
       );
+    } else if (
+      typeof claudeConfig.mcpServers !== 'object' ||
+      claudeConfig.mcpServers === null ||
+      Array.isArray(claudeConfig.mcpServers)
+    ) {
+      // Same diagnostic the Qoder resolver throws for the same shape.
+      throw new Error(
+        'Invalid MCP configuration: mcpServers must be an object',
+      );
     } else {
       mcpServers = normalizeMcpServers(
         claudeConfig.mcpServers as Record<string, unknown>,
@@ -612,6 +621,13 @@ export async function buildQwenExtensionFromPlugin(
     const mcp = readExtraJsonFile(pluginSource, mergedConfig.mcpServers);
     if (mcp) {
       mergedConfig.mcpServers = mcp as Record<string, MCPServerConfig>;
+    } else {
+      // Drop the reference so the downstream "MCP servers path not yet
+      // supported" message in convertClaudeToQwenConfig doesn't mislead.
+      debugLogger.warn(
+        `Referenced MCP servers file "${sanitizeForError(mergedConfig.mcpServers)}" could not be read; dropping.`,
+      );
+      delete mergedConfig.mcpServers;
     }
   }
 
@@ -626,7 +642,7 @@ export async function buildQwenExtensionFromPlugin(
     );
     if (!resolvedHooks || !isRegularFile(resolvedHooks)) {
       debugLogger.warn(
-        `Dropping hooks path "${stripAnsiAndControl(mergedConfig.hooks)}" that is not a usable regular file inside the plugin; hooks will not load.`,
+        `Dropping hooks path "${sanitizeForError(mergedConfig.hooks)}" that is not a usable regular file inside the plugin; the hooks reference is ignored and a co-shipped hooks/hooks.json (if present) loads instead.`,
       );
       delete mergedConfig.hooks;
     }
@@ -678,7 +694,7 @@ export async function buildQwenExtensionFromPlugin(
       const hooksFilePath = path.join(tmpDir, mergedConfig.hooks);
       if (!isRegularFile(hooksFilePath)) {
         debugLogger.warn(
-          `Dropping hooks path "${stripAnsiAndControl(mergedConfig.hooks)}" whose file was removed or is not a regular file during resource collection; hooks will not load.`,
+          `Dropping hooks path "${sanitizeForError(mergedConfig.hooks)}" whose file was removed or is not a regular file during resource collection; the hooks reference is ignored and a co-shipped hooks/hooks.json (if present) loads instead.`,
         );
         delete mergedConfig.hooks;
       }
@@ -747,6 +763,13 @@ export async function convertClaudePluginStandalone(
         string,
         MCPServerConfig
       >;
+    } else if (mcp) {
+      // Authoring slip: server map at top level instead of under
+      // `mcpServers`. Warn so the "no servers imported" investigation has
+      // a trail.
+      debugLogger.warn(
+        `.mcp.json at ${sanitizeForError(path.join(extensionDir, '.mcp.json'))} has no valid "mcpServers" object; skipping.`,
+      );
     }
   }
 
