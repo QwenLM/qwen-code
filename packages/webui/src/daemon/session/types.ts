@@ -51,25 +51,14 @@ export type DaemonConnectionStatus =
   | 'disconnected'
   | 'error';
 
-export interface DaemonSessionTransition {
-  phase: 'queued' | 'preparing' | 'failed';
-  operation: 'load' | 'resume';
-  origin: 'action' | 'controlled';
-  targetSessionId: string;
-  targetWorkspaceCwd?: string;
-  targetClientId?: string;
-  error?: {
-    message: string;
-    code?: string;
-    status?: number;
-  };
-}
 export interface DaemonSessionOwnerSnapshot {
   isCurrent(): boolean;
 }
+
 export interface DaemonSessionOwnerGuard {
   capture(): DaemonSessionOwnerSnapshot;
 }
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   sessionId?: string;
@@ -114,7 +103,6 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
-  sessionTransition?: DaemonSessionTransition;
 }
 
 export interface DaemonReasoningControls {
@@ -179,10 +167,6 @@ export interface DaemonSessionProviderProps {
     /** Warning shown when session context metadata cannot be loaded. */
     context?: string;
   };
-  onSessionTransitionCommit?: (target: {
-    sessionId: string;
-    workspaceCwd?: string;
-  }) => void;
   /** React children rendered inside the daemon session contexts. */
   children: ReactNode;
 }
