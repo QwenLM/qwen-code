@@ -1818,6 +1818,7 @@ export class SessionService {
           record.type === 'system' &&
           (record.subtype === 'parent_session' ||
             record.subtype === 'session_source' ||
+            record.subtype === 'turn_result' ||
             (options.source && record.subtype === 'custom_title'))
         ),
     );

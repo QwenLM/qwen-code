@@ -349,6 +349,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_stats',
       'session_lsp',
       'session_status',
+      'session_turn_status',
       'session_close',
       'session_archive',
       'session_metadata',

@@ -35,18 +35,33 @@ const DEFAULT_REWRITE_TIMEOUT_MS = 30_000;
 // rewritten message's _meta.
 const REWRITE_META_EXCLUDED_KEYS = new Set<string>([]);
 
+export interface MessageRewriteEmissionContext {
+  ownerPromptId?: string;
+  turnIndex: number;
+  rewritten: boolean;
+  replacesMessageText: boolean;
+}
+
 export class MessageRewriteMiddleware {
   private readonly turnBuffer: TurnBuffer;
   private readonly rewriter: LlmRewriter;
   private readonly target: MessageRewriteConfig['target'];
   private readonly timeoutMs: number;
   private turnIndex = 0;
+  private generation = 0;
+  private generationAbortController = new AbortController();
   private turnMeta: Record<string, unknown> | undefined;
+  private turnOwnerPromptId: string | undefined;
 
   constructor(
     config: Config,
     rewriteConfig: MessageRewriteConfig,
-    private readonly sendUpdate: (update: SessionUpdate) => Promise<void>,
+    private readonly sendUpdate: (
+      update: SessionUpdate,
+      context?: MessageRewriteEmissionContext,
+    ) => Promise<void>,
+    private readonly getOwnerPromptId: () => string | undefined = () =>
+      undefined,
   ) {
     this.turnBuffer = new TurnBuffer();
     this.rewriter = new LlmRewriter(config, rewriteConfig);
@@ -84,15 +99,29 @@ export class MessageRewriteMiddleware {
       | Record<string, string>
       | undefined;
     const text = content?.['text'] ?? '';
-
-    // Always send original message as-is
-    await this.sendUpdate(update);
+    const ownerPromptId = this.getOwnerPromptId();
+    const meta = updateRecord['_meta'] as Record<string, unknown> | undefined;
 
     if (
       updateType === 'agent_message_chunk' &&
-      (updateRecord['_meta'] as Record<string, unknown> | undefined)?.[
-        'source'
-      ] === 'slash_command'
+      meta?.['qwenDiscreteMessage'] === true
+    ) {
+      await this.flushTurn(signal);
+    }
+
+    // Always send original message as-is
+    await this.sendUpdate(update, {
+      ...(ownerPromptId !== undefined ? { ownerPromptId } : {}),
+      turnIndex: this.turnIndex + 1,
+      rewritten: false,
+      replacesMessageText:
+        updateType === 'agent_message_chunk' &&
+        (this.target === 'message' || this.target === 'all'),
+    });
+
+    if (
+      updateType === 'agent_message_chunk' &&
+      meta?.['source'] === 'slash_command'
     ) {
       return;
     }
@@ -113,6 +142,7 @@ export class MessageRewriteMiddleware {
 
     if (didAccumulate) {
       this.captureTurnMeta(updateRecord);
+      this.turnOwnerPromptId ??= ownerPromptId;
     }
   }
 
@@ -132,17 +162,22 @@ export class MessageRewriteMiddleware {
   async flushTurn(signal?: AbortSignal): Promise<void> {
     const content = this.turnBuffer.flush();
     const turnMeta = this.turnMeta;
+    const ownerPromptId = this.turnOwnerPromptId;
     this.turnMeta = undefined;
+    this.turnOwnerPromptId = undefined;
     if (!content) return;
 
     this.turnIndex++;
     const turnIdx = this.turnIndex;
+    const generation = this.generation;
 
     // Always enforce a timeout, combined with caller's signal if provided
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-    const rewriteSignal = signal
-      ? AbortSignal.any([signal, timeoutSignal])
-      : timeoutSignal;
+    const rewriteSignal = AbortSignal.any([
+      ...(signal ? [signal] : []),
+      timeoutSignal,
+      this.generationAbortController.signal,
+    ]);
 
     this.pendingRewrites.push(
       (async () => {
@@ -152,21 +187,32 @@ export class MessageRewriteMiddleware {
             debugLogger.info(`Turn ${turnIdx}: no rewrite output`);
             return;
           }
+          if (generation !== this.generation || rewriteSignal.aborted) return;
 
           debugLogger.info(
             `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
           );
 
           // Emit rewritten message with special _meta
-          await this.sendUpdate({
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: rewritten },
-            _meta: {
-              ...turnMeta,
-              rewritten: true,
+          await this.sendUpdate(
+            {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: rewritten },
+              _meta: {
+                ...turnMeta,
+                rewritten: true,
+                turnIndex: turnIdx,
+              },
+            } as SessionUpdate,
+            {
+              ...(ownerPromptId !== undefined ? { ownerPromptId } : {}),
               turnIndex: turnIdx,
+              rewritten: true,
+              replacesMessageText: content.messages.length > 0,
             },
-          } as SessionUpdate);
+          );
+          if (generation !== this.generation || rewriteSignal.aborted) return;
+          this.rewriter.commitOutput(rewritten);
         } catch (error) {
           debugLogger.warn(
             `Turn ${turnIdx}: rewrite failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -174,6 +220,19 @@ export class MessageRewriteMiddleware {
         }
       })(),
     );
+  }
+
+  discardTurn(): void {
+    this.generationAbortController.abort();
+    this.generationAbortController = new AbortController();
+    this.generation++;
+    this.discardBufferedTurn();
+  }
+
+  discardBufferedTurn(): void {
+    this.turnBuffer.discard();
+    this.turnMeta = undefined;
+    this.turnOwnerPromptId = undefined;
   }
 
   private captureTurnMeta(update: Record<string, unknown>): void {

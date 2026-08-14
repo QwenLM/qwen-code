@@ -50,6 +50,15 @@ function makeTurn(messages: string[], thoughts: string[] = []): TurnContent {
   return { messages, thoughts, hasToolCalls: false };
 }
 
+async function rewriteAndCommit(
+  rewriter: InstanceType<typeof LlmRewriter>,
+  turn: TurnContent,
+): Promise<string | null> {
+  const output = await rewriter.rewrite(turn);
+  if (output) rewriter.commitOutput(output);
+  return output;
+}
+
 describe('LlmRewriter', () => {
   beforeEach(() => {
     mockGenerateContent.mockClear();
@@ -59,6 +68,32 @@ describe('LlmRewriter', () => {
   });
 
   describe('contextTurns', () => {
+    it('does not expose a rewrite as context until it is committed', async () => {
+      mockGenerateContent
+        .mockResolvedValueOnce({
+          candidates: [{ content: { parts: [{ text: 'pending rewrite' }] } }],
+        })
+        .mockResolvedValue({
+          candidates: [{ content: { parts: [{ text: 'later rewrite' }] } }],
+        });
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+      } as MessageRewriteConfig);
+
+      const pending = await rewriter.rewrite(makeTurn(['first message']));
+      await rewriter.rewrite(makeTurn(['second message']));
+      const secondInput =
+        mockGenerateContent.mock.calls[1][0].contents[0].parts[0].text;
+      expect(secondInput).not.toContain('pending rewrite');
+
+      rewriter.commitOutput(pending!);
+      await rewriter.rewrite(makeTurn(['third message']));
+      const thirdInput =
+        mockGenerateContent.mock.calls[2][0].contents[0].parts[0].text;
+      expect(thirdInput).toContain('pending rewrite');
+    });
+
     it('should include last rewrite output by default (contextTurns=1)', async () => {
       const rewriter = new LlmRewriter(makeConfig(), {
         enabled: true,
@@ -66,13 +101,13 @@ describe('LlmRewriter', () => {
       } as MessageRewriteConfig);
 
       // First call — no context
-      await rewriter.rewrite(makeTurn(['first message']));
+      await rewriteAndCommit(rewriter, makeTurn(['first message']));
       const firstInput =
         mockGenerateContent.mock.calls[0][0].contents[0].parts[0].text;
       expect(firstInput).not.toContain('上一轮改写结果');
 
       // Second call — should include first rewrite output
-      await rewriter.rewrite(makeTurn(['second message']));
+      await rewriteAndCommit(rewriter, makeTurn(['second message']));
       const secondInput =
         mockGenerateContent.mock.calls[1][0].contents[0].parts[0].text;
       expect(secondInput).toContain('上一轮改写结果');
@@ -86,8 +121,8 @@ describe('LlmRewriter', () => {
         contextTurns: 0,
       } as MessageRewriteConfig);
 
-      await rewriter.rewrite(makeTurn(['first']));
-      await rewriter.rewrite(makeTurn(['second']));
+      await rewriteAndCommit(rewriter, makeTurn(['first']));
+      await rewriteAndCommit(rewriter, makeTurn(['second']));
 
       const secondInput =
         mockGenerateContent.mock.calls[1][0].contents[0].parts[0].text;
@@ -108,7 +143,10 @@ describe('LlmRewriter', () => {
       } as MessageRewriteConfig);
 
       for (let i = 0; i < 6; i++) {
-        await rewriter.rewrite(makeTurn([`message number ${i} with length`]));
+        await rewriteAndCommit(
+          rewriter,
+          makeTurn([`message number ${i} with length`]),
+        );
       }
 
       expect(historyOf(rewriter).length).toBe(2);
@@ -122,7 +160,10 @@ describe('LlmRewriter', () => {
       } as MessageRewriteConfig);
 
       for (let i = 0; i < 4; i++) {
-        await rewriter.rewrite(makeTurn([`message number ${i} with length`]));
+        await rewriteAndCommit(
+          rewriter,
+          makeTurn([`message number ${i} with length`]),
+        );
       }
 
       expect(historyOf(rewriter).length).toBe(0);
@@ -136,7 +177,10 @@ describe('LlmRewriter', () => {
       } as MessageRewriteConfig);
 
       for (let i = 0; i < 4; i++) {
-        await rewriter.rewrite(makeTurn([`message number ${i} with length`]));
+        await rewriteAndCommit(
+          rewriter,
+          makeTurn([`message number ${i} with length`]),
+        );
       }
 
       expect(historyOf(rewriter).length).toBe(4);
@@ -163,12 +207,12 @@ describe('LlmRewriter', () => {
         contextTurns: 2,
       } as MessageRewriteConfig);
 
-      await rewriter.rewrite(makeTurn(['msg1']));
-      await rewriter.rewrite(makeTurn(['msg2']));
-      await rewriter.rewrite(makeTurn(['msg3']));
+      await rewriteAndCommit(rewriter, makeTurn(['msg1']));
+      await rewriteAndCommit(rewriter, makeTurn(['msg2']));
+      await rewriteAndCommit(rewriter, makeTurn(['msg3']));
 
       // 4th call — should include rewrite-B and rewrite-C (last 2), not rewrite-A
-      await rewriter.rewrite(makeTurn(['msg4']));
+      await rewriteAndCommit(rewriter, makeTurn(['msg4']));
       const input =
         mockGenerateContent.mock.calls[3][0].contents[0].parts[0].text;
       expect(input).not.toContain('rewrite-A');
@@ -194,9 +238,9 @@ describe('LlmRewriter', () => {
         contextTurns: 'all',
       } as MessageRewriteConfig);
 
-      await rewriter.rewrite(makeTurn(['msg1']));
-      await rewriter.rewrite(makeTurn(['msg2']));
-      await rewriter.rewrite(makeTurn(['msg3']));
+      await rewriteAndCommit(rewriter, makeTurn(['msg1']));
+      await rewriteAndCommit(rewriter, makeTurn(['msg2']));
+      await rewriteAndCommit(rewriter, makeTurn(['msg3']));
 
       const input =
         mockGenerateContent.mock.calls[2][0].contents[0].parts[0].text;
@@ -231,6 +275,40 @@ describe('LlmRewriter', () => {
   });
 
   describe('filtering', () => {
+    it('does not add an aborted rewrite to the next turn context', async () => {
+      let resolveRewrite!: (value: {
+        candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
+      }) => void;
+      mockGenerateContent.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRewrite = resolve;
+          }),
+      );
+
+      const rewriter = new LlmRewriter(makeConfig(), {
+        enabled: true,
+        target: 'all',
+      } as MessageRewriteConfig);
+      const controller = new AbortController();
+      const abortedRewrite = rewriter.rewrite(
+        makeTurn(['discarded automatic turn']),
+        controller.signal,
+      );
+
+      controller.abort();
+      resolveRewrite({
+        candidates: [{ content: { parts: [{ text: 'discarded rewrite' }] } }],
+      });
+      await expect(abortedRewrite).resolves.toBeNull();
+      await rewriter.rewrite(makeTurn(['current user turn']));
+
+      const currentInput =
+        mockGenerateContent.mock.calls[1][0].contents[0].parts[0].text;
+      expect(currentInput).not.toContain('discarded rewrite');
+      expect(currentInput).not.toContain('上一轮改写结果');
+    });
+
     it('should return null for empty input', async () => {
       const rewriter = new LlmRewriter(makeConfig(), {
         enabled: true,

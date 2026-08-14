@@ -392,6 +392,7 @@ describe('Session', () => {
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
+    recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
@@ -651,6 +652,7 @@ describe('Session', () => {
     };
 
     mockChatRecordingService = {
+      recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
       recordMidTurnUserMessage: vi.fn(),
@@ -4115,6 +4117,1508 @@ describe('Session', () => {
       expect(core.getInvocationContext()).toBeUndefined();
     });
 
+    describe('turn result recording', () => {
+      const trustedContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'daemon-prompt-id',
+        originatorClientId: 'client-1',
+      };
+
+      it('records a completed turn_result for a daemon-admitted prompt', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'trusted prompt' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'completed',
+          stopReason: 'end_turn',
+          promptText: 'trusted prompt',
+          originatorClientId: 'client-1',
+        });
+        expect(payload.startedAt).toBeLessThanOrEqual(payload.endedAt);
+      });
+
+      it('accumulates streamed agent text into resultText', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'Hello, ' }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'world!' }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'greet' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            state: 'completed',
+            resultText: 'Hello, world!',
+          }),
+        );
+      });
+
+      it('records only the final answer after a tool-call boundary', async () => {
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I will check the file first. ' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'The final answer is 42.' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            state: 'completed',
+            stopReason: 'end_turn',
+            resultText: 'The final answer is 42.',
+          }),
+        );
+      });
+
+      it('ignores a delayed rewrite from the discarded tool-call block', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('');
+        const middleware = session.messageRewriter as unknown as {
+          rewriter: { rewrite: typeof rewrite };
+          sendUpdate: (
+            update: SessionUpdate,
+            context: {
+              ownerPromptId?: string;
+              turnIndex: number;
+              rewritten: boolean;
+              replacesMessageText: boolean;
+            },
+          ) => Promise<void>;
+        };
+        middleware.rewriter.rewrite = rewrite;
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        let releaseFinalResponse!: () => void;
+        const finalResponseGate = new Promise<void>((resolve) => {
+          releaseFinalResponse = resolve;
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I will check the file first. ' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                  usageMetadata: {
+                    promptTokenCount: 1,
+                    candidatesTokenCount: 1,
+                    totalTokenCount: 2,
+                  },
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              await finalResponseGate;
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'The final answer is 42.' }],
+                      },
+                    },
+                  ],
+                  usageMetadata: {
+                    promptTokenCount: 1,
+                    candidatesTokenCount: 1,
+                    totalTokenCount: 2,
+                  },
+                },
+              };
+            })(),
+          );
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+        );
+
+        await middleware.sendUpdate(
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'rewritten tool preamble' },
+            _meta: { rewritten: true, turnIndex: 1 },
+          },
+          {
+            ownerPromptId: trustedContext.promptId,
+            turnIndex: 1,
+            rewritten: true,
+            replacesMessageText: true,
+          },
+        );
+        releaseFinalResponse();
+        await prompt;
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            resultText: 'The final answer is 42.',
+          }),
+        );
+      });
+
+      it('discards text from a failed non-continuation retry attempt', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'discarded attempt' }] } },
+                ],
+              },
+            },
+            { type: core.StreamEventType.RETRY, value: {} },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'final answer' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'final answer' }),
+        );
+      });
+
+      it('waits for final answer delivery before recording it', async () => {
+        let releaseDelivery!: () => void;
+        const deliveryGate = new Promise<void>((resolve) => {
+          releaseDelivery = resolve;
+        });
+        let markDeliveryStarted!: () => void;
+        const deliveryStarted = new Promise<void>((resolve) => {
+          markDeliveryStarted = resolve;
+        });
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async ({ update }) => {
+            if (
+              update.sessionUpdate === 'agent_message_chunk' &&
+              update.content.type === 'text' &&
+              update.content.text === 'delayed final answer'
+            ) {
+              markDeliveryStarted();
+              await deliveryGate;
+            }
+          },
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'delayed final answer' }],
+                    },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+        await deliveryStarted;
+        const releaseTimer = setTimeout(releaseDelivery, 20);
+
+        try {
+          await prompt;
+        } finally {
+          clearTimeout(releaseTimer);
+          releaseDelivery();
+        }
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'delayed final answer' }),
+        );
+      });
+
+      it('records only top-level main-answer text', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'subagent detail' },
+              _meta: { parentToolCallId: 'subagent-call' },
+            });
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'background status' },
+              _meta: { qwenDiscreteMessage: true },
+            });
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'slash output' },
+              _meta: { source: 'slash_command' },
+            });
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'main answer' }] } }],
+              },
+            };
+          })(),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            resultText: 'main answer',
+          }),
+        );
+      });
+
+      it('does not let oversized subagent text consume the main-answer cap', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'x'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 1),
+              },
+              _meta: { parentToolCallId: 'subagent-call' },
+            });
+            yield {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'main answer' }] } }],
+              },
+            };
+          })(),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toBe('main answer');
+        expect(payload.resultTruncated).toBeUndefined();
+      });
+
+      it('stores rewritten main text instead of appending it to raw text', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('rewritten answer');
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          text: 'r'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS * 3),
+                        },
+                      ],
+                    },
+                  },
+                ],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toBe('rewritten answer');
+        expect(payload.resultTruncated).toBeUndefined();
+      });
+
+      it('keeps the main answer when only thoughts are rewritten', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'thought',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('rewritten thought');
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        { text: 'private reasoning', thought: true },
+                        { text: 'main answer' },
+                      ],
+                    },
+                  },
+                ],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'main answer' }),
+        );
+      });
+
+      it('does not persist framework diagnostics as the main answer', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('rewritten diagnostic');
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 101,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'too large' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'completed',
+          stopReason: 'max_tokens',
+        });
+        expect(payload.resultText).toBeUndefined();
+        expect(rewrite).toHaveBeenCalled();
+        expect(agentMessageChunks()).toContain('rewritten diagnostic');
+      });
+
+      it('does not append the scheduler exit summary to a cancelled turn result', async () => {
+        const scheduler = {
+          hasPendingWork: false,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue('Scheduler exit summary'),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        let releaseStream!: () => void;
+        const streamGate = new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.sendUpdate({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'main answer' },
+            });
+            await streamGate;
+            yield* createEmptyStream();
+          })(),
+        );
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'cancel me' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(agentMessageChunks()).toContain('main answer'),
+        );
+
+        await session.cancelPendingPrompt();
+        releaseStream();
+        await prompt;
+
+        expect(agentMessageChunks()).toContain('Scheduler exit summary');
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            state: 'cancelled',
+            resultText: 'main answer',
+          }),
+        );
+      });
+
+      it('does not persist voice bridge status as the main answer', async () => {
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        Object.assign(mockSettings.merged as Record<string, unknown>, {
+          voiceModel: 'qwen3-asr-flash',
+          env: { OPENAI_API_KEY: 'test-key' },
+        });
+        transcribeVoiceAudioSpy.mockResolvedValue('transcribed request');
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'main answer' }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: 'answer this audio' },
+              {
+                type: 'audio',
+                mimeType: 'audio/ogg',
+                data: 'T2dnUw==',
+              },
+            ],
+          },
+          trustedContext,
+        );
+
+        expect(agentMessageChunks()).toContain(
+          'Converted 1 audio file(s) to text via qwen3-asr-flash. Your audio was sent to that model.',
+        );
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'main answer' }),
+        );
+      });
+
+      it('discards automatic-turn rewrite residue before recording a prompt', async () => {
+        const discardTurn = vi.fn();
+        session.messageRewriter = {
+          discardTurn,
+          interceptUpdate: vi.fn().mockResolvedValue(undefined),
+          flushTurn: vi.fn().mockResolvedValue(undefined),
+          waitForPendingRewrites: vi.fn().mockResolvedValue(undefined),
+        } as unknown as Session['messageRewriter'];
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'fresh prompt' }],
+          },
+          trustedContext,
+        );
+
+        expect(discardTurn).toHaveBeenCalledOnce();
+      });
+
+      it.each([
+        ['empty output', () => Promise.resolve('')],
+        ['rewrite failure', () => Promise.reject(new Error('rewrite failed'))],
+      ])('falls back to raw main text on %s', async (_label, rewriteImpl) => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockImplementation(rewriteImpl);
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'raw answer' }] } }],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'raw answer' }),
+        );
+      });
+
+      it('falls back to raw text when rewritten delivery fails', async () => {
+        (
+          mockSettings.user as { originalSettings?: Record<string, unknown> }
+        ).originalSettings = {
+          messageRewrite: {
+            enabled: true,
+            target: 'message',
+            prompt: 'rewrite',
+          },
+        };
+        session.installRewriter();
+        const rewrite = vi.fn().mockResolvedValue('rewritten answer');
+        (
+          session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+          }
+        ).rewriter.rewrite = rewrite;
+        vi.mocked(mockClient.sessionUpdate).mockImplementation(
+          async ({ update }) => {
+            if (
+              update.sessionUpdate === 'agent_message_chunk' &&
+              update._meta?.['rewritten'] === true
+            ) {
+              throw new Error('rewritten update transport failed');
+            }
+          },
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'raw answer' }] } }],
+                usageMetadata: {
+                  promptTokenCount: 1,
+                  candidatesTokenCount: 1,
+                  totalTokenCount: 2,
+                },
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'answer me' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({ resultText: 'raw answer' }),
+        );
+      });
+
+      it.each([
+        {
+          label: 'another prompt',
+          ownerPromptId: 'prompt-a' as string | undefined,
+          rewriteText: 'late prompt A rewrite',
+        },
+        {
+          label: 'an automatic turn',
+          ownerPromptId: undefined,
+          rewriteText: 'late automatic rewrite',
+        },
+      ])(
+        'does not attribute a delayed rewrite from $label to the current prompt',
+        async ({ ownerPromptId, rewriteText }) => {
+          (
+            mockSettings.user as { originalSettings?: Record<string, unknown> }
+          ).originalSettings = {
+            messageRewrite: {
+              enabled: true,
+              target: 'message',
+              prompt: 'rewrite',
+            },
+          };
+          session.installRewriter();
+          const rewrite = vi.fn().mockResolvedValue('');
+          const middleware = session.messageRewriter as unknown as {
+            rewriter: { rewrite: typeof rewrite };
+            sendUpdate: (
+              update: SessionUpdate,
+              context: {
+                ownerPromptId?: string;
+                turnIndex: number;
+                rewritten: boolean;
+                replacesMessageText: boolean;
+              },
+            ) => Promise<void>;
+          };
+          middleware.rewriter.rewrite = rewrite;
+          let releaseStream!: () => void;
+          const streamGate = new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            (async function* () {
+              await streamGate;
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'prompt B answer' }] } },
+                  ],
+                  usageMetadata: {
+                    promptTokenCount: 1,
+                    candidatesTokenCount: 1,
+                    totalTokenCount: 2,
+                  },
+                },
+              };
+            })(),
+          );
+          const prompt = session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'prompt B' }],
+            },
+            { ...trustedContext, promptId: 'prompt-b' },
+          );
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+          );
+
+          await middleware.sendUpdate(
+            {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: rewriteText },
+              _meta: { rewritten: true, turnIndex: 1 },
+            },
+            {
+              ...(ownerPromptId !== undefined ? { ownerPromptId } : {}),
+              turnIndex: 1,
+              rewritten: true,
+              replacesMessageText: true,
+            },
+          );
+          releaseStream();
+          await prompt;
+
+          expect(
+            mockChatRecordingService.recordTurnResult,
+          ).toHaveBeenCalledWith(
+            expect.objectContaining({
+              promptId: 'prompt-b',
+              resultText: 'prompt B answer',
+            }),
+          );
+        },
+      );
+
+      it('returns a stable result code when resultText exceeds the cap', async () => {
+        const longText = 'a'.repeat(core.TURN_RESULT_TEXT_MAX_CHARS + 100);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: longText }] } }],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'long' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toHaveLength(
+          core.TURN_RESULT_TEXT_MAX_CHARS,
+        );
+        expect(payload.resultTruncated).toBe(true);
+        expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
+      });
+
+      it('captures streamed chunks until the character cap', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks(
+            Array.from({ length: 257 }, () => ({
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'x' }] } }],
+              },
+            })),
+          ),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'many chunks' }],
+          },
+          trustedContext,
+        );
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.resultText).toBe('x'.repeat(257));
+        expect(payload.resultTruncated).toBeUndefined();
+      });
+
+      it('records a cancelled turn when admission aborts before dispatch', async () => {
+        let releaseAdmission!: () => void;
+        const admission = new Promise<void>((resolve) => {
+          releaseAdmission = resolve;
+        });
+        mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(admission);
+        const cancellation = new AbortController();
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'cancelled prompt' }],
+          },
+          trustedContext,
+          cancellation.signal,
+        );
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
+        );
+        cancellation.abort();
+        releaseAdmission();
+
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+          }),
+        );
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0].startedAt,
+        ).toBeUndefined();
+      });
+
+      it('records an error when admission fails before dispatch', async () => {
+        mockConfig.assertCanStartTurn = vi
+          .fn()
+          .mockRejectedValue(new Error('admission failed'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'rejected prompt' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('admission failed');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: { message: 'admission failed' },
+          }),
+        );
+        expect(
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0].startedAt,
+        ).toBeUndefined();
+      });
+
+      it('records an error when awaited turn finalization fails', async () => {
+        (
+          session as unknown as {
+            liveConversationActive: boolean;
+            liveEndInstructionPending: boolean;
+          }
+        ).liveConversationActive = false;
+        (
+          session as unknown as { liveEndInstructionPending: boolean }
+        ).liveEndInstructionPending = true;
+        mockGeminiClient.refreshSystemInstruction.mockRejectedValueOnce(
+          new Error('live cleanup failed'),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cleanup failure' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('live cleanup failed');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: { message: 'live cleanup failed' },
+          }),
+        );
+      });
+
+      it('records an error turn when the model stream fails', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('model exploded'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'boom' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('model exploded');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: { message: 'model exploded' },
+          }),
+        );
+      });
+
+      it('discards and drains rewrites before recording an error', async () => {
+        const discardTurn = vi.fn();
+        const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
+        session.messageRewriter = {
+          discardTurn,
+          interceptUpdate: vi.fn().mockResolvedValue(undefined),
+          flushTurn: vi.fn().mockResolvedValue(undefined),
+          waitForPendingRewrites,
+        } as unknown as Session['messageRewriter'];
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('model exploded'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'boom' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('model exploded');
+
+        expect(discardTurn).toHaveBeenCalledTimes(2);
+        expect(waitForPendingRewrites).toHaveBeenCalled();
+        expect(discardTurn.mock.invocationCallOrder.at(-1)).toBeLessThan(
+          mockChatRecordingService.recordTurnResult.mock.invocationCallOrder[0],
+        );
+        expect(
+          waitForPendingRewrites.mock.invocationCallOrder.at(-1),
+        ).toBeLessThan(
+          mockChatRecordingService.recordTurnResult.mock.invocationCallOrder[0],
+        );
+      });
+
+      it('bounds persisted error message and code', async () => {
+        const originalError = Object.assign(
+          new Error('m'.repeat(core.TURN_RESULT_ERROR_MESSAGE_MAX_CHARS + 100)),
+          { code: 'c'.repeat(core.TURN_RESULT_ERROR_CODE_MAX_CHARS + 100) },
+        );
+        mockChat.sendMessageStream = vi.fn().mockRejectedValue(originalError);
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'large error' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toBe(originalError);
+
+        const payload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(payload.error?.message).toHaveLength(
+          core.TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
+        );
+        expect(payload.error?.code).toHaveLength(
+          core.TURN_RESULT_ERROR_CODE_MAX_CHARS,
+        );
+        expect(payload.error?.messageTruncated).toBe(true);
+        expect(payload.error?.codeTruncated).toBe(true);
+      });
+
+      it('records a cancelled turn when user cancel races a non-abort stream error', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('Request was aborted.', () => {
+            void session.cancelPendingPrompt();
+          }),
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancel me' }],
+            },
+            trustedContext,
+          ),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+          }),
+        );
+      });
+
+      it('records a terminal parent cancellation as an error', async () => {
+        const cancellation = new AbortController();
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('Request was aborted.', () => {
+            cancellation.abort(
+              Object.assign(new Error('prompt exceeded the 50ms deadline'), {
+                code: 'prompt_deadline_exceeded',
+              }),
+            );
+          }),
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'time out' }],
+            },
+            trustedContext,
+            cancellation.signal,
+          ),
+        ).rejects.toThrow('Request was aborted.');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+            error: {
+              code: 'prompt_deadline_exceeded',
+              message: 'prompt exceeded the 50ms deadline',
+            },
+          }),
+        );
+      });
+
+      it('records a cancelled turn when session disposal aborts a Stop hook', async () => {
+        const messageBus = {
+          request: vi.fn().mockImplementation(
+            (request: { signal?: AbortSignal }) =>
+              new Promise((_resolve, reject) => {
+                request.signal?.addEventListener(
+                  'abort',
+                  () => reject(new Error('Request was aborted.')),
+                  { once: true },
+                );
+              }),
+          ),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const prompt = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'dispose me' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() => expect(messageBus.request).toHaveBeenCalled());
+        session.dispose();
+
+        await expect(prompt).rejects.toThrow('Request was aborted.');
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+          }),
+        );
+      });
+
+      it('does not record a turn_result without an invocation context', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'standalone prompt' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).not.toHaveBeenCalled();
+      });
+
+      it('keeps overlapping turn records attributed to their own promptIds', async () => {
+        // DAEMON-003 overlap: the bridge releases the FIFO on deadline
+        // while the agent is still executing, so the successor prompt is
+        // admitted before the predecessor settles. Each turn must still
+        // settle its own record under its own promptId.
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        let releaseFirst!: () => void;
+        const firstBlocked = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        const firstStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [{ text: 'first answer' }] } }],
+            },
+          };
+          await firstBlocked;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(firstStream)
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'second answer' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        const secondContext: core.InvocationContextV1 = {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'second-prompt-id',
+          originatorClientId: 'client-1',
+        };
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          secondContext,
+        );
+        // Third assertCanStartTurn call = the successor's prompt()-level
+        // admission (turn A used the prompt + inner calls). Flush
+        // microtasks so the successor's recording begin has run.
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+
+        releaseFirst();
+        await first;
+        await second;
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          2,
+        );
+        const [firstPayload, secondPayload] =
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            (call) => call[0],
+          );
+        expect(firstPayload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          state: 'cancelled',
+          promptText: 'first prompt',
+          resultText: 'first answer',
+        });
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'completed',
+          promptText: 'second prompt',
+          resultText: 'second answer',
+        });
+      });
+
+      it('records a superseded signal-aware stream as cancelled', async () => {
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(
+            (
+              _model: string,
+              request: { config: { abortSignal: AbortSignal } },
+            ) =>
+              Promise.resolve(
+                (async function* () {
+                  await new Promise<void>((_resolve, reject) => {
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => reject(new Error('Request was aborted.')),
+                      { once: true },
+                    );
+                  });
+                  yield* createEmptyStream();
+                })(),
+              ),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+        );
+
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          { ...trustedContext, promptId: 'second-prompt-id' },
+        );
+
+        await expect(first).resolves.toEqual({ stopReason: 'cancelled' });
+        await expect(second).resolves.toEqual({ stopReason: 'end_turn' });
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+          }),
+        );
+      });
+
+      it('records a cancelled turn when cancelled while waiting for the predecessor', async () => {
+        // The successor is admitted while the predecessor still streams,
+        // then cancelled during the predecessor wait; it must settle its
+        // own cancelled record without disturbing the predecessor's.
+        mockConfig.assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+        let releaseFirst!: () => void;
+        const firstBlocked = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        const firstStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [{ content: { parts: [] } }],
+            },
+          };
+          await firstBlocked;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(firstStream)
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const first = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first prompt' }],
+          },
+          trustedContext,
+        );
+        await vi.waitFor(() =>
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1),
+        );
+
+        const secondContext: core.InvocationContextV1 = {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'second-prompt-id',
+        };
+        const admissionCancellation = new AbortController();
+        const second = session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second prompt' }],
+          },
+          secondContext,
+          admissionCancellation.signal,
+        );
+        await vi.waitFor(() =>
+          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledTimes(3),
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+        admissionCancellation.abort();
+
+        releaseFirst();
+        await first;
+        await expect(second).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          2,
+        );
+        const [firstPayload, secondPayload] =
+          mockChatRecordingService.recordTurnResult.mock.calls.map(
+            (call) => call[0],
+          );
+        expect(firstPayload).toMatchObject({
+          promptId: 'daemon-prompt-id',
+          promptText: 'first prompt',
+        });
+        expect(secondPayload).toMatchObject({
+          promptId: 'second-prompt-id',
+          state: 'cancelled',
+          promptText: 'second prompt',
+        });
+      });
+    });
+
     it('rejects a trusted context for a different session', async () => {
       const trustedContext: core.InvocationContextV1 = {
         version: 1,
@@ -4134,6 +5638,7 @@ describe('Session', () => {
         'Invocation context session does not match the active session',
       );
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordTurnResult).not.toHaveBeenCalled();
     });
 
     it('does not create invocation context for standalone ACP prompts', async () => {
@@ -5618,6 +7123,7 @@ describe('Session', () => {
       const waitForPendingRewrites = vi.fn().mockResolvedValue(undefined);
       const interceptUpdate = vi.fn().mockResolvedValue(undefined);
       session.messageRewriter = {
+        discardTurn: vi.fn(),
         interceptUpdate,
         flushTurn,
         waitForPendingRewrites,
@@ -8818,10 +10324,17 @@ describe('Session', () => {
           queueMatchingFailureStreak();
 
           await expect(
-            session.prompt({
-              sessionId: 'test-session-id',
-              prompt: [{ type: 'text', text: 'run the failing tool' }],
-            }),
+            session.prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'run the failing tool' }],
+              },
+              {
+                version: 1,
+                sessionId: 'test-session-id',
+                promptId: 'guard-stop-prompt',
+              },
+            ),
           ).resolves.toEqual({ stopReason: 'end_turn' });
 
           expect(execute).toHaveBeenCalledTimes(9);
@@ -8866,6 +10379,12 @@ describe('Session', () => {
                 }),
               }),
             }),
+          );
+          const recorded =
+            mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+          expect(recorded.promptId).toBe('guard-stop-prompt');
+          expect(recorded.resultText ?? '').not.toContain(
+            'Automatic continuation stopped',
           );
         } finally {
           restoreGuardMode();
@@ -9294,6 +10813,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -9324,6 +10847,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -9433,6 +10960,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -9720,6 +11251,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -11220,6 +12755,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -11420,6 +12959,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -14197,6 +15740,10 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              source: 'diagnostic',
+              qwenDiscreteMessage: true,
+            },
             content: {
               type: 'text',
               text:
@@ -14213,6 +15760,10 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'diagnostic',
+                qwenDiscreteMessage: true,
+              },
               content: {
                 type: 'text',
                 text: 'Cron jobs and loop wakeups disabled for the rest of this session due to token limit. Restart the session to re-enable.',
@@ -19139,6 +20690,10 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'diagnostic',
+                qwenDiscreteMessage: true,
+              },
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
@@ -19187,6 +20742,10 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
+              _meta: {
+                source: 'diagnostic',
+                qwenDiscreteMessage: true,
+              },
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
@@ -20523,13 +22082,15 @@ describe('Session', () => {
       it('waits for pending rewrites before ending after cancelled ask_user_question', async () => {
         let releaseRewrite!: () => void;
         const flushTurn = vi.fn().mockResolvedValue(undefined);
-        const waitForPendingRewrites = vi.fn(
-          () =>
-            new Promise<void>((resolve) => {
-              releaseRewrite = resolve;
-            }),
-        );
+        const rewriteGate = new Promise<void>((resolve) => {
+          releaseRewrite = resolve;
+        });
+        const waitForPendingRewrites = vi
+          .fn()
+          .mockImplementationOnce(() => rewriteGate)
+          .mockResolvedValue(undefined);
         session.messageRewriter = {
+          discardTurn: vi.fn(),
           interceptUpdate: vi.fn().mockResolvedValue(undefined),
           flushTurn,
           waitForPendingRewrites,
@@ -20611,6 +22172,7 @@ describe('Session', () => {
         const waitForPendingRewrites = vi
           .fn()
           .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce(undefined)
           .mockImplementationOnce(
             () =>
               new Promise<void>((resolve) => {
@@ -20618,6 +22180,7 @@ describe('Session', () => {
               }),
           );
         session.messageRewriter = {
+          discardTurn: vi.fn(),
           interceptUpdate: vi.fn().mockResolvedValue(undefined),
           flushTurn: vi.fn().mockResolvedValue(undefined),
           waitForPendingRewrites,
@@ -20639,7 +22202,7 @@ describe('Session', () => {
         });
 
         await vi.waitFor(() => {
-          expect(waitForPendingRewrites).toHaveBeenCalledTimes(2);
+          expect(waitForPendingRewrites).toHaveBeenCalledTimes(3);
         });
 
         const internals = session as unknown as {
@@ -25902,6 +27465,7 @@ describe('Session', () => {
         releaseWait = resolve;
       });
       session.messageRewriter = {
+        discardTurn: vi.fn(),
         interceptUpdate: vi.fn().mockResolvedValue(undefined),
         waitForPendingRewrites: vi.fn(async () => {
           enterWait();
@@ -29275,6 +30839,7 @@ describe('Session', () => {
       });
       let waitCalls = 0;
       session.messageRewriter = {
+        discardTurn: vi.fn(),
         interceptUpdate: vi.fn().mockResolvedValue(undefined),
         waitForPendingRewrites: vi.fn(async () => {
           if (++waitCalls !== 1) return;

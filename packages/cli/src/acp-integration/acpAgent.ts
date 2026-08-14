@@ -88,6 +88,7 @@ import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   normalizeEventPayload,
   normalizeSnapshotPayload,
+  isTurnResultRecordPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
   applyReasoningEffort,
@@ -123,6 +124,7 @@ import {
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
   type ChatRecord,
+  type TurnResultRecordPayload,
   type ToolInvocationGuard,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -352,6 +354,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  type PromptCancelRequest,
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   isValidTrustedModelPrompt,
@@ -406,6 +409,58 @@ const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+// Turn-status transcript scan bounds: settled `turn_result` records are
+// appended at each turn's end, so a backward scan from the tail finds recent
+// turns quickly. The caps keep a pathological lookup (ancient promptId in a
+// huge transcript) from reading the whole file.
+const TURN_STATUS_SCAN_PAGE_LIMIT = 500;
+const TURN_STATUS_SCAN_MAX_PAGES = 10;
+
+/**
+ * Scan the session transcript backward from the tail for `turn_result`
+ * system records. With `promptId`, returns that exact turn's payload;
+ * without it, the most recent one. Resolves `undefined` when no match is
+ * found within the scan bounds.
+ */
+async function findSettledTurnResult(
+  reader: SessionTranscriptReader,
+  sessionId: string,
+  promptId: string | undefined,
+  workspaceCwd: string,
+): Promise<TurnResultRecordPayload | undefined> {
+  let cursor: string | undefined;
+  for (let page = 0; page < TURN_STATUS_SCAN_MAX_PAGES; page++) {
+    const result = await reader.readPage(sessionId, {
+      ...(cursor !== undefined
+        ? { cursor }
+        : { direction: 'backward' as const }),
+      limit: TURN_STATUS_SCAN_PAGE_LIMIT,
+      maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+    });
+    // Backward pages hold the newest slice; walk from the tail so the most
+    // recent settled turn wins.
+    for (let i = result.records.length - 1; i >= 0; i--) {
+      const record = result.records[i]!;
+      if (record.type !== 'system' || record.subtype !== 'turn_result') {
+        continue;
+      }
+      const payload = record.systemPayload;
+      if (!isTurnResultRecordPayload(payload)) continue;
+      if (promptId === undefined || payload.promptId === promptId) {
+        return payload;
+      }
+    }
+    if (!result.hasMore || result.nextCursorState === undefined) {
+      return undefined;
+    }
+    cursor = encodeSessionTranscriptCursor(
+      result.nextCursorState,
+      workspaceCwd,
+    );
+  }
+  return undefined;
+}
 
 type AcpSessionProfileStage =
   | 'settings_load'
@@ -8128,7 +8183,7 @@ class QwenAgent implements Agent {
 
     switch (method) {
       case PROMPT_CANCEL_METHOD: {
-        const sessionId = params['sessionId'];
+        const { sessionId, terminalError } = params as PromptCancelRequest;
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -8148,7 +8203,26 @@ class QwenAgent implements Agent {
         if (targetedCalls.size === 0) {
           return { cancelled: false };
         }
-        targetedCalls.forEach((call) => call.controller.abort());
+        let abortReason: Error | undefined;
+        if (terminalError !== undefined) {
+          if (
+            typeof terminalError !== 'object' ||
+            terminalError === null ||
+            typeof terminalError.message !== 'string' ||
+            terminalError.message.length === 0 ||
+            typeof terminalError.code !== 'string' ||
+            terminalError.code.length === 0
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Invalid prompt terminal error',
+            );
+          }
+          abortReason = Object.assign(new Error(terminalError.message), {
+            code: terminalError.code,
+          });
+        }
+        targetedCalls.forEach((call) => call.controller.abort(abortReason));
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
       }
@@ -10835,6 +10909,134 @@ class QwenAgent implements Agent {
             : null,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord: {
+        const sessionId = params['sessionId'];
+        const turnResult = params['turnResult'];
+        if (
+          typeof sessionId !== 'string' ||
+          !SESSION_ID_RE.test(sessionId) ||
+          !isTurnResultRecordPayload(turnResult)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid session turn result record',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const recorder = session.getConfig().getChatRecordingService();
+        if (!recorder) {
+          throw new RequestError(
+            -32021,
+            'Session transcript writer is unavailable',
+            { errorKind: 'session_writer_unavailable' },
+          );
+        }
+        await recorder.recordTurnResultStrict(turnResult);
+        return { v: 1, sessionId };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionTurnStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawPromptId = params['promptId'];
+        if (
+          rawPromptId !== undefined &&
+          (typeof rawPromptId !== 'string' || rawPromptId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing promptId',
+          );
+        }
+        // Throws when the session is not live in this child. Settled records
+        // only exist for sessions this child owns, so that is the honest
+        // scope — the bridge routes here only for the owning child.
+        const session = this.sessionOrThrow(sessionId);
+        const settings = loadSettingsCached(cwd);
+        return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          // Flush so a just-settled turn (append queued on the recording
+          // service's write tail) is visible to the read below.
+          // Best-effort: a recorder in a write-failure state (ENOSPC,
+          // lease loss) must not turn polling into a 500 — partial
+          // records already on disk remain scannable.
+          try {
+            await session.getConfig().getChatRecordingService()?.flush();
+          } catch {
+            // Fall through to the scan.
+          }
+          let reader: SessionTranscriptReader | undefined;
+          try {
+            reader = new SessionTranscriptReader(cwd);
+            const turnResult = await findSettledTurnResult(
+              reader,
+              sessionId,
+              typeof rawPromptId === 'string' ? rawPromptId : undefined,
+              cwd,
+            );
+            return {
+              v: 1,
+              sessionId,
+              turnResult: turnResult ?? null,
+            };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              // Transcript file not written yet (no settled turn
+              // persisted). Scoped to the read so an unrelated ENOENT
+              // (settings/runtime resolution) still surfaces.
+              return { v: 1, sessionId, turnResult: null };
+            }
+            if (
+              error instanceof SessionTranscriptSnapshotUnavailableError &&
+              reader
+            ) {
+              try {
+                const transcript = await fs.stat(
+                  reader.getSessionFilePath(sessionId),
+                );
+                if (transcript.size === 0) {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              } catch (statError) {
+                if ((statError as NodeJS.ErrnoException).code === 'ENOENT') {
+                  return { v: 1, sessionId, turnResult: null };
+                }
+              }
+            }
+            if (error instanceof InvalidSessionTranscriptCursorError) {
+              throw new RequestError(-32602, error.message, {
+                errorKind: 'invalid_transcript_cursor',
+              });
+            }
+            if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+              throw new RequestError(-32010, error.message, {
+                errorKind: 'transcript_snapshot_unavailable',
+                sessionId,
+              });
+            }
+            if (error instanceof SessionTranscriptTooLargeError) {
+              throw new RequestError(-32011, error.message, {
+                errorKind: 'transcript_too_large',
+                sessionId,
+                snapshotSize: error.snapshotSize,
+                maxBytes: error.maxBytes,
+              });
+            }
+            if (error instanceof SessionTranscriptPageTooLargeError) {
+              throw new RequestError(-32012, error.message, {
+                errorKind: 'transcript_page_too_large',
+                sessionId,
+                pageBytes: error.pageBytes,
+                maxBytes: error.maxBytes,
+              });
+            }
+            throw error;
+          }
+        });
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -12474,6 +12676,9 @@ class QwenAgent implements Agent {
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+        if (options.replayHistory === false) {
+          session.primeTurnFromHistory(sessionData.conversation.messages);
+        }
       }
 
       if (

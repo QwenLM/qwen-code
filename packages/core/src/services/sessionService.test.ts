@@ -3516,6 +3516,47 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('does not copy source turn_result identities into a fork', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313131';
+      const newId = '41414141-4141-4141-4141-414141414141';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'turn-result-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'turn_result',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd: lines[0]!['cwd'],
+            version: 'test',
+            systemPayload: {
+              promptId: 'source-prompt-id',
+              state: 'completed',
+              endedAt: 2000,
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written).toHaveLength(2);
+      expect(written.some((record) => record.subtype === 'turn_result')).toBe(
+        false,
+      );
+    });
+
     it('writes source metadata and drops the inherited title for sourced forks', async () => {
       const oldId = '10101010-1010-1010-1010-101010101010';
       const newId = '20202020-2020-2020-2020-202020202020';

@@ -202,6 +202,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
       .parseInvocationContext,
   ),
+  isTurnResultRecordPayload: vi.fn(
+    (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
+      .isTurnResultRecordPayload,
+  ),
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and
@@ -910,6 +914,7 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionTranscriptPageTooLargeError,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   encodeSessionTranscriptCursor,
   unregisterGoalHook,
   getActiveGoal,
@@ -4014,6 +4019,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(cancellationSettled).toBe(false);
     expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
 
+    finishPrompt?.({ stopReason: 'cancelled' });
+    await expect(cancellation).resolves.toEqual({ cancelled: true });
+    await prompt;
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('preserves a terminal error as the tracked prompt cancellation reason', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let finishPrompt: ((value: unknown) => void) | undefined;
+    lastSessionMock?.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    const prompt = agent.prompt({ sessionId, prompt: [] });
+
+    await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
+    const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
+      | AbortSignal
+      | undefined;
+    const cancellation = agent.extMethod(PROMPT_CANCEL_METHOD, {
+      sessionId,
+      terminalError: {
+        code: 'prompt_deadline_exceeded',
+        message: 'prompt exceeded the 50ms deadline',
+      },
+    });
+
+    await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
+    expect(cancellationSignal?.reason).toMatchObject({
+      code: 'prompt_deadline_exceeded',
+      message: 'prompt exceeded the 50ms deadline',
+    });
     finishPrompt?.({ stopReason: 'cancelled' });
     await expect(cancellation).resolves.toEqual({ cancelled: true });
     await prompt;
@@ -9425,6 +9469,679 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).rejects.toThrow();
     expect(getActiveGoal).not.toHaveBeenCalledWith('not-a-live-session');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('strictly records a bridge-owned pre-dispatch turn result', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const recordTurnResultStrict = vi.fn().mockResolvedValue(undefined);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordTurnResultStrict,
+    });
+    const turnResult = {
+      promptId: 'prompt-queued-cancelled',
+      state: 'cancelled' as const,
+      stopReason: 'cancelled',
+      endedAt: 2000,
+      promptText: 'queued prompt',
+    };
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnResultRecord, {
+        sessionId,
+        turnResult,
+      }),
+    ).resolves.toEqual({ v: 1, sessionId });
+    expect(recordTurnResultStrict).toHaveBeenCalledWith(turnResult);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reads a settled turn_result record by promptId', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const turnResult = {
+      promptId: 'prompt-1',
+      state: 'completed',
+      stopReason: 'end_turn',
+      startedAt: 1000,
+      endedAt: 2000,
+      promptText: 'hello',
+      resultText: 'world',
+    };
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [
+        { type: 'user', subtype: undefined, message: {} },
+        { type: 'system', subtype: 'turn_result', systemPayload: turnResult },
+      ],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: 'prompt-1',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult });
+    expect(readPage).toHaveBeenCalledWith(sessionId, {
+      direction: 'backward',
+      limit: 500,
+      maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('paginates bounded turn_result scans until the promptId matches', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const cursorState = {
+      v: 1 as const,
+      sessionId,
+      fileIdentity: { dev: 1, ino: 2 },
+      snapshotSize: 200,
+      position: 100,
+      leafUuid: 'leaf-1',
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    const requestedTurn = {
+      promptId: 'prompt-requested',
+      state: 'completed',
+      stopReason: 'end_turn',
+      startedAt: 3000,
+      endedAt: 4000,
+      resultText: 'requested answer',
+    };
+    const readPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessionId,
+        records: [
+          {
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'prompt-newer',
+              state: 'completed',
+              startedAt: 5000,
+              endedAt: 6000,
+            },
+          },
+        ],
+        hasMore: true,
+        nextCursorState: cursorState,
+        gaps: [],
+        startTime: 'start',
+        lastUpdated: 'end',
+      })
+      .mockResolvedValueOnce({
+        sessionId,
+        records: [
+          {
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: requestedTurn,
+          },
+        ],
+        hasMore: false,
+        gaps: [],
+        startTime: 'start',
+        lastUpdated: 'end',
+      });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: requestedTurn.promptId,
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult: requestedTurn });
+    const encodedCursor = Buffer.from(
+      JSON.stringify(cursorState),
+      'utf8',
+    ).toString('base64url');
+    expect(readPage).toHaveBeenNthCalledWith(2, sessionId, {
+      cursor: encodedCursor,
+      limit: 500,
+      maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('stops an exact turn_result lookup after ten transcript pages', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const cursorState = {
+      v: 1 as const,
+      sessionId,
+      fileIdentity: { dev: 1, ino: 2 },
+      snapshotSize: 200,
+      position: 100,
+      leafUuid: 'leaf-1',
+      startTime: 'start',
+      lastUpdated: 'end',
+    };
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [],
+      hasMore: true,
+      nextCursorState: cursorState,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: 'outside-bounded-window',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult: null });
+    expect(readPage).toHaveBeenCalledTimes(10);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('skips malformed turn_result payloads while finding an exact match', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const valid = {
+      promptId: 'prompt-valid',
+      state: 'completed',
+      endedAt: 2000,
+      resultText: 'valid answer',
+    };
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [
+        { type: 'system', subtype: 'turn_result', systemPayload: valid },
+        {
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: { promptId: 'prompt-valid' },
+        },
+      ],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: valid.promptId,
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult: valid });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('maps oversized pages from bounded turn_result scans to structured errors', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const pageError = new SessionTranscriptPageTooLargeError(
+      sessionId,
+      SESSION_TRANSCRIPT_MAX_PAGE_BYTES + 1,
+      SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+    );
+    const readPage = vi.fn().mockRejectedValue(pageError);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: 'prompt-1',
+      }),
+    ).rejects.toMatchObject({
+      code: -32012,
+      data: {
+        errorKind: 'transcript_page_too_large',
+        sessionId,
+        pageBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES + 1,
+        maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    {
+      name: 'oversized snapshots',
+      error: new SessionTranscriptTooLargeError(
+        '11111111-1111-1111-1111-111111111111',
+        300,
+        200,
+      ),
+      expected: {
+        code: -32011,
+        data: {
+          errorKind: 'transcript_too_large',
+          sessionId: '11111111-1111-1111-1111-111111111111',
+          snapshotSize: 300,
+          maxBytes: 200,
+        },
+      },
+    },
+    {
+      name: 'invalid internal cursors',
+      error: new InvalidSessionTranscriptCursorError(),
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+  ])(
+    'maps $name from bounded turn_result scans',
+    async ({ error, expected }) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      await setupSessionMocks(sessionId);
+      vi.mocked(SessionTranscriptReader).mockImplementation(
+        () =>
+          ({
+            readPage: vi.fn().mockRejectedValue(error),
+          }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+      );
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+          sessionId,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toMatchObject(expected);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('still scans the transcript when the pre-read flush fails', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const flushSpy = vi
+      .fn()
+      .mockRejectedValue(new Error('ENOSPC: no space left on device'));
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      flush: flushSpy,
+    });
+    const turnResult = {
+      promptId: 'prompt-1',
+      state: 'completed',
+      stopReason: 'end_turn',
+      startedAt: 1000,
+      endedAt: 2000,
+      promptText: 'hello',
+      resultText: 'world',
+    };
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [
+        { type: 'system', subtype: 'turn_result', systemPayload: turnResult },
+      ],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: 'prompt-1',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult });
+    expect(flushSpy).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns the most recent turn_result when no promptId is given', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const older = {
+      promptId: 'prompt-old',
+      state: 'completed',
+      startedAt: 1000,
+      endedAt: 2000,
+    };
+    const newer = {
+      promptId: 'prompt-new',
+      state: 'cancelled',
+      startedAt: 3000,
+      endedAt: 3500,
+    };
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [
+        { type: 'system', subtype: 'turn_result', systemPayload: older },
+        { type: 'assistant', subtype: undefined, message: {} },
+        { type: 'system', subtype: 'turn_result', systemPayload: newer },
+      ],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult: newer });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('returns turnResult null when no settled turn matches', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [{ type: 'user', subtype: undefined, message: {} }],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId,
+        promptId: 'missing',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult: null });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('treats only an empty unavailable transcript as having no turn result', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-empty-turn-status-'),
+    );
+    const transcriptPath = path.join(tempDir, `${sessionId}.jsonl`);
+    await fs.writeFile(transcriptPath, '');
+    const snapshotError = new SessionTranscriptSnapshotUnavailableError(
+      sessionId,
+    );
+    const readPage = vi.fn().mockRejectedValue(snapshotError);
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+          getSessionFilePath: () => transcriptPath,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+          sessionId,
+          promptId: 'prompt-1',
+        }),
+      ).resolves.toEqual({ v: 1, sessionId, turnResult: null });
+
+      await fs.writeFile(transcriptPath, '{partial');
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+          sessionId,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toMatchObject({
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId,
+        },
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects turn status reads with invalid params or non-live sessions', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    for (const params of [
+      {},
+      { sessionId: '' },
+      { sessionId, promptId: '' },
+      { sessionId, promptId: 42 },
+    ]) {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, params),
+      ).rejects.toThrow();
+    }
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        sessionId: '22222222-2222-2222-2222-222222222222',
+      }),
+    ).rejects.toThrow();
 
     mockConnectionState.resolve();
     await agentPromise;

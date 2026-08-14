@@ -357,6 +357,54 @@ describe('SessionTranscriptReader', () => {
     expect(second.nextCursorState).toBeUndefined();
   });
 
+  it('keeps turn results on the active rewind branch and hides abandoned ones', async () => {
+    const turnResult = (
+      uuid: string,
+      parentUuid: string | null,
+      promptId: string,
+    ): ChatRecord => ({
+      ...record(uuid, parentUuid, ''),
+      type: 'system',
+      subtype: 'turn_result',
+      message: undefined,
+      systemPayload: {
+        promptId,
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: RECORD_BASE_MS,
+      },
+    });
+    const rewind = {
+      ...record('rewind', 'early-result', ''),
+      type: 'system' as const,
+      subtype: 'rewind' as const,
+      message: undefined,
+      systemPayload: { targetTurnIndex: 1, truncatedCount: 2 },
+    };
+    await writeRecords([
+      turnResult('pre-first-result', null, 'pre-first'),
+      record('u1', 'pre-first-result', 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      turnResult('early-result', 'a1', 'early-pre-dispatch'),
+      record('u2', 'early-result', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+      turnResult('later-result', 'a2', 'later-abandoned'),
+      rewind,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+    const promptIds = page.records.flatMap((item) =>
+      item.subtype === 'turn_result'
+        ? [(item.systemPayload as { promptId: string }).promptId]
+        : [],
+    );
+
+    expect(promptIds).toEqual(['pre-first', 'early-pre-dispatch']);
+  });
+
   it('pages backward before an exclusive active record boundary', async () => {
     await writeRecords([
       record('u1', null, 'first prompt'),

@@ -8,6 +8,8 @@ import type {
   ApprovalMode,
   GoalSnapshotV2,
   SessionGroupPresetColor,
+  TurnResultCode,
+  TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
@@ -811,6 +813,10 @@ export interface TodoStopGuardQueueReleasedRequest {
 /** Parent-to-agent request that acknowledges prompt cancellation handling. */
 export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
 
+export type PromptCancelRequest = CancelNotification & {
+  terminalError?: TurnResultErrorPayload;
+};
+
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
  * stamps this boolean on a client-hosted (extension) MCP server's
@@ -866,6 +872,8 @@ export interface BridgeMidTurnMessagesSnapshot {
 export interface PendingPromptEntry {
   promptId: string;
   queuedAt: number;
+  /** Wallclock ms the entry was dispatched on the FIFO (running start). */
+  startedAt?: number;
   originatorClientId?: string;
   promotedMidTurn?: true;
   text: string;
@@ -877,6 +885,8 @@ export interface PendingPromptEntry {
    * later publish attempts for the same prompt are suppressed.
    */
   terminalPublished?: boolean;
+  /** Durable write for a terminal published before child prompt dispatch. */
+  terminalPersistence?: Promise<void>;
   /** Cancellation handshake; duplicate callers await rather than resend it. */
   cancelForwardInitial?: Promise<void>;
   /** Full cancellation handshake, used to fence the next FIFO dispatch. */
@@ -904,6 +914,30 @@ export interface PendingPromptSummary {
   text: string;
   queuedAt: number;
   state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+/**
+ * Pollable snapshot of one admitted prompt's turn, returned by
+ * `getSessionTurnStatus`. `queued` / `running` mirror the live
+ * `pendingPromptList`; settled states come from the bridge's bounded formal
+ * terminal overlay and are enriched or restored from persisted `turn_result`
+ * records.
+ */
+export interface BridgeTurnStatus {
+  sessionId: string;
+  state: 'idle' | 'queued' | 'running' | 'completed' | 'cancelled' | 'error';
+  promptId?: string;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  queuedAt?: number;
+  startedAt?: number;
+  endedAt?: number;
+  stopReason?: string;
+  error?: TurnResultErrorPayload;
+  resultText?: string;
+  resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
   originatorClientId?: string;
 }
 
@@ -1199,6 +1233,22 @@ export interface AcpSessionBridge {
   ): readonly PendingPromptSummary[];
 
   /**
+   * Return the pollable status of a turn. With `promptId`, resolves that
+   * exact prompt: live `pendingPromptList` first (queued / running), then
+   * the bridge's recent formal terminal overlay and the agent's persisted
+   * `turn_result` records (completed / cancelled / error); resolves
+   * `undefined` when none knows it. Without `promptId`, returns the current
+   * turn: the running prompt, the queued FIFO head, the most recent terminal
+   * or persisted outcome, or `state: 'idle'`.
+   * Throws `SessionNotFoundError` for unknown ids.
+   */
+  getSessionTurnStatus(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    promptId?: string,
+  ): Promise<BridgeTurnStatus | undefined>;
+
+  /**
    * Remove a specific prompt from the pending queue. For `queued` prompts,
    * aborts them so the FIFO skips dispatch. For `running` prompts, aborts
    * the in-flight turn (equivalent to cancel). Returns `{ removed: false }`
@@ -1209,7 +1259,7 @@ export interface AcpSessionBridge {
     sessionId: string,
     promptId: string,
     context?: BridgeClientRequestContext,
-  ): { removed: boolean };
+  ): Promise<{ removed: boolean }>;
 
   /**
    * Cancel the in-flight prompt on the session. Throws
@@ -1707,7 +1757,7 @@ export interface AcpSessionBridge {
     sessionId: string,
     messageId: string,
     context?: BridgeClientRequestContext,
-  ): { removed: boolean };
+  ): Promise<{ removed: boolean }>;
 
   /**
    * Queue a daemon-owned worker completion in its live parent session. The

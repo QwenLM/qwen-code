@@ -134,6 +134,8 @@ export class LlmRewriter {
         ],
       });
 
+      if (signal?.aborted) return null;
+
       const rewritten = result.text;
 
       // If LLM returns empty or very short, skip
@@ -147,26 +149,23 @@ export class LlmRewriter {
           `--- OUTPUT ---\n${rewritten}\n---`,
       );
 
-      // Update context for next turn. Only the last `contextTurns` outputs are
-      // ever read (see the context slice above), so keep at most that many to
-      // avoid unbounded growth over a long session. Infinity ('all') keeps
-      // everything; 0 means the history is never read, so store nothing.
-      if (this.contextTurns > 0) {
-        this.outputHistory.push(rewritten);
-        if (
-          Number.isFinite(this.contextTurns) &&
-          this.outputHistory.length > this.contextTurns
-        ) {
-          this.outputHistory = this.outputHistory.slice(-this.contextTurns);
-        }
-      }
-
       return rewritten;
     } catch (error) {
       debugLogger.warn(
         `LLM rewrite failed, skipping: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
+    }
+  }
+
+  commitOutput(rewritten: string): void {
+    if (this.contextTurns <= 0) return;
+    this.outputHistory.push(rewritten);
+    if (
+      Number.isFinite(this.contextTurns) &&
+      this.outputHistory.length > this.contextTurns
+    ) {
+      this.outputHistory = this.outputHistory.slice(-this.contextTurns);
     }
   }
 }

@@ -299,6 +299,7 @@ export interface ChatRecord {
     | 'user_text_elements'
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
+    | 'turn_result'
     | 'goal_state'
     | 'goal_runtime'
     | 'realtime_message';
@@ -360,6 +361,7 @@ export interface ChatRecord {
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
+    | TurnResultRecordPayload
     | GoalStateRecordPayloadV2;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -570,6 +572,175 @@ export interface FileHistorySnapshotRecordPayload {
 export interface UserTextElementsRecordPayload {
   content: string;
   textElements: unknown[];
+}
+
+/**
+ * Cap (in UTF-16 code units) on the prompt / result text stored in a
+ * `turn_result` record. Writers truncate and set the paired flag.
+ */
+export const TURN_RESULT_TEXT_MAX_CHARS = 32_768;
+export const TURN_RESULT_ERROR_MESSAGE_MAX_CHARS = 4_096;
+export const TURN_RESULT_ERROR_CODE_MAX_CHARS = 256;
+
+export interface TurnResultErrorPayload {
+  message: string;
+  code?: string;
+  messageTruncated?: boolean;
+  codeTruncated?: boolean;
+}
+
+function readErrorField(error: unknown, field: 'message' | 'code'): unknown {
+  if (
+    (typeof error !== 'object' || error === null) &&
+    typeof error !== 'function'
+  ) {
+    return undefined;
+  }
+  try {
+    return Reflect.get(error, field);
+  } catch {
+    return undefined;
+  }
+}
+
+function truncateTurnResultErrorField(
+  value: string,
+  maxChars: number,
+): { value: string; truncated: boolean } {
+  return value.length > maxChars
+    ? { value: value.slice(0, maxChars), truncated: true }
+    : { value, truncated: false };
+}
+
+export function normalizeTurnResultError(
+  error: unknown,
+): TurnResultErrorPayload {
+  const rawMessage = readErrorField(error, 'message');
+  let message =
+    typeof rawMessage === 'string' && rawMessage.length > 0
+      ? rawMessage
+      : undefined;
+  if (message === undefined) {
+    try {
+      const converted = String(error);
+      if (converted.length > 0) message = converted;
+    } catch {
+      // Fall through to the stable generic value.
+    }
+  }
+  const boundedMessage = truncateTurnResultErrorField(
+    message ?? 'Unknown error',
+    TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
+  );
+
+  const rawCode = readErrorField(error, 'code');
+  let code: string | undefined;
+  if (typeof rawCode === 'string' && rawCode.length > 0) {
+    code = rawCode;
+  } else if (typeof rawCode === 'number') {
+    code = String(rawCode);
+  }
+  const boundedCode =
+    code === undefined
+      ? undefined
+      : truncateTurnResultErrorField(code, TURN_RESULT_ERROR_CODE_MAX_CHARS);
+
+  return {
+    message: boundedMessage.value,
+    ...(boundedMessage.truncated ? { messageTruncated: true } : {}),
+    ...(boundedCode !== undefined ? { code: boundedCode.value } : {}),
+    ...(boundedCode?.truncated ? { codeTruncated: true } : {}),
+  };
+}
+
+/**
+ * Settled outcome of one admitted prompt, appended at turn settle so
+ * pollable turn-status queries survive daemon restarts. `state`
+ * distinguishes normal completion (`completed`, with `stopReason`),
+ * user/abort cancellation (`cancelled`), and failure (`error`).
+ */
+export interface TurnResultRecordPayload {
+  promptId: string;
+  state: 'completed' | 'cancelled' | 'error';
+  stopReason?: string;
+  error?: TurnResultErrorPayload;
+  /** Epoch ms the turn started executing (agent clock). */
+  startedAt?: number;
+  /** Epoch ms the turn settled (agent clock). */
+  endedAt: number;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  resultText?: string;
+  resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
+  originatorClientId?: string;
+}
+
+export const TURN_RESULT_CODE_TEXT_TRUNCATED = 'RESULT_TEXT_TRUNCATED' as const;
+export type TurnResultCode = typeof TURN_RESULT_CODE_TEXT_TRUNCATED;
+
+export function isTurnResultRecordPayload(
+  value: unknown,
+): value is TurnResultRecordPayload {
+  if (typeof value !== 'object' || value === null) return false;
+  const payload = value as Record<string, unknown>;
+  if (
+    typeof payload['promptId'] !== 'string' ||
+    payload['promptId'].length === 0 ||
+    !['completed', 'cancelled', 'error'].includes(payload['state'] as string) ||
+    typeof payload['endedAt'] !== 'number' ||
+    !Number.isFinite(payload['endedAt'])
+  ) {
+    return false;
+  }
+  const optionalStringWithin = (field: string, maxChars?: number) => {
+    const fieldValue = payload[field];
+    return (
+      fieldValue === undefined ||
+      (typeof fieldValue === 'string' &&
+        (maxChars === undefined || fieldValue.length <= maxChars))
+    );
+  };
+  const optionalBoolean = (field: string) =>
+    payload[field] === undefined || typeof payload[field] === 'boolean';
+  const optionalTimestamp = (field: string) =>
+    payload[field] === undefined ||
+    (typeof payload[field] === 'number' && Number.isFinite(payload[field]));
+  if (
+    !optionalStringWithin('stopReason') ||
+    !optionalTimestamp('startedAt') ||
+    !optionalStringWithin('promptText', TURN_RESULT_TEXT_MAX_CHARS) ||
+    !optionalBoolean('promptTextTruncated') ||
+    !optionalStringWithin('resultText', TURN_RESULT_TEXT_MAX_CHARS) ||
+    !optionalBoolean('resultTruncated') ||
+    (payload['resultCode'] !== undefined &&
+      (payload['resultCode'] !== TURN_RESULT_CODE_TEXT_TRUNCATED ||
+        payload['resultTruncated'] !== true)) ||
+    !optionalStringWithin('originatorClientId')
+  ) {
+    return false;
+  }
+  const error = payload['error'];
+  if (error === undefined) return payload['state'] !== 'error';
+  if (
+    payload['state'] !== 'error' ||
+    typeof error !== 'object' ||
+    error === null
+  ) {
+    return false;
+  }
+  const fields = error as Record<string, unknown>;
+  return (
+    typeof fields['message'] === 'string' &&
+    fields['message'].length <= TURN_RESULT_ERROR_MESSAGE_MAX_CHARS &&
+    (fields['code'] === undefined ||
+      (typeof fields['code'] === 'string' &&
+        fields['code'].length <= TURN_RESULT_ERROR_CODE_MAX_CHARS)) &&
+    (fields['messageTruncated'] === undefined ||
+      typeof fields['messageTruncated'] === 'boolean') &&
+    (fields['codeTruncated'] === undefined ||
+      typeof fields['codeTruncated'] === 'boolean')
+  );
 }
 
 export interface ChatRecordingFailureEvent {
@@ -2204,6 +2375,37 @@ export class ChatRecordingService {
       ...this.createBaseRecord('system'),
       type: 'system',
       subtype: 'user_text_elements',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record);
+  }
+
+  /**
+   * Append the settled outcome of a turn. Best-effort by design: a
+   * recording failure must never break turn settlement, so this uses the
+   * non-strict append path (inactive/failed writers skip silently).
+   */
+  recordTurnResult(payload: TurnResultRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'turn_result',
+        systemPayload: payload,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error recording turn result:', error);
+    }
+  }
+
+  async recordTurnResultStrict(
+    payload: TurnResultRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'turn_result',
       systemPayload: payload,
     };
     await this.appendRecordStrict(record);

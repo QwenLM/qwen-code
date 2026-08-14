@@ -12,8 +12,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   ChatRecordingService,
+  isTurnResultRecordPayload,
+  normalizeTurnResultError,
+  TURN_RESULT_ERROR_CODE_MAX_CHARS,
+  TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
   type ChatRecord,
   type AtCommandRecordPayload,
+  type TurnResultRecordPayload,
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -862,6 +867,128 @@ describe('ChatRecordingService', () => {
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('user_text_elements');
       expect(record.systemPayload).toEqual(payload);
+    });
+  });
+
+  describe('recordTurnResult', () => {
+    it('records a settled turn outcome as a system payload', async () => {
+      const payload: TurnResultRecordPayload = {
+        promptId: 'prompt-1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'hello',
+        resultText: 'world',
+        originatorClientId: 'client-1',
+      };
+
+      chatRecordingService.recordTurnResult(payload);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('turn_result');
+      expect(record.systemPayload).toEqual(payload);
+    });
+
+    it('is best-effort when recording is inactive', () => {
+      const inactive = new ChatRecordingService(mockConfig);
+      expect(() =>
+        inactive.recordTurnResult({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1000,
+          endedAt: 1500,
+        }),
+      ).not.toThrow();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('fails a strict turn-result write when recording is inactive', async () => {
+      const inactive = new ChatRecordingService(mockConfig);
+      await expect(
+        inactive.recordTurnResultStrict({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          endedAt: 1500,
+        }),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    });
+  });
+
+  describe('isTurnResultRecordPayload', () => {
+    it('accepts only the stable result truncation code', () => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2000,
+          resultTruncated: true,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        }),
+      ).toBe(true);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2000,
+          resultTruncated: true,
+          resultCode: 'UNKNOWN_RESULT_CODE',
+        }),
+      ).toBe(false);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2000,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        }),
+      ).toBe(false);
+    });
+  });
+
+  describe('normalizeTurnResultError', () => {
+    it('falls back safely when getters and string conversion throw', () => {
+      const unsafe = Object.defineProperties(
+        {},
+        {
+          message: {
+            get: () => {
+              throw new Error('message getter failed');
+            },
+          },
+          code: {
+            get: () => {
+              throw new Error('code getter failed');
+            },
+          },
+          toString: {
+            value: () => {
+              throw new Error('string conversion failed');
+            },
+          },
+        },
+      );
+
+      expect(normalizeTurnResultError(unsafe)).toEqual({
+        message: 'Unknown error',
+      });
+    });
+
+    it('bounds message and code with explicit truncation flags', () => {
+      const normalized = normalizeTurnResultError({
+        message: 'm'.repeat(TURN_RESULT_ERROR_MESSAGE_MAX_CHARS + 1),
+        code: 'c'.repeat(TURN_RESULT_ERROR_CODE_MAX_CHARS + 1),
+      });
+
+      expect(normalized.message).toHaveLength(
+        TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
+      );
+      expect(normalized.code).toHaveLength(TURN_RESULT_ERROR_CODE_MAX_CHARS);
+      expect(normalized.messageTruncated).toBe(true);
+      expect(normalized.codeTruncated).toBe(true);
     });
   });
 

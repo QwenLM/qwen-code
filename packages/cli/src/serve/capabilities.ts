@@ -112,6 +112,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
+  // Poll one prompt's live or persisted turn outcome through
+  // `GET /session/:id/turns/current` or
+  // `GET /session/:id/turns/:promptId`.
+  session_turn_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },

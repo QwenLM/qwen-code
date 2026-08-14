@@ -659,7 +659,7 @@ function makeBridge(
         promotedMessageIds: [],
       };
     },
-    removeMidTurnMessage(
+    async removeMidTurnMessage(
       sessionId: string,
       messageId: string,
       context?: BridgeClientRequestContext,

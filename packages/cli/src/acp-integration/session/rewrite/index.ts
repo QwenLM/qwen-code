@@ -5,5 +5,6 @@
  */
 
 export { MessageRewriteMiddleware } from './MessageRewriteMiddleware.js';
+export type { MessageRewriteEmissionContext } from './MessageRewriteMiddleware.js';
 export { loadRewriteConfig } from './config.js';
 export type { MessageRewriteConfig, TurnContent } from './types.js';

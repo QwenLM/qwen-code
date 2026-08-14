@@ -22,6 +22,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 vi.mock('./LlmRewriter.js', () => ({
   LlmRewriter: vi.fn().mockImplementation(() => ({
     rewrite: vi.fn().mockResolvedValue('rewritten text'),
+    commitOutput: vi.fn(),
   })),
 }));
 
@@ -33,12 +34,14 @@ const { MessageRewriteMiddleware } = await import(
 function createMiddleware(
   target: 'message' | 'thought' | 'all' = 'all',
   sendUpdate?: ReturnType<typeof vi.fn>,
+  getOwnerPromptId?: () => string | undefined,
 ) {
   const mockSendUpdate = sendUpdate ?? vi.fn().mockResolvedValue(undefined);
   const middleware = new MessageRewriteMiddleware(
     {} as Config,
     { enabled: true, target, prompt: 'test prompt' },
     mockSendUpdate,
+    getOwnerPromptId ?? (() => undefined),
   );
   return { middleware, mockSendUpdate };
 }
@@ -68,7 +71,11 @@ describe('MessageRewriteMiddleware', () => {
       } as unknown as SessionUpdate;
 
       await middleware.interceptUpdate(msgUpdate);
-      expect(mockSendUpdate).toHaveBeenCalledWith(msgUpdate);
+      expect(mockSendUpdate).toHaveBeenCalledWith(msgUpdate, {
+        turnIndex: 1,
+        rewritten: false,
+        replacesMessageText: true,
+      });
     });
   });
 
@@ -91,11 +98,15 @@ describe('MessageRewriteMiddleware', () => {
         await middleware.flushTurn();
         await middleware.waitForPendingRewrites();
 
-        expect(mockSendUpdate).toHaveBeenNthCalledWith(3, {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'rewritten text' },
-          _meta: { rewritten: true, turnIndex: 1 },
-        });
+        expect(mockSendUpdate).toHaveBeenNthCalledWith(
+          3,
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'rewritten text' },
+            _meta: { rewritten: true, turnIndex: 1 },
+          },
+          { turnIndex: 1, rewritten: true, replacesMessageText: true },
+        );
 
         const { LlmRewriter } = await import('./LlmRewriter.js');
         const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
@@ -170,7 +181,188 @@ describe('MessageRewriteMiddleware', () => {
     });
   });
 
+  describe('discardTurn', () => {
+    it('drops buffered automatic-turn content before the next prompt', async () => {
+      const { middleware } = createMiddleware('message');
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'aborted background residue' },
+      } as unknown as SessionUpdate);
+      middleware.discardTurn();
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'new prompt answer' },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      expect(rewriter.rewrite).toHaveBeenCalledWith(
+        {
+          thoughts: [],
+          messages: ['new prompt answer'],
+          hasToolCalls: false,
+        },
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('drops an in-flight automatic-turn rewrite before the next prompt', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      let resolveRewrite!: (value: string) => void;
+      rewriter.rewrite.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveRewrite = resolve;
+          }),
+      );
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'automatic turn answer' },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      const rewriteSignal = rewriter.rewrite.mock.calls[0][1] as AbortSignal;
+      middleware.discardTurn();
+      expect(rewriteSignal.aborted).toBe(true);
+      resolveRewrite('late automatic rewrite');
+      await middleware.waitForPendingRewrites();
+
+      expect(mockSendUpdate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('discards only the current buffer without aborting prior rewrites', async () => {
+    const { middleware } = createMiddleware('message');
+    const { LlmRewriter } = await import('./LlmRewriter.js');
+    const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+      rewrite: ReturnType<typeof vi.fn>;
+    };
+    let resolvePriorRewrite!: (value: string) => void;
+    rewriter.rewrite.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolvePriorRewrite = resolve;
+        }),
+    );
+
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'prior tool block' },
+    } as unknown as SessionUpdate);
+    await middleware.flushTurn();
+    const priorRewriteSignal = rewriter.rewrite.mock.calls[0][1] as AbortSignal;
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'failed retry attempt' },
+    } as unknown as SessionUpdate);
+
+    middleware.discardBufferedTurn();
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'final answer' },
+    } as unknown as SessionUpdate);
+    await middleware.flushTurn();
+    resolvePriorRewrite('prior rewritten block');
+    await middleware.waitForPendingRewrites();
+
+    expect(priorRewriteSignal.aborted).toBe(false);
+    expect(rewriter.rewrite).toHaveBeenNthCalledWith(
+      2,
+      {
+        thoughts: [],
+        messages: ['final answer'],
+        hasToolCalls: false,
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('does not deliver or commit a rewrite after its turn signal aborts', async () => {
+    const { middleware, mockSendUpdate } = createMiddleware('message');
+    const { LlmRewriter } = await import('./LlmRewriter.js');
+    const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+      rewrite: ReturnType<typeof vi.fn>;
+      commitOutput: ReturnType<typeof vi.fn>;
+    };
+    let resolveRewrite!: (value: string) => void;
+    rewriter.rewrite.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRewrite = resolve;
+        }),
+    );
+    const turnAbort = new AbortController();
+
+    await middleware.interceptUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'raw answer' },
+    } as unknown as SessionUpdate);
+    await middleware.flushTurn(turnAbort.signal);
+    turnAbort.abort();
+    resolveRewrite('late rewrite');
+    await middleware.waitForPendingRewrites();
+
+    expect(mockSendUpdate).toHaveBeenCalledTimes(1);
+    expect(rewriter.commitOutput).not.toHaveBeenCalled();
+  });
+
   describe('flushTurn — tool_call boundary', () => {
+    it('commits rewrite context only after successful delivery', async () => {
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const sendUpdate = vi.fn().mockImplementation(async (update) => {
+        if (update._meta?.rewritten === true) {
+          const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+            commitOutput: ReturnType<typeof vi.fn>;
+          };
+          expect(rewriter.commitOutput).not.toHaveBeenCalled();
+        }
+      });
+      const { middleware } = createMiddleware('message', sendUpdate);
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        commitOutput: ReturnType<typeof vi.fn>;
+      };
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'main answer' },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      expect(rewriter.commitOutput).toHaveBeenCalledWith('rewritten text');
+    });
+
+    it('does not commit rewrite context when delivery fails', async () => {
+      const sendUpdate = vi.fn().mockImplementation(async (update) => {
+        if (update._meta?.rewritten === true) {
+          throw new Error('delivery failed');
+        }
+      });
+      const { middleware } = createMiddleware('message', sendUpdate);
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        commitOutput: ReturnType<typeof vi.fn>;
+      };
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'main answer' },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      expect(rewriter.commitOutput).not.toHaveBeenCalled();
+    });
+
     it('should flush before passing through tool_call', async () => {
       const { middleware, mockSendUpdate } = createMiddleware();
 
@@ -219,6 +411,47 @@ describe('MessageRewriteMiddleware', () => {
   });
 
   describe('rewrite metadata', () => {
+    it('keeps prompt ownership in callback context instead of wire metadata', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware(
+        'message',
+        undefined,
+        () => 'prompt-a',
+      );
+      const original = {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'raw answer' },
+      } as unknown as SessionUpdate;
+
+      await middleware.interceptUpdate(original);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      expect(mockSendUpdate.mock.calls).toEqual([
+        [
+          original,
+          {
+            ownerPromptId: 'prompt-a',
+            turnIndex: 1,
+            rewritten: false,
+            replacesMessageText: true,
+          },
+        ],
+        [
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'rewritten text' },
+            _meta: { rewritten: true, turnIndex: 1 },
+          },
+          {
+            ownerPromptId: 'prompt-a',
+            turnIndex: 1,
+            rewritten: true,
+            replacesMessageText: true,
+          },
+        ],
+      ]);
+    });
+
     it('should emit rewritten message with _meta.rewritten=true', async () => {
       const { middleware, mockSendUpdate } = createMiddleware();
 
@@ -286,6 +519,69 @@ describe('MessageRewriteMiddleware', () => {
         rewritten: true,
         turnIndex: 1,
       });
+    });
+
+    it('isolates a discrete diagnostic from buffered model output', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      rewriter.rewrite
+        .mockResolvedValueOnce('rewritten answer')
+        .mockResolvedValueOnce('rewritten diagnostic');
+
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'genuine model answer' },
+      } as unknown as SessionUpdate);
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'diagnostic notice' },
+        _meta: { source: 'diagnostic', qwenDiscreteMessage: true },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      expect(rewriter.rewrite).toHaveBeenNthCalledWith(
+        1,
+        {
+          thoughts: [],
+          messages: ['genuine model answer'],
+          hasToolCalls: false,
+        },
+        expect.any(AbortSignal),
+      );
+      expect(rewriter.rewrite).toHaveBeenNthCalledWith(
+        2,
+        {
+          thoughts: [],
+          messages: ['diagnostic notice'],
+          hasToolCalls: false,
+        },
+        expect.any(AbortSignal),
+      );
+      const rewrittenUpdates = mockSendUpdate.mock.calls
+        .map(([update]) => update as Record<string, unknown>)
+        .filter(
+          (update) =>
+            (update['_meta'] as Record<string, unknown> | undefined)?.[
+              'rewritten'
+            ] === true,
+        );
+      expect(rewrittenUpdates).toEqual([
+        expect.objectContaining({
+          _meta: { rewritten: true, turnIndex: 1 },
+        }),
+        expect.objectContaining({
+          _meta: {
+            source: 'diagnostic',
+            qwenDiscreteMessage: true,
+            rewritten: true,
+            turnIndex: 2,
+          },
+        }),
+      ]);
     });
   });
 

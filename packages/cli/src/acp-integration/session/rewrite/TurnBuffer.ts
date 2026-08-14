@@ -36,7 +36,7 @@ export class TurnBuffer {
     const messageText = this.messages.join('');
 
     if (!thoughtText.trim() && !messageText.trim()) {
-      this.reset();
+      this.discard();
       return null;
     }
 
@@ -46,11 +46,11 @@ export class TurnBuffer {
       hasToolCalls: this._hasToolCalls,
     };
 
-    this.reset();
+    this.discard();
     return content;
   }
 
-  private reset(): void {
+  discard(): void {
     this.thoughts = [];
     this.messages = [];
     this._hasToolCalls = false;
