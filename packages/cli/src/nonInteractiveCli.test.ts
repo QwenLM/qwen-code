@@ -695,6 +695,13 @@ describe('runNonInteractive', () => {
     const [parts, , , options] =
       mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain(
+      JSON.stringify({
+        goalId: options.goalPermit.goalId,
+        revision: options.goalPermit.revision,
+        objective: 'existing goal',
+      }),
+    );
     expect(options).toMatchObject({
       type: SendMessageType.Goal,
       goalOrigin: 'runtime',

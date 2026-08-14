@@ -49,6 +49,7 @@ import {
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
+import { renderGoalContinuationPrompt } from '../../utils/goal-continuation-prompt.js';
 
 // --- MOCKS ---
 const mockSendMessageStream = vi
@@ -495,15 +496,11 @@ describe('useGeminiStream', () => {
     });
 
     expect(streamMock).toHaveBeenCalledWith(
-      [
-        'Continue working on the active Goal.',
-        'Use get_goal for the authoritative objective and evidence state.',
-        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-        'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
-        'A phrase mentioned in the objective or this prompt is not evidence that the user supplied it.',
-        `Verifier feedback: ${goal.verifierFeedback}`,
-      ].join('\n'),
+      renderGoalContinuationPrompt({
+        permit,
+        objective: goal.continuationContext,
+        verifierFeedback: goal.verifierFeedback,
+      }),
       expect.any(AbortSignal),
       'prompt-id-goal',
       expect.objectContaining({
@@ -531,7 +528,7 @@ describe('useGeminiStream', () => {
     expect(MockedUserPromptEvent).not.toHaveBeenCalled();
   });
 
-  it('does not copy the objective into a synthetic Goal turn', async () => {
+  it('includes the authoritative objective without admitting synthetic user input', async () => {
     const goal: QueuedGoalTurn = {
       kind: 'goal',
       permit: {
@@ -554,7 +551,14 @@ describe('useGeminiStream', () => {
     });
 
     const syntheticPrompt = streamMock.mock.calls[0]?.[0];
-    expect(syntheticPrompt).not.toContain('SECRET_STOP_TOKEN');
+    expect(syntheticPrompt).toContain(
+      JSON.stringify({
+        goalId: goal.permit.goalId,
+        revision: goal.permit.revision,
+        objective: goal.continuationContext,
+      }),
+    );
+    expect(syntheticPrompt).toContain('supersedes any earlier Goal objective');
     expect(syntheticPrompt).toContain('contains no new real user input');
   });
 

@@ -15488,7 +15488,7 @@ describe('Session', () => {
             message: expect.arrayContaining([
               expect.objectContaining({
                 text: expect.stringContaining(
-                  'Continue working on the active Goal.',
+                  '{"goalId":"goal-1","revision":1,"objective":"check weather"}',
                 ),
               }),
             ]),

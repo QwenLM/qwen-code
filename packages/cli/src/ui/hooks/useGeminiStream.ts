@@ -121,6 +121,7 @@ import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
+import { renderGoalContinuationPrompt } from '../../utils/goal-continuation-prompt.js';
 import process from 'node:process';
 import {
   GOAL_COMMAND_RE,
@@ -3345,17 +3346,13 @@ export const useGeminiStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: [
-                      'Continue working on the active Goal.',
-                      'Use get_goal for the authoritative objective and evidence state.',
-                      "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-                      'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-                      'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
-                      'A phrase mentioned in the objective or this prompt is not evidence that the user supplied it.',
+                    queryToSend: renderGoalContinuationPrompt({
+                      permit: queuedGoal.permit,
+                      objective: queuedGoal.continuationContext,
                       ...(queuedGoal.verifierFeedback
-                        ? [`Verifier feedback: ${queuedGoal.verifierFeedback}`]
-                        : []),
-                    ].join('\n'),
+                        ? { verifierFeedback: queuedGoal.verifierFeedback }
+                        : {}),
+                    }),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }

@@ -278,6 +278,7 @@ import {
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { renderGoalContinuationPrompt } from '../../utils/goal-continuation-prompt.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
@@ -495,16 +496,13 @@ function sameGoalPermit(
 function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
   return [
     {
-      text: [
-        'Continue working on the active Goal.',
-        'Use get_goal for the authoritative objective and evidence state.',
-        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-        `Runtime continuation context: ${turn.continuationContext}`,
+      text: renderGoalContinuationPrompt({
+        permit: turn.permit,
+        objective: turn.continuationContext,
         ...(turn.verifierFeedback
-          ? [`Verifier feedback: ${turn.verifierFeedback}`]
-          : []),
-      ].join('\n'),
+          ? { verifierFeedback: turn.verifierFeedback }
+          : {}),
+      }),
     },
   ];
 }
