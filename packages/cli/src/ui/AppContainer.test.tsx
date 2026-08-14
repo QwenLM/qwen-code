@@ -1377,6 +1377,7 @@ describe('AppContainer State Management', () => {
         (
           _config,
           _settings,
+          _history,
           _addItem,
           _clearItems,
           _loadHistory,
@@ -1394,10 +1395,25 @@ describe('AppContainer State Management', () => {
         },
       );
 
+      // remount-only behavior holds in VP mode, where refreshStatic must
+      // not clear the terminal.
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
       render(
         <AppContainer
           config={mockConfig}
-          settings={mockSettings}
+          settings={vpSettings}
           version="1.0.0"
           initializationResult={mockInitResult}
         />,

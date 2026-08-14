@@ -540,7 +540,11 @@ export async function loadServerHierarchicalMemory(
     );
 
     // Only count files that match configured memory filenames (e.g., QWEN.md),
-    // excluding system context files like output-language.md
+    // excluding system context files like output-language.md. Note: this is
+    // intentionally different from contextFilePaths below, which is
+    // content-based and includes non-memory-named files. The two surfaces
+    // (/memory count vs announcement list) may differ; aligning them at
+    // the display site is deferred as a follow-up.
     const memoryFilenames = new Set([
       ...getAllGeminiMdFilenames(),
       LOCAL_CONTEXT_FILENAME,

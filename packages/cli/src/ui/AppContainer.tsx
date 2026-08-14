@@ -861,6 +861,21 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     contextFilesAnnouncedRef.current = false;
   }, [sessionStats.sessionId]);
+  // Wrap loadHistory to reconcile the announcement latch after any history
+  // replacement (rewind, /restore, /resume of the current session). If the
+  // restored history contains a context-files announcement the latch is
+  // consumed (prevents duplicates); otherwise it's armed (allows
+  // re-announcement). This covers /restore and same-id /resume, which the
+  // sessionId effect does not catch because the id is unchanged.
+  const loadHistoryWithLatchReconciliation = useCallback(
+    (newHistory: HistoryItem[]) => {
+      historyManager.loadHistory(newHistory);
+      contextFilesAnnouncedRef.current = newHistory.some(
+        isContextFilesAnnouncement,
+      );
+    },
+    [historyManager],
+  );
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -962,7 +977,7 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
           collapsePreviewCount,
         );
-        historyManager.loadHistory(historyItems);
+        loadHistoryWithLatchReconciliation(historyItems);
 
         // Seed the prompt counter from the resumed conversation so new
         // promptIds don't collide with restored file history snapshots.
@@ -1889,7 +1904,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.history,
     historyManager.addItem,
     historyManager.clearItems,
-    historyManager.loadHistory,
+    loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
     isProcessing,
@@ -2568,13 +2583,13 @@ export const AppContainer = (props: AppContainerProps) => {
       // (ESC, expansion errors) and built-in submit_prompt commands without
       // the modelInvocable flag are not re-armed here; consuming at the true
       // admission choke point is a deeper refactor deferred for this feature.
-      // Known gap: /cd, /directory add, performMemoryRefresh, and
-      // /resume of the current session swap or wipe the attached
-      // context-file set within the same session but do not re-arm
+      // Known gap: /cd, /directory add, and performMemoryRefresh swap the
+      // attached context-file set within the same session but do not re-arm
       // the latch, so the new file set is never announced after the first
       // prompt consumes it. A self-healing latch that watches the
       // context-file set would cover these centrally; deferred as a
-      // follow-up.
+      // follow-up. (/restore and same-id /resume are handled by the
+      // loadHistory wrapper above.)
       const trimmedPrompt = userPromptText.trim();
       if (
         !contextFilesAnnouncedRef.current &&
@@ -3732,16 +3747,7 @@ export const AppContainer = (props: AppContainerProps) => {
             originalHistory.filter((h) => h.id < userItem.id),
           );
           clearPendingStateRef.current();
-          historyManager.loadHistory(truncatedUi);
-
-          // Re-arm the latch iff the rewound history no longer contains the
-          // announcement. Rewinding to a turn before files were attached
-          // filters the INFO out while the files stay in the system prompt,
-          // so the next prompt must re-announce; rewinding to a turn at/after
-          // the announcement keeps the INFO and must not duplicate it.
-          contextFilesAnnouncedRef.current = truncatedUi.some(
-            isContextFilesAnnouncement,
-          );
+          loadHistoryWithLatchReconciliation(truncatedUi);
 
           refreshStatic();
 
@@ -3812,7 +3818,13 @@ export const AppContainer = (props: AppContainerProps) => {
         setIsRewindSelectorOpen(false);
       }
     },
-    [config, historyManager, refreshStatic, buffer],
+    [
+      config,
+      historyManager,
+      loadHistoryWithLatchReconciliation,
+      refreshStatic,
+      buffer,
+    ],
   );
 
   const handleDoubleEscRewind = useDoublePress(openRewindSelector, (pending) =>
