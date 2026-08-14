@@ -55,6 +55,29 @@ class ControlledStream implements TransportStream {
   }
 }
 
+class PendingSessionStream implements TransportStream {
+  isClosed = false;
+  readonly sent: Array<{ message: unknown; id?: number }> = [];
+  private readonly settles: Array<(result: DeliveryResult) => void> = [];
+
+  readonly kind = 'sse' as const;
+
+  async send(): Promise<void> {}
+
+  sendSerialized(payload: Buffer, id?: number): Promise<DeliveryResult> {
+    this.sent.push({ message: JSON.parse(payload.toString('utf8')), id });
+    return new Promise((resolve) => this.settles.push(resolve));
+  }
+
+  completeAll(result: DeliveryResult): void {
+    for (const settle of this.settles.splice(0)) settle(result);
+  }
+
+  close(): void {
+    this.isClosed = true;
+  }
+}
+
 class PendingWebSocket extends EventEmitter {
   readonly OPEN = 1;
   readyState = this.OPEN;
@@ -221,6 +244,195 @@ describe('ConnectionRegistry.getSnapshot', () => {
         { message: { reply: true }, id: undefined },
       ]);
       expect(budget.snapshot().usedFrames).toBe(0);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('hands pending gap replies to a replacement session stream without releasing their leases', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const first = conn.sendSessionReply('sess-1', { reply: 1 });
+      const second = conn.sendSessionReply('sess-1', { reply: 2 });
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+      expect(streamA.sent).toEqual([
+        { message: { reply: 1 }, id: undefined },
+        { message: { reply: 2 }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 2,
+        pendingDeliveryFrames: 2,
+      });
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController());
+      streamA.completeAll('outcome_unknown');
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 2,
+        pendingDeliveryFrames: 2,
+      });
+
+      const streamC = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamC, new AbortController());
+      streamB.completeAll('outcome_unknown');
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 2,
+        pendingDeliveryFrames: 2,
+      });
+      streamC.completeAll('delivered');
+
+      await expect(first).resolves.toBe('delivered');
+      await expect(second).resolves.toBe('delivered');
+      expect(streamC.sent).toEqual([
+        { message: { reply: 1 }, id: undefined },
+        { message: { reply: 2 }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('hands a pending live reply to a replacement session stream', async () => {
+    const registry = new ConnectionRegistry();
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+
+      const delivery = conn.sendSessionReply('sess-1', { reply: 'live' });
+      expect(streamA.sent).toEqual([
+        { message: { reply: 'live' }, id: undefined },
+      ]);
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController());
+      streamA.completeAll('outcome_unknown');
+      streamB.completeAll('delivered');
+
+      await expect(delivery).resolves.toBe('delivered');
+      expect(streamB.sent).toEqual([
+        { message: { reply: 'live' }, id: undefined },
+      ]);
+      expect(registry.getSnapshot()).toMatchObject({
+        preAttachOwnedFrames: 0,
+        preAttachOwnedBytes: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('buffers a pending live reply when disconnect precedes the replacement stream', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+
+      const delivery = conn.sendSessionReply('sess-1', { reply: 'live' }, 7);
+      streamA.close();
+      streamA.completeAll('outcome_unknown');
+      conn.detachSessionStream('sess-1', streamA, 10_000);
+      await Promise.resolve();
+      expect(registry.getSnapshot()).toMatchObject({
+        bufferedSessionFrames: 1,
+        pendingDeliveryFrames: 1,
+        preAttachOwnedFrames: 1,
+        preAttachOwnedBytes: Buffer.byteLength('{"reply":"live"}'),
+      });
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        pendingDeliveryFrames: 1,
+      });
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController(), 5);
+      expect(streamB.sent).toEqual([]);
+      conn.releaseDeferredSessionReplies('sess-1', 7);
+      streamB.completeAll('delivered');
+
+      await expect(delivery).resolves.toBe('delivered');
+      expect(streamB.sent).toEqual([
+        { message: { reply: 'live' }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('defers handed-off gap replies behind a replacement stream replay', async () => {
+    const budget = new AcpPreAttachBudget({ maxFrames: 4, maxBytes: 1024 });
+    const registry = new ConnectionRegistry(
+      undefined,
+      undefined,
+      2,
+      30 * 60_000,
+      budget,
+    );
+    try {
+      const conn = registry.create(true);
+      if (!conn) return;
+      conn.ownSession('sess-1');
+      conn.getOrCreateSession('sess-1');
+
+      const delivery = conn.sendSessionReply('sess-1', { reply: true });
+      const streamA = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamA, new AbortController());
+
+      const streamB = new PendingSessionStream();
+      conn.attachSessionStream('sess-1', streamB, new AbortController(), 5);
+      streamA.completeAll('outcome_unknown');
+      expect(streamB.sent).toEqual([]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 1,
+        pendingDeliveryFrames: 1,
+      });
+
+      conn.endReplayDeferral('sess-1', 5);
+      streamB.completeAll('delivered');
+      await expect(delivery).resolves.toBe('delivered');
+      expect(streamB.sent).toEqual([
+        { message: { reply: true }, id: undefined },
+      ]);
+      expect(budget.snapshot()).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
     } finally {
       registry.dispose();
     }
