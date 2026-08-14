@@ -374,6 +374,39 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(closingSwitcher?.dataset.state ?? 'closed').toBe('closed');
   });
 
+  it('keeps the collapsed session switcher open for session actions', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger?.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const moreActions = switcher?.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    expect(moreActions).not.toBeNull();
+
+    act(() => {
+      moreActions!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    expect(switcher?.dataset.state).toBe('open');
+  });
+
   it('renders the complete session name', async () => {
     renderSidebar();
     await flushSidebar();

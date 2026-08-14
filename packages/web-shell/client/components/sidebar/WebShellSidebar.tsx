@@ -647,6 +647,17 @@ function SidebarSessionSurface({
             cancelClose();
           }}
           onPointerLeave={closeAfterDelay}
+          onInteractOutside={(event) => {
+            const target = event.target;
+            if (
+              target instanceof Element &&
+              target.closest(
+                '[data-slot="dropdown-menu-content"], [data-slot="popover-content"]',
+              )
+            ) {
+              event.preventDefault();
+            }
+          }}
         >
           {children}
         </PopoverContent>
