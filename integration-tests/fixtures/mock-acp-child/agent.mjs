@@ -30,7 +30,6 @@ import {
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
-import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { Writable, Readable } from 'node:stream';
 
 // Protect the stdout NDJSON pipe — any console method that writes to
@@ -57,6 +56,12 @@ const externalToolGuardRequired =
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
 delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
 delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
+
+// SERVE_CONTROL_EXT_METHODS.sessionClose from @qwen-code/acp-bridge/status,
+// hardcoded because that module runtime-imports @qwen-code/qwen-code-core
+// and would pull core's whole barrel into this lightweight fixture. Drift
+// fails loudly: the daemon's session close errors when this stops matching.
+const SESSION_CLOSE_EXT_METHOD = 'qwen/control/session/close';
 
 new AgentSideConnection(
   (connection) => ({
@@ -118,7 +123,7 @@ new AgentSideConnection(
     async cancel() {},
 
     async extMethod(method, params) {
-      if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+      if (method === SESSION_CLOSE_EXT_METHOD) {
         // The daemon's DELETE /session/:id forwards this ext method down the
         // ACP channel; ack with the production success shape so teardown
         // completes. The mock keeps no per-session state to drain.

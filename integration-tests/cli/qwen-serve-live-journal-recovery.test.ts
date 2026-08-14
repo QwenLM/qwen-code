@@ -81,6 +81,13 @@ describe('qwen serve live journal recovery', () => {
       expect(replayText).toContain('chunk-19');
 
       await prompt;
+
+      // Gate the fixture's session-close ack in default CI: the only other
+      // consumer of this path is the opt-in loadtest, so without this call a
+      // drifted close method name or ack shape would rot silently.
+      await expect(
+        activeDaemon.client.closeSession(created.sessionId),
+      ).resolves.toBeUndefined();
     } finally {
       await activeDaemon?.dispose();
       activeDaemon = undefined;
