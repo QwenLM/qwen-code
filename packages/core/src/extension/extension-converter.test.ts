@@ -1046,6 +1046,33 @@ describe('Agent Plugins extension conversion', () => {
     });
   });
 
+  it('does not parse a stray malformed Gemini manifest before selecting an Agent Plugin', async () => {
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'portable-plugin',
+      }),
+    );
+    fs.writeFileSync(
+      path.join(pluginRoot, 'gemini-extension.json'),
+      '{ not valid json',
+    );
+
+    await expect(
+      convertGeminiOrClaudeExtension(
+        pluginRoot,
+        'catalog-alias',
+        undefined,
+        undefined,
+        'extension-root',
+      ),
+    ).resolves.toMatchObject({
+      extensionDir: pluginRoot,
+      originSource: 'AgentPlugins',
+    });
+  });
+
   it('gives an unsupported Agent Plugins schema priority over Qwen format', async () => {
     fs.writeFileSync(
       path.join(pluginRoot, 'plugin.json'),

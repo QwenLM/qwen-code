@@ -365,7 +365,7 @@ describe('discoverPlugins', () => {
     );
 
     expect(discovered.find((p) => p.name === 'gh-plugin')!.installSource).toBe(
-      'someone/repo:gh-plugin',
+      'https://github.com/someone/repo:gh-plugin',
     );
     expect(
       discovered.find((p) => p.name === 'gh-plugin')!.pluginSourceKind,
@@ -391,7 +391,7 @@ describe('discoverPlugins', () => {
     expect(
       discovered.find((p) => p.name === 'selected-string-plugin')!
         .installSource,
-    ).toBe('someone/repo:selected');
+    ).toBe('https://github.com/someone/repo:selected');
     expect(
       discovered.find((p) => p.name === 'selected-string-plugin')!
         .pluginSourceKind,
@@ -416,7 +416,7 @@ describe('discoverPlugins', () => {
       discovered.find((p) => p.name === 'port-selected')!.pluginSourceKind,
     ).toBe('marketplace-entry');
     expect(discovered.find((p) => p.name === 'bare-root')).toMatchObject({
-      installSource: 'someone/direct-root:bare-root',
+      installSource: 'https://github.com/someone/direct-root:bare-root',
       pluginSourceKind: 'extension-root',
     });
     expect(discovered.find((p) => p.name === '2048-game')).toMatchObject({
@@ -530,7 +530,7 @@ describe('discoverPlugins', () => {
       convertedDir = converted.extensionDir;
 
       expect(plugin).toMatchObject({
-        installSource: 'someone/qoder-plugin:qoder-alias',
+        installSource: 'https://github.com/someone/qoder-plugin:qoder-alias',
         pluginSourceKind: 'extension-root',
       });
       expect(converted.originSource).toBe('Qoder');
@@ -580,8 +580,7 @@ describe('discoverPlugins', () => {
 
   it('rejects local-path sources from a remote (http) marketplace', async () => {
     // A hostile remote marketplace must not be able to point the installer at a
-    // local filesystem path — via either the bare-string source or the
-    // structured { source: 'url' } form. Both fall back to the plugin name.
+    // local filesystem path through any supported source shape.
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Remote', [
         { name: 'abs', version: '1.0.0', source: '/etc/passwd' },
@@ -596,6 +595,21 @@ describe('discoverPlugins', () => {
           name: 'urlrel',
           version: '1.0.0',
           source: { source: 'url', url: '../escape' },
+        },
+        {
+          name: 'githubabs',
+          version: '1.0.0',
+          source: { source: 'github', repo: '/home/user/secrets' },
+        },
+        {
+          name: 'githubrel',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'foo/bar/baz' },
+        },
+        {
+          name: 'githubcwd',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'foo/bar' },
         },
         {
           name: 'urlok',
@@ -619,6 +633,11 @@ describe('discoverPlugins', () => {
     // { source: 'url' } local paths are rejected too (previously bypassed).
     expect(src('urlabs')).toBe('');
     expect(src('urlrel')).toBe('');
+    expect(src('githubabs')).toBe('');
+    expect(src('githubrel')).toBe('');
+    // owner/repo is normalized before it reaches parseInstallSource, whose
+    // filesystem-first resolution would otherwise select ./foo/bar.
+    expect(src('githubcwd')).toBe('https://github.com/foo/bar:githubcwd');
     // A genuine remote URL is preserved.
     expect(src('urlok')).toBe('https://example.com/p.tgz');
   });

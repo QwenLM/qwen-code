@@ -158,7 +158,34 @@ function isGitHubHost(url: string): boolean {
 }
 
 function isOwnerRepoShorthand(source: string): boolean {
-  return /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(source);
+  const match = source.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/);
+  return Boolean(
+    match &&
+      match[1] !== '.' &&
+      match[1] !== '..' &&
+      match[2] !== '.' &&
+      match[2] !== '..',
+  );
+}
+
+/**
+ * Makes a plugin source from a remote marketplace unambiguously remote.
+ *
+ * `parseInstallSource` deliberately checks the filesystem before interpreting
+ * `owner/repo` shorthand. Leaving that shorthand untouched here would let a
+ * remote marketplace select a same-named directory below the process cwd.
+ */
+function normalizeRemotePluginSource(source: string): string | undefined {
+  const trimmed = source.trim();
+  const { repo, pluginName } = parseSourceAndPluginName(trimmed);
+  if (parseExtensionSourceType(repo) === 'local') {
+    return undefined;
+  }
+
+  const normalizedRepo = isOwnerRepoShorthand(repo)
+    ? `https://github.com/${repo}`
+    : repo;
+  return pluginName ? `${normalizedRepo}:${pluginName}` : normalizedRepo;
 }
 
 function classifyRemotePluginSource(
@@ -212,38 +239,38 @@ function resolveInstallSource(
   }
   const src = plugin.source;
   if (typeof src === 'string') {
-    // A remote marketplace must not be able to point the installer at an
-    // arbitrary local filesystem path (e.g. "/opt/secret" or "../../etc").
-    if (path.isAbsolute(src) || src.startsWith('.') || src.startsWith('~')) {
+    const normalizedSource = normalizeRemotePluginSource(src);
+    if (!normalizedSource) {
       debugLogger.warn(
         `Ignoring local path source "${src}" from remote marketplace "${marketplace.source}".`,
       );
       return { installSource: '', pluginSourceKind: 'extension-root' };
     }
-    const isDirectUrl = /^https?:\/\//i.test(src);
+    const isDirectUrl = /^https?:\/\//i.test(src.trim());
     return classifyRemotePluginSource(
-      src,
+      normalizedSource,
       isDirectUrl ? undefined : plugin.name,
     );
   }
   if (src && src.source === 'github' && typeof src.repo === 'string') {
-    return classifyRemotePluginSource(src.repo, plugin.name);
+    const normalizedSource = normalizeRemotePluginSource(src.repo);
+    if (!normalizedSource) {
+      debugLogger.warn(
+        `Ignoring local path source "${src.repo}" from remote marketplace "${marketplace.source}".`,
+      );
+      return { installSource: '', pluginSourceKind: 'extension-root' };
+    }
+    return classifyRemotePluginSource(normalizedSource, plugin.name);
   }
   if (src && src.source === 'url' && typeof src.url === 'string') {
-    // Same local-path guard as the string-source branch above: a remote
-    // marketplace must not be able to redirect the installer at a local
-    // filesystem path via the structured `{ source: 'url' }` form either.
-    if (
-      path.isAbsolute(src.url) ||
-      src.url.startsWith('.') ||
-      src.url.startsWith('~')
-    ) {
+    const normalizedSource = normalizeRemotePluginSource(src.url);
+    if (!normalizedSource) {
       debugLogger.warn(
         `Ignoring local path source "${src.url}" from remote marketplace "${marketplace.source}".`,
       );
       return { installSource: '', pluginSourceKind: 'extension-root' };
     }
-    return classifyRemotePluginSource(src.url);
+    return classifyRemotePluginSource(normalizedSource);
   }
   // A direct JSON document has no cloneable root for a missing/relative source.
   // Keep the entry visible for provenance, but mark it non-installable instead

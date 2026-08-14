@@ -215,7 +215,9 @@ export async function convertCompatibleExtension(
   );
   const hasQwenConfig = fs.existsSync(configFilePath);
   const isGeminiExtension =
-    !hasQwenConfig && isGeminiExtensionConfig(extensionDir);
+    agentPluginStatus === 'unrelated' &&
+    !hasQwenConfig &&
+    isGeminiExtensionConfig(extensionDir);
   const hasClaudePlugin = fs.existsSync(
     path.join(extensionDir, SUPPORTED_EXTENSION_MANIFESTS[3]),
   );
