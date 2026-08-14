@@ -41,6 +41,7 @@ const MAX_TODO_STATES = 1_000;
 const MAX_SELF_SENDER_IDS = 20;
 const OUTBOUND_ECHO_TTL_MS = 30_000;
 const EVENT_RESTART_DELAY_MS = 2_000;
+const EVENT_RESTART_MAX_DELAY_MS = 5 * 60_000;
 const NO_REPLY_SENTINEL = '[NO_REPLY]';
 const NO_REPLY_SENTINEL_PATTERN = /^\[NO_REPLY\][.!]?$/i;
 const ACK_REACTION_NAME = '暗中观察';
@@ -65,11 +66,29 @@ interface PersistedTodoState {
   fingerprint: string;
 }
 
+interface PersistedNotificationCheckpoint {
+  startTime: number;
+  endTime: number;
+  cursor: string;
+}
+
+interface PersistedDocumentNotification {
+  documentId: string;
+  commentKey: string;
+  request: string;
+  messageId: string;
+  conversationId: string;
+  senderId: string;
+  senderName: string;
+}
+
 interface DwsCursor {
   version: 1;
   selfProfile?: string;
   selfSenderIds: string[];
   notificationWatermark?: number;
+  notificationCheckpoint?: PersistedNotificationCheckpoint;
+  pendingDocumentNotifications?: PersistedDocumentNotification[];
   processedMessages: string[];
   imTargets: PersistedImTarget[];
   todosInitialized?: boolean;
@@ -87,7 +106,10 @@ interface ImSubscriptionState {
   subscription?: DwsEventSubscription;
   retryTimer?: ReturnType<typeof setTimeout>;
   lastError?: DwsEventProcessError;
+  restartAttempts: number;
 }
+
+type SyntheticInboundOutcome = 'allowed' | 'pairing' | 'denied';
 
 function configuredString(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
@@ -177,6 +199,41 @@ function isPersistedTodoState(value: unknown): value is PersistedTodoState {
     typeof (value as PersistedTodoState).fingerprint === 'string' &&
     Boolean((value as PersistedTodoState).fingerprint)
   );
+}
+
+function isNotificationCheckpoint(
+  value: unknown,
+): value is PersistedNotificationCheckpoint {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const checkpoint = value as PersistedNotificationCheckpoint;
+  return (
+    Number.isSafeInteger(checkpoint.startTime) &&
+    checkpoint.startTime >= 0 &&
+    Number.isSafeInteger(checkpoint.endTime) &&
+    checkpoint.endTime >= checkpoint.startTime &&
+    typeof checkpoint.cursor === 'string' &&
+    Boolean(checkpoint.cursor)
+  );
+}
+
+function isPendingDocumentNotification(
+  value: unknown,
+): value is PersistedDocumentNotification {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const pending = value as PersistedDocumentNotification;
+  return [
+    pending.documentId,
+    pending.commentKey,
+    pending.request,
+    pending.messageId,
+    pending.conversationId,
+    pending.senderId,
+    pending.senderName,
+  ].every((item) => typeof item === 'string' && Boolean(item));
 }
 
 function stableTodoValue(value: unknown, key = ''): unknown {
@@ -329,7 +386,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   private readonly watchTodos: boolean;
   private readonly pendingOutboundEchoes = new Map<
     string,
-    { expiresAt: number }
+    { count: number; expiresAt: number }
   >();
   private readonly inboundReactionTargets = new Map<
     string,
@@ -342,6 +399,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   >();
   private readonly notifiedSenderPairingNotifications = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
+  private readonly syntheticInboundOutcomes = new WeakMap<
+    Envelope,
+    SyntheticInboundOutcome
+  >();
   private pollAbortController = new AbortController();
   private lifecycleGeneration = 0;
   private connectionStartedAt = 0;
@@ -401,7 +462,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
 
     this.userInstructions = userInstructions;
     this.client = client ?? new DwsClient({ executable: 'dws', profile });
-    this.imStates = imSources.map((source) => ({ source }));
+    this.imStates = imSources.map((source) => ({
+      source,
+      restartAttempts: 0,
+    }));
     this.watchTodos = watchTodos;
   }
 
@@ -410,6 +474,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       version: 1,
       selfSenderIds: [],
       notificationWatermark: undefined,
+      pendingDocumentNotifications: [],
       processedMessages: [],
       imTargets: [],
       todosInitialized: false,
@@ -440,6 +505,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         (typeof cursor.notificationWatermark !== 'number' ||
           !Number.isSafeInteger(cursor.notificationWatermark) ||
           cursor.notificationWatermark < 0)) ||
+      (cursor.notificationCheckpoint !== undefined &&
+        !isNotificationCheckpoint(cursor.notificationCheckpoint)) ||
+      (cursor.pendingDocumentNotifications !== undefined &&
+        (!Array.isArray(cursor.pendingDocumentNotifications) ||
+          !cursor.pendingDocumentNotifications.every(
+            isPendingDocumentNotification,
+          ))) ||
       !Array.isArray(cursor.processedMessages) ||
       !cursor.processedMessages.every((item) => typeof item === 'string') ||
       !Array.isArray(cursor.imTargets) ||
@@ -459,6 +531,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         -MAX_SELF_SENDER_IDS,
       ),
       notificationWatermark: cursor.notificationWatermark,
+      notificationCheckpoint: cursor.notificationCheckpoint,
+      pendingDocumentNotifications: (
+        cursor.pendingDocumentNotifications ?? []
+      ).slice(-MAX_PROCESSED_ITEMS),
       processedMessages: cursor.processedMessages.slice(-MAX_PROCESSED_ITEMS),
       imTargets: cursor.imTargets.slice(-MAX_IM_TARGETS),
       todosInitialized: cursor.todosInitialized ?? false,
@@ -496,7 +572,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.todosInitialized = false;
       this.cursor.todoTasks = [];
     }
-    this.cursor.selfSenderIds = [];
+    this.cursor.selfSenderIds = [
+      ...new Set(identity.selfSenderIds ?? []),
+    ].slice(-MAX_SELF_SENDER_IDS);
     this.connected = true;
     try {
       await Promise.all(
@@ -541,6 +619,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       state.retryTimer = undefined;
       state.subscription?.stop();
       state.subscription = undefined;
+      state.restartAttempts = 0;
     }
   }
 
@@ -568,10 +647,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     const source = this.todoTargets.has(envelope.chatId) ? 'todo' : 'document';
     if (result.allowed) {
+      this.syntheticInboundOutcomes.set(envelope, 'allowed');
       this.markPreflighted(envelope);
       return true;
     }
     if (result.pairing) {
+      this.syntheticInboundOutcomes.set(envelope, 'pairing');
       this.logPreflightRejected(`${source}_sender_pairing_required`);
       return this.onPairingRequired(
         envelope.chatId,
@@ -581,6 +662,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         .then(() => false)
         .catch(() => false);
     }
+    this.syntheticInboundOutcomes.set(envelope, 'denied');
     this.logPreflightRejected(`${source}_sender_denied`);
     return false;
   }
@@ -605,11 +687,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
     }
     try {
-      await super.onPairingRequired(chatId, result, threadId);
-    } catch (error) {
-      if (!(error instanceof DwsCommandError) || error.outcome === 'not_sent') {
-        this.notifiedSenderPairingNotifications.delete(notificationKey);
+      if (
+        'code' in result &&
+        !this.documentSet.has(chatId) &&
+        !this.todoTargets.has(chatId)
+      ) {
+        const text = `Your pairing code is: ${result.code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${result.code}`;
+        await this.sendImText(
+          chatId,
+          text,
+          stableUuid(`${this.name}\0pairing\0${notificationKey}`),
+        );
+      } else {
+        await super.onPairingRequired(chatId, result, threadId);
       }
+    } catch (error) {
+      this.notifiedSenderPairingNotifications.delete(notificationKey);
       throw error;
     }
   }
@@ -629,6 +722,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] DWS todo delivery requires a task thread.`,
       );
     }
+    await this.sendImText(chatId, text, randomUUID());
+  }
+
+  private async sendImText(
+    chatId: string,
+    text: string,
+    idempotencyKey: string,
+  ): Promise<void> {
     const target = this.findImTarget(chatId);
     if (!target) {
       throw new Error(
@@ -636,7 +737,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       );
     }
     await this.sendWithEchoTracking(chatId, text, () =>
-      this.client.sendImMessage(target, text, randomUUID()),
+      this.client.sendImMessage(target, text, idempotencyKey),
     );
   }
 
@@ -742,21 +843,32 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const signal = this.pollAbortController.signal;
     if (!this.connected || signal.aborted) return;
     const endTime = Date.now();
-    const startTime = Math.max(
-      0,
-      (this.cursor.notificationWatermark ?? endTime) -
-        NOTIFICATION_HISTORY_OVERLAP_MS,
-    );
-    const notifications = await this.client.listDirectMessages(
-      startTime,
+    await this.replayPendingDocumentNotifications(signal);
+    if (signal.aborted || !this.connected) return;
+    const checkpoint = this.cursor.notificationCheckpoint ?? {
+      startTime: Math.max(
+        0,
+        (this.cursor.notificationWatermark ?? endTime) -
+          NOTIFICATION_HISTORY_OVERLAP_MS,
+      ),
       endTime,
+      cursor: '0',
+    };
+    const page = await this.client.listDirectMessages(
+      checkpoint.startTime,
+      checkpoint.endTime,
       signal,
+      checkpoint.cursor,
     );
-    notifications.sort(
+    page.messages.sort(
       (left, right) => (left.eventTime ?? 0) - (right.eventTime ?? 0),
     );
-    for (const message of notifications) {
+    for (const message of page.messages) {
       if (signal.aborted || !this.connected) return;
+      if (this.cursor.selfSenderIds.includes(message.senderId)) {
+        this.markProcessedMessage(messageKey(message));
+        continue;
+      }
       const key = messageKey(message);
       if (this.cursor.processedMessages.includes(key)) {
         continue;
@@ -765,16 +877,31 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (!notification) continue;
       await this.processDocumentNotification(message, key, notification);
     }
+    if (page.nextCursor) {
+      this.cursor.notificationCheckpoint = {
+        ...checkpoint,
+        cursor: page.nextCursor,
+      };
+    } else {
+      this.cursor.notificationCheckpoint = undefined;
+      this.cursor.notificationWatermark = checkpoint.endTime;
+    }
+    this.saveCursor();
     if (
       this.watchTodos &&
       (this.lastTodoPollAt === 0 ||
         endTime - this.lastTodoPollAt >= this.todoPollInterval)
     ) {
-      await this.pollTodos(signal);
+      try {
+        await this.pollTodos(signal);
+      } catch (error) {
+        if (signal.aborted || !this.connected) return;
+        process.stderr.write(
+          `[Channel:${this.name}] failed to poll DWS todos: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+      }
       this.lastTodoPollAt = Date.now();
     }
-    this.cursor.notificationWatermark = endTime;
-    this.saveCursor();
   }
 
   private async pollTodos(signal: AbortSignal): Promise<void> {
@@ -880,6 +1007,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       state.source,
       (message) => {
         state.lastError = undefined;
+        state.restartAttempts = 0;
         return this.handleImMessage(state.source, message);
       },
       (error) => {
@@ -892,6 +1020,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
     state.lastError = undefined;
+    state.restartAttempts = 0;
     state.subscription = subscription;
     void subscription.closed.then(() => {
       if (state.subscription !== subscription) return;
@@ -953,23 +1082,28 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   ): void {
     if (!this.connected || state.retryTimer) return;
     const resolvedError = error ?? new DwsEventProcessError('stream stopped');
-    if (retryLimit(resolvedError) === 0) {
-      process.stderr.write(
-        `[Channel:${this.name}] DWS ${sanitizeLogText(sourceLabel(state.source), 120)} stream is not retryable and will remain stopped.\n`,
-      );
-      return;
-    }
-    const delay = retryDelay(resolvedError);
+    const delay = Math.min(
+      EVENT_RESTART_MAX_DELAY_MS,
+      retryDelay(resolvedError) * 2 ** Math.min(state.restartAttempts, 8),
+    );
+    state.restartAttempts += 1;
+    process.stderr.write(
+      `[Channel:${this.name}] DWS ${sanitizeLogText(sourceLabel(state.source), 120)} stream is degraded; retrying in ${delay}ms.\n`,
+    );
     state.retryTimer = setTimeout(() => {
       state.retryTimer = undefined;
       if (!this.connected) return;
       state.lastError = undefined;
-      void this.startImSourceWithRetry(state, this.lifecycleGeneration).catch(
+      void this.startImSource(state, this.lifecycleGeneration).catch(
         (error: unknown) => {
           const resolvedError =
             error instanceof Error ? error : new Error(String(error));
-          process.stderr.write(
-            `[Channel:${this.name}] DWS ${sanitizeLogText(sourceLabel(state.source), 120)} stream restart stopped: ${sanitizeLogText(resolvedError.message, 300)}\n`,
+          this.logImError(state.source, resolvedError);
+          this.scheduleImRestart(
+            state,
+            resolvedError instanceof DwsEventProcessError
+              ? resolvedError
+              : undefined,
           );
         },
       );
@@ -988,6 +1122,11 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     message: DwsImMessage,
   ): Promise<void> {
     if (!this.connected) return;
+    if (this.cursor.selfSenderIds.includes(message.senderId)) {
+      this.markProcessedMessage(messageKey(message));
+      this.saveCursor();
+      return;
+    }
     if (
       message.eventTime !== undefined &&
       message.eventTime < this.connectionStartedAt - 5_000
@@ -1108,7 +1247,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const inFlight = this.processingMessages.get(notificationKey);
     if (inFlight) {
       await inFlight;
-      this.markProcessedMessage(key);
+      if (
+        this.cursor.processedMessages.includes(notificationKey) ||
+        this.hasPendingDocumentNotification(notificationKey)
+      ) {
+        this.markProcessedMessage(key);
+      }
       this.saveCursor();
       return;
     }
@@ -1146,18 +1290,101 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         ].join('\n'),
       };
       await this.handleInbound(envelope);
-      this.markProcessedMessage(notificationKey);
+      const outcome = this.syntheticInboundOutcomes.get(envelope);
+      this.syntheticInboundOutcomes.delete(envelope);
+      if (
+        outcome === 'pairing' ||
+        (!outcome && !this.gate.isAllowed(message.senderId))
+      ) {
+        this.rememberPendingDocumentNotification(message, notification);
+      } else {
+        this.markProcessedMessage(notificationKey);
+        this.removePendingDocumentNotification(notificationKey);
+      }
     })();
     this.processingMessages.set(notificationKey, task);
     try {
       await task;
-      this.markProcessedMessage(key);
+      if (
+        this.cursor.processedMessages.includes(notificationKey) ||
+        this.hasPendingDocumentNotification(notificationKey)
+      ) {
+        this.markProcessedMessage(key);
+      }
       this.saveCursor();
     } finally {
       if (this.processingMessages.get(notificationKey) === task) {
         this.processingMessages.delete(notificationKey);
       }
     }
+  }
+
+  private async replayPendingDocumentNotifications(
+    signal: AbortSignal,
+  ): Promise<void> {
+    for (const pending of [
+      ...(this.cursor.pendingDocumentNotifications ?? []),
+    ]) {
+      if (signal.aborted || !this.connected) return;
+      const notification: DwsDocumentMentionNotification = {
+        documentId: pending.documentId,
+        commentKey: pending.commentKey,
+        request: pending.request,
+      };
+      const message: DwsImMessage = {
+        type: 'user_im_message_receive_o2o_all',
+        eventId: pending.messageId,
+        messageId: pending.messageId,
+        conversationId: pending.conversationId,
+        content: '',
+        senderId: pending.senderId,
+        senderName: pending.senderName,
+      };
+      try {
+        await this.processDocumentNotification(
+          message,
+          messageKey(message),
+          notification,
+        );
+      } catch (error) {
+        if (signal.aborted || !this.connected) return;
+        process.stderr.write(
+          `[Channel:${this.name}] failed to replay pending DWS document notification: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+      }
+    }
+  }
+
+  private hasPendingDocumentNotification(notificationKey: string): boolean {
+    return (this.cursor.pendingDocumentNotifications ?? []).some(
+      (pending) => documentNotificationKey(pending) === notificationKey,
+    );
+  }
+
+  private rememberPendingDocumentNotification(
+    message: DwsImMessage,
+    notification: DwsDocumentMentionNotification,
+  ): void {
+    const key = documentNotificationKey(notification);
+    if (this.hasPendingDocumentNotification(key)) return;
+    const pending = this.cursor.pendingDocumentNotifications ?? [];
+    if (pending.length >= MAX_PROCESSED_ITEMS) {
+      throw new Error('DWS pending document notification queue is full.');
+    }
+    pending.push({
+      ...notification,
+      messageId: message.messageId,
+      conversationId: message.conversationId,
+      senderId: message.senderId,
+      senderName: message.senderName,
+    });
+    this.cursor.pendingDocumentNotifications = pending;
+  }
+
+  private removePendingDocumentNotification(notificationKey: string): void {
+    this.cursor.pendingDocumentNotifications = (
+      this.cursor.pendingDocumentNotifications ?? []
+    ).filter((pending) => documentNotificationKey(pending) !== notificationKey);
   }
 
   private async sendWithEchoTracking(
@@ -1330,11 +1557,22 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const now = Date.now();
     this.pruneOutboundEchoes(now);
     const key = outboundEchoKey(conversationId, content);
-    const pending = { expiresAt: now + OUTBOUND_ECHO_TTL_MS };
+    const existing = this.pendingOutboundEchoes.get(key);
+    const pending = {
+      count: (existing?.count ?? 0) + 1,
+      expiresAt: Math.max(existing?.expiresAt ?? 0, now + OUTBOUND_ECHO_TTL_MS),
+    };
     this.pendingOutboundEchoes.set(key, pending);
     return () => {
-      if (this.pendingOutboundEchoes.get(key) === pending) {
+      const current = this.pendingOutboundEchoes.get(key);
+      if (!current || current.expiresAt <= Date.now()) return;
+      if (current.count <= 1) {
         this.pendingOutboundEchoes.delete(key);
+      } else {
+        this.pendingOutboundEchoes.set(key, {
+          ...current,
+          count: current.count - 1,
+        });
       }
     };
   }
@@ -1343,8 +1581,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const now = Date.now();
     this.pruneOutboundEchoes(now);
     const key = outboundEchoKey(message.conversationId, message.content);
-    if (!this.pendingOutboundEchoes.has(key)) return false;
-    this.pendingOutboundEchoes.delete(key);
+    const pending = this.pendingOutboundEchoes.get(key);
+    if (!pending) return false;
+    if (this.cursor.selfSenderIds.length > 0) return false;
+    if (pending.count <= 1) this.pendingOutboundEchoes.delete(key);
+    else {
+      this.pendingOutboundEchoes.set(key, {
+        ...pending,
+        count: pending.count - 1,
+      });
+    }
     return true;
   }
 

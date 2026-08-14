@@ -17,6 +17,7 @@ export type {
   DwsImMessage,
   DwsImSource,
   DwsImTarget,
+  DwsMessageHistoryPage,
   DwsTodoTask,
 } from './dws-client.js';
 export {

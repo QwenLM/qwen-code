@@ -8,10 +8,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  ChannelAgentBridge,
-  ChannelConfig,
-  Envelope,
+import {
+  PairingStore,
+  type ChannelAgentBridge,
+  type ChannelConfig,
+  type Envelope,
 } from '@qwen-code/channel-base';
 import { DwsChannel } from './dws-channel.js';
 import {
@@ -151,6 +152,7 @@ interface FakeStream {
 class FakeDwsClient implements DwsClientLike {
   identity: DwsIdentity = {
     profile: 'corp:user-self',
+    selfSenderIds: ['open-self'],
   };
   streams: FakeStream[] = [];
   directMessages: DwsImMessage[] = [];
@@ -174,7 +176,7 @@ class FakeDwsClient implements DwsClientLike {
   removeImReaction = vi.fn().mockResolvedValue(undefined);
   listDirectMessages = vi.fn(
     async (_startTime: number, _endTime: number, _signal?: AbortSignal) =>
-      Promise.resolve(this.directMessages),
+      Promise.resolve({ messages: this.directMessages }),
   );
   readDocument = vi.fn(async (_documentId: string, _signal?: AbortSignal) =>
     Promise.resolve('# Plan\nUse DWS.'),
@@ -255,6 +257,14 @@ class TestableDwsChannel extends DwsChannel {
 
   approvalMode(): string | undefined {
     return this.config.approvalMode;
+  }
+
+  notificationWatermark(): number | undefined {
+    return this.cursor.notificationWatermark;
+  }
+
+  notificationCheckpoint(): unknown {
+    return this.cursor.notificationCheckpoint;
   }
 
   resolveSession(): Promise<string> {
@@ -542,7 +552,7 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('uses the full retry budget while creating a replacement stream', async () => {
+  it('keeps retrying after the replacement retry budget is exhausted', async () => {
     vi.useFakeTimers();
     try {
       const client = new FakeDwsClient();
@@ -550,13 +560,14 @@ describe('DwsChannel', () => {
       const subscribe = vi
         .spyOn(client, 'subscribeToIm')
         .mockRejectedValueOnce(new DwsEventProcessError('retry one', true))
-        .mockRejectedValueOnce(new DwsEventProcessError('retry two', true));
+        .mockRejectedValueOnce(new DwsEventProcessError('retry two', true))
+        .mockRejectedValueOnce(new DwsEventProcessError('retry three', true));
 
       client.streams[0]?.subscription.close();
       await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.advanceTimersByTimeAsync(30_000);
 
-      expect(subscribe).toHaveBeenCalledTimes(3);
+      expect(subscribe).toHaveBeenCalledTimes(4);
       expect(client.streams[2]?.source).toEqual({ kind: 'at' });
     } finally {
       vi.useRealTimers();
@@ -716,6 +727,38 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('resumes a bounded notification-history checkpoint after restart', async () => {
+    const firstClient = new FakeDwsClient();
+    firstClient.listDirectMessages.mockResolvedValueOnce({
+      messages: [],
+      nextCursor: 'cursor-100',
+    });
+    const first = await readyChannel(
+      firstClient,
+      makeConfig(),
+      'checkpoint-dws',
+    );
+
+    await first.poll();
+    expect(first.notificationCheckpoint()).toEqual(
+      expect.objectContaining({ cursor: 'cursor-100' }),
+    );
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    const second = await readyChannel(
+      secondClient,
+      makeConfig(),
+      'checkpoint-dws',
+    );
+    await second.poll();
+
+    expect(secondClient.listDirectMessages.mock.calls[0]?.[3]).toBe(
+      'cursor-100',
+    );
+    expect(second.notificationCheckpoint()).toBeUndefined();
+  });
+
   it('deduplicates the same document notification across different message IDs', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -815,6 +858,34 @@ describe('DwsChannel', () => {
     expect(channel.inbound).toEqual([
       expect.objectContaining({ threadId: 'task-good' }),
     ]);
+  });
+
+  it('advances notification history while the todo list is unavailable', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-14T08:00:00Z'));
+      const client = new FakeDwsClient();
+      client.listTodoTasks.mockRejectedValue(new Error('todo unavailable'));
+      const channel = await readyChannel(
+        client,
+        makeConfig({ watchTodos: true }),
+        'todo-outage-dws',
+      );
+      vi.setSystemTime(new Date('2026-08-14T08:01:00Z'));
+
+      await expect(channel.poll()).resolves.toBeUndefined();
+      const firstWatermark = channel.notificationWatermark();
+      vi.setSystemTime(new Date('2026-08-14T08:02:00Z'));
+      await expect(channel.poll()).resolves.toBeUndefined();
+
+      expect(firstWatermark).toBe(new Date('2026-08-14T08:01:00Z').getTime());
+      expect(channel.notificationWatermark()).toBe(
+        new Date('2026-08-14T08:02:00Z').getTime(),
+      );
+      expect(client.listTodoTasks).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reacts to actionable todo changes but ignores comment metadata', async () => {
@@ -929,6 +1000,37 @@ describe('DwsChannel', () => {
       'doc-pairing',
       'comment-pairing',
       expect.stringContaining('pairing code'),
+    );
+  });
+
+  it('replays a pairing-pending document mention after approval', async () => {
+    const client = new FakeDwsClient();
+    const config = makeConfig({ senderPolicy: 'pairing' });
+    const name = 'pending-document-dws';
+    const { channel, bridge } = await readyPolicyChannel(client, config, name);
+    client.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'pending-document',
+        documentMentionCard('doc-pending', 'comment-pending'),
+      ),
+    ];
+
+    await channel.poll();
+    const pairingText = client.replyToComment.mock.calls[0]?.[2];
+    const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
+    expect(code).toBeDefined();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+
+    expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
+    client.directMessages = [];
+    await channel.poll();
+
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('reply with the document code'),
+      expect.any(Object),
     );
   });
 
@@ -1171,7 +1273,7 @@ describe('DwsChannel', () => {
     expect(client.sendImMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('does not repeat a pairing notification after an ambiguous delivery failure', async () => {
+  it('retries an ambiguous pairing delivery with the same idempotency key', async () => {
     const client = new FakeDwsClient();
     client.sendImMessage.mockRejectedValueOnce(
       new DwsCommandError('connection reset', 'unknown'),
@@ -1191,7 +1293,10 @@ describe('DwsChannel', () => {
       ),
     );
 
-    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledTimes(2);
+    expect(client.sendImMessage.mock.calls[0]?.[2]).toBe(
+      client.sendImMessage.mock.calls[1]?.[2],
+    );
   });
 
   it('notifies different pending direct-message pairing requests', async () => {
@@ -1285,6 +1390,68 @@ describe('DwsChannel', () => {
       'hello',
       'shared text',
     ]);
+  });
+
+  it('filters repeated and delayed self echoes without swallowing peer text', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client, makeConfig(), 'self-id-dws');
+      await client.emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'request', 'hello'),
+      );
+      await channel.sendMessage('cid-1', 'shared text');
+      await channel.sendMessage('cid-1', 'shared text');
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          'peer-first',
+          'shared text',
+          {
+            senderId: 'open-bob',
+            senderName: 'Bob',
+          },
+        ),
+      );
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          'self-echo-1',
+          'shared text',
+          {
+            senderId: 'open-self',
+          },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          'self-echo-2',
+          'shared text',
+          {
+            senderId: 'open-self',
+          },
+        ),
+      );
+      await channel.sendMessage('cid-1', 'follow up');
+
+      expect(channel.inbound.map((item) => item.text)).toEqual([
+        'hello',
+        'shared text',
+      ]);
+      expect(client.sendImMessage.mock.calls[2]?.[0]).toEqual({
+        kind: 'direct',
+        openDingTalkId: 'open-bob',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not treat matching peer text as an echo after the tracking window expires', async () => {

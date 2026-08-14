@@ -67,6 +67,7 @@ describe('DwsClient', () => {
 
     await expect(client.assertAuthenticated()).resolves.toEqual({
       profile: 'corp:user',
+      selfSenderIds: ['open-user-1'],
     });
     expect(runner).toHaveBeenNthCalledWith(1, '/opt/dws', [
       'profile',
@@ -576,13 +577,13 @@ describe('DwsClient', () => {
       runner,
     );
 
-    const messages = await client.listDirectMessages(
+    const page = await client.listDirectMessages(
       new Date(2026, 7, 13, 10, 55, 0).getTime(),
       new Date(2026, 7, 13, 10, 56, 0).getTime(),
     );
 
     expect(
-      messages.map(({ messageId, content }) => ({ messageId, content })),
+      page.messages.map(({ messageId, content }) => ({ messageId, content })),
     ).toEqual([
       { messageId: 'message-1', content: 'first' },
       { messageId: 'message-2', content: 'second' },
@@ -607,6 +608,37 @@ describe('DwsClient', () => {
       ],
       expect.arrayContaining(['--cursor', 'page-2']),
     ]);
+  });
+
+  it('returns a continuation after a bounded history batch', async () => {
+    const runner = vi.fn<DwsCommandRunner>(async (_executable, args) => {
+      const cursorIndex = args.indexOf('--cursor');
+      const cursor = Number(args[cursorIndex + 1]);
+      return {
+        stdout: json({
+          result: {
+            conversationMessagesList: [],
+            hasMore: cursor < 100,
+            nextCursor: cursor < 100 ? String(cursor + 1) : '',
+          },
+          success: true,
+        }),
+        stderr: '',
+      };
+    });
+    const client = new DwsClient({ executable: '/opt/dws' }, runner);
+
+    const first = await client.listDirectMessages(1, 2);
+    const second = await client.listDirectMessages(
+      1,
+      2,
+      undefined,
+      first.nextCursor,
+    );
+
+    expect(first).toEqual({ messages: [], nextCursor: '100' });
+    expect(second).toEqual({ messages: [] });
+    expect(runner).toHaveBeenCalledTimes(101);
   });
 
   it('reads document Markdown and replies without shell interpolation', async () => {

@@ -20,6 +20,7 @@ const MAX_TODO_PAGES = 50;
 const TODO_PAGE_SIZE = 20;
 export interface DwsIdentity {
   profile?: string;
+  selfSenderIds?: string[];
 }
 
 export type DwsImSource =
@@ -56,6 +57,11 @@ export interface DwsTodoTask {
   data: Record<string, unknown>;
 }
 
+export interface DwsMessageHistoryPage {
+  messages: DwsImMessage[];
+  nextCursor?: string;
+}
+
 export interface DwsClientLike {
   assertCompatible?(signal?: AbortSignal): Promise<void>;
   assertAuthenticated(signal?: AbortSignal): Promise<DwsIdentity>;
@@ -90,7 +96,8 @@ export interface DwsClientLike {
     startTime: number,
     endTime: number,
     signal?: AbortSignal,
-  ): Promise<DwsImMessage[]>;
+    cursor?: string,
+  ): Promise<DwsMessageHistoryPage>;
   readDocument(documentId: string, signal?: AbortSignal): Promise<string>;
   replyToComment(
     documentId: string,
@@ -599,7 +606,22 @@ export class DwsClient implements DwsClientLike {
         'DWS is not authenticated. Run `dws auth login` for the selected profile.',
       );
     }
-    return { profile: this.profile };
+    const selfSenderId = findScalar(
+      response,
+      new Set([
+        'openDingTalkId',
+        'open_dingtalk_id',
+        'senderOpenDingTalkId',
+        'sender_open_dingtalk_id',
+      ]),
+    );
+    return {
+      profile: this.profile,
+      selfSenderIds:
+        typeof selfSenderId === 'string' && selfSenderId.trim()
+          ? [selfSenderId]
+          : undefined,
+    };
   }
 
   async subscribeToIm(
@@ -711,10 +733,11 @@ export class DwsClient implements DwsClientLike {
     startTime: number,
     endTime: number,
     signal?: AbortSignal,
-  ): Promise<DwsImMessage[]> {
+    initialCursor = '0',
+  ): Promise<DwsMessageHistoryPage> {
     const messages: DwsImMessage[] = [];
-    const seenCursors = new Set<string>();
-    let cursor = '0';
+    const seenCursors = new Set<string>([initialCursor]);
+    let cursor = initialCursor;
     for (let page = 0; page < MAX_MESSAGE_PAGES; page++) {
       signal?.throwIfAborted();
       const response = await this.run(
@@ -771,18 +794,19 @@ export class DwsClient implements DwsClientLike {
         }
       }
       if (findScalar(response, new Set(['hasMore'])) !== true) {
-        return messages;
+        return { messages };
       }
       const next = findScalar(response, new Set(['nextCursor']));
       if (typeof next !== 'string' || !next || seenCursors.has(next)) {
         throw new Error('DWS returned an invalid message pagination cursor.');
       }
       seenCursors.add(next);
+      if (page === MAX_MESSAGE_PAGES - 1) {
+        return { messages, nextCursor: next };
+      }
       cursor = next;
     }
-    throw new Error(
-      `DWS message pagination exceeded ${MAX_MESSAGE_PAGES} pages.`,
-    );
+    return { messages };
   }
 
   async readDocument(
