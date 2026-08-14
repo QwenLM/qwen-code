@@ -324,11 +324,17 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
       'can be fooled into a wrong result is **Critical**',
     );
     // The witness contract: without a concrete demonstrated corner the shape
-    // finding confirms only low, never posts, and never reaches the ledger the
-    // backstop reads (nor survives holdUnwitnessedCriticals). Drop it and the
-    // headline mechanism goes inert.
+    // finding confirms only low, and low-confidence findings are terminal-only —
+    // they never post and never reach the ledger the backstop reads. Drop it and
+    // the headline mechanism goes inert.
     expect(ENUMERATION_TRAP_LENS).toContain(
       "Carry ONE demonstrated corner as the finding's witness",
+    );
+    // The bounded-surface exception is the false-positive guard R4-2 demanded;
+    // deleting it would make the lens escalate a small exhaustively-specified
+    // grammar. Pin it literally — the delivery assertions cannot see its loss.
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'Adversarial input alone does NOT make a surface unbounded',
     );
   });
 });
