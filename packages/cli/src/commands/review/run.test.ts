@@ -668,6 +668,17 @@ describe('review run (handler)', () => {
     expect(prompt).toBe('/review 7724 --resume');
   });
 
+  it('passes --resume through with no target — the child owns the gating', async () => {
+    // A guard like `args.resume && args.target` would ship the whole suite
+    // green while silently dropping the flag before the child can emit the
+    // documented "ignored because the target is not a PR" warning.
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ resume: true });
+
+    const [, argvUsed] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(argvUsed[argvUsed.indexOf('--prompt') + 1]).toBe('/review --resume');
+  });
+
   it('omits --resume from the child prompt when not asked', async () => {
     armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
     await runHandler({ target: '7724', resume: false });
