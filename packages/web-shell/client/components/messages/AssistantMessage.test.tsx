@@ -55,6 +55,7 @@ function renderCompletedThinking(
   const tree = (isStreaming: boolean) => (
     <I18nProvider language={language}>
       <ThinkingMessage
+        messageId={`completed-${durationMs}-${language}`}
         content="private chain of thought"
         isStreaming={isStreaming}
         timestamp={0}
@@ -94,7 +95,11 @@ describe('AssistantMessage thinking logic', () => {
 
   it('keeps replayed completed thinking durationless', () => {
     const container = render(
-      <ThinkingMessage content="private chain of thought" timestamp={0} />,
+      <ThinkingMessage
+        messageId="replayed"
+        content="private chain of thought"
+        timestamp={0}
+      />,
     );
 
     expect(container.textContent).toContain('Done thinking');
@@ -128,6 +133,7 @@ describe('AssistantMessage thinking logic', () => {
 
     const container = render(
       <ThinkingMessage
+        messageId="running"
         content="private chain of thought"
         isStreaming
         timestamp={0}
@@ -180,6 +186,7 @@ describe('AssistantMessage thinking logic', () => {
     });
     const container = render(
       <ThinkingMessage
+        messageId="translated-thinking"
         content="private chain of thought"
         generateContent={generateContent}
       />,
@@ -220,6 +227,7 @@ describe('AssistantMessage thinking logic', () => {
   it('only offers translation when the UI language is Chinese', () => {
     const container = render(
       <ThinkingMessage
+        messageId="english-thinking"
         content="private chain of thought"
         generateContent={async function* () {}}
       />,
@@ -245,7 +253,8 @@ describe('AssistantMessage thinking logic', () => {
     };
     const container = render(
       <ThinkingMessage
-        content="private chain of thought that fails"
+        messageId="empty-translation"
+        content="private chain of thought"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -283,7 +292,8 @@ describe('AssistantMessage thinking logic', () => {
     });
     const container = render(
       <ThinkingMessage
-        content="private chain of thought to cancel"
+        messageId="cancel-translation"
+        content="private chain of thought"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -340,7 +350,8 @@ describe('AssistantMessage thinking logic', () => {
     };
     const container = render(
       <ThinkingMessage
-        content="private chain of thought with thinking status"
+        messageId="thinking-translation"
+        content="private chain of thought"
         generateContent={generateContent}
       />,
       'zh-CN',
@@ -365,6 +376,7 @@ describe('AssistantMessage thinking logic', () => {
   it('does not offer translation while thinking is streaming', () => {
     const container = render(
       <ThinkingMessage
+        messageId="still-running"
         content="private chain of thought"
         isStreaming
         generateContent={async function* () {}}

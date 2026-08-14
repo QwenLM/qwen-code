@@ -19,12 +19,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
-import type {
-  ToolGroupMessage as DaemonToolGroupMessage,
-  Message,
-  ACPToolCall,
-  TurnCollapseHead,
-} from '../adapters/types';
+import type { Message, ACPToolCall, TurnCollapseHead } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import {
   isBackgroundSubAgentToolCall,
@@ -273,6 +268,10 @@ function isForceExpandGroup(
   return false;
 }
 
+function isHiddenInCompactMode(msg: Message): boolean {
+  return msg.role === 'thinking';
+}
+
 function isStandaloneToolGroup(msg: Message): boolean {
   return (
     msg.role === 'tool_group' &&
@@ -292,85 +291,63 @@ function mergeCompactToolGroups(
   const result: Message[] = [];
   let i = 0;
 
-  const isMergedToolGroup = (m: Message): boolean =>
-    m.role === 'tool_group' &&
-    !isForceExpandGroup(m, pendingApproval) &&
-    !isStandaloneToolGroup(m);
-
   while (i < messages.length) {
     const msg = messages[i];
-    const isThinking = msg.role === 'thinking';
 
-    if (!isThinking && !isMergedToolGroup(msg)) {
+    if (
+      msg.role !== 'tool_group' ||
+      isForceExpandGroup(msg, pendingApproval) ||
+      isStandaloneToolGroup(msg)
+    ) {
+      if (!isHiddenInCompactMode(msg)) {
+        result.push(msg);
+      }
+      i++;
+      continue;
+    }
+
+    const mergeableGroups: Message[] = [msg];
+    let lastMergedIdx = i;
+    let j = i + 1;
+
+    while (j < messages.length) {
+      const next = messages[j];
+
+      if (isHiddenInCompactMode(next)) {
+        j++;
+        continue;
+      }
+
+      if (
+        next.role === 'tool_group' &&
+        !isForceExpandGroup(next, pendingApproval) &&
+        !isStandaloneToolGroup(next)
+      ) {
+        mergeableGroups.push(next);
+        lastMergedIdx = j;
+        j++;
+        continue;
+      }
+
+      break;
+    }
+
+    if (mergeableGroups.length === 1) {
       result.push(msg);
       i++;
       continue;
     }
 
-    // A run of thinking + adjacent tool groups aggregates into one summary,
-    // keeping the original interleaved order.
-    const run: Message[] = [];
-    let lastRunIdx = i - 1;
-    let j = i;
-    while (j < messages.length) {
-      const next = messages[j];
-      if (next.role === 'thinking' || isMergedToolGroup(next)) {
-        run.push(next);
-        lastRunIdx = j;
-        j++;
-        continue;
-      }
-      break;
-    }
-
-    const tools = run
-      .filter((m): m is DaemonToolGroupMessage => m.role === 'tool_group')
-      .flatMap((group) => group.tools);
-    const hasStreamingThought = run.some(
-      (m) => m.role === 'thinking' && m.isStreaming === true,
+    const mergedTools = mergeableGroups.flatMap((g) =>
+      g.role === 'tool_group' ? g.tools : [],
     );
-    if (tools.length === 0 && !hasStreamingThought) {
-      // Completed thinking with no adjacent tools stays a standalone row.
-      for (const item of run) result.push(item);
-      i = lastRunIdx + 1;
-      continue;
-    }
-
-    // Each thought remembers the tool that follows it, so the group renders
-    // in the original order without the view reordering anything.
-    const thoughts: Array<{
-      content: string;
-      isStreaming?: boolean;
-      beforeToolCallId?: string;
-    }> = [];
-    const thoughtsAwaitingTool: Array<(typeof thoughts)[number]> = [];
-    for (const item of run) {
-      if (item.role === 'thinking') {
-        const thought = {
-          content: item.content,
-          ...(item.isStreaming === true ? { isStreaming: true } : {}),
-        };
-        thoughts.push(thought);
-        thoughtsAwaitingTool.push(thought);
-      } else if (item.role === 'tool_group' && item.tools.length > 0) {
-        const firstToolCallId = item.tools[0]!.callId;
-        for (const thought of thoughtsAwaitingTool) {
-          thought.beforeToolCallId = firstToolCallId;
-        }
-        thoughtsAwaitingTool.length = 0;
-      }
-    }
     result.push({
-      // Synthetic id so the aggregated group never collides with an original
-      // message key: React then remounts instead of carrying the expanded
-      // summary state into non-compact mode.
-      id: `summary-${run[0]!.id}`,
+      id: mergeableGroups[0].id,
       role: 'tool_group',
-      tools,
-      ...(thoughts.length > 0 ? { thoughts } : {}),
-      timestamp: run[0]!.timestamp,
+      tools: mergedTools,
+      timestamp: mergeableGroups[0].timestamp,
     });
-    i = lastRunIdx + 1;
+    i = lastMergedIdx + 1;
   }
 
   return result;
@@ -1752,13 +1729,6 @@ export function applyTurnCollapse(
       toolCallCount += itemToolCallCount(item);
       if (item.type === 'message' && item.message.role === 'thinking') {
         thinkingCount++;
-      } else if (
-        item.type === 'message' &&
-        item.message.role === 'tool_group' &&
-        item.message.thoughts
-      ) {
-        // Compact mode folds thinking into tool summaries; count it too.
-        thinkingCount += item.message.thoughts.length;
       }
       const terminalTimestamp = terminalTurnTimestamp(item);
       if (terminalTimestamp !== undefined) {

@@ -136,23 +136,11 @@
 .translateButton {
   flex-shrink: 0;
   margin-left: 7px;
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted-foreground);
+  color: var(--foreground);
   cursor: pointer;
-  font: inherit;
-  font-size: 12px;
-  line-height: inherit;
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
-}
-
-.translateButton:hover,
-.translateButton:focus-visible {
-  color: var(--primary);
 }
 
 .thinkingHeader:hover .translateButton,
