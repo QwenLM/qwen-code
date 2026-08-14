@@ -10,10 +10,20 @@
  * through SendMessageOptions.
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { SendMessageType } from '@qwen-code/qwen-code-core';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { livePromptEvents } from './live-session.js';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { ApprovalMode, SendMessageType } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallConfirmationDetails,
+} from '@qwen-code/qwen-code-core';
+import {
+  livePromptEvents,
+  nextApprovalMode,
+  resetPromptCountForTesting,
+  selectAutoApprovals,
+  type WaitingCallInfo,
+} from './live-session.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 // The steering test drives one full tool round-trip; replace the scheduler
 // with a stub that completes the pending calls immediately.
@@ -26,10 +36,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       private readonly opts: {
         onAllToolCallsComplete: (calls: unknown[]) => unknown;
         onToolCallsUpdate?: (calls: unknown[]) => unknown;
+        outputUpdateHandler?: (callId: string, chunk: unknown) => unknown;
       };
       constructor(opts: {
         onAllToolCallsComplete: (calls: unknown[]) => unknown;
         onToolCallsUpdate?: (calls: unknown[]) => unknown;
+        outputUpdateHandler?: (callId: string, chunk: unknown) => unknown;
       }) {
         this.opts = opts;
       }
@@ -51,6 +63,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               },
             })),
           );
+        }
+        // Live output bridge: one chunk per call before completion (the
+        // shape is chosen by the individual tests via the call args).
+        for (const c of calls) {
+          const chunks = ((c.args ?? {}) as { __liveChunks?: unknown[] })
+            .__liveChunks ?? ['live output\n'];
+          for (const chunk of chunks) {
+            this.opts.outputUpdateHandler?.(c.callId, chunk);
+          }
         }
         await this.opts.onAllToolCallsComplete(
           calls.map((c) => ({
@@ -83,6 +104,10 @@ function createFakeConfig(sendMessageStream: (...args: unknown[]) => unknown) {
   return {
     initialize: vi.fn(async () => {}),
     getGeminiClient: () => ({ sendMessageStream }),
+    getSessionId: () => 'session-1',
+    getModel: () => 'test-model',
+    getMaxSessionTurns: () => 10,
+    getContentGeneratorConfig: () => ({ authType: 'qwen-oauth' }),
   } as unknown as Config;
 }
 
@@ -93,6 +118,10 @@ async function drain(gen: AsyncGenerator<unknown>): Promise<unknown[]> {
 }
 
 describe('livePromptEvents', () => {
+  beforeEach(() => {
+    resetPromptCountForTesting();
+  });
+
   it('forwards string prompts without send options', async () => {
     const sendMessageStream = vi.fn(function* () {});
     const config = createFakeConfig(sendMessageStream);
@@ -102,12 +131,53 @@ describe('livePromptEvents', () => {
 
     expect(config.initialize).toHaveBeenCalled();
     expect(sendMessageStream).toHaveBeenCalledTimes(1);
-    const [prompt, passedSignal, promptId, options] = sendMessageStream.mock
+    const [prompt, passedSignal, , options] = sendMessageStream.mock
       .calls[0] as unknown[];
     expect(prompt).toBe('hello');
     expect(passedSignal).toBe(signal);
-    expect(String(promptId)).toMatch(/^opentui-/);
     expect(options).toBeUndefined();
+  });
+
+  it('uses the ink promptId format and increments promptCount per turn', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(livePromptEvents(config, 'one'));
+    await drain(livePromptEvents(config, 'two'));
+
+    // ink parity: sessionId + '########' + promptCount (useGeminiStream:3287)
+    expect((sendMessageStream.mock.calls[0] as unknown[])[2]).toBe(
+      'session-1########0',
+    );
+    expect((sendMessageStream.mock.calls[1] as unknown[])[2]).toBe(
+      'session-1########1',
+    );
+  });
+
+  it('keeps one promptId across the tool-continuation loop of a turn', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(livePromptEvents(config, 'go'));
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    expect((sendMessageStream.mock.calls[0] as unknown[])[2]).toBe(
+      (sendMessageStream.mock.calls[1] as unknown[])[2],
+    );
   });
 
   it('forwards multimodal part lists unchanged', async () => {
@@ -232,5 +302,190 @@ describe('livePromptEvents', () => {
       callId: 'w1',
       name: 'ask_user_question',
     });
+  });
+
+  describe('tool execution live output (outputUpdateHandler)', () => {
+    /** One tool batch on call 1, plain finish on the continuation call. */
+    function oneToolBatchStream(request: {
+      callId: string;
+      name: string;
+      args?: unknown;
+    }) {
+      let calls = 0;
+      return vi.fn(function* (): Generator<{
+        type: string;
+        value?: unknown;
+      }> {
+        calls += 1;
+        if (calls === 1) {
+          yield { type: 'tool_call_request', value: request };
+          return;
+        }
+        yield { type: 'finished', value: {} };
+      });
+    }
+
+    it('streams tool-output events while the tool executes', async () => {
+      const sendMessageStream = oneToolBatchStream({
+        callId: 't1',
+        name: 'run_shell_command',
+      });
+      const config = createFakeConfig(sendMessageStream);
+
+      const events = (await drain(
+        livePromptEvents(config, 'run'),
+      )) as OpenTuiStreamEvent[];
+
+      const outputIdx = events.findIndex((e) => e.type === 'tool-output');
+      expect(outputIdx).toBeGreaterThanOrEqual(0);
+      expect(events[outputIdx]).toEqual({
+        type: 'tool-output',
+        id: 't1',
+        delta: 'live output\n',
+      });
+      // Live output arrives before the tool-end settlement.
+      const endIdx = events.findIndex((e) => e.type === 'tool-end');
+      expect(outputIdx).toBeLessThan(endIdx);
+    });
+
+    it('ignores shell_progress heartbeats', async () => {
+      const sendMessageStream = oneToolBatchStream({
+        callId: 't1',
+        name: 'run_shell_command',
+        args: { __liveChunks: [{ type: 'shell_progress', elapsedMs: 5 }] },
+      });
+      const config = createFakeConfig(sendMessageStream);
+
+      const events = (await drain(
+        livePromptEvents(config, 'run'),
+      )) as OpenTuiStreamEvent[];
+
+      expect(events.some((e) => e.type === 'tool-output')).toBe(false);
+    });
+
+    it('maps task_execution chunks to task card events', async () => {
+      const running = {
+        type: 'task_execution',
+        subagentName: 'researcher',
+        taskDescription: 'benchmark renders',
+        status: 'running',
+        toolCalls: [{ callId: 'x1', name: 'grep_search', status: 'executing' }],
+      };
+      const completed = {
+        ...running,
+        status: 'completed',
+        toolCalls: [
+          { callId: 'x1', name: 'grep_search', status: 'success' },
+          {
+            callId: 'x2',
+            name: 'read_file',
+            status: 'success',
+            description: 'Read app.tsx',
+          },
+        ],
+        executionSummary: {
+          totalToolCalls: 2,
+          totalDurationMs: 12400,
+          totalTokens: 2100,
+        },
+      };
+      const sendMessageStream = oneToolBatchStream({
+        callId: 'agent1',
+        name: 'agent',
+        args: { __liveChunks: [running, completed] },
+      });
+      const config = createFakeConfig(sendMessageStream);
+
+      const events = (await drain(
+        livePromptEvents(config, 'delegate'),
+      )) as OpenTuiStreamEvent[];
+
+      expect(events).toContainEqual({
+        type: 'task-start',
+        id: 'agent1',
+        name: 'researcher',
+        description: 'benchmark renders',
+      });
+      expect(events).toContainEqual({
+        type: 'task-progress',
+        id: 'agent1',
+        line: '↳ grep_search',
+      });
+      expect(events).toContainEqual({
+        type: 'task-progress',
+        id: 'agent1',
+        line: '↳ Read app.tsx',
+      });
+      expect(events).toContainEqual({
+        type: 'task-end',
+        id: 'agent1',
+        tools: 2,
+        seconds: 12.4,
+        tokens: '2.1k',
+      });
+      // Progress for already-seen subagent tool calls is not repeated.
+      expect(
+        events.filter(
+          (e) => e.type === 'task-progress' && e.line === '↳ grep_search',
+        ),
+      ).toHaveLength(1);
+    });
+  });
+});
+
+describe('approval-mode helpers', () => {
+  it('cycles through the core order including PLAN', () => {
+    expect(nextApprovalMode(ApprovalMode.PLAN)).toBe(ApprovalMode.DEFAULT);
+    expect(nextApprovalMode(ApprovalMode.DEFAULT)).toBe(ApprovalMode.AUTO_EDIT);
+    expect(nextApprovalMode(ApprovalMode.AUTO_EDIT)).toBe(ApprovalMode.AUTO);
+    expect(nextApprovalMode(ApprovalMode.AUTO)).toBe(ApprovalMode.YOLO);
+    expect(nextApprovalMode(ApprovalMode.YOLO)).toBe(ApprovalMode.PLAN);
+    expect(nextApprovalMode(undefined)).toBe(ApprovalMode.AUTO_EDIT);
+  });
+
+  const waitingCall = (
+    callId: string,
+    name: string,
+    extra?: Partial<{ hideAlwaysAllow: boolean }>,
+  ): WaitingCallInfo => ({
+    callId,
+    name,
+    confirmationDetails: {
+      type: 'exec',
+      title: name,
+      command: 'ls',
+      rootCommand: 'ls',
+      onConfirm: async () => {},
+      ...extra,
+    } as ToolCallConfirmationDetails,
+  });
+
+  it('YOLO auto-approves every waiting call except hideAlwaysAllow', () => {
+    const waiting = [
+      waitingCall('a', 'run_shell_command'),
+      waitingCall('b', 'ask_user_question'),
+      waitingCall('c', 'edit', { hideAlwaysAllow: true }),
+    ];
+    const approved = selectAutoApprovals(ApprovalMode.YOLO, waiting);
+    expect(approved.map((c) => c.callId)).toEqual(['a', 'b']);
+  });
+
+  it('AUTO_EDIT auto-approves only edit tools', () => {
+    const waiting = [
+      waitingCall('a', 'run_shell_command'),
+      waitingCall('b', 'edit'),
+      waitingCall('c', 'write_file'),
+      waitingCall('d', 'notebook_edit'),
+      waitingCall('e', 'replace'),
+    ];
+    const approved = selectAutoApprovals(ApprovalMode.AUTO_EDIT, waiting);
+    expect(approved.map((c) => c.callId)).toEqual(['b', 'c', 'd', 'e']);
+  });
+
+  it('other mode switches auto-approve nothing', () => {
+    const waiting = [waitingCall('a', 'edit')];
+    expect(selectAutoApprovals(ApprovalMode.DEFAULT, waiting)).toEqual([]);
+    expect(selectAutoApprovals(ApprovalMode.AUTO, waiting)).toEqual([]);
+    expect(selectAutoApprovals(ApprovalMode.PLAN, waiting)).toEqual([]);
   });
 });

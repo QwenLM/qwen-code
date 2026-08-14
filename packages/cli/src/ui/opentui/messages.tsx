@@ -427,6 +427,13 @@ export function MessageList({ items, expanded, onToggle }: MessageListProps) {
                 onToggle={onToggle}
               />
             );
+          case 'image':
+            // Text-only surface: placeholder for inline model images.
+            return (
+              <box key={item.id} flexDirection="row" marginTop={1}>
+                <text fg={C.dim}>{`[image: ${item.mimeType}]`}</text>
+              </box>
+            );
         }
       })}
     </>

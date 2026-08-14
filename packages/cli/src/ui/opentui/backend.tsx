@@ -27,6 +27,7 @@ import {
   foldLiveEvent,
   settleOpenTools,
   type LiveHistoryItem,
+  type LiveImageItem,
   type LiveThinkingItem,
   type LiveToolItem,
 } from './live-session-model.js';
@@ -52,7 +53,12 @@ import { readFileSync } from 'node:fs';
 import nodePath from 'node:path';
 import { execSync } from 'node:child_process';
 import type { Part, PartListUnion } from '@google/genai';
-import { livePromptEvents } from './live-session.js';
+import {
+  livePromptEvents,
+  nextApprovalMode,
+  selectAutoApprovals,
+  type WaitingCallInfo,
+} from './live-session.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import { isSlashCommandInput } from './slash-dispatch.js';
 import {
@@ -338,6 +344,21 @@ function AssistantMessage(props: {
   );
 }
 
+/** Inline model image (content part inlineData); terminals without a
+ *  graphics protocol simply leave the box empty (onError swallowed). */
+function ImageItem(props: { item: LiveImageItem }) {
+  const { item } = props;
+  const source = useMemo(
+    () => new Uint8Array(Buffer.from(item.data, 'base64')),
+    [item.data],
+  );
+  return (
+    <box paddingLeft={1} marginTop={1}>
+      <image source={source} width={64} height={18} onError={() => {}} />
+    </box>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // app
 // ---------------------------------------------------------------------------
@@ -431,6 +452,8 @@ function approvalModeLabel(mode: string): string {
       return 'Auto-edit';
     case 'auto':
       return 'Auto';
+    case 'plan':
+      return 'Plan';
     default:
       return 'Default';
   }
@@ -668,6 +691,12 @@ function App({
     names: string;
     resolve: (b: boolean) => void;
   } | null>(null);
+  // Waiting (awaiting_approval) scheduler calls by callId — consumed by the
+  // approval-mode switch auto-approve path (handleApprovalModeChange parity).
+  const pendingApprovalsRef = useRef(new Map<string, WaitingCallInfo>());
+  // callId owning the currently visible confirm/question dialog (null when
+  // the dialog is the DEFAULT-mode batch confirm).
+  const approvalDialogCallIdRef = useRef<string | null>(null);
   // ask_user_question dialog (scheduler awaiting_approval parity).
   const [questionReq, setQuestionReq] = useState<{
     questions: Array<{
@@ -843,6 +872,46 @@ function App({
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [events, config, startStream, applyEvent]);
+
+  // -i/--prompt-interactive (AppContainer initialPrompt parity, simplified):
+  // with a question and a live config, auto-submit once after the first
+  // frame through the normal submit pipeline.
+  const initialPromptSubmittedRef = useRef(false);
+  useEffect(() => {
+    if (!config || initialPromptSubmittedRef.current) return;
+    const question = config.getQuestion();
+    if (!question) return;
+    initialPromptSubmittedRef.current = true;
+    const t = setTimeout(() => submitTextRef.current?.(question), 0);
+    return () => clearTimeout(t);
+  }, [config]);
+
+  // Approval-mode switch (Shift+Tab / dialog): cycling includes PLAN (core
+  // approval-mode.ts order), and switching into YOLO/AUTO_EDIT auto-confirms
+  // still-waiting calls with ProceedOnce (useGeminiStream
+  // handleApprovalModeChange parity).
+  const switchApprovalMode = (next: ApprovalMode) => {
+    setApprovalMode(next);
+    const approved = selectAutoApprovals(next, [
+      ...pendingApprovalsRef.current.values(),
+    ]);
+    if (approved.length === 0) return;
+    let dialogOwnerApproved = false;
+    for (const call of approved) {
+      pendingApprovalsRef.current.delete(call.callId);
+      if (approvalDialogCallIdRef.current === call.callId) {
+        dialogOwnerApproved = true;
+      }
+      void call.confirmationDetails
+        .onConfirm(ToolConfirmationOutcome.ProceedOnce)
+        .catch(() => {});
+    }
+    if (dialogOwnerApproved) {
+      approvalDialogCallIdRef.current = null;
+      setConfirmReq(null);
+      setQuestionReq(null);
+    }
+  };
 
   useKeyboard((key) => {
     if (questionReq) {
@@ -1046,15 +1115,8 @@ function App({
       return;
     }
     if (key.name === 'tab' && key.shift) {
-      // cycle approval mode (mirrors original Shift+Tab)
-      const order = [
-        ApprovalMode.DEFAULT,
-        ApprovalMode.AUTO_EDIT,
-        ApprovalMode.AUTO,
-        ApprovalMode.YOLO,
-      ];
-      const idx = order.indexOf(approvalMode ?? ApprovalMode.DEFAULT);
-      setApprovalMode(order[(idx + 1) % order.length]);
+      // cycle approval mode (mirrors original Shift+Tab; includes PLAN)
+      switchApprovalMode(nextApprovalMode(approvalMode));
       return;
     }
     if (key.name === 'escape' && streaming) {
@@ -1107,6 +1169,7 @@ function App({
                 ? {
                     confirmBatch: (reqs: Array<{ name: string }>) =>
                       new Promise<boolean>((resolve) => {
+                        approvalDialogCallIdRef.current = null;
                         setConfirmReq({
                           names: reqs.map((r) => r.name).join(', '),
                           resolve,
@@ -1115,7 +1178,19 @@ function App({
                   }
                 : {}),
               drainSteering,
-              onWaitingCall: ({ name, confirmationDetails }) => {
+              onWaitingCall: ({ callId, name, confirmationDetails }) => {
+                pendingApprovalsRef.current.set(callId, {
+                  callId,
+                  name,
+                  confirmationDetails,
+                });
+                approvalDialogCallIdRef.current = callId;
+                const settleWaitingCall = () => {
+                  pendingApprovalsRef.current.delete(callId);
+                  if (approvalDialogCallIdRef.current === callId) {
+                    approvalDialogCallIdRef.current = null;
+                  }
+                };
                 if (confirmationDetails.type === 'ask_user_question') {
                   const details = confirmationDetails;
                   qAnswersRef.current = {};
@@ -1129,6 +1204,7 @@ function App({
                   setQuestionReq({
                     questions: details.questions,
                     resolve: (answers) => {
+                      settleWaitingCall();
                       void details.onConfirm(
                         answers
                           ? ToolConfirmationOutcome.ProceedOnce
@@ -1141,6 +1217,7 @@ function App({
                   setConfirmReq({
                     names: `${name} needs approval`,
                     resolve: (ok) => {
+                      settleWaitingCall();
                       void confirmationDetails.onConfirm(
                         ok
                           ? ToolConfirmationOutcome.ProceedOnce
@@ -1153,6 +1230,12 @@ function App({
             },
           ))
             applyEvent(ev);
+          // Turn end: the generator only returns when the whole agent loop
+          // (model + tool batches) is done, so settle tool cards and drop
+          // the streaming state HERE — the core `finished` event arrives
+          // before tool execution and no longer maps to `done` (premature
+          // "✗ skipped" fix).
+          applyEvent({ type: 'done' });
           // The turn completed: fire the submit_prompt callback (e.g. skill
           // completion hooks). ink logs failures to the debug logger.
           if (options?.onComplete) {
@@ -1171,8 +1254,10 @@ function App({
               controller.signal.aborted ? 'interrupted' : 'error',
             ),
           );
+          applyEvent({ type: 'done' });
         } finally {
           if (liveAbortRef.current === controller) liveAbortRef.current = null;
+          pendingApprovalsRef.current.clear();
           setStreaming(false);
           const next = queuedPromptsRef.current.shift();
           setQueuedPrompts([...queuedPromptsRef.current]);
@@ -1461,6 +1546,8 @@ function App({
                   onToggle={toggle}
                 />
               );
+            case 'image':
+              return <ImageItem key={item.id} item={item} />;
           }
         })}
         <box height={1} />
@@ -1615,7 +1702,7 @@ function App({
             applyEvent({ type: 'text', delta: text });
             applyEvent({ type: 'done' });
           }}
-          onApprovalModeChanged={setApprovalMode}
+          onApprovalModeChanged={switchApprovalMode}
         />
       )}
     </box>

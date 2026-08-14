@@ -7,9 +7,9 @@
 /**
  * History fold for the OpenTUI backend: reduces neutral stream events (the
  * `ui/model/streamingModel` union plus the local lossless extensions
- * `tool-args` / `tool-result` / `confirm`) into render-ready history items.
- * Tool cards additionally carry args text and the approval state
- * (pending → approved/rejected).
+ * `tool-args` / `tool-result` / `confirm` / `segment-end` / `image`) into
+ * render-ready history items. Tool cards additionally carry args text and
+ * the approval state (pending → approved/rejected).
  */
 
 import type { HistoryItem } from '../model/streamingModel.js';
@@ -27,10 +27,19 @@ export type LiveThinkingItem = Extract<HistoryItem, { kind: 'thinking' }> & {
   durationMs?: number;
 };
 
+/** Inline image returned by the model (content part `inlineData`). */
+export type LiveImageItem = {
+  kind: 'image';
+  id: string;
+  mimeType: string;
+  data: string;
+};
+
 export type LiveHistoryItem =
   | Exclude<HistoryItem, { kind: 'tool' } | { kind: 'thinking' }>
   | LiveThinkingItem
-  | LiveToolItem;
+  | LiveToolItem
+  | LiveImageItem;
 
 let uid = 0;
 const nid = (p: string) => `${p}${++uid}`;
@@ -199,6 +208,24 @@ export function foldLiveEvent(
           stats: `${ev.tools} tools · ${ev.seconds}s · ${ev.tokens} tokens`,
         };
       }
+      return items;
+    }
+    case 'image': {
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
+      items.push({
+        kind: 'image',
+        id: nid('img'),
+        mimeType: ev.mimeType,
+        data: ev.data,
+      });
+      return items;
+    }
+    case 'segment-end': {
+      // Close the streaming assistant block only — tools keep running and
+      // the turn stays in flight (`done` is the sole turn-end event).
+      if (last?.kind === 'assistant' && last.streaming)
+        items[items.length - 1] = { ...last, streaming: false };
       return items;
     }
     case 'done': {
