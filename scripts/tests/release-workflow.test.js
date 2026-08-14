@@ -5,7 +5,9 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
@@ -85,8 +87,26 @@ describe('release workflow', () => {
     // first — and it must be keyed by the computed tag, which only exists
     // as a prepare output, plus is_dry_run, so a dry run (which ships
     // nothing) never queues ahead of the real release for the same tag.
+    // timeout-minutes bounds the hold a wedged publish (a stalled npm
+    // publish or asset upload) keeps on the group: without it the GitHub
+    // default of 360 minutes leaves same-tag retries queued behind it,
+    // unable to run, fail, or notify.
     expect(workflow).toMatch(
-      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.release_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false[\s\S]*?environment:\n {6}name: 'production-release'/,
+      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.release_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
+    );
+  });
+
+  it('refuses the force push when the checked-out ref predates the guard', () => {
+    // The guard runs scripts/get-release-version.js from the checked-out
+    // ref — the operator-controlled dispatch input `ref` — and a pre-PR
+    // ref's entry point ignores --assert-unreleased, prints version JSON,
+    // and exits 0 (probed against the merge base), so GUARD_STATUS=0
+    // would read as "unreleased verified" while the guard never ran. Pin
+    // the capability check that fails closed instead: inside the dry-run
+    // guard, ahead of the guard invocation, refusing with a plain
+    // failure so the run notifies instead of force-pushing unverified.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?if ! grep -q "assert-unreleased" scripts\/get-release-version\.js; then\n {14}echo "::error::Checked-out ref predates the push-time guard; refusing force push\."\n {14}exit 1\n {12}fi[\s\S]*?for attempt in 1 2 3; do\n {14}GUARD_STATUS=0\n {14}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?/,
     );
   });
 
@@ -109,9 +129,12 @@ describe('release workflow', () => {
     // a hit, failing closed on a probe error) are unit-tested in
     // get-release-version.test.js. The `|| GUARD_STATUS=$?` suffix is
     // pinned too: notify_failure's refusal gate reads the guard's exit
-    // code through it.
+    // code through it, and the retry loop is pinned around the call:
+    // GUARD_STATUS is reset each attempt and only exit 2 (a probe
+    // failure) retries — exit 0 and exit 3 stay decisive on the first
+    // attempt.
     expect(workflow).toMatch(
-      /name: 'Commit and Conditionally Push package versions'\n {8}id: 'push_release_branch'\n {8}env:\n[\s\S]*?GITHUB_TOKEN: '\$\{\{ github\.token \}\}'[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?\n {12}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
+      /name: 'Commit and Conditionally Push package versions'\n {8}id: 'push_release_branch'\n {8}env:\n[\s\S]*?GITHUB_TOKEN: '\$\{\{ github\.token \}\}'[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?for attempt in 1 2 3; do\n {14}GUARD_STATUS=0\n {14}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
     );
   });
 
@@ -122,9 +145,11 @@ describe('release workflow', () => {
     // publish job must export the marker, and notify_failure must skip
     // its "Release Failed" issue + autofix dispatch for it — while any
     // other guard exit (a fail-closed probe error) and every later
-    // publish failure still notify.
+    // publish failure still notify — including through the propagation
+    // branch pinned verbatim below: without it a probe failure falls
+    // through to the force push unverified.
     expect(workflow).toMatch(
-      /node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?\n {12}if \[\[ "\$\{GUARD_STATUS\}" -eq 3 \]\]; then\n {14}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {14}exit 1/,
+      /node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?[\s\S]*?if \[\[ "\$\{GUARD_STATUS\}" -eq 3 \]\]; then\n {14}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {14}exit 1\n {12}fi\n {12}if \[\[ "\$\{GUARD_STATUS\}" -ne 0 \]\]; then\n {14}exit "\$\{GUARD_STATUS\}"\n {12}fi/,
     );
     expect(workflow).toContain(
       "version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'",
@@ -148,6 +173,29 @@ describe('release workflow', () => {
     expect(result.stderr).toContain(
       '::error::assert-unreleased requires a version',
     );
+  });
+
+  it('exits 3 from the real entry point when the version already shipped', () => {
+    // The workflow reads the refusal through the entry-point exit-status
+    // glue, not through runCli(); the usage-error test above never
+    // exercises exit 3. A stub npm on PATH that echoes the probed
+    // version makes the strict npm scan report "shipped" without
+    // network, so an entry point that swallowed exit 3 fails here
+    // instead of reading as GUARD_STATUS=0 at push time.
+    const stubDir = mkdtempSync(join(tmpdir(), 'npm-stub-'));
+    writeFileSync(join(stubDir, 'npm'), '#!/bin/sh\necho "${2##*@}"\n', {
+      mode: 0o755,
+    });
+    const result = spawnSync(
+      process.execPath,
+      ['scripts/get-release-version.js', '--assert-unreleased=1.2.3'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}` },
+      },
+    );
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('has already shipped');
   });
 
   it('keeps a dispatch failure from failing an already-published release', () => {
