@@ -37,7 +37,7 @@ import { listWorkspaceSessionsForResponse } from '../server/session-list.js';
 import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from './session-source.js';
+} from '../conversations/session-source.js';
 
 const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_READ_TURN_LIMIT = 3;

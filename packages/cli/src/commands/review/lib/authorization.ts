@@ -110,11 +110,19 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   } catch {
     // No args file means no arguments — which means no `--comment`. Fail
     // closed: a missing authorisation record is not an absent objection.
+    // The wording must not send a setting-driven operator to type a flag
+    // they never needed: with `review.comment` on, the real blocker is that
+    // no recorded invocation names a pull request to bind the write to, and
+    // a plain re-run of the review fixes that — typing `--comment` does not.
     return {
       ok: false,
       why:
-        `no review arguments were recorded at ${path}, so this run cannot ` +
-        'show that `--comment` was requested',
+        req.defaultComment === true
+          ? `no review arguments were recorded at ${path}, so no recorded ` +
+            'invocation names a pull request to bind this write to — re-run ' +
+            'the review naming the pull request'
+          : `no review arguments were recorded at ${path}, so this run ` +
+            'cannot show that `--comment` was requested',
     };
   }
 

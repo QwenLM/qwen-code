@@ -773,6 +773,29 @@ describe('budget-gap disclosures — guarded, parsed, never punished', () => {
     expect(r.ok).toBe(true);
   });
 
+  it("labels a non-chunk discloser by its brief codename, not the prompt's first line", () => {
+    // Launchers prepend context: twelve live finders shared one PR-summary
+    // first line, so every disclosure rendered the same truncated PR quote
+    // instead of a name. The codename line names the agent wherever it sits.
+    transcript(
+      '6c',
+      'PR #9045 modifies getAuthTypeFromEnv() to infer auth.\n\nYou are review agent `6c` — Agent 6c: Undirected audit.\n' +
+        wholeDiff(),
+      {
+        calls: 4,
+        text: 'Walked the diff.\nBudget gap: second-order callers of getAuthTypeFromEnv',
+      },
+    );
+
+    const r = coverageFromTranscripts(plan3a(), ENV);
+    expect(r.budgetGaps).toEqual([
+      {
+        agent: 'agent 6c',
+        gaps: ['second-order callers of getAuthTypeFromEnv'],
+      },
+    ]);
+  });
+
   it('a disclosure costs no coverage credit — the gate must not punish it', () => {
     // An earlier draft narrowed a disclosing agent's credit to its ranged
     // reads. `rangeOf` records only reads carrying a positive `limit`, so

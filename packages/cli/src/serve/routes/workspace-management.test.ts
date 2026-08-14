@@ -305,6 +305,119 @@ describe('owned workspace runtime publication', () => {
       'workspace_removed',
     );
   });
+
+  it('rejects and disposes a primary owned-runtime candidate', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-primary', {
+      primary: true,
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).rejects.toThrow('Daemon-owned workspace runtime must not be primary');
+
+    expect(registry.add).not.toHaveBeenCalled();
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+
+  it('disposes a candidate rejected by final pre-publication validation', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-invalid-before-publication', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    runtimeRemoval.runtimeAdded = vi.fn().mockResolvedValue(undefined);
+    const validate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('root changed before publication'));
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        validate,
+      ),
+    ).rejects.toThrow('root changed before publication');
+
+    expect(validate).toHaveBeenCalledOnce();
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.runtimeAdded).not.toHaveBeenCalled();
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+
+  it('keeps a candidate unpublished and the topology lock free during final validation', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-pending-validation', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    let releaseValidation: (() => void) | undefined;
+    const validationGate = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    const validate = vi.fn(async () => validationGate);
+    const runWorkspaceTrustOperation = vi.fn(async (operation) => operation());
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval: createRemovalController(),
+      runWorkspaceTrustOperation,
+    });
+
+    const publication = handle.publishOwnedRuntime(
+      runtime.workspaceCwd,
+      'live-conversation',
+      validate,
+    );
+    await vi.waitFor(() => expect(validate).toHaveBeenCalledOnce());
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBeUndefined();
+    expect(
+      registry.getManagedByWorkspaceCwd(runtime.workspaceCwd),
+    ).toBeUndefined();
+    expect(registry.add).not.toHaveBeenCalled();
+    expect(runWorkspaceTrustOperation).not.toHaveBeenCalled();
+
+    releaseValidation?.();
+    await expect(publication).resolves.toBe(runtime);
+    expect(registry.add).toHaveBeenCalledOnce();
+    expect(runWorkspaceTrustOperation).toHaveBeenCalledTimes(1);
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+  });
 });
 
 describe('POST /workspaces', () => {

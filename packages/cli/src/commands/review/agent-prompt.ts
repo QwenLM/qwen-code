@@ -72,6 +72,7 @@ import {
 } from './lib/retirement.js';
 import {
   BRIEFS,
+  ENUMERATION_TRAP_LENS,
   isRepositoryContextRoleId,
   MODELED_SYSTEM_EXECUTION_LENS,
   type RoleId,
@@ -433,7 +434,11 @@ function toolBudgetBlock(
       'counted in. It is a soft ceiling. At the ceiling: stop exploring, write ' +
       'your findings from the evidence already in hand, and disclose each ' +
       'unfinished check on its own line, exactly as `Budget gap: <the check>` — ' +
-      'the coverage tool reads those lines, so the format is load-bearing. The ' +
+      'the coverage tool reads those lines, so the format is load-bearing. If ' +
+      'nothing was cut short, write NO `Budget gap:` line at all — the format ' +
+      'is only for checks the ceiling stopped: a "none" put there is at best ' +
+      'filtered out, and any wording the filter does not recognize is ' +
+      'published in the review body as a phantom coverage gap. The ' +
       'budget never suppresses a finding: a candidate you can already name goes ' +
       'in your return regardless (at `Confidence: low` if the budget stopped ' +
       'you before verifying it).',
@@ -499,6 +504,15 @@ export function buildChunkAgentPrompt(
       '',
       `    Uncoverable: chunk ${chunk.id} — line exceeds the read limit`,
     );
+    // Return the receipt and stop. An unreachable chunk's ONE instruction is to
+    // return the Uncoverable line, so it must not also carry the ordinary review
+    // block (dimensions, the shape lens, the finding format) — that is the
+    // two-masters contradiction the modeled-system and tool-budget blocks already
+    // guard against with `!unreachable`; returning here makes the whole ordinary
+    // contract do the same by construction. The downstream `!unreachable` guards
+    // (modeled-system lens, tool-budget, Covered receipt) are now belt-and-braces
+    // — inert while this return stands, deliberate if it is ever removed.
+    return parts.join('\n');
   } else if (chunk.oversized) {
     parts.push(
       '',
@@ -522,6 +536,10 @@ export function buildChunkAgentPrompt(
       'agent is structurally blind to them: cross-file tracing (a caller in another chunk) and ' +
       'the cross-chunk half of removed-behavior. Audit the deletions in your own territory; do ' +
       'not conclude a deletion is unreplaced merely because its replacement is not in your range.',
+    '',
+    '**Shape check (part of code quality — the altitude lens, scoped to your ' +
+      'territory).** For the code in YOUR chunk: ' +
+      ENUMERATION_TRAP_LENS,
     '',
     FINDING_FORMAT,
     '',
