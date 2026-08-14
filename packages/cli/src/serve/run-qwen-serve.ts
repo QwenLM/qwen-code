@@ -104,9 +104,11 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CAPABILITIES_SCHEMA_VERSION,
@@ -133,7 +135,7 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
-import { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import {
   workspaceRegistrationId,
@@ -1040,7 +1042,7 @@ export interface RunQwenServeDeps {
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
   /** Test/embed override; production uses ~/.qwen for the Live Host locator. */
   liveDiscoveryStableBaseDir?: string;
   /** Test/embed override for stable Live locator ownership handoff. */
@@ -2993,6 +2995,13 @@ async function runQwenServeImpl(
       'qwen serve: required external tool guard handshake succeeded.',
     );
   }
+  // Keep the guard's core helper imports out of the serve fast-path bundle.
+  const { createDaemonToolGuard } = await import(
+    './daemon-git-worktree-guard.js'
+  );
+  const daemonToolGuardHandler = createDaemonToolGuard(
+    externalToolGuardHandler,
+  );
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
@@ -3000,8 +3009,9 @@ async function runQwenServeImpl(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: externalToolGuardHandler
-      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+    [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]: externalToolGuardHandler
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
       : undefined,
   };
 
@@ -3446,7 +3456,7 @@ async function runQwenServeImpl(
       );
     }
     const liveConversationWorkspace =
-      deps.liveConversationWorkspace ?? new LiveConversationWorkspace();
+      deps.liveConversationWorkspace ?? new ConversationWorkspace();
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -4212,9 +4222,7 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4623,9 +4631,7 @@ async function runQwenServeImpl(
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -5184,9 +5190,7 @@ async function runQwenServeImpl(
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,
-          ...(externalToolGuardHandler
-            ? { externalToolGuard: externalToolGuardHandler }
-            : {}),
+          externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
