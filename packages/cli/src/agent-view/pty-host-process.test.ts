@@ -696,7 +696,9 @@ describe('Agent View PTY host process server', () => {
     // holding the socket lock, and only the exit poller may declare it dead.
     connected.kill('SIGKILL');
     expect(await notSettledWithin(100)).toBe(false);
-    connected.shutdown();
+    // shutdown is optional on the handle type; the connected handle always
+    // provides it.
+    connected.shutdown?.();
     expect(await notSettledWithin(100)).toBe(false);
   });
 
