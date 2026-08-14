@@ -250,10 +250,14 @@ describe('BridgeClient — managed external tool guard', () => {
     });
     const entry: {
       sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
       promptActive: boolean;
       activePromptId?: string;
     } = {
       sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
       promptActive: true,
       activePromptId: 'prompt-1',
     };
@@ -278,7 +282,115 @@ describe('BridgeClient — managed external tool guard', () => {
       toolCallId: 'call-1',
       toolName: 'write_file',
       arguments: { path: 'README.md' },
+      effectiveCwd: '/workspace/worktree',
     });
+  });
+
+  it('ignores a forged effective directory in the child payload', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry: {
+      sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: { path: 'README.md' },
+        effectiveCwd: '/forged/effective',
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'write_file',
+      arguments: { path: 'README.md' },
+      effectiveCwd: '/workspace/worktree',
+    });
+  });
+
+  it('accepts a prompt-less shell check validated by session ownership', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry: {
+      sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
+      promptActive: false,
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: { command: 'pwd' },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      toolCallId: 'call-1',
+      toolName: 'run_shell_command',
+      arguments: { command: 'pwd' },
+      effectiveCwd: '/workspace/worktree',
+    });
+  });
+
+  it('rejects an empty prompt id in a guard request', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-1',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      }),
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: '',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: {},
+      }),
+    ).rejects.toThrow('Invalid external tool guard request');
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('rejects a stale prompt without contacting the host', async () => {

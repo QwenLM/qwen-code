@@ -137,7 +137,7 @@ interface DaemonSessionClientStaticLike {
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
-  load(
+  resume(
     client: DaemonClientLike,
     sessionId: string,
     req: {
@@ -210,7 +210,7 @@ export function createDaemonSessionFactory({
       sessionScope: 'thread' as const,
     };
     if (req.sessionId) {
-      return await DaemonSessionClient.load(
+      return await DaemonSessionClient.resume(
         client,
         req.sessionId,
         daemonReq,

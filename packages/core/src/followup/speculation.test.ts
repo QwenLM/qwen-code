@@ -61,6 +61,8 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(guard),
     } as unknown as Config;
@@ -101,6 +103,8 @@ describe('startSpeculation', () => {
       toolName: 'read_file',
       args: { path: '/normalized/a.ts' },
       signal: expect.any(AbortSignal),
+      sessionId: 'spec-session',
+      cwd: '/spec/cwd',
     });
     expect(execute).not.toHaveBeenCalled();
 
@@ -125,6 +129,8 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolInvocationGuard: vi.fn().mockReturnValue(guard),
     } as unknown as Config;
@@ -165,6 +171,8 @@ describe('startSpeculation', () => {
       toolName: 'read_file',
       args: { path: '/normalized/a.ts' },
       signal: expect.any(AbortSignal),
+      sessionId: 'spec-session',
+      cwd: '/spec/cwd',
     });
     expect(execute).toHaveBeenCalledOnce();
 
