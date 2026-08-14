@@ -323,6 +323,39 @@ describe('extractAndStripMeta', () => {
       );
     });
 
+    it('enforces the cap after JSON escaping', () => {
+      const src = `export const meta = { name: '\\0'.repeat(20000), description: 'd' }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+    });
+
+    it('enforces the cap for string-free containers', () => {
+      const src = `export const meta = { name: 'x', description: 'd', phases: Array.from({ length: 40000 }, () => ({})) }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+    });
+
+    it('bounds a looping then getter', () => {
+      const src = `export const meta = { name: 'x', description: 'd', extra: { get then() { while (true) {} } } }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    it('does not invoke a phases iterator', () => {
+      const src = `export const meta = {
+        name: 'x',
+        description: 'd',
+        phases: Object.assign([{ title: 'one' }], {
+          [Symbol.iterator]: function () { while (true) {} },
+        }),
+      }\nreturn 1`;
+      expect(extractAndStripMeta(src).meta?.phases).toEqual([{ title: 'one' }]);
+    });
+
     it('leaves a well-formed meta literal unaffected', () => {
       const src = `export const meta = { name: 'w', description: 'd', phases: [{ title: 'One' }] }\nreturn 1`;
       const { meta } = extractAndStripMeta(src);
@@ -346,10 +379,95 @@ describe('extractAndStripMeta', () => {
   });
 
   it('a thenable stays rejected even when the literal predefines the flag name', () => {
-    const src = `export const meta = { name: 'x', description: 'd', phases: Promise.resolve(1) }\nreturn 1`;
+    const src = `export const meta = { name: 'x', description: 'd', hasThenable: false, phases: Promise.resolve(1) }\nreturn 1`;
     expect(() => extractAndStripMeta(src)).toThrow(
       /meta values must not be Promises/,
     );
+  });
+
+  it('isolates serializer intrinsics from the meta literal', () => {
+    const src = `export const meta = {
+      name: (JSON.stringify = () => ({ toString() { return '@'; } }), 'x'),
+      description: 'd',
+    }\nreturn 1`;
+    expect(extractAndStripMeta(src).meta).toEqual({
+      name: 'x',
+      description: 'd',
+    });
+  });
+
+  it('rejects Promises after the literal mutates serializer helpers', () => {
+    const src = `export const meta = {
+      name: (
+        Object.keys = () => ['name', 'description'],
+        Promise.prototype.then = () => undefined,
+        'x'
+      ),
+      description: 'd',
+      extra: Promise.resolve(1),
+    }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+  });
+
+  it('does not expose host helpers to serializer getters', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      extra: Object.defineProperty({}, 'value', { enumerable: true, get: function () {
+        const serializerGlobal = arguments.callee.caller.constructor('return globalThis')();
+        if (serializerGlobal.__qwenWorkflowMetaIsPromise) throw new Error('host helper exposed');
+        return 'safe';
+      } }),
+    }\nreturn 1`;
+    expect(extractAndStripMeta(src).meta).toEqual({
+      name: 'x',
+      description: 'd',
+    });
+  });
+
+  it('prefers a Promise error after the size budget is exceeded', () => {
+    const src = `export const meta = {
+      name: 'x'.repeat(200000),
+      description: 'd',
+      extra: Promise.resolve(1),
+    }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+  });
+
+  it('copies shared phase objects at each array position', () => {
+    const src = `export const meta = {
+      name: 'x',
+      description: 'd',
+      phases: (function () {
+        const phase = { title: 'one' };
+        return [phase, phase];
+      })(),
+    }\nreturn 1`;
+    expect(extractAndStripMeta(src).meta?.phases).toEqual([
+      { title: 'one' },
+      { title: 'one' },
+    ]);
+  });
+
+  it.each([
+    [
+      `export const meta = { name: 'x', description: 'd', whenToUse: () => {} }\nreturn 1`,
+      /meta.whenToUse must be a string/,
+    ],
+    [
+      `export const meta = { name: 'x', description: 'd', phases: [{ title: 'one', detail: Symbol('x') }] }\nreturn 1`,
+      /meta.phases\[\].detail must be a string/,
+    ],
+    [
+      `export const meta = { name: 'x', description: 'd', phases: [{ title: 'one', model: 1n }] }\nreturn 1`,
+      /meta.phases\[\].model must be a string/,
+    ],
+  ])('preserves invalid optional field types for validation', (src, error) => {
+    expect(() => extractAndStripMeta(src)).toThrow(error);
   });
 
   // P4a adversarial review (HIGH × 3 lenses): the docstring at

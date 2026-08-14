@@ -165,8 +165,9 @@ export interface WorkflowMeta {
  *      during resume, so non-determinism in the meta literal (a
  *      `Date.now()` call in `meta.name`) does not break the resume
  *      contract that the script body honors.
- *   3. A SECOND vm script walks that value and serialises it to JSON, and
- *      the host parses the result into host-realm plain objects.
+ *   3. A SECOND fresh vm context walks that value and serialises it to JSON,
+ *      and the host parses the result into host-realm plain objects. Its
+ *      intrinsics have never been exposed to the model-authored program.
  *
  * Both scripts run under `META_EVAL_TIMEOUT_MS`, and the split between them
  * is what makes that bound real. The literal is model-authored source, so it
@@ -205,31 +206,52 @@ export function extractAndStripMeta(source: string): {
   // provides its own intrinsics, but that's intentional — see the
   // docstring above.
   const metaContext = vm.createContext(Object.create(null));
+  let raw: unknown;
   let serialized: unknown;
   try {
-    // Script 1 — the model's literal, as its own program. Property reads are
-    // deferred: a getter defined here closes over THIS scope, so it cannot
-    // see script 2's bindings when it later runs.
-    new vm.Script(
-      `globalThis[${JSON.stringify(META_SLOT)}] = (${metaSource});`,
-    ).runInContext(metaContext, { timeout: META_EVAL_TIMEOUT_MS });
-    // Script 2 — fixed source, zero interpolation. Getters fire here, inside
-    // the vm, under the timeout.
+    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext, {
+      timeout: META_EVAL_TIMEOUT_MS,
+    });
+
+    const serializeContext = vm.createContext(Object.create(null));
+    Object.defineProperty(serializeContext, META_SLOT, { value: raw });
     serialized = new vm.Script(META_SERIALIZE_SOURCE).runInContext(
-      metaContext,
+      serializeContext,
       { timeout: META_EVAL_TIMEOUT_MS },
     );
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = e instanceof Error ? e.message : 'unknown error';
     throw new Error(
       `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
     );
   }
 
-  const walked = JSON.parse(String(serialized)) as {
+  let walked: {
     hasThenable: boolean;
+    tooLarge: boolean;
     value: unknown;
   };
+  try {
+    if (typeof serialized !== 'string') {
+      throw new Error('unexpected serializer result');
+    }
+    const parsed: unknown = JSON.parse(serialized);
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      typeof (parsed as { hasThenable?: unknown }).hasThenable !== 'boolean' ||
+      typeof (parsed as { tooLarge?: unknown }).tooLarge !== 'boolean' ||
+      !Object.hasOwn(parsed, 'value')
+    ) {
+      throw new Error('unexpected serializer result');
+    }
+    walked = parsed as typeof walked;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'unknown error';
+    throw new Error(
+      `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
+    );
+  }
 
   // P4a R3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
   // value in the meta literal would otherwise leave a dangling rejection
@@ -243,6 +265,12 @@ export function extractAndStripMeta(source: string): {
     throw new Error(
       'extractAndStripMeta: meta values must not be Promises ' +
         '(no async / dynamic import allowed in meta literal)',
+    );
+  }
+  if (walked.tooLarge) {
+    throw new Error(
+      'extractAndStripMeta: failed to evaluate meta object literal: ' +
+        'meta literal is too large',
     );
   }
 
@@ -392,67 +420,120 @@ const META_SLOT = '__qwenWorkflowMetaValue';
  * Runs inside the vm so that property reads on the literal — getters, proxy
  * traps — execute under the same timeout as the literal itself.
  *
- * Intrinsics are captured into locals up front and every call goes through
- * `Reflect.apply`, so a literal that replaced a prototype method before this
- * script ran cannot redirect the walk.
+ * Intrinsics are captured from this fresh realm and every call goes through
+ * `Reflect.apply`, so model-authored prototype mutations cannot redirect the
+ * walk.
  */
 const META_SERIALIZE_SOURCE = `(() => {
   const apply = Reflect.apply;
   const isArray = Array.isArray;
+  const getOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
   const objectKeys = Object.keys;
   const objectCreate = Object.create;
   const jsonStringify = JSON.stringify;
   const push = Array.prototype.push;
   const thenCall = Promise.prototype.then;
   const setAdd = WeakSet.prototype.add;
+  const setDelete = WeakSet.prototype.delete;
   const setHas = WeakSet.prototype.has;
-  const seen = new WeakSet();
+  const ancestors = new WeakSet();
+  const promiseScanSeen = new WeakSet();
+  const handledPromises = new WeakSet();
   let hasThenable = false;
+  let tooLarge = false;
   let budget = ${META_SERIALIZED_MAX_CHARS};
 
   function spend(n) {
+    if (tooLarge) return false;
     budget -= n;
-    if (budget < 0) throw new Error('meta literal is too large');
+    if (budget < 0) {
+      tooLarge = true;
+      return false;
+    }
+    return true;
+  }
+
+  function handlePromise(value) {
+    if (apply(setHas, handledPromises, [value])) return true;
+    try {
+      apply(thenCall, value, [undefined, () => {}]);
+    } catch (e) {
+      return false;
+    }
+    apply(setAdd, handledPromises, [value]);
+    hasThenable = true;
+    return true;
+  }
+
+  function markPromises(value) {
+    if (value === null || typeof value !== 'object') return;
+    if (handlePromise(value)) return;
+    if (apply(setHas, promiseScanSeen, [value])) return;
+    apply(setAdd, promiseScanSeen, [value]);
+    const descriptors = getOwnPropertyDescriptors(value);
+    const keys = objectKeys(descriptors);
+    for (let i = 0; i < keys.length; i++) {
+      const descriptor = descriptors[keys[i]];
+      if ('value' in descriptor) markPromises(descriptor.value);
+    }
   }
 
   function copy(value) {
     const type = typeof value;
     if (value === null) return null;
-    if (type === 'string') { spend(value.length); return value; }
-    if (type === 'number' || type === 'boolean') { spend(8); return value; }
-    // Functions, symbols and bigints are not contract values; drop them the
-    // same way the previous host-side walk did.
-    if (type !== 'object') return undefined;
-    // Cycles and shared subgraphs both terminate here.
-    if (apply(setHas, seen, [value])) return undefined;
-    apply(setAdd, seen, [value]);
-    if (typeof value.then === 'function') {
+    if (type === 'string') return spend(value.length) ? value : undefined;
+    if (type === 'number' || type === 'boolean') {
+      return spend(8) ? value : undefined;
+    }
+    if (type === 'undefined') return undefined;
+    if (type !== 'object') return null;
+    if (handlePromise(value) || typeof value.then === 'function') {
       hasThenable = true;
-      // Mark handled so Node's unhandled-rejection trap cannot later kill the
-      // host process. A non-standard thenable may throw synchronously here.
-      try { apply(thenCall, value, [undefined, () => {}]); } catch (e) {}
       return undefined;
     }
-    if (isArray(value)) {
-      const out = [];
-      for (let i = 0; i < value.length; i++) {
-        spend(2);
-        apply(push, out, [copy(value[i])]);
+    if (apply(setHas, ancestors, [value])) return undefined;
+    apply(setAdd, ancestors, [value]);
+    try {
+      if (isArray(value)) {
+        const out = [];
+        for (let i = 0; i < value.length; i++) {
+          const keep = spend(2);
+          const copied = copy(value[i]);
+          if (keep) apply(push, out, [copied]);
+        }
+        return out;
+      }
+      const out = objectCreate(null);
+      const keys = objectKeys(value);
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const keep = spend(key.length + 4);
+        const copied = copy(value[key]);
+        if (keep) out[key] = copied;
       }
       return out;
+    } finally {
+      apply(setDelete, ancestors, [value]);
     }
-    const out = objectCreate(null);
-    const keys = objectKeys(value);
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      spend(key.length + 4);
-      out[key] = copy(value[key]);
-    }
-    return out;
   }
 
-  const value = copy(globalThis[${JSON.stringify(META_SLOT)}]);
-  return jsonStringify({ hasThenable: hasThenable, value: value });
+  const source = globalThis[${JSON.stringify(META_SLOT)}];
+  markPromises(source);
+  const value = copy(source);
+  let serialized = jsonStringify({
+    hasThenable: hasThenable,
+    tooLarge: tooLarge,
+    value: value,
+  });
+  if (serialized.length > ${META_SERIALIZED_MAX_CHARS}) {
+    tooLarge = true;
+    serialized = jsonStringify({
+      hasThenable: hasThenable,
+      tooLarge: tooLarge,
+      value: null,
+    });
+  }
+  return serialized;
 })()`;
 
 /**
