@@ -465,6 +465,31 @@ function availableSkillInfos(status: {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+function availableSessionSkillInfos(
+  skills: readonly string[],
+  commands: readonly {
+    name: string;
+    description: string;
+    argumentHint?: string;
+  }[],
+): SkillInfo[] {
+  const commandsByName = new Map(
+    commands.map((command) => [command.name.toLowerCase(), command]),
+  );
+  return skills
+    .map((name) => {
+      const command = commandsByName.get(name.toLowerCase());
+      return {
+        name,
+        description: command?.description ?? '',
+        ...(command?.argumentHint
+          ? { argumentHint: command.argumentHint }
+          : {}),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
@@ -4409,9 +4434,24 @@ export function App({
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
   const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
+  const [loadedSkillsFallbackSessionId, setLoadedSkillsFallbackSessionId] =
+    useState<string>();
+  const connectionSkillSnapshotRef = useRef({
+    sessionId: connection.sessionId,
+    commands: connection.commands,
+    skills: connection.skills,
+  });
+  connectionSkillSnapshotRef.current = {
+    sessionId: connection.sessionId,
+    commands: connection.commands,
+    skills: connection.skills,
+  };
+  const loadedSkillsFallbackSnapshotRef = useRef<
+    typeof connectionSkillSnapshotRef.current | undefined
+  >(undefined);
   const loadedSkillsRequestRef = useRef(0);
   const reloadLoadedSkills = useCallback(
-    async (workspaceCwd?: string) => {
+    async (workspaceCwd?: string, notifyOnError = false) => {
       const request = ++loadedSkillsRequestRef.current;
       try {
         const status =
@@ -4423,16 +4463,82 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-      } catch {
-        return;
+        return true;
+      } catch (error) {
+        if (notifyOnError) {
+          pushToast(
+            'error',
+            formatError(error, 'Failed to refresh composer skills'),
+          );
+        }
+        return false;
       }
     },
-    [workspace.client, workspaceActions],
+    [pushToast, workspace.client, workspaceActions],
   );
   useEffect(() => {
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
+  const handledSkillMutationIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const mutation = workspaceEventSignals?.lastSkillMutation;
+    if (!mutation || handledSkillMutationIdRef.current === mutation.id) return;
+    handledSkillMutationIdRef.current = mutation.id;
+    const sessionId = connection.sessionId;
+    if (
+      sessionId &&
+      mutation.activation === 'applied' &&
+      mutation.sessionsFailed === 0
+    ) {
+      loadedSkillsFallbackSnapshotRef.current = undefined;
+      setLoadedSkillsFallbackSessionId(undefined);
+      return;
+    }
+    const sourceSnapshot = connectionSkillSnapshotRef.current;
+    let cancelled = false;
+    void reloadLoadedSkills(connection.workspaceCwd, true).then((loaded) => {
+      if (cancelled || !loaded || !sessionId) return;
+      const currentSnapshot = connectionSkillSnapshotRef.current;
+      if (
+        currentSnapshot.sessionId !== sourceSnapshot.sessionId ||
+        currentSnapshot.commands !== sourceSnapshot.commands ||
+        currentSnapshot.skills !== sourceSnapshot.skills
+      ) {
+        return;
+      }
+      loadedSkillsFallbackSnapshotRef.current = sourceSnapshot;
+      setLoadedSkillsFallbackSessionId(sessionId);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    reloadLoadedSkills,
+    workspaceEventSignals?.lastSkillMutation,
+    workspaceEventSignals?.skillsVersion,
+  ]);
+  useEffect(() => {
+    if (!loadedSkillsFallbackSessionId) return;
+    const fallbackSnapshot = loadedSkillsFallbackSnapshotRef.current;
+    if (
+      fallbackSnapshot &&
+      fallbackSnapshot.sessionId === connection.sessionId &&
+      fallbackSnapshot.commands === connection.commands &&
+      fallbackSnapshot.skills === connection.skills
+    ) {
+      return;
+    }
+    loadedSkillsFallbackSnapshotRef.current = undefined;
+    setLoadedSkillsFallbackSessionId(undefined);
+  }, [
+    connection.commands,
+    connection.sessionId,
+    connection.skills,
+    loadedSkillsFallbackSessionId,
+  ]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -10451,18 +10557,37 @@ export function App({
     }
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
+  const useWorkspaceSkillSnapshot =
+    loadedSkillsReady &&
+    (!connection.sessionId ||
+      loadedSkillsFallbackSessionId === connection.sessionId);
+  const composerSkills = useMemo(
+    () =>
+      useWorkspaceSkillSnapshot
+        ? loadedSkills
+        : availableSessionSkillInfos(
+            connection.skills ?? [],
+            connection.commands ?? [],
+          ),
+    [
+      connection.commands,
+      connection.skills,
+      loadedSkills,
+      useWorkspaceSkillSnapshot,
+    ],
+  );
   const commands = useMemo(() => {
     const previousSkillNames = new Set(
       (connection.skills ?? []).map((skill) => skill.toLowerCase()),
     );
-    const retainedCommands = loadedSkillsReady
+    const retainedCommands = useWorkspaceSkillSnapshot
       ? (connection.commands ?? []).filter(
           (command) =>
             command.source !== 'skill' &&
             !previousSkillNames.has(command.name.toLowerCase()),
         )
       : (connection.commands ?? []);
-    const refreshedSkillCommands = loadedSkillsReady
+    const refreshedSkillCommands = useWorkspaceSkillSnapshot
       ? loadedSkills.map((skill) => ({
           name: skill.name,
           description: skill.description,
@@ -10496,9 +10621,9 @@ export function App({
     connection.skills,
     hiddenCommands,
     loadedSkills,
-    loadedSkillsReady,
     sideTasksAvailable,
     t,
+    useWorkspaceSkillSnapshot,
   ]);
 
   const welcomeHeaderProps = useMemo(
@@ -12332,7 +12457,7 @@ export function App({
                             unknownPromptAdmission?.payloadAvailable === true
                           }
                           commands={commands}
-                          skills={loadedSkills}
+                          skills={composerSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
@@ -12463,7 +12588,7 @@ export function App({
                                   label: getModelDisplayName(m.label || m.id),
                                   contextWindow: m.contextWindow,
                                 }))}
-                              skills={loadedSkills}
+                              skills={composerSkills}
                               onSelectMode={handleSetMode}
                               onSelectModel={handleModelSelect}
                             />
@@ -12490,7 +12615,7 @@ export function App({
                                 label: getModelDisplayName(m.label || m.id),
                                 contextWindow: m.contextWindow,
                               }))}
-                            skills={loadedSkills}
+                            skills={composerSkills}
                             onSelectMode={handleSetMode}
                             onSelectModel={handleModelSelect}
                           />

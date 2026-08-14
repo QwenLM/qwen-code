@@ -32,6 +32,7 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSkillToggleMutation,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
@@ -505,6 +506,8 @@ export interface DaemonWorkspaceEventSignals {
   agentsVersion: number;
   toolsVersion: number;
   settingsVersion: number;
+  skillsVersion: number;
+  lastSkillMutation?: DaemonSkillToggleMutation;
   mcpVersion: number;
   extensionsVersion: number;
   artifactsVersion: number;

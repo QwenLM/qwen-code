@@ -817,6 +817,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   agentsVersion: 0,
   toolsVersion: 0,
   settingsVersion: 0,
+  skillsVersion: 0,
   mcpVersion: 0,
   extensionsVersion: 0,
   artifactsVersion: 0,
@@ -3563,25 +3564,40 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       clearNotices();
       for (const notice of staged.notices) addNotice(notice);
       for (const id of staged.dismissNoticeIds) dismissNotice(id);
-      setWorkspaceEventSignals((currentSignals) => ({
-        memoryVersion:
-          currentSignals.memoryVersion + staged.signals.memoryVersion,
-        agentsVersion:
-          currentSignals.agentsVersion + staged.signals.agentsVersion,
-        toolsVersion: currentSignals.toolsVersion + staged.signals.toolsVersion,
-        settingsVersion:
-          currentSignals.settingsVersion + staged.signals.settingsVersion,
-        mcpVersion: currentSignals.mcpVersion + staged.signals.mcpVersion,
-        extensionsVersion:
-          currentSignals.extensionsVersion + staged.signals.extensionsVersion,
-        artifactsVersion:
-          currentSignals.artifactsVersion + staged.signals.artifactsVersion,
-        initVersion: currentSignals.initVersion + staged.signals.initVersion,
-        authVersion: currentSignals.authVersion + staged.signals.authVersion,
-        ...(staged.signals.lastExtensionChange
-          ? { lastExtensionChange: staged.signals.lastExtensionChange }
-          : {}),
-      }));
+      setWorkspaceEventSignals((currentSignals) => {
+        const stagedSkillMutation = staged.signals.lastSkillMutation;
+        const hasNewSkillMutation =
+          stagedSkillMutation !== undefined &&
+          stagedSkillMutation.id !== currentSignals.lastSkillMutation?.id;
+        return {
+          memoryVersion:
+            currentSignals.memoryVersion + staged.signals.memoryVersion,
+          agentsVersion:
+            currentSignals.agentsVersion + staged.signals.agentsVersion,
+          toolsVersion:
+            currentSignals.toolsVersion + staged.signals.toolsVersion,
+          settingsVersion:
+            currentSignals.settingsVersion + staged.signals.settingsVersion,
+          skillsVersion:
+            currentSignals.skillsVersion +
+            (hasNewSkillMutation ? staged.signals.skillsVersion : 0),
+          mcpVersion: currentSignals.mcpVersion + staged.signals.mcpVersion,
+          extensionsVersion:
+            currentSignals.extensionsVersion + staged.signals.extensionsVersion,
+          artifactsVersion:
+            currentSignals.artifactsVersion + staged.signals.artifactsVersion,
+          initVersion: currentSignals.initVersion + staged.signals.initVersion,
+          authVersion: currentSignals.authVersion + staged.signals.authVersion,
+          ...(hasNewSkillMutation
+            ? { lastSkillMutation: stagedSkillMutation }
+            : currentSignals.lastSkillMutation
+              ? { lastSkillMutation: currentSignals.lastSkillMutation }
+              : {}),
+          ...(staged.signals.lastExtensionChange
+            ? { lastExtensionChange: staged.signals.lastExtensionChange }
+            : {}),
+        };
+      });
       for (const event of staged.midTurnEvents) {
         const injected = parseSidechannelMidTurnInjected(event);
         if (injected) publishSidechannelMidTurnInjected(injected);
@@ -5354,6 +5370,9 @@ function bumpWorkspaceEventSignals(
   let agents = 0;
   let tools = 0;
   let settings = 0;
+  let lastSkillMutation:
+    | DaemonWorkspaceEventSignals['lastSkillMutation']
+    | undefined;
   let mcp = 0;
   let extensions = 0;
   let artifacts = 0;
@@ -5375,7 +5394,11 @@ function bumpWorkspaceEventSignals(
         tools += 1;
         break;
       case 'workspace.settings.changed':
-        settings += 1;
+        if (event.mutation?.kind === 'skill_toggle') {
+          lastSkillMutation = event.mutation;
+        } else {
+          settings += 1;
+        }
         break;
       case 'workspace.mcp.budget_warning':
       case 'workspace.mcp.child_refused':
@@ -5424,22 +5447,49 @@ function bumpWorkspaceEventSignals(
       artifacts +
       init +
       auth ===
-    0
+      0 &&
+    !lastSkillMutation
   )
     return;
 
-  setSignals((current) => ({
-    memoryVersion: current.memoryVersion + memory,
-    agentsVersion: current.agentsVersion + agents,
-    toolsVersion: current.toolsVersion + tools,
-    settingsVersion: current.settingsVersion + settings,
-    mcpVersion: current.mcpVersion + mcp,
-    extensionsVersion: current.extensionsVersion + extensions,
-    artifactsVersion: current.artifactsVersion + artifacts,
-    ...(lastExtensionChange ? { lastExtensionChange } : {}),
-    initVersion: current.initVersion + init,
-    authVersion: current.authVersion + auth,
-  }));
+  setSignals((current) => {
+    const hasNewSkillMutation =
+      lastSkillMutation !== undefined &&
+      lastSkillMutation.id !== current.lastSkillMutation?.id;
+    if (
+      memory +
+        agents +
+        tools +
+        settings +
+        mcp +
+        extensions +
+        artifacts +
+        init +
+        auth ===
+        0 &&
+      !hasNewSkillMutation
+    ) {
+      return current;
+    }
+    return {
+      memoryVersion: current.memoryVersion + memory,
+      agentsVersion: current.agentsVersion + agents,
+      toolsVersion: current.toolsVersion + tools,
+      settingsVersion: current.settingsVersion + settings,
+      skillsVersion: current.skillsVersion + (hasNewSkillMutation ? 1 : 0),
+      mcpVersion: current.mcpVersion + mcp,
+      extensionsVersion: current.extensionsVersion + extensions,
+      artifactsVersion: current.artifactsVersion + artifacts,
+      ...(hasNewSkillMutation
+        ? { lastSkillMutation }
+        : current.lastSkillMutation
+          ? { lastSkillMutation: current.lastSkillMutation }
+          : {}),
+      ...(lastExtensionChange ? { lastExtensionChange } : {}),
+      initVersion: current.initVersion + init,
+      authVersion: current.authVersion + auth,
+    };
+  });
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {
