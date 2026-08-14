@@ -2733,6 +2733,30 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('renders loop detection errors from a structured localized label', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        {
+          id: 'err-loop',
+          kind: 'error' as const,
+          source: 'turn_error' as const,
+          errorKind: 'loop_detected' as const,
+          text: 'internal fallback',
+          clientReceivedAt: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      { labels: { loopDetected: 'Localized loop guidance.' } },
+    );
+
+    expect(messages[0]).toMatchObject({
+      content: 'Localized loop guidance.',
+      retryable: false,
+      source: 'turn_error',
+    });
+  });
+
   it('renders model stream interruption errors from structured errorKind labels', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [
