@@ -29,6 +29,7 @@ import { OpenTuiInputPrompt } from './input-prompt.js';
 interface FakeEditor {
   plainText: string;
   deleteCharBackwardCalls: number;
+  newLineCalls: number;
   insertCalls: string[];
   deleteCharBackward(): boolean;
   insertText(text: string): void;
@@ -63,6 +64,7 @@ const mocks = vi.hoisted(() => {
         return col;
       },
       deleteCharBackwardCalls: 0,
+      newLineCalls: 0,
       insertCalls: [] as string[],
       deleteCharBackward() {
         editor.deleteCharBackwardCalls += 1;
@@ -91,7 +93,9 @@ const mocks = vi.hoisted(() => {
       gotoLineEnd() {
         col = text.length;
       },
-      newLine() {},
+      newLine() {
+        editor.newLineCalls += 1;
+      },
     };
     return editor;
   }
@@ -164,6 +168,11 @@ vi.mock('./theme.js', () => ({
 }));
 vi.mock('./slash-dispatch.js', () => ({
   loadInteractiveCommands: async () => [],
+}));
+vi.mock('../utils/clipboardUtils.js', () => ({
+  clipboardHasImage: async () => true,
+  saveClipboardImage: async () => '/tmp/clipboard-test.png',
+  cleanupOldClipboardImages: async () => {},
 }));
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
@@ -391,5 +400,92 @@ describe('OpenTuiInputPrompt submit guard', () => {
     });
     expect(submitted).toEqual(['vw']);
     expect(editor.plainText).toBe('');
+  });
+
+  it('Shift/Ctrl/Meta+Enter insert a newline instead of submitting', async () => {
+    const submitted: string[] = [];
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={(text) => submitted.push(text)}
+        userMessages={[]}
+      />,
+    );
+    const editor = currentEditor();
+    await typeText('ab');
+    for (const overrides of [
+      { name: 'return', sequence: '\r', shift: true },
+      { name: 'return', sequence: '\r', ctrl: true },
+      { name: 'return', sequence: '\r', meta: true },
+      { name: 'kpenter', sequence: '\r', shift: true },
+    ]) {
+      await act(async () => {
+        lastKeyboardHandler()(baseKeyEvent(overrides));
+      });
+    }
+    expect(editor.newLineCalls).toBe(4);
+    expect(submitted).toEqual([]);
+    expect(editor.plainText).toBe('ab');
+  });
+
+  it('Ctrl+V attaches the clipboard image and submits it with the text', async () => {
+    const submitted: Array<{ text: string; images?: string[] }> = [];
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={(text, images) => submitted.push({ text, images })}
+        userMessages={[]}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(
+        baseKeyEvent({ name: 'v', sequence: '\x16', ctrl: true }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await typeText('hi');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual([
+      { text: 'hi', images: ['/tmp/clipboard-test.png'] },
+    ]);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('Esc pops queued prompts into the composer before the clear window', async () => {
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        queueLength={1}
+        onPopQueue={() => 'queued text'}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'escape', sequence: '\x1b' }));
+    });
+    expect(editor.plainText).toBe('queued text');
+  });
+
+  it('Up at the top edge pops queued prompts into the composer', async () => {
+    let queued: string | null = 'from queue';
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        queueLength={1}
+        onPopQueue={() => {
+          const q = queued;
+          queued = null;
+          return q;
+        }}
+      />,
+    );
+    const editor = currentEditor();
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'up', sequence: '\x1b[A' }));
+    });
+    expect(editor.plainText).toBe('from queue');
   });
 });

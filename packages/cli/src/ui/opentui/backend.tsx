@@ -10,6 +10,8 @@
  */
 import { MouseButton } from '@opentui/core';
 import { C, SYNTAX, applyThemeMode } from './theme.js';
+import { detectInitialThemeMode } from './theme-auto.js';
+import { selectionProps } from './messages.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import {
   useKeyboard,
@@ -29,7 +31,12 @@ import {
   type LiveToolItem,
 } from './live-session-model.js';
 import { formatDuration } from '../utils/displayUtils.js';
-import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  ToolConfirmationOutcome,
+  type Config,
+} from '@qwen-code/qwen-code-core';
+import { isPrintableKeyInput } from './input-prompt-key.js';
 import {
   findProviderByCredentials,
   resolveMetadataKey,
@@ -44,7 +51,7 @@ import { getAsciiArtWidth } from '../utils/textUtils.js';
 import { readFileSync } from 'node:fs';
 import nodePath from 'node:path';
 import { execSync } from 'node:child_process';
-import type { PartListUnion } from '@google/genai';
+import type { Part, PartListUnion } from '@google/genai';
 import { livePromptEvents } from './live-session.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import { isSlashCommandInput } from './slash-dispatch.js';
@@ -73,6 +80,30 @@ const argsPreview = (args: string) => {
   const line = args.split('\n')[0] ?? '';
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 };
+
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+};
+
+/** Clipboard image file → genai inlineData part (null when unreadable). */
+function readImagePart(p: string): Part | null {
+  try {
+    const data = readFileSync(p).toString('base64');
+    return {
+      inlineData: {
+        mimeType: IMAGE_MIME[nodePath.extname(p).toLowerCase()] ?? 'image/png',
+        data,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
 
 const toolDisplayName = (name: string) =>
   name
@@ -300,6 +331,7 @@ function AssistantMessage(props: {
           streaming={item.streaming}
           syntaxStyle={SYNTAX}
           fg={isError ? C.red : C.text}
+          bg={C.bg}
         />
       </box>
     </box>
@@ -587,12 +619,10 @@ function App({
     if (envTheme === 'light' || envTheme === 'dark') {
       onMode(envTheme);
     } else {
-      renderer
-        .waitForThemeMode(1000)
-        .then((m) => {
-          if (m) onMode(m);
-        })
-        .catch(() => {});
+      // Ink parity chain (COLORFGBG → OSC 10/11 probe → macOS appearance →
+      // dark) so terminals that never answer the OSC probe (Warp) still get
+      // the right palette instead of staying dark-on-light.
+      void detectInitialThemeMode(renderer, 1000).then(onMode);
     }
     return () => {
       renderer.off('theme_mode', onMode);
@@ -606,11 +636,28 @@ function App({
   const startLiveTurnRef = useRef<
     ((content: PartListUnion, opts?: object) => void) | null
   >(null);
+  const submitTextRef = useRef<
+    ((raw: string, imagePaths?: string[]) => void) | null
+  >(null);
   const composerHandle = useRef<{
     getText: () => string;
     setText: (t: string) => void;
   } | null>(null);
   const queuedPromptsRef = useRef<string[]>([]);
+  const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
+  // Submissions made while a turn is in flight queue up (original
+  // useMessageQueue semantics) instead of aborting the live stream.
+  const enqueuePrompt = useCallback((t: string) => {
+    queuedPromptsRef.current = [...queuedPromptsRef.current, t];
+    setQueuedPrompts(queuedPromptsRef.current);
+  }, []);
+  const popAllQueued = useCallback((): string | null => {
+    if (queuedPromptsRef.current.length === 0) return null;
+    const all = queuedPromptsRef.current.join('\n\n');
+    queuedPromptsRef.current = [];
+    setQueuedPrompts([]);
+    return all;
+  }, []);
   const reverseSearchRef = useRef<number>(-1);
   const reverseQueryRef = useRef<string>('');
   const approvalModeRef = useRef(approvalMode);
@@ -621,6 +668,24 @@ function App({
     names: string;
     resolve: (b: boolean) => void;
   } | null>(null);
+  // ask_user_question dialog (scheduler awaiting_approval parity).
+  const [questionReq, setQuestionReq] = useState<{
+    questions: Array<{
+      question: string;
+      header: string;
+      options: Array<{ label: string; description: string }>;
+      multiSelect?: boolean;
+    }>;
+    resolve: (answers: Record<string, string> | null) => void;
+  } | null>(null);
+  const [qNav, setQNav] = useState({
+    q: 0,
+    opt: 0,
+    other: false,
+    otherText: '',
+    multi: [] as number[],
+  });
+  const qAnswersRef = useRef<Record<string, string>>({});
 
   // Streaming phase for the status bar / spinner / border (F1.1).
 
@@ -657,6 +722,22 @@ function App({
       }
     }
   }, []);
+
+  // "Enter to steer": plain queued prompts leave the queue at the next tool
+  // boundary and ride with the tool results as user content; slash entries
+  // stay queued for turn-end routing through the command stack.
+  const drainSteering = useCallback((): string[] => {
+    const plain = queuedPromptsRef.current.filter(
+      (t) => !isSlashCommandInput(t),
+    );
+    if (plain.length === 0) return [];
+    queuedPromptsRef.current = queuedPromptsRef.current.filter((t) =>
+      isSlashCommandInput(t),
+    );
+    setQueuedPrompts([...queuedPromptsRef.current]);
+    for (const t of plain) applyEvent({ type: 'user', text: t });
+    return plain;
+  }, [applyEvent]);
 
   const startStream = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -764,6 +845,87 @@ function App({
   }, [events, config, startStream, applyEvent]);
 
   useKeyboard((key) => {
+    if (questionReq) {
+      const q = questionReq.questions[qNav.q];
+      const optCount = (q?.options.length ?? 0) + 1; // + "Other"
+      const submitAnswer = (answer: string) => {
+        const answers = { ...qAnswersRef.current, [String(qNav.q)]: answer };
+        if (qNav.q + 1 < questionReq.questions.length) {
+          qAnswersRef.current = answers;
+          setQNav({
+            q: qNav.q + 1,
+            opt: 0,
+            other: false,
+            otherText: '',
+            multi: [],
+          });
+        } else {
+          qAnswersRef.current = {};
+          setQuestionReq(null);
+          questionReq.resolve(answers);
+        }
+      };
+      if (qNav.other) {
+        if (key.name === 'escape') {
+          setQNav((n) => ({ ...n, other: false }));
+          return;
+        }
+        if (key.name === 'return' || key.name === 'enter') {
+          const answer = qNav.otherText.trim();
+          if (answer) submitAnswer(answer);
+          return;
+        }
+        if (key.name === 'backspace' || key.name === 'delete') {
+          setQNav((n) => ({ ...n, otherText: n.otherText.slice(0, -1) }));
+          return;
+        }
+        if (isPrintableKeyInput(key)) {
+          setQNav((n) => ({ ...n, otherText: n.otherText + key.sequence }));
+        }
+        return;
+      }
+      if (key.name === 'up') {
+        setQNav((n) => ({ ...n, opt: (n.opt + optCount - 1) % optCount }));
+        return;
+      }
+      if (key.name === 'down') {
+        setQNav((n) => ({ ...n, opt: (n.opt + 1) % optCount }));
+        return;
+      }
+      if (key.name === 'escape') {
+        qAnswersRef.current = {};
+        setQuestionReq(null);
+        questionReq.resolve(null);
+        return;
+      }
+      if (key.name === 'space' && q?.multiSelect && qNav.opt < optCount - 1) {
+        setQNav((n) => ({
+          ...n,
+          multi: n.multi.includes(n.opt)
+            ? n.multi.filter((i) => i !== n.opt)
+            : [...n.multi, n.opt],
+        }));
+        return;
+      }
+      if (key.name === 'return' || key.name === 'enter') {
+        if (qNav.opt === optCount - 1) {
+          setQNav((n) => ({ ...n, other: true, otherText: '' }));
+          return;
+        }
+        if (q?.multiSelect) {
+          submitAnswer(
+            [...new Set([...qNav.multi, qNav.opt])]
+              .sort((a, b) => a - b)
+              .map((i) => q.options[i]?.label ?? '')
+              .join(', '),
+          );
+        } else {
+          submitAnswer(q?.options[qNav.opt]?.label ?? '');
+        }
+        return;
+      }
+      return; // dialog open: swallow everything else
+    }
     if (confirmReq) {
       if (key.name === 'y') {
         confirmReq.resolve(true);
@@ -813,7 +975,7 @@ function App({
       // queue the current composer text for after the in-flight turn
       const t = (composerHandle.current?.getText() ?? '').trim();
       if (t) {
-        queuedPromptsRef.current.push(t);
+        enqueuePrompt(t);
         composerHandle.current?.setText('');
         setToast(`⏸ queued: ${t.slice(0, 24)}`);
         setTimeout(() => setToast(null), 1200);
@@ -952,6 +1114,42 @@ function App({
                       }),
                   }
                 : {}),
+              drainSteering,
+              onWaitingCall: ({ name, confirmationDetails }) => {
+                if (confirmationDetails.type === 'ask_user_question') {
+                  const details = confirmationDetails;
+                  qAnswersRef.current = {};
+                  setQNav({
+                    q: 0,
+                    opt: 0,
+                    other: false,
+                    otherText: '',
+                    multi: [],
+                  });
+                  setQuestionReq({
+                    questions: details.questions,
+                    resolve: (answers) => {
+                      void details.onConfirm(
+                        answers
+                          ? ToolConfirmationOutcome.ProceedOnce
+                          : ToolConfirmationOutcome.Cancel,
+                        answers ? { answers } : undefined,
+                      );
+                    },
+                  });
+                } else {
+                  setConfirmReq({
+                    names: `${name} needs approval`,
+                    resolve: (ok) => {
+                      void confirmationDetails.onConfirm(
+                        ok
+                          ? ToolConfirmationOutcome.ProceedOnce
+                          : ToolConfirmationOutcome.Cancel,
+                      );
+                    },
+                  });
+                }
+              },
             },
           ))
             applyEvent(ev);
@@ -977,11 +1175,12 @@ function App({
           if (liveAbortRef.current === controller) liveAbortRef.current = null;
           setStreaming(false);
           const next = queuedPromptsRef.current.shift();
-          if (next) setTimeout(() => startLiveTurnRef.current?.(next), 50);
+          setQueuedPrompts([...queuedPromptsRef.current]);
+          if (next) setTimeout(() => submitTextRef.current?.(next), 50);
         }
       })();
     },
-    [config, applyEvent],
+    [config, applyEvent, drainSteering],
   );
   startLiveTurnRef.current = startLiveTurn;
 
@@ -1043,11 +1242,17 @@ function App({
   );
 
   const submitText = useCallback(
-    (raw: string) => {
+    (raw: string, imagePaths?: string[]) => {
       reverseSearchRef.current = -1;
       void (async () => {
         const text = raw.trim();
         if (!text) return;
+        // A turn is in flight: queue instead of aborting it (original
+        // useMessageQueue semantics; drained when the turn settles).
+        if (streamingRef.current || commandProcessingRef.current) {
+          enqueuePrompt(text);
+          return;
+        }
         // Slash commands run through the real command stack behind the
         // gateway: queued until the dispatcher is ready, rejected while one
         // is already running, never silently misrouted to the model.
@@ -1074,16 +1279,33 @@ function App({
             return;
           }
         }
-        applyEvent({ type: 'user', text });
+        const imageParts = (imagePaths ?? [])
+          .map(readImagePart)
+          .filter((p): p is Part => p !== null);
+        applyEvent({
+          type: 'user',
+          text: imageParts.length > 0 ? `${text} 📎${imageParts.length}` : text,
+        });
         if (config) {
-          startLiveTurn(text);
+          startLiveTurn(
+            imageParts.length > 0 ? [{ text }, ...imageParts] : text,
+          );
           return;
         }
         startStream(); // scripted: every submission replays the scenario
       })();
     },
-    [applyEvent, applySlashAction, config, gateway, startLiveTurn, startStream],
+    [
+      applyEvent,
+      applySlashAction,
+      config,
+      gateway,
+      startLiveTurn,
+      startStream,
+      enqueuePrompt,
+    ],
   );
+  submitTextRef.current = submitText;
 
   const banner = buildBanner(config, width);
 
@@ -1163,10 +1385,10 @@ function App({
                   marginTop={1}
                 >
                   <box flexDirection="row">
-                    <text fg={C.accent} attributes={1}>
+                    <text fg={C.accent} attributes={1} {...selectionProps()}>
                       {'> '}
                     </text>
-                    <text fg={C.accent} attributes={1}>
+                    <text fg={C.accent} attributes={1} {...selectionProps()}>
                       {item.text}
                     </text>
                   </box>
@@ -1205,13 +1427,15 @@ function App({
                       }
                     }}
                   >
-                    <text fg={C.dim}>
+                    <text fg={C.dim} {...selectionProps()}>
                       {`${th.done ? '∴' : '∵'} ${label}${hint}`}
                     </text>
                   </box>
                   {expanded.has(item.id) && item.text.length > 0 && (
                     <box paddingLeft={2} paddingRight={2} marginTop={1}>
-                      <text fg={C.dim}>{item.text}</text>
+                      <text fg={C.dim} {...selectionProps()}>
+                        {item.text}
+                      </text>
                     </box>
                   )}
                 </box>
@@ -1251,6 +1475,60 @@ function App({
         )}
         {/* prompt (flows after messages; top-aligned when empty) */}
         <box flexDirection="column">
+          {questionReq && (
+            <box
+              flexDirection="column"
+              border
+              borderColor={C.accent}
+              paddingLeft={1}
+              paddingRight={1}
+              marginTop={1}
+            >
+              <text fg={C.accent} attributes={1}>
+                {`[${qNav.q + 1}/${questionReq.questions.length}] ${
+                  questionReq.questions[qNav.q]?.header ?? ''
+                }`}
+              </text>
+              <text fg={C.text}>
+                {questionReq.questions[qNav.q]?.question ?? ''}
+              </text>
+              {(questionReq.questions[qNav.q]?.options ?? []).map((o, i) => (
+                <box key={o.label} flexDirection="column">
+                  <text fg={!qNav.other && qNav.opt === i ? C.accent : C.dim}>
+                    {`${!qNav.other && qNav.opt === i ? '> ' : '  '}${
+                      questionReq.questions[qNav.q]?.multiSelect
+                        ? `[${qNav.multi.includes(i) ? 'x' : ' '}] `
+                        : ''
+                    }${o.label}`}
+                  </text>
+                  <text fg={C.dim}>{`   ${o.description}`}</text>
+                </box>
+              ))}
+              <text
+                fg={
+                  !qNav.other &&
+                  qNav.opt ===
+                    (questionReq.questions[qNav.q]?.options.length ?? 0)
+                    ? C.accent
+                    : C.dim
+                }
+              >
+                {`${
+                  !qNav.other &&
+                  qNav.opt ===
+                    (questionReq.questions[qNav.q]?.options.length ?? 0)
+                    ? '> '
+                    : '  '
+                }Other…`}
+              </text>
+              {qNav.other && <text fg={C.text}>{`> ${qNav.otherText}▌`}</text>}
+              <text fg={C.dim}>
+                {questionReq.questions[qNav.q]?.multiSelect
+                  ? '↑↓ move · space toggle · enter confirm · esc cancel'
+                  : '↑↓ move · enter select · esc cancel'}
+              </text>
+            </box>
+          )}
           {confirmReq && (
             <box
               flexDirection="column"
@@ -1266,12 +1544,31 @@ function App({
               <text fg={C.dim}>{'press y to approve · n / esc to cancel'}</text>
             </box>
           )}
+          {queuedPrompts.length > 0 && (
+            <box flexDirection="column" marginTop={1} paddingLeft={2}>
+              {queuedPrompts.slice(0, 3).map((m, i) => (
+                <text key={`${i}-${m}`} fg={C.dim}>
+                  {m.replace(/\s+/g, ' ')}
+                </text>
+              ))}
+              {queuedPrompts.length > 3 && (
+                <text
+                  fg={C.dim}
+                >{`... (+${queuedPrompts.length - 3} more)`}</text>
+              )}
+              <text fg={C.dim} attributes={2}>
+                {'Ctrl+Q to queue · ↑ to edit queued messages'}
+              </text>
+            </box>
+          )}
           <OpenTuiInputPrompt
             onSubmit={submitText}
             userMessages={userPrompts}
             config={config}
             approvalMode={approvalMode}
             streaming={streaming || commandProcessing}
+            queueLength={queuedPrompts.length}
+            onPopQueue={popAllQueued}
             onInterrupt={() => {
               if (commandProcessingRef.current) {
                 gateway.cancel();
@@ -1282,7 +1579,7 @@ function App({
               setStreaming(false);
             }}
             placeholder="Type your message or @path/to/file"
-            focus={!dialog}
+            focus={!dialog && !questionReq}
             composerHandle={composerHandle}
           />
         </box>
@@ -1290,8 +1587,14 @@ function App({
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
           <text fg={C.dim}>{footerLine1}</text>
           <box flexDirection="row">
+            {(streaming || commandProcessing) && (
+              <text fg={C.dim}>{'Enter to steer · Ctrl+Q to queue · '}</text>
+            )}
             <text fg={modeColor}>{`${modeName} mode`}</text>
             <text fg={C.dim}>{' (shift + tab to cycle)'}</text>
+            {queuedPrompts.length > 0 && (
+              <text fg={C.dim}>{` · ⏳ ${queuedPrompts.length} queued`}</text>
+            )}
           </box>
           {contextPct != null && (
             <text fg={C.dim}>{`${contextPct}% used`}</text>

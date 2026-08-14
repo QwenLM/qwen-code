@@ -51,6 +51,16 @@ export const MESSAGE_ICON = {
 /** Width the ink ToolStatusIndicator reserves for the glyph column. */
 export const STATUS_INDICATOR_WIDTH = 2;
 
+/**
+ * Theme-aware mouse-selection colors. OpenTUI's default invert fallback
+ * (selection bg = cell fg, fg = black) is unreadable on light themes, so
+ * every selectable text/code renderable gets explicit colors.
+ */
+export const selectionProps = () => ({
+  selectionBg: C.selectionBg,
+  selectionFg: C.selectionFg,
+});
+
 /** TextAttributes bitmask (1 << 7) for the canceled strikethrough. */
 const STRIKETHROUGH_ATTR = 128;
 
@@ -174,14 +184,16 @@ function ThinkingBlock({ item, expanded, onToggle }: ThinkingBlockProps) {
         }}
         backgroundColor={hover ? C.hover : undefined}
       >
-        <text fg={meta.color} attributes={6}>
+        <text fg={meta.color} attributes={6} {...selectionProps()}>
           {meta.icon} {meta.label}
           {meta.hint ? ` ${meta.hint}` : ''}
         </text>
       </box>
       {!meta.collapsed && item.text.length > 0 && (
         <box paddingLeft={2} marginTop={0}>
-          <text fg={C.dim}>{item.text}</text>
+          <text fg={C.dim} {...selectionProps()}>
+            {item.text}
+          </text>
         </box>
       )}
     </box>
@@ -221,7 +233,7 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
         backgroundColor={hover ? C.hover : undefined}
       >
         <box width={STATUS_INDICATOR_WIDTH} flexShrink={0}>
-          <text fg={meta.color} attributes={1}>
+          <text fg={meta.color} attributes={1} {...selectionProps()}>
             {meta.glyph}
           </text>
         </box>
@@ -229,15 +241,21 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
           <text
             fg={C.text}
             attributes={1 | (meta.strikethrough ? STRIKETHROUGH_ATTR : 0)}
+            {...selectionProps()}
           >
             {item.tool}
           </text>
-          <text fg={C.dim}> {description}</text>
+          <text fg={C.dim} {...selectionProps()}>
+            {' '}
+            {description}
+          </text>
         </box>
       </box>
       {item.args && (
         <box paddingLeft={STATUS_INDICATOR_WIDTH}>
-          <text fg={C.dim}>{argsPreview(item.args)}</text>
+          <text fg={C.dim} {...selectionProps()}>
+            {argsPreview(item.args)}
+          </text>
         </box>
       )}
       {expanded && item.output.length > 0 && (
@@ -247,6 +265,7 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
             filetype="txt"
             syntaxStyle={SYNTAX}
             fg={C.dim}
+            {...selectionProps()}
           />
         </box>
       )}
@@ -291,24 +310,30 @@ function TaskCard({ item, expanded, onToggle }: TaskCardProps) {
         backgroundColor={hover ? C.hover : undefined}
       >
         <box width={STATUS_INDICATOR_WIDTH} flexShrink={0}>
-          <text fg={iconColor} attributes={1}>
+          <text fg={iconColor} attributes={1} {...selectionProps()}>
             {icon}
           </text>
         </box>
         <box flexGrow={1}>
-          <text fg={C.text}>Task — {item.description}</text>
-          <text fg={C.dim}>{suffix}</text>
+          <text fg={C.text} {...selectionProps()}>
+            Task — {item.description}
+          </text>
+          <text fg={C.dim} {...selectionProps()}>
+            {suffix}
+          </text>
         </box>
       </box>
       {!item.done && live && (
         <box paddingLeft={STATUS_INDICATOR_WIDTH}>
-          <text fg={C.dim}>{live}</text>
+          <text fg={C.dim} {...selectionProps()}>
+            {live}
+          </text>
         </box>
       )}
       {expanded && item.progress.length > 0 && (
         <box paddingLeft={STATUS_INDICATOR_WIDTH} flexDirection="column">
           {item.progress.map((p, i) => (
-            <text key={i} fg={C.dim}>
+            <text key={i} fg={C.dim} {...selectionProps()}>
               {p}
             </text>
           ))}
@@ -345,10 +370,14 @@ export function MessageList({ items, expanded, onToggle }: MessageListProps) {
                 alignSelf="flex-start"
               >
                 <box width={2} flexShrink={0}>
-                  <text fg={user.color}>{user.glyph}</text>
+                  <text fg={user.color} {...selectionProps()}>
+                    {user.glyph}
+                  </text>
                 </box>
                 <box flexGrow={1}>
-                  <text fg={user.color}>{item.text}</text>
+                  <text fg={user.color} {...selectionProps()}>
+                    {item.text}
+                  </text>
                 </box>
               </box>
             );
@@ -365,6 +394,7 @@ export function MessageList({ items, expanded, onToggle }: MessageListProps) {
                       streaming={item.streaming}
                       syntaxStyle={SYNTAX}
                       fg={C.text}
+                      bg={C.bg}
                     />
                   )}
                 </box>

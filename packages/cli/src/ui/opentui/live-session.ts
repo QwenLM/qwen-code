@@ -21,7 +21,10 @@
  */
 
 import { appendFileSync } from 'node:fs';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallConfirmationDetails,
+} from '@qwen-code/qwen-code-core';
 import { CoreToolScheduler, SendMessageType } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import {
@@ -51,6 +54,26 @@ export interface LivePromptOptions {
   confirmBatch?: (
     reqs: Array<{ callId: string; name: string; args?: unknown }>,
   ) => Promise<boolean>;
+  /**
+   * "Enter to steer" parity: called at each tool boundary (after tools ran,
+   * before their results go back to the model). Returned texts are appended
+   * after the functionResponse parts as genuine user content, exactly like
+   * the original's drainSteerAtBoundary sampling-boundary drain. Skipped
+   * when the turn is aborted (messages then stay queued).
+   */
+  drainSteering?: () => string[];
+  /**
+   * Scheduler-level confirmation requests the permission flow did not
+   * auto-approve (ask_user_question in every mode; edit/exec in DEFAULT).
+   * The backend renders the matching dialog and resolves the call through
+   * `confirmationDetails.onConfirm` — without this the waiting call would
+   * never settle and the turn would silently die ("skipped").
+   */
+  onWaitingCall?: (call: {
+    callId: string;
+    name: string;
+    confirmationDetails: ToolCallConfirmationDetails;
+  }) => void;
 }
 
 /**
@@ -86,6 +109,7 @@ export async function* livePromptEvents(
   // submit results -> drain again).
   let nextPrompt: PartListUnion = prompt;
   let first = true;
+  const waitingSeen = new Set<string>();
   for (;;) {
     const sendOptions = first
       ? options?.modelOverride
@@ -150,6 +174,20 @@ export async function* livePromptEvents(
         config,
         getPreferredEditor: () => undefined,
         onEditorClose: () => {},
+        onToolCallsUpdate: (calls) => {
+          if (!options?.onWaitingCall) return;
+          for (const c of calls) {
+            if (c.status !== 'awaiting_approval') continue;
+            const callId = c.request.callId;
+            if (waitingSeen.has(callId)) continue;
+            waitingSeen.add(callId);
+            options.onWaitingCall({
+              callId,
+              name: c.request.name,
+              confirmationDetails: c.confirmationDetails,
+            });
+          }
+        },
         onAllToolCallsComplete: async (calls) => {
           resolve(calls as unknown as LooseCompletedCall[]);
         },
@@ -179,6 +217,13 @@ export async function* livePromptEvents(
         summary: failed ? 'error' : 'ok',
       };
       if (resp?.responseParts) responseParts.push(...resp.responseParts);
+    }
+    // Sampling boundary: drained steering rides after the tool responses as
+    // genuine user content (original useGeminiStream mid-turn drain).
+    if (!abort.aborted) {
+      for (const text of options?.drainSteering?.() ?? []) {
+        if (text) responseParts.push({ text });
+      }
     }
     if (responseParts.length === 0) return;
     nextPrompt = responseParts;

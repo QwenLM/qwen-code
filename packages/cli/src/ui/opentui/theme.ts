@@ -15,6 +15,10 @@ export interface Palette {
   yellow: string;
   purple: string;
   hover: string;
+  /** Mode background; lets selection colors keep contrast on light themes. */
+  bg?: string;
+  selectionBg?: string;
+  selectionFg?: string;
 }
 
 // Hex values mirror the original qwen-code default themes (themes/theme.ts):
@@ -28,6 +32,10 @@ const DARK: Palette = {
   yellow: '#F9E2AF',
   purple: '#89B4FA',
   hover: '#313244',
+  // No bg on dark: the default invert selection (bg=text fg, fg=black) is
+  // readable on dark terminals, and leaving bg unset keeps transparency.
+  selectionBg: '#264F78',
+  selectionFg: '#FFFFFF',
 };
 
 const LIGHT: Palette = {
@@ -39,6 +47,12 @@ const LIGHT: Palette = {
   yellow: '#D5A40A',
   purple: '#3B82F6',
   hover: '#E6E9EF',
+  // Light: paint the markdown block with the original light theme's
+  // Background so opentui's invert-selection (fg→bg swap) stays readable —
+  // with an undefined cell bg the fallback selection fg is black-on-black.
+  bg: '#FAFAFA',
+  selectionBg: '#ADD6FF',
+  selectionFg: '#1F2328',
 };
 
 /** Mutable palette object — components read `C.x` at render time;
@@ -48,6 +62,9 @@ export const C: Palette = { ...DARK };
 function buildSyntax(mode: 'dark' | 'light'): SyntaxStyle {
   return mode === 'light'
     ? SyntaxStyle.fromStyles({
+        // `default` colors unstyled markdown chunks (table cells, plain
+        // inline text); without it TextTable falls back to #FFFFFF.
+        default: { fg: '#1f2328' },
         keyword: { fg: '#cf222e', bold: true },
         string: { fg: '#0a3069' },
         comment: { fg: '#59636e', italic: true },
@@ -63,6 +80,7 @@ function buildSyntax(mode: 'dark' | 'light'): SyntaxStyle {
         code: { fg: '#0a3069' },
       })
     : SyntaxStyle.fromStyles({
+        default: { fg: '#e6edf3' },
         keyword: { fg: '#bb9af7', bold: true },
         string: { fg: '#9ece6a' },
         comment: { fg: '#565f89', italic: true },

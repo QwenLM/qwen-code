@@ -15,6 +15,70 @@ import { SendMessageType } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { livePromptEvents } from './live-session.js';
 
+// The steering test drives one full tool round-trip; replace the scheduler
+// with a stub that completes the pending calls immediately.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    CoreToolScheduler: class FakeScheduler {
+      private readonly opts: {
+        onAllToolCallsComplete: (calls: unknown[]) => unknown;
+        onToolCallsUpdate?: (calls: unknown[]) => unknown;
+      };
+      constructor(opts: {
+        onAllToolCallsComplete: (calls: unknown[]) => unknown;
+        onToolCallsUpdate?: (calls: unknown[]) => unknown;
+      }) {
+        this.opts = opts;
+      }
+      async schedule(
+        calls: Array<{ callId: string; name?: string; args?: unknown }>,
+      ): Promise<void> {
+        // Emit one awaiting_approval update per call (twice, to prove the
+        // live-session dedupe), then complete the calls.
+        for (let i = 0; i < 2; i++) {
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((c) => ({
+              status: 'awaiting_approval',
+              request: c,
+              confirmationDetails: {
+                type: 'ask_user_question',
+                title: '',
+                questions: [],
+                onConfirm: async () => {},
+              },
+            })),
+          );
+        }
+        await this.opts.onAllToolCallsComplete(
+          calls.map((c) => ({
+            request: {
+              callId: c.callId,
+              name: c.name ?? 'test_tool',
+              args: c.args ?? {},
+            },
+            status: 'success',
+            response: {
+              responseParts: [
+                {
+                  functionResponse: {
+                    name: c.name ?? 'test_tool',
+                    id: c.callId,
+                    response: { ok: true },
+                  },
+                },
+              ],
+              resultDisplay: 'done',
+            },
+          })),
+        );
+      }
+    },
+  };
+});
+
 function createFakeConfig(sendMessageStream: (...args: unknown[]) => unknown) {
   return {
     initialize: vi.fn(async () => {}),
@@ -72,6 +136,101 @@ describe('livePromptEvents', () => {
     expect(options).toEqual({
       type: SendMessageType.UserQuery,
       modelOverride: 'fast-x',
+    });
+  });
+
+  it('appends drained steering texts after tool responses at the boundary', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['steer me'],
+      }),
+    );
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+    expect(secondPrompt).toEqual([
+      {
+        functionResponse: {
+          name: 'test_tool',
+          id: 't1',
+          response: { ok: true },
+        },
+      },
+      { text: 'steer me' },
+    ]);
+  });
+
+  it('skips steering when the turn is aborted', async () => {
+    const drainSteering = vi.fn(() => ['never']);
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 't1', name: 'test_tool', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const controller = new AbortController();
+    controller.abort();
+
+    await drain(
+      livePromptEvents(config, 'start', controller.signal, { drainSteering }),
+    );
+
+    expect(drainSteering).not.toHaveBeenCalled();
+  });
+
+  it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 'w1', name: 'ask_user_question', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const onWaitingCall = vi.fn();
+
+    await drain(livePromptEvents(config, 'q', undefined, { onWaitingCall }));
+
+    // The fake scheduler reports the waiting call twice; dedupe must surface it once.
+    expect(onWaitingCall).toHaveBeenCalledTimes(1);
+    expect(onWaitingCall.mock.calls[0][0]).toMatchObject({
+      callId: 'w1',
+      name: 'ask_user_question',
     });
   });
 });

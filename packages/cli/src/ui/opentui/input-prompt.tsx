@@ -50,9 +50,16 @@ import type { KeyEvent, TextareaRenderable } from '@opentui/core';
 import {
   FileSearchFactory,
   ApprovalMode,
+  Storage,
   type Config,
   type FileSearch,
 } from '@qwen-code/qwen-code-core';
+import {
+  clipboardHasImage,
+  saveClipboardImage,
+  cleanupOldClipboardImages,
+} from '../utils/clipboardUtils.js';
+import path from 'node:path';
 import type { SlashCommand } from '../commands/types.js';
 import type { Suggestion } from '../utils/suggestions.js';
 import { C } from './theme.js';
@@ -97,7 +104,7 @@ function promptChrome(approvalMode: ApprovalMode | undefined): {
 }
 
 export interface InputPromptProps {
-  onSubmit: (text: string) => void;
+  onSubmit: (text: string, imagePaths?: string[]) => void;
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
@@ -114,6 +121,10 @@ export interface InputPromptProps {
   composerHandle?: {
     current: { getText: () => string; setText: (t: string) => void } | null;
   };
+  /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
+  queueLength?: number;
+  /** Pops all queued prompts into the composer (returns joined text). */
+  onPopQueue?: () => string | null;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -127,6 +138,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     placeholder = DEFAULT_PLACEHOLDER,
     focus = true,
     onEscapeArmedChange,
+    queueLength = 0,
+    onPopQueue,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -161,6 +174,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [escapeArmed, setEscapeArmed] = useState(false);
+  const [attachments, setAttachments] = useState<
+    Array<{ id: string; path: string; filename: string }>
+  >([]);
   const completionModeRef = useRef<CompletionMode>(CompletionMode.IDLE);
   // History-restored text suppresses re-opening the dropdown, like the
   // original's isHistoryRestoredText.
@@ -360,6 +376,26 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     [suggestions, applyTextToEditor, onSubmit],
   );
 
+  // ── Ctrl+V / Cmd+V: clipboard image → temp file → attachment chip ──────
+  const handleClipboardImage = useCallback(async () => {
+    try {
+      if (!(await clipboardHasImage())) return;
+      const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
+      if (!imagePath) return;
+      cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {});
+      setAttachments((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-${prev.length}`,
+          path: imagePath,
+          filename: path.basename(imagePath),
+        },
+      ]);
+    } catch {
+      // Native clipboard module unavailable: leave the paste as plain text.
+    }
+  }, []);
+
   // ── raw Backspace: consumed before parsed-key dispatch so legacy DEL/BS
   //    and unmodified kitty encodings delete exactly once via the editor API
   //    and never double-fire through the focused editor ────────────────────
@@ -399,13 +435,29 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       key.name === 'return' ||
       key.name === 'kpenter'
     ) {
+      // Original NEWLINE bindings: shift/ctrl/meta/cmd+enter insert a line
+      // break instead of submitting.
+      if (key.shift || key.ctrl || key.meta || key.super) {
+        el.newLine();
+        setTextVersion((v) => v + 1);
+        key.preventDefault();
+        return;
+      }
       const text = el.plainText.trim();
       if (text) {
+        const images = attachments.map((a) => a.path);
         el.clear();
         setTextVersion((v) => v + 1);
-        onSubmit(text);
+        setAttachments([]);
+        onSubmit(text, images.length > 0 ? images : undefined);
         key.preventDefault();
       }
+      return;
+    }
+    if (key.name === 'v' && (key.ctrl || key.super)) {
+      // PASTE_CLIPBOARD_IMAGE parity (ctrl+v / cmd+v).
+      key.preventDefault();
+      void handleClipboardImage();
       return;
     }
     if (isPrintableKeyInput(key)) {
@@ -436,6 +488,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         completionModeRef.current = CompletionMode.IDLE;
         setSuggestions([]);
         setLoadingSuggestions(false);
+        return;
+      }
+      // Pop queued prompts back into the composer before the double-Esc
+      // clear (original parity; the streaming branch above already guards
+      // the respond-cancel case).
+      if (queueLength > 0) {
+        const popped = onPopQueue?.();
+        if (popped) {
+          const current = el.plainText;
+          el.setText(current ? `${popped}\n${current}` : popped);
+          setTextVersion((v) => v + 1);
+        }
         return;
       }
       const effect = escapeRef.current!.handleEscape(el.plainText);
@@ -481,6 +545,21 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       key.preventDefault();
       acceptSuggestion(activeIndex, true);
       return;
+    }
+
+    // Up at the top edge pops queued prompts into the composer (original).
+    if (navigationUp && queueLength > 0) {
+      const topCursor = el.logicalCursor;
+      if (topCursor.row === 0 && topCursor.col === 0) {
+        const popped = onPopQueue?.();
+        if (popped) {
+          const current = el.plainText;
+          el.setText(current ? `${popped}\n${current}` : popped);
+          setTextVersion((v) => v + 1);
+          key.preventDefault();
+          return;
+        }
+      }
     }
 
     if (navigationUp) {
@@ -540,14 +619,16 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       setTextVersion((v) => v + 1);
       return;
     }
+    const images = attachments.map((a) => a.path);
     el.clear();
     setTextVersion((v) => v + 1);
     historyRef.current?.reset();
     historyRestoredTextRef.current = null;
     setSuggestions([]);
     setLoadingSuggestions(false);
-    onSubmit(decision.text.trim());
-  }, [onSubmit]);
+    setAttachments([]);
+    onSubmit(decision.text.trim(), images.length > 0 ? images : undefined);
+  }, [onSubmit, attachments]);
 
   // Force the editor text color after mount (prop may not forward), max contrast.
   useEffect(() => {
@@ -598,6 +679,13 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   return (
     <box flexDirection="column" marginLeft={1} marginRight={1}>
+      {attachments.length > 0 && (
+        <box flexDirection="column" paddingLeft={1}>
+          {attachments.map((a) => (
+            <text key={a.id} fg={C.purple}>{`📎 ${a.filename}`}</text>
+          ))}
+        </box>
+      )}
       <text fg={borderColor}>{dashLine}</text>
       <box
         flexDirection="row"
@@ -618,6 +706,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           placeholderColor={C.dim}
           textColor={C.text}
           cursorColor={C.accent}
+          selectionBg={C.selectionBg}
+          selectionFg={C.selectionFg}
           wrapMode="char"
           onSubmit={handleSubmit}
           onContentChange={() => setTextVersion((v) => v + 1)}
