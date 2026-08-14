@@ -60,8 +60,11 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 /**
  * Safety margin subtracted from the remaining window when computing the
  * compression side-query's output budget. The side-query input size is a
- * char/4 estimate — real tokenizers vary ±30% and under-count CJK-dense
- * content — so a small pad keeps `prompt + max_tokens <= window` honest.
+ * char/4 estimate, so this pad absorbs rounding and small per-part drift.
+ * It does NOT scale with the estimate: proportional tokenizer error
+ * (real tokenizers vary ±30% and under-count CJK-dense content) can still
+ * push `prompt + max_tokens` over the window, in which case the backend
+ * rejects the request with a 400 and compression fails safely.
  */
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
 
@@ -925,16 +928,21 @@ export class ChatCompressionService {
     // estimator error (the ±30% variance the margin documents), so comparing
     // them against a clamped budget would convert that error into false
     // truncation verdicts for complete summaries. The fixed ceiling
-    // preserves the pre-#7960 semantics for the usage-missing path.
+    // preserves the pre-#7960 semantics for the usage-missing path. The one
+    // exception is the floor regime (budget 1): no complete summary can
+    // exist at a 1-token cap, so the false-positive rationale cannot apply
+    // and estimates must be dropped there too — otherwise a provider that
+    // omits usage would persist a 1-token fragment as COMPRESSED.
     //
     // TODO(finish_reason): the current `>= budget` check is a heuristic that
     // false-positives on legitimate summaries that happen to land exactly at
     // the budget. The proper signal is `finish_reason === 'length'` (OpenAI) /
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
-    const truncationThreshold = outputCountIsEstimated
-      ? COMPACT_MAX_OUTPUT_TOKENS
-      : coldOutputBudget;
+    const truncationThreshold =
+      outputCountIsEstimated && coldOutputBudget > 1
+        ? COMPACT_MAX_OUTPUT_TOKENS
+        : coldOutputBudget;
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
