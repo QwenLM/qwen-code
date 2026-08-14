@@ -152,7 +152,8 @@ describe('resolveBootstrapRoute', () => {
     );
     // Array options consume at most one token (matching yargs' command-
     // detection pass), so the second value reads as a positional and demotes
-    // these to the slow path, which prints the identical top-level page.
+    // these to the slow path, which prints the same top-level options plus
+    // the full parser's command/positional sections.
     expect(
       resolveBootstrapRoute(['--extensions', 'ext1', 'ext2', '--help']),
     ).toBe('default');
@@ -190,8 +191,8 @@ describe('resolveBootstrapRoute', () => {
     ).toBe('help');
     // The `=` form carries its value inside the token and consumes nothing
     // further, so `b` reads as a positional and demotes to the slow path;
-    // the full parser then greedily collects [a, b, c] into the array and
-    // prints the same top-level help.
+    // with --help present the full parser boots and prints help before the
+    // leftover tokens matter.
     expect(resolveBootstrapRoute(['--extensions=a', 'b', 'c', '--help'])).toBe(
       'default',
     );
@@ -201,6 +202,22 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--model=gpt-4', 'serve', '--help'])).toBe(
       'default',
     );
+  });
+
+  it('routes --help ahead of --version like the full parser', () => {
+    // yargs gives --help precedence over --version in every ordering, so a
+    // dash-token sitting directly in a value flag's value slot must not flip
+    // the fast path onto the version page.
+    expect(resolveBootstrapRoute(['--model', '-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['-p', '-v', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['--resume', '-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--model', '--version', '--help'])).toBe(
+      'help',
+    );
+    expect(resolveBootstrapRoute(['-v', '--help'])).toBe('help');
+    // Version still wins when no help is requested.
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-v'])).toBe('version');
   });
 
   it('demotes unrecognized short-option clusters to the slow path', () => {
@@ -1338,5 +1355,19 @@ describe('bootstrap error handling', () => {
     expect(entryPoint.indexOf('stampCliEntryEnv()')).toBeLessThan(
       entryPoint.indexOf('await run()'),
     );
+  });
+});
+
+describe('shared top-level option definitions', () => {
+  it('keeps every definition typed and described so yargs renders them', () => {
+    // TOP_LEVEL_HELP_OPTIONS is the union both help builders consume, so one
+    // pass covers every definition in the global and default-command maps.
+    for (const [name, config] of TOP_LEVEL_HELP_OPTIONS) {
+      expect(config.type, `${name} is missing a type`).toBeDefined();
+      expect(
+        typeof config.description,
+        `${name} is missing a description`,
+      ).toBe('string');
+    }
   });
 });

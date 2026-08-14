@@ -190,7 +190,10 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   'allowed-tools': {
     type: 'array' as const,
-    description: 'Tools that are allowed to run without confirmation',
+    // Pre-PR the default-command builder registered this option twice and
+    // yargs rendered the LAST registration's description; keep that wording
+    // so the consolidated help output is unchanged.
+    description: 'Tools to allow, will bypass confirmation',
   },
   extensions: {
     alias: 'e',

@@ -102,8 +102,8 @@ function isValueToken(arg: string | undefined): arg is string {
 // (e.g. `-sm gpt-4`) are not recognized and boot the full CLI graph; and
 // value-taking options consume at most ONE following token (none for the
 // `--flag=value` form), so multi-value array invocations such as
-// `--extensions a b --help` demote to the slow path, which prints the
-// identical page via the full parser.
+// `--extensions a b --help` demote to the slow path, which prints the same
+// top-level options plus the full parser's command/positional sections.
 function skipOptionValues(argv: readonly string[], index: number): number {
   const raw = argv[index]!;
   const eq = raw.indexOf('=');
@@ -197,6 +197,14 @@ export function resolveBootstrapRoute(
 ): BootstrapRoute {
   const argv = normalizeServeFastPathArgv(rawArgv);
 
+  // Help before version — yargs' precedence: `qwen --model -v --help` (a
+  // dash-token exposed in a value slot by the scanner) prints help on the
+  // full parser in every ordering, so the fast path must match.
+  const firstPositional = firstPositionalArg(argv);
+  if (hasFlag(argv, '--help', '-h') && firstPositional === undefined) {
+    return 'help';
+  }
+
   if (hasFlag(argv, '--version', '-v')) {
     return 'version';
   }
@@ -207,11 +215,6 @@ export function resolveBootstrapRoute(
   }
   if (firstArg === 'mcp') {
     return 'mcp';
-  }
-
-  const firstPositional = firstPositionalArg(argv);
-  if (hasFlag(argv, '--help', '-h') && firstPositional === undefined) {
-    return 'help';
   }
 
   return 'default';
