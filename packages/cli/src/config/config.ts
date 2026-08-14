@@ -68,6 +68,7 @@ import {
   TOP_LEVEL_GLOBAL_OPTIONS,
   DEFAULT_COMMAND_OPTIONS,
   TOP_LEVEL_DEPRECATED_OPTIONS,
+  TOP_LEVEL_USAGE,
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
@@ -565,9 +566,7 @@ export async function parseArguments(): Promise<CliArgs> {
   const yargsInstance = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')
-    .usage(
-      'Usage: qwen [options] [command]\n\nQwen Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode',
-    )
+    .usage(TOP_LEVEL_USAGE)
     .option('telemetry', TOP_LEVEL_GLOBAL_OPTIONS.telemetry)
     .option('telemetry-target', TOP_LEVEL_GLOBAL_OPTIONS['telemetry-target'])
     .option(

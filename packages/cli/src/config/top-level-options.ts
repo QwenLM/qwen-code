@@ -12,6 +12,11 @@ import type { Options } from 'yargs';
  *
  * These options are valid at the top level, before any subcommand.
  */
+
+/** Usage banner shared by both help builders, kept here with the options. */
+export const TOP_LEVEL_USAGE =
+  'Usage: qwen [options] [command]\n\nQwen Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode';
+
 export const TOP_LEVEL_GLOBAL_OPTIONS = {
   telemetry: {
     type: 'boolean' as const,

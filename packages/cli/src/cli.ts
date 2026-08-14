@@ -17,6 +17,7 @@ import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import {
   TOP_LEVEL_DEPRECATED_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
+  TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
@@ -144,10 +145,9 @@ function hasFlag(
 async function buildTopLevelHelpParser() {
   const { default: yargs } = await import('yargs');
   const parser = yargs([])
+    .locale('en')
     .scriptName('qwen')
-    .usage(
-      'Usage: qwen [options] [command]\n\nQwen Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode',
-    )
+    .usage(TOP_LEVEL_USAGE)
     .version(process.env['CLI_VERSION'] || 'unknown')
     .alias('v', 'version')
     .help()
