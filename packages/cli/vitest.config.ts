@@ -158,6 +158,10 @@ export default defineConfig({
       junit: 'junit.xml',
     },
     setupFiles: ['./test-setup.ts'],
+    // Fail fast with an actionable message when workspace dist/ output or
+    // generated files are missing (fresh clone, new worktree, deep clean).
+    // See scripts/vitest-global-setup.js and issue #9149.
+    globalSetup: '../../scripts/vitest-global-setup.js',
     coverage: {
       enabled: true,
       provider: 'v8',
