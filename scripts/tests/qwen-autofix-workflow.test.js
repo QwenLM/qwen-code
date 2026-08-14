@@ -33,6 +33,10 @@ const reviewVerificationRunner = readFileSync(
   reviewVerificationRunnerPath,
   'utf8',
 );
+const upsertDeferredScript = readFileSync(
+  '.github/scripts/upsert-deferred-issue.sh',
+  'utf8',
+);
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
@@ -2917,7 +2921,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(16);
+    expect(workflow.split('--paginate').length - 1).toBe(15);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
@@ -10358,14 +10362,18 @@ exit 1
   });
 
   it('upserts deferred findings into a per-PR issue that survives the merge', () => {
-    // Wiring: the upsert runs for BOTH outcomes (after each shared
-    // resolve/reply call), the agent file rides the artifact dump and the
-    // repair cleanup, and SKILL documents the fourth disposition.
+    // Wiring: the staged script runs after both shared resolve/reply call
+    // sites AND on the failure/handoff path (a failed round must not lose
+    // verified findings); it is staged from the trusted base; the agent
+    // file rides the artifact dump and the repair cleanup; SKILL documents
+    // the fourth disposition.
     expect(
-      pushAndReportStep.split(
-        'resolve_and_reply_threads\n            upsert_deferred_issue',
-      ).length - 1,
-    ).toBe(2);
+      workflow.split('bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"').length -
+        1,
+    ).toBe(3);
+    expect(workflow).toContain(
+      'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
+    );
     expect(reviewAddressJob).toContain(
       'comment-replies.json deferred-findings.json pr.diff',
     );
@@ -10377,41 +10385,144 @@ exit 1
     expect(skill).toContain('deferred-findings.json');
     expect(skill).toContain('you defer what is worth doing');
 
-    // Shape validation: only a non-empty array of {id:number,
-    // reason:string} passes.
-    const validateJq = pushAndReportStep.match(
-      /jq -e 'type == "array" and length > 0 and all\(\.\[\];[\s\S]*?\(\.reason \| type == "string"\)\)'/,
-    )?.[0];
-    expect(validateJq).toBeTruthy();
-    const prog = validateJq.match(/'([\s\S]*)'/)?.[1];
-    const validates = (json) =>
-      spawnSync('jq', ['-e', prog], { input: json, encoding: 'utf8' })
-        .status === 0;
-    expect(validates('[{"id":1,"reason":"r"}]')).toBe(true);
-    expect(validates('[]')).toBe(false);
-    expect(validates('[{"id":"1","reason":"r"}]')).toBe(false);
-    expect(validates('{"id":1}')).toBe(false);
-
-    // Line building: dedupe against the existing issue body by rc id,
-    // flatten newlines, truncate, and neutralize markers.
-    const linesJq = pushAndReportStep.match(
-      /jq -r --arg body "\$\{existing_body\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/deferred-findings\.json"/,
-    )?.[1];
-    expect(linesJq).toBeTruthy();
-    const lines = (items, body) =>
-      spawnSync('jq', ['-r', '--arg', 'body', body, linesJq], {
-        input: JSON.stringify(items),
-        encoding: 'utf8',
-      }).stdout;
-    const built = lines(
-      [
-        { id: 7, path: 'src/a.ts', reason: 'real\nbut out of\r\nscope' },
-        { id: 8, reason: 'already tracked' },
-      ],
-      'existing…\n- rc:8 `x`: already tracked',
+    // End-to-end boundary: run the real script against a recording gh
+    // stub. Every case asserts the CALLS, not just the strings.
+    const runUpsert = ({
+      findings,
+      resolved = '',
+      list = '[]',
+      body = '',
+      bodyFail = false,
+      comments = '[]',
+      writeFail = false,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(join(dir, 'deferred-findings.json'), findings);
+      if (resolved) writeFileSync(join(dir, 'resolved-comments.txt'), resolved);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'printf "%s\\n" "$*" >> "$GHLOG"',
+          'case "$2" in',
+          '  *"issues?state=open"*) printf "%s" "$LIST_JSON";;',
+          '  */comments?per_page=100*) printf "%s" "$COMMENTS_JSON";;',
+          '  */comments) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo ok;;',
+          '  repos/*/issues) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo 77;;',
+          '  repos/*/issues/*) [[ "$BODY_FAIL" == 1 ]] && exit 1; printf "%s" "$BODY_TEXT";;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const res = spawnSync(
+        'bash',
+        ['.github/scripts/upsert-deferred-issue.sh'],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
+            PR: '5',
+            REPO: 'o/r',
+            AUTOFIX_BOT: 'bot',
+            GHLOG: join(dir, 'gh.log'),
+            LIST_JSON: list,
+            BODY_TEXT: body,
+            BODY_FAIL: bodyFail ? '1' : '0',
+            COMMENTS_JSON: comments,
+            WRITE_FAIL: writeFail ? '1' : '0',
+          },
+        },
+      );
+      const calls = existsSync(join(dir, 'gh.log'))
+        ? readFileSync(join(dir, 'gh.log'), 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, status: res.status, calls };
+    };
+    const marker = '<!-- autofix-deferred pr=5 -->';
+    // Create path: no existing issue → POST /issues with marker + item.
+    const created = runUpsert({
+      findings: '[{"id":7,"path":"src/a.ts","reason":"real, out of scope"}]',
+    });
+    expect(created.status).toBe(0);
+    expect(created.calls).toContain('api repos/o/r/issues -f title=');
+    expect(created.calls).toContain(marker);
+    expect(created.calls).toContain('- rc:7 `src/a.ts`: real, out of scope');
+    expect(created.out).toContain('tracked in new issue #77');
+    // Append path: existing issue found → dedupe against body+comments,
+    // then POST an issue COMMENT (append-only; no body PATCH anywhere).
+    const appended = runUpsert({
+      findings:
+        '[{"id":7,"reason":"new"},{"id":8,"reason":"dup"},{"id":9,"reason":"in-comment"}]',
+      list: JSON.stringify([
+        { number: 42, body: `x\n${marker}`, pull_request: null },
+      ]),
+      body: 'intro\n- rc:8 `x`: dup',
+      comments: JSON.stringify([{ body: '- rc:9 `y`: in-comment' }]),
+    });
+    expect(appended.calls).toContain(
+      'api repos/o/r/issues/42/comments -f body=',
     );
-    expect(built).toContain('- rc:7 `src/a.ts`: real but out of scope');
-    expect(built).not.toContain('rc:8');
+    expect(appended.calls).toContain('- rc:7');
+    expect(appended.calls).not.toContain('- rc:8 ');
+    expect(appended.calls).not.toContain('- rc:9 ');
+    expect(appended.calls).not.toContain('PATCH');
+    expect(appended.out).toContain('appended to issue #42');
+    // Free-text mentions do not suppress (line-anchored dedupe), and a PULL
+    // REQUEST carrying the marker is never selected as the tracking issue.
+    const anchored = runUpsert({
+      findings: '[{"id":3,"reason":"r"}]',
+      list: JSON.stringify([
+        { number: 9, body: `pr body ${marker}`, pull_request: { url: 'x' } },
+        {
+          number: 42,
+          body: `x\n${marker}\nprose mentioning rc:3 casually`,
+          pull_request: null,
+        },
+      ]),
+      body: 'prose mentioning rc:3 casually',
+      comments: '[]',
+    });
+    expect(anchored.calls).toContain('api repos/o/r/issues/42/comments');
+    expect(anchored.calls).toContain('- rc:3');
+    // A failed body read SKIPS the round — never treated as empty history.
+    const readFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      bodyFail: true,
+    });
+    expect(readFail.out).toContain('skipping this round');
+    expect(readFail.calls).not.toContain('/comments -f body=');
+    // An id resolved in code this round is never deferred (contradiction).
+    const resolvedOut = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      resolved: 'rc:7\r\n',
+    });
+    expect(resolvedOut.calls).not.toContain('-f title=');
+    // Malformed path type fails the shape gate loudly, dropping nothing
+    // silently.
+    const badShape = runUpsert({
+      findings: '[{"id":7,"reason":"r","path":5}]',
+    });
+    expect(badShape.out).toContain('malformed');
+    expect(badShape.calls).toBe('');
+    // A failed write logs NOT persisted — success is never claimed.
+    const writeFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      writeFail: true,
+    });
+    expect(writeFail.out).toContain('NOT persisted');
+    // Path bytes are sanitized before rendering (no forged bullet lines).
+    const forged = runUpsert({
+      findings: '[{"id":4,"path":"a`\\n- rc:999 `z","reason":"r"}]',
+    });
+    expect(forged.calls).toContain('- rc:4');
+    expect(forged.calls).not.toContain('- rc:999');
   });
 
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
@@ -11152,7 +11263,7 @@ exit 1
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL TEN agent-derived publish sites
+    // Token-breaking neutralization at ALL NINE workflow publish sites
     // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, the
     // gate-rejection body, the comment-reply body whose content is agent
     // stdout that can echo external comment text, the two
@@ -11167,7 +11278,10 @@ exit 1
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
-    expect(escapeSites).toHaveLength(10);
+    expect(escapeSites).toHaveLength(9);
+    // The tenth agent-derived publish site lives in the staged
+    // upsert-deferred-issue.sh (line builder) and is pinned there.
+    expect(upsertDeferredScript).toContain("sed 's/<!--/<!\\\\-\\\\-/g'");
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }

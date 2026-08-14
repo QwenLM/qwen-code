@@ -3970,6 +3970,7 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
@@ -5518,57 +5519,6 @@ jobs:
             exit 1
           fi
 
-          # Deferred-to-follow-up findings must SURVIVE the PR: a reason
-          # that lives only in a review thread dies at merge (nobody
-          # re-reads merged PRs' threads). The agent records verified but
-          # out-of-footprint findings in deferred-findings.json; this
-          # upserts them into one per-PR tracking issue, appending only ids
-          # not already listed. Best-effort: a failure here must never fail
-          # a good round. Deliberately NO ready-for-agent label — feeding
-          # the bot's own deferrals back into its issue queue is a human
-          # authorization, not a default.
-          upsert_deferred_issue() {
-            [[ -s "${WORKDIR}/deferred-findings.json" ]] || return 0
-            if ! jq -e 'type == "array" and length > 0 and all(.[];
-                (.id | type == "number") and (.reason | type == "string"))' \
-              "${WORKDIR}/deferred-findings.json" > /dev/null 2>&1; then
-              echo "::warning::deferred-findings.json is malformed; skipping the follow-up upsert"
-              return 0
-            fi
-            local marker existing_num existing_body new_lines body
-            marker="<!-- autofix-deferred pr=${PR} -->"
-            existing_num="$(gh api "repos/${REPO}/issues?state=open&creator=${AUTOFIX_BOT}&per_page=100" \
-              --paginate --jq '.[] | "\(.number)\t\(.body // "")"' 2> /dev/null |
-              awk -F'\t' -v m="${marker}" 'index($0, m) { print $1; exit }')" || existing_num=''
-            existing_body=''
-            if [[ -n "${existing_num}" ]]; then
-              existing_body="$(gh api "repos/${REPO}/issues/${existing_num}" --jq '.body // ""' 2> /dev/null)" || existing_body=''
-            fi
-            # Append only rc ids the issue does not already carry; item text
-            # is agent-authored, so it gets the same token-breaking
-            # neutralization as every other published agent output.
-            new_lines="$(jq -r --arg body "${existing_body}" '
-              .[] | .id as $id
-              | select(($body | contains("rc:" + ($id | tostring) + " ")) | not)
-              | "- rc:\($id) `\(.path // "?" | .[0:200])`: \(.reason | gsub("[\r\n]+"; " ") | .[0:500])"' \
-              "${WORKDIR}/deferred-findings.json" 2> /dev/null |
-              sed 's/<!--/<!\\-\\-/g')" || new_lines=''
-            [[ -n "${new_lines}" ]] || return 0
-            if [[ -n "${existing_num}" ]]; then
-              body="${existing_body}"$'\n'"${new_lines}"
-              gh api --method PATCH "repos/${REPO}/issues/${existing_num}" \
-                -f body="${body}" > /dev/null 2>&1 ||
-                echo "::warning::could not update the deferred-findings issue #${existing_num}"
-              echo "🗂 deferred findings appended to issue #${existing_num}"
-            else
-              body="${marker}"$'\n\n'"Verified review findings from PR #${PR} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up. A maintainer can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${new_lines}"
-              gh api "repos/${REPO}/issues" \
-                -f title="Deferred review findings from PR #${PR}" \
-                -f body="${body}" --jq '.number' 2> /dev/null ||
-                echo "::warning::could not create the deferred-findings issue for PR #${PR}"
-            fi
-          }
-
           # Shared by the pushed and no-op outcomes: a no-op round may
           # resolve re-verified findings (verified_head is the unchanged,
           # previously verified origin head) and must post its declines'
@@ -5873,7 +5823,11 @@ jobs:
               fi
             done
             resolve_and_reply_threads
-            upsert_deferred_issue
+            # Best-effort: verified out-of-footprint findings persist into
+            # the per-PR tracking issue (trusted staged copy; append-only
+            # comment design — see the script).
+            bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+              echo "::warning::deferred-findings upsert failed; continuing"
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -5927,7 +5881,11 @@ jobs:
             # origin head; resolution's own live-head guards still apply.
             PUSH_RACE_MERGED='false'
             resolve_and_reply_threads
-            upsert_deferred_issue
+            # Best-effort: verified out-of-footprint findings persist into
+            # the per-PR tracking issue (trusted staged copy; append-only
+            # comment design — see the script).
+            bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+              echo "::warning::deferred-findings upsert failed; continuing"
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
@@ -6629,6 +6587,13 @@ jobs:
               fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
+          fi
+          # A failed round must not lose verified deferred findings: the
+          # agent's analysis is independent of whether this round's commit
+          # survived verification. Same guards as the handoff itself.
+          if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" ]]; then
+            bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+              echo "::warning::deferred-findings upsert failed; continuing"
           fi
 
       # Flip the status comment out of "working" so a finished round never
