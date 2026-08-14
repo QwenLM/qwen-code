@@ -296,12 +296,7 @@ export function flushSessionUsageSnapshot(
 
 export function startSessionUsageSnapshots(
   config: Pick<Config, 'getProjectRoot' | 'getSessionId'>,
-  registerCleanupFn: typeof registerCleanup = registerCleanup,
-  deps?: Partial<SessionUsageSnapshotDeps> & {
-    intervalMs?: number;
-    setIntervalFn?: typeof setInterval;
-    clearIntervalFn?: typeof clearInterval;
-  },
+  deps?: Partial<SessionUsageSnapshotDeps>,
 ): void {
   const snapshotDeps: SessionUsageSnapshotDeps = {
     getMetrics: deps?.getMetrics ?? (() => uiTelemetryService.getMetrics()),
@@ -318,16 +313,11 @@ export function startSessionUsageSnapshots(
       // Best-effort — usage reporting must not affect the session.
     }
   };
-  const setIntervalFn = deps?.setIntervalFn ?? setInterval;
-  const clearIntervalFn = deps?.clearIntervalFn ?? clearInterval;
-  const timer = setIntervalFn(
-    flush,
-    deps?.intervalMs ?? LIVE_USAGE_FLUSH_INTERVAL_MS,
-  );
+  const timer = setInterval(flush, LIVE_USAGE_FLUSH_INTERVAL_MS);
   timer.unref();
 
-  registerCleanupFn(() => {
-    clearIntervalFn(timer);
+  registerCleanup(() => {
+    clearInterval(timer);
     flush();
   });
 }

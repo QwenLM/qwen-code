@@ -355,39 +355,35 @@ describe('session usage snapshots', () => {
     });
   });
 
-  it('flushes on the interval and once more during cleanup', () => {
+  it('flushes on the interval and once more during cleanup', async () => {
+    vi.useFakeTimers();
     const persist = vi.fn();
-    const registerCleanup = vi.fn();
-    const timer = { unref: vi.fn() } as unknown as NodeJS.Timeout;
-    let intervalCallback: (() => void) | undefined;
-    const setIntervalFn = vi.fn((callback: () => void) => {
-      intervalCallback = callback;
-      return timer;
-    }) as unknown as typeof setInterval;
-    const clearIntervalFn = vi.fn() as unknown as typeof clearInterval;
+    try {
+      const { registerCleanup } = await import('./utils/cleanup.js');
+      const registerCleanupMock = vi.mocked(registerCleanup);
+      registerCleanupMock.mockClear();
 
-    startSessionUsageSnapshots(config, registerCleanup, {
-      getMetrics: () => makeSessionMetrics(1),
-      getSessionStartTime: () => new Date('2026-07-06T00:00:00Z'),
-      now: () => new Date('2026-07-06T00:05:00Z'),
-      persist,
-      intervalMs: 1234,
-      setIntervalFn,
-      clearIntervalFn,
-    });
+      startSessionUsageSnapshots(config, {
+        getMetrics: () => makeSessionMetrics(1),
+        getSessionStartTime: () => new Date('2026-07-06T00:00:00Z'),
+        now: () => new Date('2026-07-06T00:05:00Z'),
+        persist,
+      });
 
-    expect(setIntervalFn).toHaveBeenCalledWith(expect.any(Function), 1234);
-    expect(timer.unref).toHaveBeenCalledOnce();
-    expect(registerCleanup).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(1);
+      expect(registerCleanupMock).toHaveBeenCalledOnce();
 
-    intervalCallback?.();
-    expect(persist).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(5 * 60 * 1000);
+      expect(persist).toHaveBeenCalledTimes(1);
 
-    const cleanup = registerCleanup.mock.calls[0]![0];
-    cleanup();
+      const cleanup = registerCleanupMock.mock.calls[0]![0];
+      cleanup();
 
-    expect(clearIntervalFn).toHaveBeenCalledWith(timer);
-    expect(persist).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(persist).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
