@@ -1312,6 +1312,16 @@ describe('renderLedgerSection', () => {
         findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
       }),
     ).not.toContain('reviewed at');
+    // …and the routing tail goes with it: asserting only the space-form
+    // phrase let a mutant hoist the tail out of the ternary, since its own
+    // wording says "reviewed-at sha".
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('--since');
   });
 
   it('renders a work-list table that names the ruling owed per entry', () => {

@@ -1342,7 +1342,8 @@ export function buildRoleBrief(
     const base =
       inc?.effective === true &&
       inc.upToDate !== true &&
-      typeof inc.diffBase === 'string'
+      typeof inc.diffBase === 'string' &&
+      inc.diffBase !== ''
         ? inc.diffBase
         : report.mergeBaseSha;
     const pr = report.prNumber;

@@ -59,6 +59,7 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
+import { unquoteCStylePath } from '@qwen-code/qwen-code-core';
 
 interface PrMetadata {
   headRefName: string;
@@ -172,24 +173,23 @@ type FetchPrResult = PlanReport & {
    * could not be captured, `diffPath` is null and those flows read the
    * ordinary degraded state, while the flow that stops the round needs no
    * plan at all.
-   * `effective: false` carries the reason the anchor was refused — a rebase
-   * or force-push (`not-an-ancestor`), a sha this history has never seen
-   * (`unknown-commit`), an anchor older than the merge base that would
-   * scope WIDER than the PR's diff (`behind-merge-base`), a delta carrying
-   * hunks the PR's own diff does not contain (`hunks-outside-pr-diff` — an
-   * "undo per feedback" revert makes an in-range anchor produce them), a
-   * diff whose paths the containment parser could not name, leaving the
-   * oracle unavailable rather than the delta disproved
-   * (`containment-unverified`), a
-   * merge base too stale to rule the clamp on (`base-untrusted`), a delta
-   * capture that failed (`capture-failed`), or a delta the partitioner
-   * refused to tile (`partition-failed`) — and in every one of those the
-   * diff and plan are the full range. **`full-range-unavailable` is the
-   * single exception and the single planless reason**: it is stamped over
-   * whatever refused the anchor whenever the run ends with no captured diff
-   * at all, so a reader can key the degraded flow on the reason alone
-   * rather than having to cross-check `diffPath` (the underlying refusal is
-   * named on stderr).
+   * `effective: false` carries the reason the anchor was refused, and every
+   * reason names a CAUSE: a rebase or force-push (`not-an-ancestor`), a sha
+   * this history has never seen (`unknown-commit`), an anchor older than the
+   * merge base that would scope WIDER than the PR's diff
+   * (`behind-merge-base`), a delta carrying hunks the PR's own diff does not
+   * contain (`hunks-outside-pr-diff` — an "undo per feedback" revert makes an
+   * in-range anchor produce them), a containment check that could not be
+   * RULED because the parser cannot name a path (`containment-unverified`),
+   * a merge base too stale to rule the clamp on (`base-untrusted`), a
+   * capture that threw (`capture-failed`), or a partitioner that refused to
+   * tile (`partition-failed`).
+   *
+   * Whether a PLAN exists is a separate fact, and it is `diffPath`: null
+   * means this round has no diff to review, whatever refused the anchor. A
+   * reader keys the degraded flow on that, never on the reason — a single
+   * field meaning both is what renamed deterministic refusals into the
+   * class the skill retries.
    */
   incremental?: IncrementalDecision;
 };
@@ -206,8 +206,7 @@ export interface IncrementalDecision {
     | 'containment-unverified'
     | 'base-untrusted'
     | 'capture-failed'
-    | 'partition-failed'
-    | 'full-range-unavailable';
+    | 'partition-failed';
   /**
    * The scoped range's left side as a FULL sha, present exactly when the
    * report's diff is the delta (`effective` and not `upToDate`). Downstream
@@ -426,6 +425,18 @@ function diffSections(
       // `+++` line at all. A path containing ` b/` cannot be split here;
       // the whole diff is then unparsed rather than half-understood.
       const rest = line.slice('diff --git '.length);
+      // git C-style-quotes a path with a quote, a backslash or a control
+      // character even under `core.quotePath=false` (and every non-ASCII
+      // path without it), so the oracle unquotes rather than trusting the
+      // capture's config — the same helper the chunk parser uses.
+      const quoted = /^("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")$/.exec(rest);
+      if (quoted) {
+        const b = unquoteCStylePath(quoted[2]);
+        if (!b.startsWith('b/')) return null;
+        file = b.slice(2);
+        if (!out.has(file)) out.set(file, []);
+        continue;
+      }
       const halves = rest.split(' b/');
       if (halves.length !== 2 || !rest.startsWith('a/')) return null;
       file = halves[1];
@@ -788,23 +799,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // no merge base) used to publish `capture-failed` over a zero-chunk plan
   // while the skill's per-reason bullet said the full range was in hand. The
   // original refusal is not lost: the status line below names it.
-  const anchorRefusal = anchor?.incremental.reason;
-  // Only when NOTHING was captured — which is what the reason names. A
-  // refusal whose ranges captured but would not tile keeps `partition-failed`
-  // (deterministic: the same text re-fails identically, so SKILL's same-sha
-  // retry must keep excluding it), and a validity refusal keeps the reason
-  // that names the anchor's fault. Planless-ness is already on the report as
-  // `diffPath: null`; the reason exists to classify the CAUSE, and renaming
-  // deterministic refusals into the retryable class is what let a re-run be
-  // spent on a re-refusal that could not come out differently.
-  if (
-    anchor &&
-    !anchor.incremental.effective &&
-    diffPath === null &&
-    fullText === null
-  ) {
-    demote('full-range-unavailable');
-  }
+  // No restamping. A reason names the CAUSE of the refusal — a capture that
+  // threw, a partitioner that refused, an anchor ruled invalid — and whether
+  // a PLAN exists is `diffPath`, which the report already carries. One field
+  // meaning both facts is what renamed a deterministic partition failure
+  // into the class SKILL retries, and put a validity refusal under a name
+  // that invited re-running the invalid anchor.
   // The incremental status line is emitted AFTER planning, so it describes
   // the state the report actually publishes — a demotion above must not be
   // narrated as a scoped round.
@@ -815,7 +815,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         ? `Incremental: anchor ${inc.since.slice(0, 10)} is up to date with the head — nothing new to review.`
         : inc.effective
           ? `Incremental: scoped to ${inc.since.slice(0, 10)}..${fetchedSha.slice(0, 10)}.`
-          : `Incremental anchor ${inc.since.slice(0, 10)} refused (${anchorRefusal}); ${
+          : `Incremental anchor ${inc.since.slice(0, 10)} refused (${inc.reason}); ${
               diffPath !== null
                 ? 'reviewing the full diff.'
                 : 'no diff could be captured — coverage will be partial.'

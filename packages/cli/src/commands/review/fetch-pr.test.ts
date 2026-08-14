@@ -532,6 +532,9 @@ describe('fetch-pr report assembly', () => {
     // diffPath leak this PR shipped and fixed.
     expect(writtenDiff()).toBe(DELTA_DIFF);
     expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
+    // …and the PLAN is the delta's, not the full range's: a re-plan over
+    // fullText would pair a 200-line plan with an 8-line published diff.
+    expect(report.diffLines).toBe(DELTA_DIFF.trimEnd().split('\n').length);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
@@ -677,18 +680,17 @@ describe('fetch-pr report assembly', () => {
       return Buffer.from(DELTA_DIFF);
     });
     const report = await reportFor({ since: ANCHOR });
-    // The arm refuses (`capture-failed`), and since the full range is what
-    // failed, the round ends with nothing published — so the planless stamp
-    // renames it. What this pins is that the delta did NOT become the scope:
-    // without the arm the report would read `{effective: true, diffBase}`.
+    // The reason names the CAUSE and keeps naming it: the capture threw.
+    // Whether a plan exists is `diffPath`, reported separately — one field
+    // meaning both is what used to rename this into the retryable class.
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'full-range-unavailable',
+      reason: 'capture-failed',
     });
     expect(report.diffPath).toBeNull();
+    // What this pins beyond the reason: the delta did NOT become the scope.
     expect(writtenDiff()).not.toBe(DELTA_DIFF);
-    // The underlying cause survives on stderr, as the reason contract says.
     expect(
       producerMocks.writeStderrLine.mock.calls
         .map((c) => String(c[0]))
@@ -758,6 +760,86 @@ describe('fetch-pr report assembly', () => {
       diffBase: ANCHOR,
     });
     expect(report.diffPath).not.toBeNull();
+  });
+
+  it('keeps upToDate through a partition failure — the stop flow needs no plan', async () => {
+    // The `!upToDate` exemption in the partition catch: without it the
+    // demote strips `upToDate` and the round stops being "no new changes"
+    // for an anchor that is the head.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    // Empty delta → upToDate; the full range is what gets partitioned.
+    servesBothRanges(FULL_DIFF, '');
+    producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
+      if (typeof text === 'string' && text.trim() !== '') {
+        throw new Error('chunks do not tile the diff');
+      }
+      return producerMocks.actualBuildDiffPlan(text, 400);
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      upToDate: true,
+    });
+    expect(report.diffPath).toBeNull();
+  });
+
+  it('rules upToDate from the anchor-at-head shape, not just the empty delta', async () => {
+    // Every other upToDate case here reaches it through the empty-delta
+    // arm; this is the shape an unchanged-head re-fetch takes, where
+    // `resolved === fetchedSha` decides it before any capture runs.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'cat-file' || args[0] === 'merge-base'
+        ? ''
+        : args[0] === 'rev-parse'
+          ? 'f00df00df00d' // the anchor IS the head
+          : null,
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: 'f00df00df00d' });
+    expect(report.incremental).toEqual({
+      since: 'f00df00df00d',
+      effective: true,
+      upToDate: true,
+    });
+    // The FULL range is what the round carries, for the flows that continue.
+    expect(writtenDiff()).toBe(FULL_DIFF);
+  });
+
+  it('reuses the full range when the anchor IS the merge base', async () => {
+    // The dedupe shortcut: re-running the identical `git diff` would spend
+    // the capture (and its timeout) twice on the same bytes.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'cat-file' || args[0] === 'merge-base'
+        ? ''
+        : args[0] === 'rev-parse'
+          ? BASE // the anchor resolves to the merge base
+          : null,
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: BASE });
+    expect(report.incremental).toEqual({
+      since: BASE,
+      effective: true,
+      diffBase: BASE,
+    });
+    // Exactly one capture: the delta arm read no second range.
+    const ranges = producerMocks.gitRaw.mock.calls.filter((c) =>
+      c.some((a: unknown) => String(a).includes('..f00df00df00d')),
+    );
+    expect(ranges).toHaveLength(1);
   });
 
   it('refuses a rebased-away anchor end to end, on a full-range plan', async () => {
@@ -913,12 +995,12 @@ describe('fetch-pr report assembly', () => {
     expect(report.diffPath).not.toBeNull();
   });
 
-  it('reports the planless reason whatever refused the anchor first', async () => {
-    // Three shapes used to publish `capture-failed` over a zero-chunk plan
-    // while the skill's per-reason bullet promised the full range: here the
-    // delta throws AND there is no merge base to fall back to. One reason
-    // names the degraded flow; the stderr line still names the underlying
-    // refusal.
+  it('keeps the CAUSE as the reason on a planless round', async () => {
+    // The delta throws and there is no merge base to fall back to, so the
+    // round ends with no plan. The reason still names what happened; the
+    // planless fact is `diffPath: null`, which is what the degraded flow
+    // reads. Renaming causes into one planless label put deterministic
+    // refusals into the class the skill retries.
     anchorIsValid();
     producerMocks.gitRaw.mockImplementation((...args: string[]) => {
       if (args.includes('diff')) throw new Error('git timed out');
@@ -929,7 +1011,7 @@ describe('fetch-pr report assembly', () => {
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'full-range-unavailable',
+      reason: 'capture-failed',
     });
     const refusedLine = producerMocks.writeStderrLine.mock.calls
       .map((c) => String(c[0]))
@@ -1172,6 +1254,35 @@ describe('resolveIncrementalAnchor', () => {
     expect(r.diffBase).toBe(ANCHOR);
   });
 
+  it('rules base-untrusted BEFORE the clamp — an unverifiable base cannot be clamped against', () => {
+    // Swapping the two checks leaves the suite green while the clamp rules
+    // on a base the run has flagged unreliable, which is the state every
+    // sibling guard declines to rule in.
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ isAncestor: (a) => a !== 'c'.repeat(40) }),
+      { sha: 'c'.repeat(40), fetchFailed: true },
+    );
+    expect(r.incremental.reason).toBe('base-untrusted');
+  });
+
+  it('compares the RESOLVED sha to the head, not the string it was given', () => {
+    // An abbreviation of the head must rule upToDate: comparing the raw
+    // input would scope an empty range instead of stopping the round.
+    const r = resolveIncrementalAnchor(
+      'f00df00',
+      HEAD,
+      probe({ resolveCommit: () => HEAD }),
+    );
+    expect(r.incremental).toEqual({
+      since: 'f00df00',
+      effective: true,
+      upToDate: true,
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
   it('clamps an anchor older than the merge base — wider than the PR is not incremental', () => {
     const MERGE_BASE = 'c'.repeat(40);
     // The anchor is behind the head, but the merge base is NOT behind the
@@ -1312,10 +1423,15 @@ describe('hunksContainedIn — the containment oracle', () => {
       'diff --git a/a.ts b/a.ts',
       '--- a/a.ts',
       '+++ b/a.ts',
-      '@@ -1,0 +1,2 @@',
-      '+first',
-      '+second',
+      // The marker lands MID-hunk, with a count still owed on the new side
+      // — the shape real git emits whenever a modification hunk's old side
+      // lacks a trailing newline. Spending the counts before it arrives
+      // routes the line through the outside-hunk skip and leaves the
+      // in-hunk branch unexercised, which is what the first cut did.
+      '@@ -1,1 +1,1 @@',
+      '-old',
       '\\ No newline at end of file',
+      '+new',
       '@@ -50,0 +50,1 @@',
       '+later',
       '',
@@ -1323,6 +1439,17 @@ describe('hunksContainedIn — the containment oracle', () => {
     // Both hunks are seen: covered by a wide outer, refused by a narrow one.
     expect(hunksContainedIn(withMarker, sec('a.ts', [[1, 100]]))).toBe(true);
     expect(hunksContainedIn(withMarker, sec('a.ts', [[1, 10]]))).toBe(false);
+  });
+
+  it('scans EVERY covering hunk, not just the first', () => {
+    // A mutant testing only `covering[0]` survives while every outer is
+    // single-hunk; a real PR diff is many hunks per file.
+    const outer = sec('a.ts', [
+      [1, 5],
+      [100, 20],
+    ]);
+    expect(hunksContainedIn(sec('a.ts', [[105, 3]]), outer)).toBe(true);
+    expect(hunksContainedIn(sec('a.ts', [[50, 3]]), outer)).toBe(false);
   });
 
   it('keys coverage per FILE — a numerically-inside range in another file is not covered', () => {
@@ -1426,9 +1553,12 @@ describe('hunksContainedIn — the containment oracle', () => {
       '+x',
       '',
     ].join('\n');
-    // The shape the pin exists to keep out of the oracle: unruleable, and
-    // reported as such rather than as a disproved delta.
-    expect(hunksContainedIn(quoted, quoted)).toBe(false);
+    // And the quoted shape rules too: git quotes such a path even under
+    // `core.quotePath=false` when it holds a quote, a backslash or a
+    // control character, so the oracle unquotes rather than trusting the
+    // capture's config. The pin still matters (it keeps the common
+    // non-ASCII case unquoted end to end) and is asserted in diff-flags.
+    expect(hunksContainedIn(quoted, quoted)).toBe(true);
   });
 
   it('fails closed on a path it cannot name unambiguously', () => {
