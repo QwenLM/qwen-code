@@ -20,6 +20,11 @@ export default defineConfig({
       : undefined,
     reporters: ['default', 'junit'],
     silent: true,
+    // Fail fast with an actionable message when the workspace dist/ output
+    // core tests import through the package entry is missing (fresh clone,
+    // new worktree, deep clean). See scripts/vitest-global-setup.js and
+    // issue #9149.
+    globalSetup: '../../scripts/vitest-global-setup.js',
     setupFiles: ['./test-setup.ts'],
     outputFile: {
       junit: 'junit.xml',

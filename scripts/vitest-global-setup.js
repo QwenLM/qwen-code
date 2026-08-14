@@ -27,15 +27,20 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(__dirname, '..');
 
-// Workspace packages that `packages/cli` tests import through package.json
-// `main`/`exports` entries pointing at `dist/` — i.e. packages that are NOT
-// fully aliased to TypeScript source in packages/cli/vitest.config.ts.
+// Per-package prerequisites: for each key, the workspace packages whose
+// built `dist/` output that package's tests import through package.json
+// `main`/`exports` entries — i.e. packages that are NOT fully aliased to
+// TypeScript source in that package's vitest.config.ts. `packages/core`
+// lists itself: several core test files import the bare
+// `@qwen-code/qwen-code-core` specifier, which resolves through the
+// package's own exports to `dist/index.js`.
 // Verified against a clean checkout: each missing entry below produces a
 // "Failed to resolve" collection error. When you add a cross-package import
 // that is not source-aliased, add its package here as well; the sync test in
 // scripts/tests/vitest-global-setup.test.js asserts the builtin channels of
 // channel-registry.ts stay covered.
 export const DIST_PREREQUISITES = {
+  'packages/core': ['packages/core'],
   'packages/cli': [
     'packages/acp-bridge',
     'packages/web-templates',
@@ -81,7 +86,13 @@ export function distEntryFiles(packageDir) {
   const manifest = readManifest(packageDir);
   const files = [];
   const collect = (target) => {
-    if (typeof target === 'string' && target.startsWith('./dist/')) {
+    // Wildcard pattern entries (`"./dist/*": "./dist/*"`) name no individual
+    // file and cannot be enumerated here; skip them.
+    if (
+      typeof target === 'string' &&
+      target.startsWith('./dist/') &&
+      !target.includes('*')
+    ) {
       files.push(path.join(packageDir, target));
     }
   };

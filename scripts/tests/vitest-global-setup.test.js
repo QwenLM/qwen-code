@@ -24,12 +24,14 @@ import {
   normalizePackageKey,
 } from '../vitest-global-setup.js';
 
-const CLI_PACKAGES = DIST_PREREQUISITES['packages/cli'];
-
 // Mirrors the real manifest shapes: most channel packages declare their entry
 // via exports['.'].default, while acp-bridge/web-templates use exports['.'].import.
 function manifestFor(rel) {
-  if (rel === 'packages/acp-bridge' || rel === 'packages/web-templates') {
+  if (
+    rel === 'packages/acp-bridge' ||
+    rel === 'packages/web-templates' ||
+    rel === 'packages/core'
+  ) {
     return {
       name: `fake-${path.basename(rel)}`,
       exports: {
@@ -47,17 +49,21 @@ function manifestFor(rel) {
 
 function buildFixtureRoot() {
   const root = mkdtempSync(path.join(tmpdir(), 'vitest-prereq-'));
-  for (const rel of CLI_PACKAGES) {
-    mkdirSync(path.join(root, rel, 'dist'), { recursive: true });
-    writeFileSync(
-      path.join(root, rel, 'package.json'),
-      JSON.stringify(manifestFor(rel)),
-    );
-    writeFileSync(path.join(root, rel, 'dist', 'index.js'), '');
+  for (const deps of Object.values(DIST_PREREQUISITES)) {
+    for (const rel of deps) {
+      mkdirSync(path.join(root, rel, 'dist'), { recursive: true });
+      writeFileSync(
+        path.join(root, rel, 'package.json'),
+        JSON.stringify(manifestFor(rel)),
+      );
+      writeFileSync(path.join(root, rel, 'dist', 'index.js'), '');
+    }
   }
-  for (const rel of GENERATED_PREREQUISITES['packages/cli']) {
-    mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
-    writeFileSync(path.join(root, rel), '');
+  for (const files of Object.values(GENERATED_PREREQUISITES)) {
+    for (const rel of files) {
+      mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      writeFileSync(path.join(root, rel), '');
+    }
   }
   return root;
 }
@@ -81,6 +87,7 @@ describe('vitest-global-setup prerequisite guard', () => {
   it('reports nothing when every prerequisite exists', () => {
     root = buildFixtureRoot();
     expect(findMissingPrerequisites('packages/cli', root)).toEqual([]);
+    expect(findMissingPrerequisites('packages/core', root)).toEqual([]);
   });
 
   it('accepts a win32-style relative key', () => {
@@ -112,7 +119,17 @@ describe('vitest-global-setup prerequisite guard', () => {
 
   it('skips packages without known prerequisites', () => {
     root = buildFixtureRoot();
-    expect(findMissingPrerequisites('packages/core', root)).toEqual([]);
+    expect(findMissingPrerequisites('packages/web-shell', root)).toEqual([]);
+  });
+
+  it('reports an unbuilt packages/core dist for core tests', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/core/dist/index.js'));
+
+    const missing = findMissingPrerequisites('packages/core', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('packages/core');
+    expect(missing[0]).toContain('has not been built');
   });
 
   it('names the fix command in the formatted message', () => {
@@ -128,6 +145,22 @@ describe('subpath exports entries are probed', () => {
   afterEach(() => {
     if (root) rmSync(root, { recursive: true, force: true });
     root = undefined;
+  });
+
+  it('skips wildcard pattern entries instead of treating them as files', () => {
+    root = buildFixtureRoot();
+    writeFileSync(
+      path.join(root, 'packages/core', 'package.json'),
+      JSON.stringify({
+        name: 'fake-core',
+        exports: {
+          '.': { import: './dist/index.js' },
+          './dist/*': './dist/*',
+          './src/*': './src/*',
+        },
+      }),
+    );
+    expect(findMissingPrerequisites('packages/core', root)).toEqual([]);
   });
 
   it('flags a missing subpath dist file even when the . entry exists', () => {
