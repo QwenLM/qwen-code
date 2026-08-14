@@ -448,6 +448,14 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       (element) => element.textContent === 'Archived task',
     );
     expect(sessionName?.textContent).toContain('Archived task');
+
+    // The archived row has no keyboard interaction, so it must not be an
+    // inert tab stop.
+    const archivedRow = sessionName?.closest<HTMLElement>(
+      '[class*="archivedRow"]',
+    );
+    expect(archivedRow).not.toBeNull();
+    expect(archivedRow!.tabIndex).toBe(-1);
   });
 
   it('refreshes archived sessions each time the section expands', async () => {
@@ -679,5 +687,211 @@ describe('WebShellSidebar collapsed session group persistence', () => {
           '[]',
       ),
     ).toEqual(['ws:other|group:g2', 'ws:other|ungrouped']);
+  });
+
+  it('does not let a stale hover-close timer close a reopened switcher', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    expect(
+      document.querySelector('[data-web-shell-collapsed-session-switcher]'),
+    ).not.toBeNull();
+
+    // Pointer leave arms the 150ms close timer; a reopen (tap on touch,
+    // Enter on the keyboard) inside that window must cancel it.
+    act(() => {
+      trigger!.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }));
+    });
+    act(() => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(switcher).not.toBeNull();
+    expect(switcher?.dataset.state).toBe('open');
+  });
+
+  it('lets the switcher close after a tracked menu unmounts open', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const moreActions = switcher?.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    expect(moreActions).not.toBeNull();
+    act(() => {
+      moreActions!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+
+    // A poll removes the row, unmounting the row's open menu without Radix
+    // ever emitting a close event.
+    active.sessions = active.sessions.filter(
+      (session) => session.sessionId !== 'session-a',
+    );
+    active.data = active.sessions;
+    renderSidebar(true);
+    await flushSidebar();
+
+    const reopened = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(reopened).not.toBeNull();
+    act(() => {
+      reopened!.dispatchEvent(
+        new PointerEvent('pointerout', { bubbles: true }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    const after = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(after === null || after.dataset.state === 'closed').toBe(true);
+  });
+
+  it('keeps the switcher open while the group picker is open', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const moreActions = switcher?.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    expect(moreActions).not.toBeNull();
+    act(() => {
+      moreActions!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+
+    const groupItem = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.includes('Group'));
+    expect(groupItem).not.toBeNull();
+    act(() => {
+      groupItem!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      groupItem!.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true }),
+      );
+      groupItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    // The bespoke group picker (plain role="menu", no Radix data-slot) must
+    // keep the switcher underneath it open.
+    expect(switcher?.dataset.state).toBe('open');
+    act(() => {
+      switcher!.dispatchEvent(
+        new PointerEvent('pointerout', { bubbles: true }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    expect(
+      document
+        .querySelector('[data-web-shell-collapsed-session-switcher]')
+        ?.getAttribute('data-state'),
+    ).toBe('open');
+  });
+
+  it('keeps the switcher open while keyboard focus is inside it', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const search = switcher?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(search).not.toBeNull();
+    act(() => {
+      search!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    const input = switcher?.querySelector<HTMLInputElement>('input');
+    expect(input).not.toBeNull();
+    act(() => {
+      input!.focus();
+    });
+    expect(document.activeElement).toBe(input);
+
+    act(() => {
+      switcher!.dispatchEvent(
+        new PointerEvent('pointerout', { bubbles: true }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    const after = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(after).not.toBeNull();
+    expect(after?.dataset.state).toBe('open');
   });
 });

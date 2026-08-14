@@ -87,6 +87,7 @@ import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection } from './WorkspaceSection';
 import {
   hasWorkspaceExpansionPreference,
+  migrateWorkspaceExpansionPreference,
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
@@ -535,6 +536,35 @@ function IconChevron({ expanded }: { expanded: boolean }) {
   );
 }
 
+function SessionMenu({
+  onOpenChange,
+  children,
+}: {
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  const openRef = useRef(false);
+  useEffect(
+    () => () => {
+      // Radix emits no onOpenChange(false) when an open menu unmounts (its
+      // row removed by a poll or preview slice); without the close signal the
+      // collapsed surface's dismissal guards stay blocked forever.
+      if (openRef.current) onOpenChange(false);
+    },
+    [onOpenChange],
+  );
+  return (
+    <DropdownMenu
+      onOpenChange={(open) => {
+        openRef.current = open;
+        onOpenChange(open);
+      }}
+    >
+      {children}
+    </DropdownMenu>
+  );
+}
+
 function SidebarSessionSurface({
   collapsed,
   label,
@@ -563,6 +593,19 @@ function SidebarSessionSurface({
     },
     [isCloseBlocked, onOpenChange],
   );
+  const cancelClose = useCallback(
+    () => window.clearTimeout(closeTimerRef.current),
+    [],
+  );
+  const closeAfterDelay = useCallback(() => {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      // A hover-out must not unmount the surface while it holds keyboard
+      // focus (search or rename inputs): the close would drop focus to body.
+      if (contentRef.current?.contains(document.activeElement)) return;
+      changeOpen(false);
+    }, 150);
+  }, [cancelClose, changeOpen]);
 
   useEffect(() => () => window.clearTimeout(closeTimerRef.current), []);
 
@@ -580,24 +623,22 @@ function SidebarSessionSurface({
         target.closest(
           '[data-slot="dropdown-menu-content"], [data-slot="popover-content"]',
         );
-      window.clearTimeout(closeTimerRef.current);
       if (!insideSurface && !insideNestedOverlay) {
-        closeTimerRef.current = window.setTimeout(() => changeOpen(false), 150);
+        closeAfterDelay();
+      } else {
+        cancelClose();
       }
     };
     document.addEventListener('pointermove', handlePointerMove);
-    return () => document.removeEventListener('pointermove', handlePointerMove);
-  }, [changeOpen, collapsed, open]);
+    return () => {
+      document.removeEventListener('pointermove', handlePointerMove);
+      window.clearTimeout(closeTimerRef.current);
+    };
+  }, [cancelClose, closeAfterDelay, collapsed, open]);
 
   if (!collapsed) {
     return <div className={styles.sessionList}>{children}</div>;
   }
-
-  const cancelClose = () => window.clearTimeout(closeTimerRef.current);
-  const closeAfterDelay = () => {
-    cancelClose();
-    closeTimerRef.current = window.setTimeout(() => changeOpen(false), 150);
-  };
 
   return (
     <div className={styles.sessionList}>
@@ -620,6 +661,7 @@ function SidebarSessionSurface({
             }}
             onClick={(event) => {
               event.preventDefault();
+              cancelClose();
               changeOpen(true);
             }}
             onKeyDown={() => {
@@ -989,7 +1031,16 @@ export function WebShellSidebar({
     if (!projectExpanded) setShowAllProjectSessions(false);
   }, [projectExpanded]);
 
+  const previousPrimaryExpansionIdRef = useRef(primaryWorkspaceExpansionId);
   useEffect(() => {
+    const previousId = previousPrimaryExpansionIdRef.current;
+    previousPrimaryExpansionIdRef.current = primaryWorkspaceExpansionId;
+    if (previousId !== primaryWorkspaceExpansionId) {
+      migrateWorkspaceExpansionPreference(
+        previousId,
+        primaryWorkspaceExpansionId,
+      );
+    }
     setProjectExpanded(readWorkspaceExpanded(primaryWorkspaceExpansionId));
   }, [primaryWorkspaceExpansionId]);
 
@@ -1009,10 +1060,15 @@ export function WebShellSidebar({
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
   const sessionMenuOpenRef = useRef(false);
+  const renameFocusSuppressRef = useRef(false);
   const handleSessionMenuOpenChange = useCallback((open: boolean) => {
     sessionMenuOpenRef.current = open;
+    if (open) renameFocusSuppressRef.current = false;
   }, []);
-  const isSessionMenuOpen = useCallback(() => sessionMenuOpenRef.current, []);
+  const isCollapsedCloseBlocked = useCallback(
+    () => sessionMenuOpenRef.current || groupMenu !== null,
+    [groupMenu],
+  );
   const previousRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
   >({ default: null, channel: null });
@@ -2265,6 +2321,7 @@ export function WebShellSidebar({
 
   const handleRenameFromMenu = useCallback(
     (session: DaemonSessionSummary) => {
+      renameFocusSuppressRef.current = true;
       startRename(session);
     },
     [startRename],
@@ -3238,7 +3295,6 @@ export function WebShellSidebar({
               styles.archivedRow,
               busy && styles.busySession,
             )}
-            tabIndex={sessionActionItems.has('details') ? 0 : undefined}
           >
             {isEditing ? (
               <form
@@ -3292,7 +3348,7 @@ export function WebShellSidebar({
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                 >
-                  <DropdownMenu onOpenChange={handleSessionMenuOpenChange}>
+                  <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
                     <DropdownMenuTrigger asChild>
                       <button
                         className={styles.sessionActionButton}
@@ -3311,6 +3367,11 @@ export function WebShellSidebar({
                         sessionMenuPointerDismissRef.current = true;
                       }}
                       onCloseAutoFocus={(event) => {
+                        if (renameFocusSuppressRef.current) {
+                          renameFocusSuppressRef.current = false;
+                          event.preventDefault();
+                          return;
+                        }
                         if (!sessionMenuPointerDismissRef.current) return;
                         sessionMenuPointerDismissRef.current = false;
                         event.preventDefault();
@@ -3353,7 +3414,7 @@ export function WebShellSidebar({
                         )}
                       </DropdownMenuGroup>
                     </DropdownMenuContent>
-                  </DropdownMenu>
+                  </SessionMenu>
                 </div>
               )}
             </div>
@@ -3596,7 +3657,7 @@ export function WebShellSidebar({
                         canOrganizeSession(session, 'group') ||
                         (showExport && !inlineActionItems.has('export')) ||
                         (showDelete && !inlineActionItems.has('delete')) ? (
-                          <DropdownMenu
+                          <SessionMenu
                             onOpenChange={handleSessionMenuOpenChange}
                           >
                             <DropdownMenuTrigger asChild>
@@ -3617,6 +3678,11 @@ export function WebShellSidebar({
                                 sessionMenuPointerDismissRef.current = true;
                               }}
                               onCloseAutoFocus={(event) => {
+                                if (renameFocusSuppressRef.current) {
+                                  renameFocusSuppressRef.current = false;
+                                  event.preventDefault();
+                                  return;
+                                }
                                 if (!sessionMenuPointerDismissRef.current)
                                   return;
                                 sessionMenuPointerDismissRef.current = false;
@@ -3708,7 +3774,7 @@ export function WebShellSidebar({
                                   )}
                               </DropdownMenuGroup>
                             </DropdownMenuContent>
-                          </DropdownMenu>
+                          </SessionMenu>
                         ) : null}
                       </div>
                     )}
@@ -4499,7 +4565,7 @@ export function WebShellSidebar({
             width={sidebarWidth}
             open={collapsedSessionsOpen}
             onOpenChange={setCollapsedSessionsOpen}
-            isCloseBlocked={isSessionMenuOpen}
+            isCloseBlocked={isCollapsedCloseBlocked}
           >
             {sourceMetadataEnabled && (
               <Tabs
@@ -4812,7 +4878,7 @@ export function WebShellSidebar({
                                   </>
                                 )}
                                 {canRemove && (
-                                  <DropdownMenu
+                                  <SessionMenu
                                     onOpenChange={handleSessionMenuOpenChange}
                                   >
                                     <DropdownMenuTrigger asChild>
@@ -4852,7 +4918,7 @@ export function WebShellSidebar({
                                         {t('sidebar.removeWorkspace')}
                                       </DropdownMenuItem>
                                     </DropdownMenuContent>
-                                  </DropdownMenu>
+                                  </SessionMenu>
                                 )}
                               </div>
                             );

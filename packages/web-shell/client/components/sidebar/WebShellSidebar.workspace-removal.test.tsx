@@ -2336,6 +2336,60 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onLoadSession).not.toHaveBeenCalled();
   });
 
+  it('keeps a persisted workspace collapse when sections remount', async () => {
+    connection.workspaceCwd = '/tmp/other';
+    connection.sessionId = 'secondary-session';
+
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The current session lives in the secondary workspace, so it was
+    // auto-expanded once.
+    const secondaryHeader = () =>
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+      ).find((button) => button.textContent?.includes('other'));
+    expect(secondaryHeader()?.getAttribute('aria-expanded')).toBe('true');
+
+    // The user collapses it; the choice is persisted.
+    await act(async () => {
+      click(secondaryHeader()!);
+      await Promise.resolve();
+    });
+    expect(secondaryHeader()?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.workspace-expanded:secondary',
+      ),
+    ).toBe('false');
+
+    // Toggle the Projects header off/on: every workspace section remounts,
+    // replaying the stale one-shot auto-expand.
+    const projectsToggle = () =>
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+      ).find(
+        (button) =>
+          button.textContent?.includes('Project') &&
+          !button.textContent?.includes('other'),
+      );
+    expect(projectsToggle()).toBeDefined();
+    await act(async () => {
+      click(projectsToggle()!);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      click(projectsToggle()!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(secondaryHeader()?.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('hides non-current rename when workspace metadata is unsupported', async () => {
     connection.sessionId = 'current-session';
     connection.capabilities = {

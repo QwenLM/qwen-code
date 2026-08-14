@@ -110,16 +110,14 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     return {
       clientHeight: element.clientHeight,
       lineHeight: Number.parseFloat(style.lineHeight),
-      scrollHeight: element.scrollHeight,
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
     };
   });
   expect(titleMetrics.clientHeight).toBeLessThanOrEqual(
-    titleMetrics.lineHeight * 3 + 1,
+    titleMetrics.lineHeight + 1,
   );
-  expect(titleMetrics.clientHeight).toBeGreaterThanOrEqual(
-    titleMetrics.lineHeight * 3 - 1,
-  );
-  expect(titleMetrics.scrollHeight).toBeGreaterThan(titleMetrics.clientHeight);
+  expect(titleMetrics.scrollWidth).toBeGreaterThan(titleMetrics.clientWidth);
 });
 
 async function expectDetailsInsideRoot(

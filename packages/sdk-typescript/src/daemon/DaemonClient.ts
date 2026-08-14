@@ -5905,7 +5905,7 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       `/session/${urlEncode(sessionId)}/metadata`,
       'PATCH /workspaces/:workspace/session/:id/metadata',
-      { method: 'PATCH', body: metadata, clientId },
+      { method: 'PATCH', body: metadata, clientId, mode: 'rest' },
     );
   }
 

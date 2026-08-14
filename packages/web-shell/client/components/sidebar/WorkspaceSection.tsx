@@ -29,6 +29,7 @@ import {
   writeWorkspaceCollapsedGroupIds,
 } from './collapsedSessionSections';
 import {
+  hasWorkspaceExpansionPreference,
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
@@ -185,10 +186,14 @@ export function WorkspaceSection({
   }, [collapsedGroupIds, workspace.id]);
 
   useEffect(() => {
-    if (controlledExpanded === undefined && autoExpandKey) {
+    if (
+      controlledExpanded === undefined &&
+      autoExpandKey &&
+      !hasWorkspaceExpansionPreference(workspace.id)
+    ) {
       setInternalExpanded(true);
     }
-  }, [autoExpandKey, controlledExpanded]);
+  }, [autoExpandKey, controlledExpanded, workspace.id]);
 
   const sessionsEnabled = renderSessions && !disabled;
   const sessionsVisible = expanded || Boolean(searchQuery.trim());
