@@ -57,7 +57,10 @@
 import { statSync, readFileSync } from 'node:fs';
 import { readTranscripts } from './transcripts.js';
 import { bakedRanges, openedTheTerritory } from './retirement.js';
-import { repositoryContextOf } from './repository-context.js';
+import {
+  repositoryContextOf,
+  type RepositoryContext,
+} from './repository-context.js';
 import { MODELED_SYSTEM_DOMAIN, owedLayerDimensions } from './audit-layers.js';
 
 /**
@@ -141,7 +144,13 @@ export function layerAuditGate(
     return { unreviewed: [] };
   }
 
-  let context;
+  // Typed, not inferred: the annotation pins the declared type regardless of how
+  // the assignment's control flow is later restructured (or if
+  // `repositoryContextOf` starts returning `any`), so `context.domains` stays
+  // checked against `RepositoryContext` at compile time. (An evolving `let`
+  // already narrows to the return type today, so this is belt-and-braces, not the
+  // sole guard.)
+  let context: RepositoryContext | null;
   try {
     context = repositoryContextOf(plan as { repositoryContext?: unknown });
   } catch {
@@ -153,6 +162,13 @@ export function layerAuditGate(
     return { unreviewed: [] };
   }
 
+  // Corroboration needs the diff path: `readTranscripts` populates
+  // `diffToolCalls`/`diffReads` only when given it, so a plan WITHOUT
+  // `diffPathAbsolute` fails every auditor's corroboration and owes all six
+  // layers. That is fail-safe (over-caps, never releases), and the gate arms only
+  // on a manifest read from a pr-worktree base where the path is present — but the
+  // dependency is real, not incidental: a plan shape that dropped it would defeat
+  // corroboration silently, so it is stated here.
   const diffPathValue = (plan as { diffPathAbsolute?: unknown })
     ?.diffPathAbsolute;
   const diffPath =

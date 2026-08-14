@@ -25,7 +25,7 @@ import request from 'supertest';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
 import {
-  createServeApp,
+  createServeApp as createServeAppImpl,
   computeKeepaliveIntervalMs,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
@@ -180,7 +180,7 @@ import {
   createVirtualSubagentSessionId,
   VirtualSubagentSessions,
 } from './virtual-subagent-sessions.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
 import type { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import {
@@ -292,6 +292,38 @@ const baseOpts: ServeOptions = {
   mode: 'http-bridge',
 };
 
+// Direct app tests bypass runQwenServe's reconciler cleanup.
+const createdApps = new Set<ReturnType<typeof createServeAppImpl>>();
+
+function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
+  const app = createServeAppImpl(...args);
+  createdApps.add(app);
+  return app;
+}
+
+function stopCreatedApps() {
+  for (const app of createdApps) {
+    (
+      app.locals as { stopExtensionGenerationReconciler?: () => void }
+    ).stopExtensionGenerationReconciler?.();
+  }
+  createdApps.clear();
+}
+
+afterEach(stopCreatedApps);
+
+it('stops extension generation reconcilers for direct app tests', () => {
+  const stopExtensionGenerationReconciler = vi.fn();
+  createdApps.add({
+    locals: { stopExtensionGenerationReconciler },
+  } as ReturnType<typeof createServeAppImpl>);
+
+  stopCreatedApps();
+
+  expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+  expect(createdApps.size).toBe(0);
+});
+
 function fakeDaemonLog(): DaemonLogger {
   return {
     info: vi.fn(),
@@ -364,7 +396,11 @@ afterAll(async () => {
   restoreEnv('QWEN_HOME', previousServerTestQwenHome);
   restoreEnv('QWEN_RUNTIME_DIR', previousServerTestRuntimeDir);
   resetHomeEnvBootstrapForTesting();
-  await fsp.rm(serverTestEnvironmentRoot, { recursive: true, force: true });
+  await fsp.rm(serverTestEnvironmentRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+  });
 });
 
 function deferred<T = void>(): {
@@ -1733,6 +1769,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
         channelIdleTimeoutMs: 0,
         sessionIdleTimeoutMs: 1_800_000,
       },
@@ -11597,6 +11634,90 @@ describe('createServeApp', () => {
           workspaceCwd: WS_BOUND,
           historyReplay: 'response',
           historyPageSize: 100,
+        },
+      ]);
+    });
+
+    it('passes the requested live replay mode to load', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-summary',
+          workspaceCwd: WS_BOUND,
+          historyReplay: 'response',
+          liveReplayMode: 'summary',
+        },
+      ]);
+    });
+
+    it('rejects an invalid live replay mode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.loadCalls).toEqual([]);
+    });
+
+    it('rejects an invalid live replay mode on resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.resumeCalls).toEqual([]);
+    });
+
+    it('does not forward a valid live replay mode to resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary-resume/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      // Resume always restores with the full journal; the load-only field
+      // is validated but never forwarded to the bridge.
+      expect(bridge.resumeCalls).toEqual([
+        {
+          sessionId: 'persisted-summary-resume',
+          workspaceCwd: WS_BOUND,
         },
       ]);
     });
@@ -23437,6 +23558,7 @@ describe('createServeApp', () => {
             compactedReplayMaxBytes: 4 * 1024 * 1024,
             maxJournalEvents: 10_000,
             maxJournalBytes: 8 * 1024 * 1024,
+            journalGrowth: null,
             channelIdleTimeoutMs: 0,
             sessionIdleTimeoutMs: 1_800_000,
           },
@@ -23456,6 +23578,8 @@ describe('createServeApp', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 4,
+              maxJournalEvents: 10_000,
+              maxJournalBytes: 8 * 1024 * 1024,
             },
           ],
         }),
@@ -26864,7 +26988,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   }
 
   it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26905,7 +27028,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26927,7 +27049,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected fsFactory verbatim when supplied', async () => {
-    const { createServeApp } = await import('./server.js');
     const sentinel = { forRequest: vi.fn(() => ({ marker: 'injected' })) };
     const app = createServeApp(
       {
@@ -26950,7 +27071,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads production-style primary trust into the default runtime metadata', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26966,7 +27086,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads primary runtime env metadata into the default registry runtime', async () => {
-    const { createServeApp } = await import('./server.js');
     const primaryRuntimeEnv = {
       mode: 'runtime-overlay',
       overlayKeys: ['OPENAI_API_KEY'],
@@ -26988,7 +27107,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses an injected workspace registry as the primary runtime source', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27061,7 +27179,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('accepts matching runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27085,8 +27202,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires the Voice coordinator paired with runtime removal', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -27103,8 +27218,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires a live bridge provider when runtime generations can change', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -27121,7 +27234,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected registry sender when client-MCP over WS is enabled', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27177,7 +27289,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27301,7 +27412,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('default fsFactory is built with trusted=false (writes refused)', async () => {
-    const { createServeApp } = await import('./server.js');
     const { isFsError } = await import('./fs/index.js');
     const os = await import('node:os');
     const tmp = await import('node:fs').then((m) =>
@@ -29320,7 +29430,7 @@ describe('Live conversation runtime lifecycle', () => {
         async (sessionId: string) =>
           `${root.canonicalRoot}/conversation-${sessionId}`,
       ),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveBridge = fakeBridge(liveBridgeOptions);
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
@@ -29528,6 +29638,53 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('shares the boot publication with a concurrent Live Host bind', async () => {
+    const restoreLiveSettings = await enableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    try {
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      const coordinator = setup.app.locals[
+        'liveCoordinator'
+      ] as LiveHostCoordinator;
+      const socket = new FakeLiveHostSocket();
+      coordinator.attachHost(
+        socket as unknown as WebSocket,
+        coordinator.daemonInstanceNonce,
+      );
+      socket.hello('host_live_runtime_concurrent_0001');
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+
+      setup.resolveCreation();
+      await vi.waitFor(() => {
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+      });
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+      expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+      expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+    } finally {
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      await restoreLiveSettings();
+    }
+  });
+
   it('hot-enables and disables the Live runtime without restarting the daemon', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29711,6 +29868,74 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it.each(['task', 'speech'] as const)(
+    'rolls back a partial Live bind after a %s handler failure and retries without republishing',
+    async (failedChannel) => {
+      const restoreLiveSettings = await disableLiveVoiceAtBoot();
+      const setup = setupLiveRuntime();
+      const failedSetter =
+        failedChannel === 'task'
+          ? vi.spyOn(setup.liveBridge, 'setLiveTaskToolRequestHandler')
+          : vi.spyOn(setup.liveBridge, 'setLiveSpeakToUserHandler');
+      failedSetter.mockImplementationOnce(() => {
+        throw new Error(`${failedChannel} handler bind failed`);
+      });
+      try {
+        const setEnabled = setup.app.locals['setLiveVoiceEnabled'] as
+          | ((enabled: boolean) => Promise<void>)
+          | undefined;
+        if (!setEnabled) throw new Error('Live hot-toggle hook missing.');
+        const capabilitiesBefore = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesBefore.body.workspaces).not.toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
+
+        const firstEnable = setEnabled(true);
+        await vi.waitFor(() => {
+          expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+        });
+        setup.resolveCreation();
+        await expect(firstEnable).rejects.toThrow(
+          `${failedChannel} handler bind failed`,
+        );
+
+        expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
+          setup.liveRuntime,
+        );
+        expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+        expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+        expect(failedSetter).toHaveBeenCalledTimes(2);
+        const capabilitiesAfter = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesAfter.body.workspaces).toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
+
+        await expect(setEnabled(true)).resolves.toBeUndefined();
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(failedSetter.mock.calls.length).toBeGreaterThanOrEqual(3);
+      } finally {
+        await (
+          setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+        )();
+        await restoreLiveSettings();
+      }
+    },
+  );
+
   it('shutdown waits for the in-flight boot publication', async () => {
     const restoreLiveSettings = await enableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29846,7 +30071,7 @@ describe('Live Appshot server integration', () => {
         return root;
       }),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const coordinator = new LiveHostCoordinator({
       daemonInstanceNonce: 'daemon_live_appshot_nonce_0001',
       getProviderReadiness: () => ({ state: 'ready' }),
@@ -29978,7 +30203,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-disabled-conversations',
@@ -30083,7 +30308,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-acp-disabled-conversations',
@@ -30264,6 +30489,7 @@ describe('Live Appshot server integration', () => {
       await shutdown;
       expect(settled).toBe(true);
       expect(setup.captureHandler).toBeUndefined();
+      expect(setup.speakHandler).toBeUndefined();
       expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
     } finally {
       channelGate.resolve(undefined);

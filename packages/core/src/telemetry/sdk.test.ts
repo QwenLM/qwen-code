@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { diag } from '@opentelemetry/api';
+import { diag, ROOT_CONTEXT } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
 import {
   initializeTelemetry,
@@ -29,6 +29,8 @@ import {
   resetDebugLoggingState,
   setDebugLogSession,
 } from '../utils/debugLogger.js';
+
+const mockEndAllInteractionSpans = vi.hoisted(() => vi.fn());
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -62,17 +64,25 @@ vi.mock('./session-events.js', () => ({
 }));
 vi.mock('./session-context.js');
 vi.mock('./trace-context.js');
+vi.mock('./session-tracing.js', () => ({
+  endAllInteractionSpans: mockEndAllInteractionSpans,
+}));
 vi.mock('./tracer.js', () => ({
   createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
 }));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
-import { getCurrentSessionId, setSessionContext } from './session-context.js';
+import {
+  getCurrentSessionId,
+  getSessionIdFromContext,
+  setSessionContext,
+} from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
 import { createSessionRootContext } from './tracer.js';
 import { emitSessionEnd, emitSessionStart } from './session-events.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 describe('resolveHttpOtlpUrl', () => {
   it('appends signal path to base collector URL', () => {
@@ -138,6 +148,8 @@ describe('Telemetry SDK', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getCurrentSessionId).mockReturnValue(undefined);
+    vi.mocked(getSessionIdFromContext).mockReturnValue(undefined);
     mockConfig = {
       getTelemetryEnabled: () => true,
       getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
@@ -160,7 +172,67 @@ describe('Telemetry SDK', () => {
   });
 
   afterEach(async () => {
+    vi.mocked(getCurrentSessionId).mockReturnValue(undefined);
     await shutdownTelemetry();
+  });
+
+  async function getSessionIdSpanProcessor() {
+    await initializeTelemetry(mockConfig);
+    const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]! as {
+      spanProcessors?: Array<{
+        onStart: (span: unknown, parentContext: unknown) => void;
+      }>;
+    };
+    return constructorCall.spanProcessors![0]!;
+  }
+
+  function createSessionSpan(attributes: Record<string, unknown> = {}) {
+    return {
+      attributes,
+      setAttribute: vi.fn((key: string, value: unknown) => {
+        attributes[key] = value;
+      }),
+    };
+  }
+
+  it('stamps automatic spans from scoped context before the global session', async () => {
+    vi.mocked(getSessionIdFromContext).mockReturnValue('scoped-session');
+    vi.mocked(getCurrentSessionId).mockReturnValue('stale-session');
+    const processor = await getSessionIdSpanProcessor();
+    const span = createSessionSpan();
+
+    processor.onStart(span, ROOT_CONTEXT);
+
+    expect(span.setAttribute).toHaveBeenCalledWith(
+      'session.id',
+      'scoped-session',
+    );
+  });
+
+  it('does not overwrite an explicit automatic-span session', async () => {
+    vi.mocked(getSessionIdFromContext).mockReturnValue('scoped-session');
+    const processor = await getSessionIdSpanProcessor();
+    const span = createSessionSpan({ 'session.id': 'explicit-session' });
+
+    processor.onStart(span, ROOT_CONTEXT);
+
+    expect(span.setAttribute).not.toHaveBeenCalled();
+  });
+
+  it('uses the per-request session before the global session', async () => {
+    vi.mocked(getSessionIdFromContext).mockReturnValue(undefined);
+    vi.mocked(getCurrentSessionId).mockReturnValue('stale-session');
+    const processor = await getSessionIdSpanProcessor();
+    const span = createSessionSpan();
+
+    sessionIdContext.run('request-session', () =>
+      processor.onStart(span, ROOT_CONTEXT),
+    );
+
+    expect(span.setAttribute).toHaveBeenCalledWith(
+      'session.id',
+      'request-session',
+    );
   });
 
   it('should use gRPC exporters when protocol is grpc', async () => {
@@ -344,7 +416,13 @@ describe('Telemetry SDK', () => {
 
       await shutdownTelemetry();
 
+      expect(mockEndAllInteractionSpans).toHaveBeenCalledWith('cancelled');
       expect(emitSessionEnd).toHaveBeenCalledWith('active-session');
+      expect(
+        mockEndAllInteractionSpans.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(NodeSDK.prototype.shutdown).mock.invocationCallOrder[0],
+      );
       expect(
         vi.mocked(emitSessionEnd).mock.invocationCallOrder[0],
       ).toBeLessThan(
