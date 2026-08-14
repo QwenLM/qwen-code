@@ -26,6 +26,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   BridgeEvent,
+  LiveReplayMode,
   SessionReplaySnapshot,
   SubscribeOptions,
 } from './eventBus.js';
@@ -166,6 +167,8 @@ export interface BridgeRestoreSessionRequest {
   historyReplay?: 'stream' | 'response';
   /** Optional newest persisted-record page requested for response replay. */
   historyPageSize?: number;
+  /** Load-only live-turn replay projection; defaults to the complete journal. */
+  liveReplayMode?: LiveReplayMode;
   /** Keep inherited fork records as model context without replaying them. */
   hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
@@ -224,16 +227,21 @@ export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 /**
- * Work categories a child reports holds for. Deliberately excludes background
- * shells, Monitors, workflows, and cron: those are out of `activeWork`'s
- * declared scope. The category travels on every hold so widening the scope
- * later adds data rather than changing what the `activeWork` boolean means.
+ * Work categories a child reports holds for. Monitors, workflows, and cron
+ * remain outside `activeWork`'s declared scope. The category travels on every
+ * hold so peers can negotiate coverage explicitly when the scope widens.
  */
-export type ActiveWorkHoldCategory = 'agent' | 'notification';
+export type ActiveWorkHoldCategory = 'agent' | 'notification' | 'shell';
+
+/** Categories understood by active-work v1 before category negotiation was
+ * added to the daemon's initialize request. */
+export const ACTIVE_WORK_LEGACY_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] =
+  ['agent', 'notification'];
 
 export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
   'agent',
   'notification',
+  'shell',
 ];
 
 export interface ActiveWorkHeartbeatCapabilityV1 {
@@ -692,6 +700,13 @@ export interface BridgeClientRequestContext {
   modelPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
   promptDisplayText?: string;
+  /**
+   * Trusted channel-turn classification injected by the daemon prompt route
+   * after validating the channel-worker prompt authorization. Never
+   * populated from caller-controlled ACP metadata: `sendPrompt` strips the
+   * wire key from untrusted callers and re-injects it only from this flag.
+   */
+  channelPrompt?: boolean;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -733,6 +748,9 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
+// Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
+// dependency path between them, so a cross-package test pins the value.
+export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -970,7 +988,9 @@ export interface BridgeDaemonSessionDiagnostic {
   currentApprovalMode?: string;
   /**
    * The session's EFFECTIVE live-journal caps right now — the configured
-   * baseline, or higher when adaptive growth raised them mid-turn.
+   * baseline, or higher when adaptive growth raised them mid-turn. One
+   * session retains two journals (full + summary) under the SAME caps, so
+   * its live-journal heap can reach twice the reported byte cap.
    */
   maxJournalEvents: number;
   maxJournalBytes: number;
@@ -1913,9 +1933,9 @@ export interface AcpSessionBridge {
   readonly activePromptCount: number;
 
   /**
-   * Whether an accepted prompt, a running background Agent, or an Agent
-   * terminal notification is unsettled. Background shells, Monitors,
-   * workflows, and cron are deliberately outside this.
+   * Whether an accepted prompt, a running background Agent, an Agent terminal
+   * notification, or Session-managed background shell work is unsettled.
+   * Monitors, workflows, and cron are deliberately outside this.
    */
   readonly activeWork: boolean;
 

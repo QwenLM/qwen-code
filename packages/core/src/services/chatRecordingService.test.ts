@@ -30,6 +30,7 @@ import {
   type FileHistorySnapshot,
 } from './fileHistoryService.js';
 import {
+  SessionWriterLostError,
   SessionTranscriptChangedError,
   SessionWriterUnavailableError,
   type SessionWriterLease,
@@ -903,6 +904,12 @@ describe('ChatRecordingService', () => {
       ).toEqual({ message: 'Unknown error' });
     });
 
+    it('preserves the RPC code of session writer errors', () => {
+      expect(normalizeTurnResultError(new SessionWriterLostError())).toEqual(
+        expect.objectContaining({ code: '-32021' }),
+      );
+    });
+
     it('validates the bounded turn_result transcript contract', () => {
       expect(
         isTurnResultRecordPayload({
@@ -944,6 +951,36 @@ describe('ChatRecordingService', () => {
       expect(record.type).toBe('system');
       expect(record.subtype).toBe('turn_result');
       expect(record.systemPayload).toEqual(payload);
+    });
+
+    it('keeps turn_result records on the active transcript chain', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'before result' }]);
+      chatRecordingService.recordTurnResult({
+        promptId: 'prompt-1',
+        state: 'completed',
+        endedAt: 2_000,
+      });
+      await chatRecordingService.recordSessionArtifactEvent({
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-08-14T00:00:00.000Z',
+        changes: [],
+      });
+      chatRecordingService.recordUserMessage([{ text: 'after result' }]);
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const before = records[0]!;
+      const turnResult = records[1]!;
+      const artifact = records[2]!;
+      const after = records[3]!;
+      expect(turnResult.subtype).toBe('turn_result');
+      expect(turnResult.parentUuid).toBe(before.uuid);
+      expect(artifact.parentUuid).toBe(turnResult.uuid);
+      expect(after.parentUuid).toBe(turnResult.uuid);
     });
 
     it('is best-effort when recording is inactive', () => {

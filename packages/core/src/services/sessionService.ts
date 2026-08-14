@@ -1806,6 +1806,14 @@ export class SessionService {
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
     const { messages: activeMessages } = this.reconstructHistory(records);
+    const omittedTurnResultUuids = new Set(
+      activeMessages
+        .filter(
+          (record) =>
+            record.type === 'system' && record.subtype === 'turn_result',
+        )
+        .map((record) => record.uuid),
+    );
     const sourceRecords = includeActiveSideArtifactRecords(
       records,
       activeMessages,
@@ -1853,6 +1861,14 @@ export class SessionService {
       ...(sourceRecord ? [sourceRecord] : []),
       ...sourceRecords.map((record) => {
         const isArtifactRecord = isSessionArtifactRecord(record);
+        let parentUuid = prevUuid;
+        if (isArtifactRecord) {
+          parentUuid =
+            record.parentUuid !== null &&
+            omittedTurnResultUuids.has(record.parentUuid)
+              ? prevUuid
+              : record.parentUuid;
+        }
         const systemPayload = remapSystemPayloadForFork(
           record,
           sourceSessionId,
@@ -1864,7 +1880,7 @@ export class SessionService {
           sessionId: newSessionId,
           cwd: this.projectRoot,
           systemPayload,
-          parentUuid: isArtifactRecord ? record.parentUuid : prevUuid,
+          parentUuid,
           forkedFrom: {
             sessionId: sourceSessionId,
             messageUuid: record.uuid,

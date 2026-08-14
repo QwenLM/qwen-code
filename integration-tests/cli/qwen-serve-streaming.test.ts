@@ -493,6 +493,48 @@ describePOSIX('qwen serve — pollable turn results', () => {
       await client.closeSession(session.sessionId).catch(() => undefined);
     }
   }, 60_000);
+
+  it('reads a settled result after a normal Session reload', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'turn-result-reload-e2e' }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'fake response complete',
+        });
+
+      await client.closeSession(session.sessionId);
+      await client.loadSession(session.sessionId, {
+        workspaceCwd: workspaceDir,
+      });
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'fake response complete',
+        });
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
 });
 
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {

@@ -594,7 +594,7 @@ export interface TurnResultErrorPayload {
 
 function readTurnResultErrorField(
   error: unknown,
-  field: 'message' | 'code',
+  field: 'message' | 'code' | 'rpcCode',
 ): unknown {
   if (
     (typeof error !== 'object' || error === null) &&
@@ -639,7 +639,9 @@ export function normalizeTurnResultError(
     TURN_RESULT_ERROR_MESSAGE_MAX_CHARS,
   );
 
-  const rawCode = readTurnResultErrorField(error, 'code');
+  const rawCode =
+    readTurnResultErrorField(error, 'code') ??
+    readTurnResultErrorField(error, 'rpcCode');
   const code =
     typeof rawCode === 'string' && rawCode.length > 0
       ? rawCode

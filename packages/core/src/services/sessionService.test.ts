@@ -3539,6 +3539,23 @@ describe('SessionService', () => {
               endedAt: 2000,
             },
           },
+          {
+            uuid: 'artifact-after-turn-result',
+            parentUuid: 'turn-result-1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_artifact_event',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd: lines[0]!['cwd'],
+            version: 'test',
+            systemPayload: {
+              v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+              sessionId: oldId,
+              sequence: 1,
+              recordedAt: '2026-04-22T00:00:03.000Z',
+              changes: [],
+            },
+          },
         ]
           .map((line) => JSON.stringify(line))
           .join('\n') + '\n',
@@ -3551,10 +3568,13 @@ describe('SessionService', () => {
         .split('\n')
         .map((line) => JSON.parse(line));
 
-      expect(written).toHaveLength(2);
+      expect(written).toHaveLength(3);
       expect(written.some((record) => record.subtype === 'turn_result')).toBe(
         false,
       );
+      expect(
+        written.find((record) => record.uuid === 'artifact-after-turn-result'),
+      ).toMatchObject({ parentUuid: 'u2' });
     });
 
     it('writes source metadata and drops the inherited title for sourced forks', async () => {

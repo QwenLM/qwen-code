@@ -175,7 +175,10 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
-import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
+import {
+  ACP_EVENT_LOOP_STALL_RESTART_MS,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -212,7 +215,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import { isCompatibleLiveSessionSource } from '../serve/live/session-source.js';
+import { isCompatibleLiveSessionSource } from '../serve/conversations/session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -338,11 +341,13 @@ import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
   clampActiveWorkIntervalMs,
   type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
@@ -4523,12 +4528,10 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
-    // Checked under the close gate and before anything destructive runs. The
-    // gate is what makes this atomic: with it held the Session admits no new
-    // prompt and starts no new automatic turn, so a hold cannot appear between
-    // this read and the teardown below. Without it, a caller that asked
-    // "anything running?" and then closed would race exactly the work it was
-    // trying to protect.
+    // Reject known work before disturbing any active turn. The close gate
+    // prevents new turns, but a turn that was already running can still settle
+    // into a new hold while the drain below is in progress, so this early read
+    // is an optimization rather than the final authorization.
     if (opts?.onlyIfUnheld) {
       const holds = session.collectActiveWorkHolds();
       if (holds.length > 0) {
@@ -4559,6 +4562,17 @@ class QwenAgent implements Agent {
         drainTimeoutMs,
         'close',
       );
+
+      // Existing out-of-scope work such as a cron turn may have registered a
+      // background shell while it drained. Re-check after every active turn
+      // has settled and while the close gate still blocks new ones; only this
+      // read can authorize the destructive recorder/session cleanup below.
+      if (opts?.onlyIfUnheld) {
+        const holds = session.collectActiveWorkHolds();
+        if (holds.length > 0) {
+          return { closed: false, holds };
+        }
+      }
 
       recorder?.finalize();
       let flushError: unknown;
@@ -4848,12 +4862,23 @@ class QwenAgent implements Agent {
           (requestedActiveWork as Record<string, unknown>)['intervalMs'],
         )
       : undefined;
+    const requestedActiveWorkCategories = activeWorkRequested
+      ? (requestedActiveWork as Record<string, unknown>)['categories']
+      : undefined;
+    const activeWorkCategories = activeWorkRequested
+      ? Array.isArray(requestedActiveWorkCategories)
+        ? ACTIVE_WORK_HOLD_CATEGORIES.filter((category) =>
+            requestedActiveWorkCategories.includes(category),
+          )
+        : ACTIVE_WORK_LEGACY_HOLD_CATEGORIES
+      : undefined;
     if (activeWorkIntervalMs !== undefined) {
       this.activeWorkReporter?.dispose();
       this.activeWorkReporter = new ActiveWorkReporter(
         (method, params) => this.connection.extNotification(method, params),
         () => this.sessions.values(),
         activeWorkIntervalMs,
+        activeWorkCategories ?? [],
       );
     }
 
@@ -4872,7 +4897,7 @@ class QwenAgent implements Agent {
             [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
               v: ACTIVE_WORK_HEARTBEAT_VERSION,
               intervalMs: activeWorkIntervalMs,
-              categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+              categories: [...(activeWorkCategories ?? [])],
             },
           }
         : {}),
@@ -5763,10 +5788,14 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
     // channel-worker value here). A plain delete would drop that re-injection.
@@ -5775,6 +5804,26 @@ class QwenAgent implements Agent {
       typeof suppliedPromptDisplayText === 'string'
     ) {
       meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] = suppliedPromptDisplayText;
+    }
+    // Channel classification is trusted-parent metadata: only the channel
+    // bridges and the daemon bridge hold the private parent capability. An
+    // untrusted caller must not be able to mark its own prompt as a channel
+    // turn — that opts the turn out of loop-detected rejection and the
+    // repeated-failure guard.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelPrompt === true
+    ) {
+      meta[CHANNEL_PROMPT_META_KEY] = true;
+    }
+    // Channel delivery is a daemon-managed side effect (the prompt route
+    // injects it from the trusted context); an untrusted direct-ACP caller
+    // must not self-schedule its own response delivery through the key.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelDelivery !== undefined
+    ) {
+      meta[DAEMON_CHANNEL_DELIVERY_META_KEY] = suppliedChannelDelivery;
     }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
@@ -5841,8 +5890,9 @@ class QwenAgent implements Agent {
       // Order a fresh snapshot ahead of this response on the same stream. The
       // daemon drops its own pending-prompt count the instant the response
       // lands, so any hold this prompt left behind — a background agent it
-      // started, its terminal notification — has to already be on the wire or
-      // the daemon sees an idle Session for as long as the next report takes.
+      // started, a background shell, or a terminal notification — has to
+      // already be on the wire or the daemon sees an idle Session for as long
+      // as the next report takes.
       await this.activeWorkReporter?.flush();
     }
   }
