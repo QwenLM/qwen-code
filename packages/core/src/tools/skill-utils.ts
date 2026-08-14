@@ -52,8 +52,9 @@ export function skillUnloadedPlaceholder(skillName: string): string {
 /**
  * Whether a tool-result output is a `/unskill` placeholder. Microcompaction
  * treats it like its own cleared message: it must not absorb a keepRecent
- * protection slot, nor be re-blanked (which would also emit a spurious
- * eviction report for the name).
+ * protection slot, nor be re-blanked (which would silently replace the reload
+ * hint with the generic cleared message without any eviction report, since
+ * placeholders are not bodies).
  */
 export function isSkillUnloadedPlaceholder(output: unknown): boolean {
   return (
@@ -427,33 +428,6 @@ export function clearLoadedSkillTracking(
 }
 
 /**
- * Re-track loaded skills whose bodies were restored to history after a
- * rewrite had cleared the tracking (the ACP continuation settle re-adds
- * the entries the continuation strip removed; the names were resolved at
- * strip time). Restores the body-resident ⇒ tracked invariant so the
- * dedup guard does not let a duplicate body through.
- */
-export function retrackSkills(
-  names: Iterable<string>,
-  toolRegistry: ToolRegistry | undefined,
-  logTag: string,
-): void {
-  const list = Array.from(names);
-  if (list.length === 0) {
-    return;
-  }
-  const tracker = getLoadedSkillTracker(toolRegistry);
-  if (!tracker) {
-    return;
-  }
-  tracker.trackSkills(list);
-  debugLogger.debug(
-    `[SKILL_TRACKING] re-tracked ${list.length} skill(s) after ${logTag}: ` +
-      list.join(', '),
-  );
-}
-
-/**
  * Build a `callId → skill name[]` map for every Skill tool call: the name
  * lives on the request-side `functionCall.args.skill`, not on the
  * (possibly blanked) `functionResponse`, so this is the only way to
@@ -529,7 +503,8 @@ export function resolveLoadedSkillNames(
  * the hard-rescue verbatim restore, and the retry restore of stripped
  * entries — where the blanket-clear uncertainty rationale does not apply.
  * (The retry restore reconciles via `restoreStrippedRetryEntries` in
- * client.ts; the ACP continuation strip re-tracks stashed names instead.)
+ * client.ts; the ACP continuation settle reconciles via the chat-level
+ * wrapper.)
  */
 export function reconcileLoadedSkillTracking(
   history: Content[],
@@ -554,10 +529,13 @@ export function reconcileLoadedSkillTracking(
 /**
  * Un-track only the skills whose bodies `entries` dropped from history —
  * unlike a blanket clear, resident bodies elsewhere keep their tracking.
- * Unresolvable skill results are deliberately left tracked: an unneeded
- * un-track self-heals (one duplicate body on next invoke), while
- * dropping a tracked name whose body was NOT actually removed leaves the
- * skill unreloadable behind the dedup guard.
+ * A skill with ANOTHER resident body keeps its tracking too: un-tracking
+ * it would disarm the dedup guard while a body is still resident, letting
+ * a duplicate body through on the next invoke. Unresolvable skill results
+ * are deliberately left tracked: an unneeded un-track self-heals (one
+ * duplicate body on next invoke), while dropping a tracked name whose body
+ * was NOT actually removed leaves the skill unreloadable behind the dedup
+ * guard.
  */
 export function unloadSkillsFromEntries(
   entries: Content[],
@@ -565,7 +543,12 @@ export function unloadSkillsFromEntries(
   toolRegistry: ToolRegistry | undefined,
   logTag: string,
 ): void {
-  const names = resolveLoadedSkillNames(entries, history);
+  const dropped = resolveLoadedSkillNames(entries, history);
+  if (dropped.length === 0) {
+    return;
+  }
+  const resident = new Set(resolveLoadedSkillNames(history, history));
+  const names = dropped.filter((name) => !resident.has(name));
   if (names.length === 0) {
     return;
   }

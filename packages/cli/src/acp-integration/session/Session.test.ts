@@ -592,7 +592,7 @@ describe('Session', () => {
       stripThoughtsFromHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
       resolveLoadedSkillNamesInEntries: vi.fn().mockReturnValue([]),
-      retrackLoadedSkillNames: vi.fn(),
+      reconcileLoadedSkillTracking: vi.fn(),
       setTools: vi.fn(),
     } as unknown as GeminiChat;
     mockGeminiClient = {
@@ -2347,8 +2347,12 @@ describe('Session', () => {
         }),
       );
       // The strip un-tracked any skill body it removed; once the orphan is
-      // preserved back, the names stashed at strip time are re-tracked.
-      expect(mockChat.retrackLoadedSkillNames).toHaveBeenCalledWith(['demo']);
+      // preserved back, the settle reconcile rebuilds tracking from the
+      // settled history (residency aware — not an additive re-track of the
+      // stashed names).
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalledWith(
+        'acpContinuationSettle',
+      );
     });
 
     it('restores the orphaned turn when a continuation send throws (no data loss)', async () => {
@@ -2389,7 +2393,9 @@ describe('Session', () => {
           ]),
         }),
       );
-      expect(mockChat.retrackLoadedSkillNames).toHaveBeenCalledWith(['demo']);
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalledWith(
+        'acpContinuationSettle',
+      );
     });
 
     it('rejects (accepted:false) when a prompt is already in flight', async () => {

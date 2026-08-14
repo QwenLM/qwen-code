@@ -74,6 +74,19 @@ export const unskillCommand: SlashCommand = {
         content: t('Config not loaded.'),
       };
     }
+    if (!geminiClient.isInitialized()) {
+      // Fresh session or --continue/--resume before the first send:
+      // getChat() would throw 'Chat not initialized'. History is empty
+      // pre-init by definition, so nothing can be loaded — same guard
+      // pattern as contextCommand for this exact window.
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Skill "{{name}}" is not loaded in context.', {
+          name: skillName,
+        }),
+      };
+    }
 
     const skillTool = getSkillTrackingTool(context);
     if (!skillTool) {

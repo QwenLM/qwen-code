@@ -4511,8 +4511,11 @@ describe('GeminiChat', async () => {
       expect(recordChatCompression).not.toHaveBeenCalled();
       expect(chatWithRecording.getLastPromptTokenCount()).toBe(176_999);
       expect(chatWithRecording.isLastPromptTokenCountEstimated()).toBe(false);
-      expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
-        originalHistory[0].parts?.[0].text,
+      // Index 2: the oversized user entry sits after the prepended skill
+      // call/response pair; asserting index 0 would compare two undefined
+      // functionCall texts and pass for any history.
+      expect(chatWithRecording.getHistory()[2].parts?.[0].text).toBe(
+        originalHistory[2].parts?.[0].text,
       );
       // The verbatim restore reconciles tracking from the restored history:
       // the tryCompress blanket clear (COMPRESSED) plus the reconcile's own

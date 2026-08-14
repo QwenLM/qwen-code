@@ -39,6 +39,7 @@ describe('unskillCommand', () => {
         config: {
           getToolRegistry: () => ({ getAllTools: () => [skillTool] }),
           getGeminiClient: () => ({
+            isInitialized: () => true,
             getChat: () => ({ unloadSkillBody, hasSkillBodyInHistory }),
           }),
           getSkillManager: () => ({

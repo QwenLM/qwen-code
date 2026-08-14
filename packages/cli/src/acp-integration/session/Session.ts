@@ -4002,11 +4002,14 @@ export class Session implements SessionContext {
             let orphanPushCountSnapshot = 0;
             // The continuation strip un-tracks any skill body it removes;
             // every terminal path of this turn re-adds the stripped content
-            // (send re-push, catch restore, or the abort addHistory), so the
-            // stashed names are re-tracked in the outer finally. Names are
-            // resolved AT STRIP TIME: a compression inside the continuation
-            // send can summarize away the model-side functionCalls needed for
-            // pairing, so re-deriving from the post-send history would miss
+            // (send re-push, catch restore, or the abort addHistory). The
+            // stashed names gate the settle reconcile in the outer finally,
+            // which rebuilds tracking from the SETTLED history — residency
+            // aware, because a mid-turn rewrite can blank or summarize away
+            // the re-pushed body again. Names are resolved AT STRIP TIME:
+            // a compression inside the continuation send can summarize away
+            // the model-side functionCalls needed for pairing, so
+            // re-deriving the gate from the post-send history would miss
             // them.
             let orphanStrippedSkillNames: string[] = [];
             if (goalTurn?.origin === 'runtime') {
@@ -4638,8 +4641,14 @@ export class Session implements SessionContext {
               // top-of-loop abort return that re-adds the stripped content
               // via addHistory without entering the send-try's finally.
               if (orphanStrippedSkillNames.length > 0) {
-                this.#getCurrentChat().retrackLoadedSkillNames(
-                  orphanStrippedSkillNames,
+                // Residency-aware, not additive: a mid-turn rewrite
+                // (tryCompress / microcompaction) can blank or summarize
+                // away the re-pushed body and correctly un-track it;
+                // re-adding the stashed names anyway would resurrect the
+                // ghost the strip just removed. Mirrors the TUI twin in
+                // restoreStrippedRetryEntries (client.ts).
+                this.#getCurrentChat().reconcileLoadedSkillTracking(
+                  'acpContinuationSettle',
                 );
                 orphanStrippedSkillNames = [];
               }

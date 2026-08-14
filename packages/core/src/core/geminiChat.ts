@@ -62,7 +62,6 @@ import {
   isSkillBodyOutput,
   isSkillDedupConfirmation,
   reconcileLoadedSkillTracking,
-  retrackSkills,
   resolveLoadedSkillNames,
   skillUnloadedPlaceholder,
   unloadSkillsFromEntries,
@@ -4564,22 +4563,35 @@ export class GeminiChat {
 
   /**
    * Resolve the skill names of skill-body entries against the CURRENT
-   * history. The ACP continuation strip stashes the result at strip time:
-   * the model-side functionCalls needed for pairing can be summarized away
-   * by a compression inside the continuation send, so re-deriving from the
-   * post-send history would fail to re-track the re-pushed bodies.
+   * history. The ACP continuation strip resolves at strip time so it can
+   * tell whether the stripped entries carried any skill body — a
+   * compression inside the continuation send can summarize away the
+   * model-side functionCalls needed for pairing, so re-deriving from the
+   * post-send history would miss them.
    */
   resolveLoadedSkillNamesInEntries(entries: Content[]): string[] {
     return resolveLoadedSkillNames(entries, this.history);
   }
 
   /**
-   * Additively re-track the given skill names (ACP continuation settle:
-   * every terminal path re-adds the stripped content, so the stashed
-   * bodies are resident again).
+   * Residency-aware settle twin of the additive re-track this replaces:
+   * rebuild tracking from the CURRENT (settled) history. A mid-turn
+   * rewrite (tryCompress / microcompaction) can blank or summarize away
+   * the re-pushed bodies and correctly un-track them; re-adding names
+   * resolved before the send anyway would resurrect the ghost the strip
+   * removed. Forked chats hold only a tail slice while sharing the
+   * parent's tracker — reconciling from the slice would corrupt the
+   * parent's tracking in both directions.
    */
-  retrackLoadedSkillNames(names: string[]): void {
-    retrackSkills(names, this.config.getToolRegistry(), 'acpContinuation');
+  reconcileLoadedSkillTracking(logTag: string): void {
+    if (this.isForkedChat) {
+      return;
+    }
+    reconcileLoadedSkillTracking(
+      this.history,
+      this.config.getToolRegistry(),
+      logTag,
+    );
   }
 
   /**
