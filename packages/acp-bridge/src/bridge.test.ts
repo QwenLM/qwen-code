@@ -79,6 +79,7 @@ import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
@@ -257,6 +258,10 @@ function agentHold(id: string) {
   return { category: 'agent' as const, id };
 }
 
+function shellHold() {
+  return { category: 'shell' as const, id: 'background-shells' };
+}
+
 /**
  * The grade `/health?deep=1` would report for a single-runtime daemon. The
  * bridge exposes counts rather than a grade (an empty runtime must not vouch
@@ -290,6 +295,7 @@ describe('createAcpSessionBridge', () => {
         [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
           v: ACTIVE_WORK_HEARTBEAT_VERSION,
           intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+          categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
         },
         [CHANNEL_STARTUP_PROFILE_META_KEY]: {
           v: CHANNEL_STARTUP_PROFILE_VERSION,
@@ -338,12 +344,29 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('grades a child that omits a category as partial', async () => {
+    it('retains sessions reported by a negotiated but incomplete child', async () => {
+      let conditionalCloseCalls = 0;
+      let forcedCloseCalls = 0;
       const handle = makeChannel({
         initializeImpl: () =>
-          activeWorkInitializeResponse({ categories: ['agent'] }),
+          activeWorkInitializeResponse({
+            categories: [...ACTIVE_WORK_LEGACY_HOLD_CATEGORIES],
+          }),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            conditionalCloseCalls++;
+          } else {
+            forcedCloseCalls++;
+          }
+          return { closed: true, holds: [] };
+        },
       });
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await sendActiveWorkSnapshot(handle, 1, [
@@ -351,6 +374,81 @@ describe('createAcpSessionBridge', () => {
       ]);
       expect(bridge.activeWork).toBe(false);
       expect(reportingGrade(bridge)).toBe('partial');
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+      // Wait through multiple reaper ticks too. Both detach and reaper must
+      // stop at the shared incomplete-reporting candidate guard.
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(conditionalCloseCalls).toBe(0);
+      expect(bridge.sessionCount).toBe(1);
+
+      // Direct close remains a force operation even when reporting is
+      // incomplete; only ordinary automatic cleanup is fail-closed.
+      await bridge.closeSession(session.sessionId);
+      expect(forcedCloseCalls).toBe(1);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('accepts the aggregate shell hold as active work', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: activeWorkCloseImpl,
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [shellHold()] },
+      ]);
+      expect(bridge.activeWork).toBe(true);
+      expect(reportingGrade(bridge)).toBe('full');
+
+      await sendActiveWorkSnapshot(handle, 2, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(bridge.activeWork).toBe(false);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps explicit close and kill forceful while shell holds are reported', async () => {
+      const closeParams: Array<Record<string, unknown>> = [];
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            closeParams.push(params);
+            return { closed: true, holds: [] };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: first.sessionId, holds: [shellHold()] },
+        { sessionId: second.sessionId, holds: [shellHold()] },
+      ]);
+
+      await bridge.closeSession(first.sessionId);
+      await expect(bridge.killSession(second.sessionId)).resolves.toBe(true);
+      expect(closeParams).toHaveLength(2);
+      expect(
+        closeParams.some(
+          (params) => params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
+        ),
+      ).toBe(false);
+      expect(bridge.sessionCount).toBe(0);
 
       await bridge.shutdown();
     });
@@ -8118,7 +8216,13 @@ describe('createAcpSessionBridge', () => {
     vi.useFakeTimers();
     const lateRestore = deferred<LoadSessionResponse>();
     const handle = makeChannel({
-      initializeImpl: () => activeWorkInitializeResponse(),
+      // An old v1 child cannot report the newer shell category. Ordinary
+      // cleanup must retain it, but once the restore lifecycle condemns this
+      // channel the existing bounded force-recovery path still has to run.
+      initializeImpl: () =>
+        activeWorkInitializeResponse({
+          categories: [...ACTIVE_WORK_LEGACY_HOLD_CATEGORIES],
+        }),
       loadSessionImpl: () => lateRestore.promise,
       // The wedged child answers NO close at all — neither the hold probe nor
       // the plain agent close. An earlier version of this test let the plain
