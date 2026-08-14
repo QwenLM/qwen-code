@@ -4518,6 +4518,1473 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('keeps the current turn error when refreshing from persisted history', async () => {
+    const handle = makeChannel({
+      promptImpl: () => {
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-page' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'loop' }],
+        },
+        undefined,
+        { promptId: 'prompt-loop' },
+      ),
+    ).rejects.toThrow('Loop protection stopped this turn');
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay).toHaveLength(2);
+    // Anchor the replay on the persisted page so the degenerate in-memory
+    // fallback (identical shape for a single-turn session) cannot satisfy
+    // the assertion.
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+      data: expect.objectContaining({
+        content: { type: 'text', text: 'persisted turn content' },
+      }),
+    });
+    expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+      type: 'turn_error',
+      promptId: 'prompt-loop',
+      data: expect.objectContaining({
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+      }),
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('keeps the turn error on refresh when queue bookkeeping lands after it', async () => {
+    // A queued-then-promoted prompt that trips loop protection publishes
+    // `pending_prompt_completed` AFTER its `turn_error` terminal (the
+    // queue-view bookkeeping from `result.finally`). That bookkeeping must
+    // not defeat the refresh-append of the terminal error.
+    let releaseFirst!: () => void;
+    const firstPrompt = new Promise<{ stopReason: 'end_turn' }>((resolve) => {
+      releaseFirst = () => resolve({ stopReason: 'end_turn' });
+    });
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: () => {
+        promptCalls += 1;
+        if (promptCalls === 1) return firstPrompt;
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-queued-page' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const seenTypes: string[] = [];
+    const collectUntilQueueBookkeeping = (async () => {
+      for await (const event of iter) {
+        seenTypes.push(event.type);
+        if (
+          event.type === 'pending_prompt_completed' &&
+          event.promptId === 'prompt-loop'
+        ) {
+          return;
+        }
+      }
+      throw new Error('pending_prompt_completed was not published');
+    })();
+
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      { promptId: 'prompt-first' },
+    );
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    const second = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'loop' }],
+      },
+      undefined,
+      { promptId: 'prompt-loop' },
+    );
+    await vi.waitFor(() => {
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+    });
+
+    releaseFirst();
+    await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+    await expect(second).rejects.toThrow('Loop protection stopped this turn');
+    await collectUntilQueueBookkeeping;
+    // The bookkeeping event lands AFTER the terminal — exactly the ordering
+    // that must not hide the error on refresh.
+    expect(seenTypes.indexOf('turn_error')).toBeGreaterThanOrEqual(0);
+    expect(seenTypes.indexOf('turn_error')).toBeLessThan(
+      seenTypes.lastIndexOf('pending_prompt_completed'),
+    );
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay).toHaveLength(2);
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+      data: expect.objectContaining({
+        content: { type: 'text', text: 'persisted turn content' },
+      }),
+    });
+    expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+      type: 'turn_error',
+      promptId: 'prompt-loop',
+      data: expect.objectContaining({
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+      }),
+    });
+
+    abort.abort();
+    await bridge.shutdown();
+  });
+
+  it.each([
+    'model_switch_failed',
+    'language_changed',
+    'session_metadata_updated',
+    'session_cwd_changed',
+    'artifact_changed',
+    'settings_changed',
+    'extensions_changed',
+    'mcp_server_changed',
+    'mcp_server_added',
+    'mcp_server_removed',
+    'approval_mode_changed',
+    'model_switched',
+    'prompt_cancelled',
+    'tool_toggled',
+    'workspace_initialized',
+    'mcp_server_restarted',
+    'mcp_server_restart_refused',
+    'settings_reloaded',
+    'trust_change_requested',
+    'memory_changed',
+    'agent_changed',
+    'git_status_changed',
+    'git_branch_changed',
+    'github_setup_completed',
+    'auth_device_flow_started',
+    'auth_device_flow_throttled',
+    'auth_device_flow_authorized',
+    'auth_device_flow_failed',
+    'auth_device_flow_cancelled',
+  ] as const)(
+    'keeps the turn error on refresh when %s bookkeeping lands after it',
+    async (bookkeepingType) => {
+      // Idle-reachable bookkeeping (a rejected model switch, language
+      // change, rename, cwd change, client artifact) carries no turn
+      // content and must not defeat the refresh-append of the terminal.
+      const promptImpl = () => {
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      };
+      const extMethodImpl = (
+        method: string,
+        params: Record<string, unknown>,
+      ): Record<string, unknown> => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted turn content' },
+                  _meta: {
+                    'qwen.session.recordId':
+                      'record-loop-idle-bookkeeping-page',
+                  },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionLanguage) {
+          return { language: 'zh-CN', outputLanguage: null, refreshed: false };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          return { previousCwd: WS_A, newCwd: WS_B, warnings: [] };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+          return { previous: 'default', current: ApprovalMode.PLAN };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd) {
+          return { name: params['name'], toolCount: 1 };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove) {
+          return {
+            name: params['name'],
+            removed: true,
+            wasShadowingSettings: false,
+            originatorClientId: '',
+          };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+          return {
+            serverName: params['serverName'],
+            action: params['action'],
+            ok: true,
+          };
+        }
+        return {};
+      };
+      let bridge: ReturnType<typeof makeBridge>;
+      const isModelSwitchCase =
+        bookkeepingType === 'model_switch_failed' ||
+        bookkeepingType === 'model_switched' ||
+        bookkeepingType === 'settings_changed';
+      if (isModelSwitchCase) {
+        const factory: ChannelFactory = async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const fakeAgent = new FakeAgent({ promptImpl, extMethodImpl });
+          const augmented = new Proxy(fakeAgent, {
+            get(target, prop) {
+              if (prop === 'unstable_setSessionModel') {
+                return async () => {
+                  if (bookkeepingType === 'model_switch_failed') {
+                    throw new Error('agent denied');
+                  }
+                  return {};
+                };
+              }
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              return (target as any)[prop];
+            },
+          });
+          new AgentSideConnection(() => augmented as Agent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
+        };
+        bridge = makeBridge({ channelFactory: factory });
+      } else {
+        const handle = makeChannel({ promptImpl, extMethodImpl });
+        bridge = makeBridge({ channelFactory: async () => handle.channel });
+      }
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'loop' }],
+          },
+          undefined,
+          { promptId: 'prompt-loop' },
+        ),
+      ).rejects.toThrow('Loop protection stopped this turn');
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const collectUntilBookkeeping = (async () => {
+        for await (const event of iter) {
+          if (event.type === bookkeepingType) return;
+        }
+        throw new Error(`${bookkeepingType} was not published`);
+      })();
+
+      if (bookkeepingType === 'model_switch_failed') {
+        await expect(
+          bridge.setSessionModel(session.sessionId, {
+            sessionId: session.sessionId,
+            modelId: 'rejected-model',
+          }),
+        ).rejects.toThrow();
+      } else if (
+        bookkeepingType === 'model_switched' ||
+        bookkeepingType === 'settings_changed'
+      ) {
+        // The successful model-switch path publishes `model_switched`
+        // followed by a workspace-broadcast `settings_changed` with no
+        // `skipSessionId` — both land in every session's journal.
+        await bridge.setSessionModel(session.sessionId, {
+          sessionId: session.sessionId,
+          modelId: 'new-model',
+        });
+      } else if (bookkeepingType === 'approval_mode_changed') {
+        await bridge.setSessionApprovalMode(
+          session.sessionId,
+          ApprovalMode.PLAN,
+          { persist: false },
+        );
+      } else if (bookkeepingType === 'extensions_changed') {
+        bridge.broadcastExtensionsChanged({ refreshed: 1, failed: 0 });
+      } else if (bookkeepingType === 'mcp_server_added') {
+        await bridge.addRuntimeMcpServer('loop-mcp-server', {
+          command: 'loop-mcp',
+        });
+      } else if (bookkeepingType === 'mcp_server_removed') {
+        await bridge.removeRuntimeMcpServer('loop-mcp-server');
+      } else if (bookkeepingType === 'mcp_server_changed') {
+        await bridge.manageMcpServer('loop-mcp-server', 'enable', undefined);
+      } else if (bookkeepingType === 'prompt_cancelled') {
+        await bridge.cancelSession(session.sessionId);
+      } else if (bookkeepingType === 'language_changed') {
+        await bridge.setSessionLanguage(session.sessionId, {
+          language: 'zh-CN',
+          syncOutputLanguage: false,
+        });
+      } else if (bookkeepingType === 'session_metadata_updated') {
+        await bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'Renamed after loop stop',
+        });
+      } else if (bookkeepingType === 'session_cwd_changed') {
+        await bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+      } else if (
+        bookkeepingType.startsWith('auth_device_flow_') ||
+        bookkeepingType === 'tool_toggled' ||
+        bookkeepingType === 'workspace_initialized' ||
+        bookkeepingType === 'mcp_server_restarted' ||
+        bookkeepingType === 'mcp_server_restart_refused' ||
+        bookkeepingType === 'settings_reloaded' ||
+        bookkeepingType === 'trust_change_requested' ||
+        bookkeepingType === 'memory_changed' ||
+        bookkeepingType === 'agent_changed' ||
+        bookkeepingType === 'git_status_changed' ||
+        bookkeepingType === 'git_branch_changed' ||
+        bookkeepingType === 'github_setup_completed'
+      ) {
+        // The workspace service, git watcher, memory / agent CRUD, and the
+        // device-flow registry publish these through the workspace fan-out,
+        // not a session-scoped bridge method.
+        bridge.publishWorkspaceEvent({
+          type: bookkeepingType,
+          data: { workspaceId: 'loop-bookkeeping-workspace' },
+        });
+      } else {
+        await bridge.addSessionArtifact(
+          session.sessionId,
+          { title: 'Client link', url: 'https://example.com/client' },
+          { clientId: session.clientId },
+        );
+      }
+      await collectUntilBookkeeping;
+
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay).toHaveLength(2);
+      // Anchor the replay on the persisted page: for a single-turn session
+      // the degenerate in-memory fallback has an identical shape, so only
+      // the persisted fixture's content proves the append path ran.
+      expect(compactedReplay[0]).toMatchObject({
+        type: 'session_update',
+        data: expect.objectContaining({
+          content: { type: 'text', text: 'persisted turn content' },
+        }),
+      });
+      expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        }),
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    },
+  );
+
+  it('keeps the turn error on refresh when an idle user-shell command streams output after it', async () => {
+    // User-shell activity publishes `user_shell_command`, `session_update`
+    // (shell output, `_meta.source: 'user-shell'`), and `user_shell_result`
+    // on the session bus while idle. The output is injected into the model
+    // conversation history, not the persisted transcript the refresh pages,
+    // so none of the three may defeat the append.
+    const shellSpy = vi
+      .spyOn(ShellExecutionService, 'execute')
+      .mockImplementation(async (_command, _cwd, onEvent) => {
+        onEvent({ type: 'data', chunk: 'hello\n' });
+        return {
+          pid: 123,
+          result: Promise.resolve({
+            rawOutput: Buffer.from('hello\n'),
+            output: 'hello\n',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 123,
+            executionMethod: 'none',
+          }),
+        };
+      });
+    try {
+      const handle = makeChannel({
+        promptImpl: () => {
+          throw new RequestError(-32603, 'Loop protection stopped this turn', {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'turn_tool_call_cap',
+          });
+        },
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            return {};
+          }
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted turn content' },
+                  _meta: { 'qwen.session.recordId': 'record-loop-shell-page' },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'loop' }],
+          },
+          undefined,
+          { promptId: 'prompt-loop' },
+        ),
+      ).rejects.toThrow('Loop protection stopped this turn');
+
+      await bridge.executeShellCommand(
+        session.sessionId,
+        'echo hello',
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay).toHaveLength(2);
+      // Anchor the replay on the persisted page so a regression of the
+      // bounded-append branch into the in-memory fallback cannot satisfy
+      // the assertions with an identically shaped replay.
+      expect(compactedReplay[0]).toMatchObject({
+        type: 'session_update',
+        data: expect.objectContaining({
+          content: { type: 'text', text: 'persisted turn content' },
+        }),
+      });
+      expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        }),
+      });
+
+      await bridge.shutdown();
+    } finally {
+      shellSpy.mockRestore();
+    }
+  });
+
+  it('keeps the turn error on refresh when journal truncation marks the idle tail', async () => {
+    // With a pinned small journal cap, idle user-shell output evicts its
+    // own older entries after the loop terminal; `liveJournalSnapshot`
+    // then unshifts the synthetic `history_truncated` marker. The marker
+    // is size accounting, never ingested turn content — it must not
+    // defeat the append the way real newer content does.
+    const shellSpy = vi
+      .spyOn(ShellExecutionService, 'execute')
+      .mockImplementation(async (_command, _cwd, onEvent) => {
+        onEvent({ type: 'data', chunk: 'first chunk\n' });
+        onEvent({ type: 'data', chunk: 'second chunk\n' });
+        return {
+          pid: 123,
+          result: Promise.resolve({
+            rawOutput: Buffer.from('first chunk\nsecond chunk\n'),
+            output: 'first chunk\nsecond chunk\n',
+            exitCode: 0,
+            signal: null,
+            error: null,
+            aborted: false,
+            pid: 123,
+            executionMethod: 'none',
+          }),
+        };
+      });
+    try {
+      const handle = makeChannel({
+        promptImpl: () => {
+          throw new RequestError(-32603, 'Loop protection stopped this turn', {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'turn_tool_call_cap',
+          });
+        },
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            return {};
+          }
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted turn content' },
+                  _meta: {
+                    'qwen.session.recordId':
+                      'record-loop-truncated-journal-page',
+                  },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      const bridge = makeBridge({
+        sessionShellCommandEnabled: true,
+        maxJournalEvents: 1,
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'loop' }],
+          },
+          undefined,
+          { promptId: 'prompt-loop' },
+        ),
+      ).rejects.toThrow('Loop protection stopped this turn');
+
+      await bridge.executeShellCommand(
+        session.sessionId,
+        'echo truncated',
+        undefined,
+        { clientId: session.clientId },
+      );
+
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay).toHaveLength(2);
+      expect(compactedReplay[0]).toMatchObject({
+        type: 'session_update',
+        data: expect.objectContaining({
+          content: { type: 'text', text: 'persisted turn content' },
+        }),
+      });
+      expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        }),
+      });
+
+      await bridge.shutdown();
+    } finally {
+      shellSpy.mockRestore();
+    }
+  });
+
+  it.each(['available_commands_update', 'current_mode_update'] as const)(
+    'keeps the turn error on refresh when an idle %s session_update lands after it',
+    async (subtype) => {
+      // Latest-wins state snapshots fan out to idle sessions (a workspace
+      // skills/settings refresh, an approval-mode change). They carry no
+      // turn content for the persisted transcript and must not defeat the
+      // refresh-append of the terminal.
+      const handle = makeChannel({
+        promptImpl: () => {
+          throw new RequestError(-32603, 'Loop protection stopped this turn', {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'turn_tool_call_cap',
+          });
+        },
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            return {};
+          }
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [
+              {
+                v: 1,
+                type: 'session_update',
+                data: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'persisted turn content' },
+                  _meta: {
+                    'qwen.session.recordId': `record-loop-${subtype}-page`,
+                  },
+                },
+              },
+            ],
+            hasMore: false,
+          };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'loop' }],
+          },
+          undefined,
+          { promptId: 'prompt-loop' },
+        ),
+      ).rejects.toThrow('Loop protection stopped this turn');
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const sawIdleUpdate = (async () => {
+        for await (const event of iter) {
+          if (
+            event.type === 'session_update' &&
+            (event.data as { update?: { sessionUpdate?: string } })?.update
+              ?.sessionUpdate === subtype
+          ) {
+            return;
+          }
+        }
+        throw new Error(`${subtype} was not published`);
+      })();
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update:
+          subtype === 'available_commands_update'
+            ? {
+                sessionUpdate: subtype,
+                availableCommands: [],
+                _meta: { availableSkills: [] },
+              }
+            : { sessionUpdate: subtype, currentModeId: 'plan' },
+      });
+      await sawIdleUpdate;
+
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay).toHaveLength(2);
+      expect(compactedReplay[0]).toMatchObject({
+        type: 'session_update',
+        data: expect.objectContaining({
+          content: { type: 'text', text: 'persisted turn content' },
+        }),
+      });
+      expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: expect.objectContaining({
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        }),
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    },
+  );
+
+  it('keeps the turn error on refresh when a queued deadline terminal lands after it', async () => {
+    // A queued prompt's terminal publishes the event alone without mutating
+    // turn state; it must not erase the refresh-replay record of the active
+    // turn's failure either. The held cancel ack keeps the queued prompt's
+    // FIFO promotion blocked on the cancel-forward drain, so its deadline
+    // expires while it is still queued AFTER the loop terminal has landed.
+    let promptCalls = 0;
+    const heldTurn = deferred<PromptResponse>();
+    let releaseCancel!: () => void;
+    const heldCancel = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const handle = makeChannel({
+      promptImpl: () => {
+        promptCalls += 1;
+        if (promptCalls === 1) return heldTurn.promise;
+        return { stopReason: 'end_turn' };
+      },
+      cancelImpl: () => heldCancel,
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {};
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: {
+                  'qwen.session.recordId': 'record-loop-queued-deadline-page',
+                },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const terminalOrder: string[] = [];
+    const sawQueuedDeadlineTerminal = (async () => {
+      for await (const event of iter) {
+        if (event.type !== 'turn_error') continue;
+        if (event.promptId === 'prompt-first') terminalOrder.push('loop');
+        if (
+          event.promptId === 'prompt-queued' &&
+          (event.data as { code?: string }).code === 'prompt_deadline_exceeded'
+        ) {
+          terminalOrder.push('deadline');
+          return;
+        }
+      }
+      throw new Error('queued deadline terminal was not published');
+    })();
+
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      { promptId: 'prompt-first' },
+    );
+    first.catch(() => {});
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    const second = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'queued' }],
+      },
+      undefined,
+      { promptId: 'prompt-queued', deadlineMs: 120 },
+    );
+    second.catch(() => {});
+    await vi.waitFor(() => {
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+    });
+
+    // Cancel the running turn, then reject it with the loop error. The held
+    // cancel ack blocks the queued prompt's promotion on the cancel-forward
+    // drain, so it is still queued when the deadline expires.
+    void bridge.cancelSession(session.sessionId).catch(() => {});
+    await vi.waitFor(() => {
+      expect(handle.agent.cancelCalls).toHaveLength(1);
+    });
+    heldTurn.reject(
+      new RequestError(-32603, 'Loop protection stopped this turn', {
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+      }),
+    );
+    await expect(first).rejects.toThrow('Loop protection stopped this turn');
+
+    await sawQueuedDeadlineTerminal;
+    // Pin the scenario's premise — the deadline expires while the prompt is
+    // still queued, AFTER the loop terminal has landed. The 120 ms budget
+    // can invert under load; without this the assertions below would stay
+    // green through the inverted ordering.
+    expect(terminalOrder.indexOf('loop')).toBeGreaterThanOrEqual(0);
+    expect(terminalOrder.indexOf('loop')).toBeLessThan(
+      terminalOrder.lastIndexOf('deadline'),
+    );
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    // Anchor the replay on the persisted page so a regression of the
+    // bounded-append branch into the in-memory fallback cannot satisfy
+    // the assertions with an identically shaped replay.
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+      data: expect.objectContaining({
+        content: { type: 'text', text: 'persisted turn content' },
+      }),
+    });
+    expect(
+      compactedReplay.some(
+        (event) =>
+          event.type === 'turn_error' &&
+          (event.data as { errorKind?: string }).errorKind === 'loop_detected',
+      ),
+    ).toBe(true);
+    // The queued terminal must not overwrite the session-scoped summary
+    // either: it belongs to a prompt that never ran.
+    expect(bridge.getSessionSummary(session.sessionId).turnError).toMatchObject(
+      { code: 'LOOP_DETECTED' },
+    );
+
+    abort.abort();
+    releaseCancel();
+    await bridge.shutdown();
+  });
+
+  it('keeps the turn error on refresh when a queued prompt is removed after it', async () => {
+    // DAEMON-004 variant: removing a still-queued prompt publishes its
+    // `cancelled` terminal alone. Like the deadline variant it must not
+    // clear the active turn's refresh-replay record.
+    let promptCalls = 0;
+    const heldTurn = deferred<PromptResponse>();
+    let releaseCancel!: () => void;
+    const heldCancel = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const handle = makeChannel({
+      promptImpl: () => {
+        promptCalls += 1;
+        if (promptCalls === 1) return heldTurn.promise;
+        return { stopReason: 'end_turn' };
+      },
+      cancelImpl: () => heldCancel,
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {};
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: {
+                  'qwen.session.recordId': 'record-loop-queued-removed-page',
+                },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const sawQueuedRemovedTerminal = (async () => {
+      for await (const event of iter) {
+        if (
+          event.type === 'turn_complete' &&
+          event.promptId === 'prompt-queued' &&
+          (event.data as { stopReason?: string }).stopReason === 'cancelled'
+        ) {
+          return;
+        }
+      }
+      throw new Error('queued removed terminal was not published');
+    })();
+
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      { promptId: 'prompt-first' },
+    );
+    first.catch(() => {});
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    const second = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'queued' }],
+      },
+      undefined,
+      { promptId: 'prompt-queued' },
+    );
+    second.catch(() => {});
+    await vi.waitFor(() => {
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+    });
+
+    void bridge.cancelSession(session.sessionId).catch(() => {});
+    await vi.waitFor(() => {
+      expect(handle.agent.cancelCalls).toHaveLength(1);
+    });
+    heldTurn.reject(
+      new RequestError(-32603, 'Loop protection stopped this turn', {
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+      }),
+    );
+    await expect(first).rejects.toThrow('Loop protection stopped this turn');
+
+    // The queued prompt is removed while its promotion is still blocked on
+    // the cancel-forward drain.
+    expect(
+      bridge.removePendingPrompt(session.sessionId, 'prompt-queued'),
+    ).toEqual({ removed: true });
+    await sawQueuedRemovedTerminal;
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    // Anchor the replay on the persisted page so a regression of the
+    // bounded-append branch into the in-memory fallback cannot satisfy
+    // the assertions with an identically shaped replay.
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+      data: expect.objectContaining({
+        content: { type: 'text', text: 'persisted turn content' },
+      }),
+    });
+    expect(
+      compactedReplay.some(
+        (event) =>
+          event.type === 'turn_error' &&
+          (event.data as { errorKind?: string }).errorKind === 'loop_detected',
+      ),
+    ).toBe(true);
+    expect(bridge.getSessionSummary(session.sessionId).turnError).toMatchObject(
+      { code: 'LOOP_DETECTED' },
+    );
+
+    abort.abort();
+    releaseCancel();
+    await bridge.shutdown();
+  });
+
+  it('drops the stale turn error when a queued terminal folds newer automatic-turn content', async () => {
+    // A queued terminal is a turn boundary on the bus: ingesting it folds
+    // and resets the live journal. When newer turn content was journaled
+    // after the pending loop terminal, that content supersedes the stale
+    // error before the fold erases it — otherwise the refresh-append would
+    // re-place the stale loop error AFTER the newer automatic content, the
+    // exact misplacement the guard exists to prevent.
+    let promptCalls = 0;
+    const heldTurn = deferred<PromptResponse>();
+    let releaseCancel!: () => void;
+    const heldCancel = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const handle = makeChannel({
+      promptImpl: () => {
+        promptCalls += 1;
+        if (promptCalls === 1) return heldTurn.promise;
+        return { stopReason: 'end_turn' };
+      },
+      cancelImpl: () => heldCancel,
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {};
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: {
+                  'qwen.session.recordId': 'record-loop-queued-supersede-page',
+                },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    // One consumer for both waypoints: two loops over the same iterator
+    // would race for each event and starve one of the waits.
+    const sawContentThenQueuedTerminal = (async () => {
+      let sawContent = false;
+      for await (const event of iter) {
+        if (
+          !sawContent &&
+          event.type === 'session_update' &&
+          JSON.stringify(event.data).includes('automatic turn content')
+        ) {
+          sawContent = true;
+          continue;
+        }
+        if (
+          sawContent &&
+          event.type === 'turn_complete' &&
+          event.promptId === 'prompt-queued' &&
+          (event.data as { stopReason?: string }).stopReason === 'cancelled'
+        ) {
+          return;
+        }
+      }
+      throw new Error('automatic content or queued terminal not published');
+    })();
+
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      { promptId: 'prompt-first' },
+    );
+    first.catch(() => {});
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    const second = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'queued' }],
+      },
+      undefined,
+      { promptId: 'prompt-queued' },
+    );
+    second.catch(() => {});
+    await vi.waitFor(() => {
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+    });
+
+    void bridge.cancelSession(session.sessionId).catch(() => {});
+    await vi.waitFor(() => {
+      expect(handle.agent.cancelCalls).toHaveLength(1);
+    });
+    heldTurn.reject(
+      new RequestError(-32603, 'Loop protection stopped this turn', {
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+      }),
+    );
+    await expect(first).rejects.toThrow('Loop protection stopped this turn');
+
+    // An automatic turn journals content after the loop terminal; the
+    // queued terminal that follows folds it.
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'automatic turn content' },
+      },
+    });
+
+    expect(
+      bridge.removePendingPrompt(session.sessionId, 'prompt-queued'),
+    ).toEqual({ removed: true });
+    await sawContentThenQueuedTerminal;
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+      data: expect.objectContaining({
+        content: { type: 'text', text: 'persisted turn content' },
+      }),
+    });
+    expect(
+      compactedReplay.some(
+        (event) =>
+          event.type === 'turn_error' &&
+          (event.data as { errorKind?: string }).errorKind === 'loop_detected',
+      ),
+    ).toBe(false);
+    // The supersede only drops the refresh-replay record; the session
+    // summary still carries the active turn's failure.
+    expect(bridge.getSessionSummary(session.sessionId).turnError).toMatchObject(
+      { code: 'LOOP_DETECTED' },
+    );
+
+    abort.abort();
+    releaseCancel();
+    await bridge.shutdown();
+  });
+
+  it('drops the turn error on refresh after a subsequent successful interactive turn', async () => {
+    // Loop reject, then a successful prompt, then refresh: the newer turn's
+    // terminal supersedes the pending append, so the stale loop error must
+    // not reappear after the newer turn's content.
+    let promptCalls = 0;
+    const handle = makeChannel({
+      promptImpl: () => {
+        promptCalls += 1;
+        if (promptCalls === 1) {
+          throw new RequestError(-32603, 'Loop protection stopped this turn', {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'turn_tool_call_cap',
+          });
+        }
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {};
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-recovery-page' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'loop' }],
+        },
+        undefined,
+        { promptId: 'prompt-loop' },
+      ),
+    ).rejects.toThrow('Loop protection stopped this turn');
+
+    await expect(
+      bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'recovery' }],
+        },
+        undefined,
+        { promptId: 'prompt-recovery' },
+      ),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    expect(compactedReplay.some((event) => event.type === 'turn_error')).toBe(
+      false,
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('drops the stale turn error on refresh after newer automatic-turn content', async () => {
+    const handle = makeChannel({
+      promptImpl: () => {
+        throw new RequestError(-32603, 'Loop protection stopped this turn', {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+        });
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'persisted turn content' },
+                _meta: { 'qwen.session.recordId': 'record-loop-stale-page' },
+              },
+            },
+          ],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'loop' }],
+        },
+        undefined,
+        { promptId: 'prompt-loop' },
+      ),
+    ).rejects.toThrow('Loop protection stopped this turn');
+
+    // An automatic turn (cron/background notification) runs after the loop
+    // error without an interactive dispatch: its content is journaled via
+    // the ordinary session/update fan-in.
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const sawAutomaticContent = (async () => {
+      for await (const event of iter) {
+        if (
+          event.type === 'session_update' &&
+          JSON.stringify(event.data).includes('automatic turn content')
+        ) {
+          return;
+        }
+      }
+      throw new Error('automatic turn content was not published');
+    })();
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'automatic turn content' },
+      },
+    });
+    await sawAutomaticContent;
+
+    const refreshed = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      clientId: session.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const compactedReplay = refreshed.compactedReplay ?? [];
+    // The retained event must BE the persisted-page event — a stale branch
+    // that rebuilds the replay from anything else ships green without this.
+    expect(compactedReplay[0]).toMatchObject({
+      type: 'session_update',
+      data: expect.objectContaining({
+        content: { type: 'text', text: 'persisted turn content' },
+      }),
+    });
+    expect(compactedReplay).toHaveLength(1);
+    expect(compactedReplay.some((event) => event.type === 'turn_error')).toBe(
+      false,
+    );
+
+    abort.abort();
+    await bridge.shutdown();
+  });
+
   it('skips empty persisted pages when refreshing an attached load', async () => {
     const handle = makeChannel({
       loadSessionImpl: () => ({}),
@@ -10640,6 +12107,45 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips spoofed channel-prompt classification and injects only trusted context', async () => {
+      // `qwen.channel.prompt` opts a turn out of loop-detected rejection,
+      // so a forged key must not reach the child; only the authenticated
+      // channel-worker flag on the trusted context re-arms it.
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'forged channel turn' }],
+          _meta: { 'qwen.channel.prompt': true },
+        } as PromptRequest,
+        undefined,
+        { promptId: 'prompt-forged' },
+      );
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.channel.prompt'],
+      ).toBeUndefined();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'trusted channel turn' }],
+          _meta: { 'qwen.channel.prompt': true },
+        } as PromptRequest,
+        undefined,
+        { promptId: 'prompt-trusted', channelPrompt: true },
+      );
+      expect(handle.agent.promptCalls[1]?._meta?.['qwen.channel.prompt']).toBe(
+        true,
+      );
+
+      await bridge.shutdown();
+    });
+
     it('strips both spoofed retry and continue meta keys from one prompt', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -10955,6 +12461,66 @@ describe('createAcpSessionBridge', () => {
         message: 'terminated',
         errorKind: 'model_stream_interrupted',
         promptId: 'prompt-error',
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('preserves structured loop detection details on turn_error', async () => {
+      const handle = makeChannel({
+        promptImpl: () => {
+          throw new RequestError(-32603, 'Loop protection stopped this turn', {
+            code: 'LOOP_DETECTED',
+            errorKind: 'loop_detected',
+            loopType: 'turn_tool_call_cap',
+          });
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const emittedTypes: string[] = [];
+      const turnError = (async () => {
+        for await (const event of iter) {
+          emittedTypes.push(event.type);
+          if (event.type === 'turn_error') return event;
+        }
+        throw new Error('turn_error was not published');
+      })();
+
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'loop' }],
+          },
+          undefined,
+          { promptId: 'prompt-loop' },
+        ),
+      ).rejects.toThrow('Loop protection stopped this turn');
+
+      await expect(turnError).resolves.toMatchObject({
+        type: 'turn_error',
+        promptId: 'prompt-loop',
+        data: {
+          code: 'LOOP_DETECTED',
+          errorKind: 'loop_detected',
+          loopType: 'turn_tool_call_cap',
+          promptId: 'prompt-loop',
+        },
+      });
+      // Structured rejections already ran on the daemon: the forward-failure
+      // phantom (`prompt_cancelled{forward_failed}`) must be suppressed.
+      expect(emittedTypes).not.toContain('prompt_cancelled');
+      expect(bridge.getSessionSummary(session.sessionId).turnError).toEqual({
+        message: 'Loop protection stopped this turn',
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
       });
 
       abort.abort();

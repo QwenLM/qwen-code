@@ -179,7 +179,10 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
-import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
+import {
+  ACP_EVENT_LOOP_STALL_RESTART_MS,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -332,6 +335,8 @@ import {
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   isValidExternalToolGuardDenialReason,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+  SHELL_EXECUTING_TOOL_NAMES,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   parseSessionSource,
@@ -348,6 +353,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
@@ -3040,30 +3046,42 @@ export async function deliverClientMcpMessage(
  */
 export function createManagedExternalToolGuard(
   connection: AgentSideConnection,
+  options: { externalProviderAttached: boolean } = {
+    externalProviderAttached: false,
+  },
 ): ToolInvocationGuard {
   return async (context) => {
+    // With only the daemon's built-in policy attached there is no external
+    // provider to consult: every non-shell tool is structurally allowed,
+    // so resolve locally instead of paying a serialized child-daemon-child
+    // round trip on every tool call. The shell-executing tools still go to
+    // the daemon because they are the only ones the built-in policy inspects.
+    if (
+      !options.externalProviderAttached &&
+      !SHELL_EXECUTING_TOOL_NAMES.has(context.toolName)
+    ) {
+      return { allowed: true };
+    }
     const invocation = context.invocationContext;
-    if (!invocation) {
+    if (!invocation && options.externalProviderAttached) {
       throw new Error(
         'Managed external tool guard requires a runtime invocation context.',
+      );
+    }
+    // Subagent reasoning loops, cron turns, background notifications, and
+    // resumed background agents run without an invocation context by design.
+    // Under the built-in policy alone the daemon only needs the session
+    // identity, so fall back to the scheduler-owned session id and skip the
+    // prompt binding instead of denying every shell call those paths make.
+    const sessionId = invocation?.sessionId ?? context.sessionId;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new Error(
+        'Managed external tool guard requires a session identity.',
       );
     }
     if (context.signal.aborted) {
       throw new DOMException('Tool invocation aborted', 'AbortError');
     }
-    if (
-      context.toolName === ToolNames.AGENT ||
-      context.toolName === ToolNames.WORKFLOW ||
-      context.toolName === ToolNames.CREATE_SUB_SESSION ||
-      context.toolName === ToolNames.SEND_MESSAGE
-    ) {
-      return {
-        allowed: false,
-        reason:
-          'Managed external tool guard v1 does not support nested or delegated agent execution.',
-      };
-    }
-
     let rejectOnAbort: ((error: Error) => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
       rejectOnAbort = reject;
@@ -3081,11 +3099,16 @@ export function createManagedExternalToolGuard(
         connection.extMethod(
           SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
           {
-            sessionId: invocation.sessionId,
-            promptId: invocation.promptId,
+            sessionId,
+            ...(invocation ? { promptId: invocation.promptId } : {}),
             toolCallId: context.callId,
             toolName: context.toolName,
             arguments: context.args,
+            // A sub-agent pinned to a worktree executes here, not in the
+            // session's own directory; the host validates this before use.
+            ...(typeof context.cwd === 'string' && context.cwd.length > 0
+              ? { invocationCwd: context.cwd }
+              : {}),
           },
         ),
         aborted,
@@ -3238,6 +3261,7 @@ export async function runAcpAgent(
   options?: {
     privateParentCapability?: string;
     externalToolGuardRequired?: boolean;
+    externalToolGuardProviderAttached?: boolean;
   },
 ) {
   // Freeze the restart-required writer protocol before the first await.
@@ -3253,8 +3277,11 @@ export async function runAcpAgent(
       : options.privateParentCapability;
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
   const externalToolGuardRequired = options?.externalToolGuardRequired === true;
+  const externalToolGuardProviderAttached =
+    options?.externalToolGuardProviderAttached === true;
   if (externalToolGuardRequired && privateParentCapability === undefined) {
     throw new Error(
       'Required external tool guard is available only to a private managed ACP parent.',
@@ -3382,7 +3409,9 @@ export async function runAcpAgent(
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
       const managedToolInvocationGuard = externalToolGuardRequired
-        ? createManagedExternalToolGuard(conn)
+        ? createManagedExternalToolGuard(conn, {
+            externalProviderAttached: externalToolGuardProviderAttached,
+          })
         : undefined;
       agentInstance = new QwenAgent(
         config,
@@ -3392,6 +3421,7 @@ export async function runAcpAgent(
         privateParentCapability,
         sessionWriterLeaseEnabledAtStartup,
         managedToolInvocationGuard,
+        externalToolGuardProviderAttached,
       );
       return agentInstance;
     }, stream);
@@ -3907,7 +3937,10 @@ class QwenAgent implements Agent {
   }
 
   private rejectUnsupportedGuardedHiddenAgent(operation: string): void {
-    if (this.managedToolInvocationGuard) {
+    if (
+      this.managedToolInvocationGuard &&
+      this.externalToolGuardProviderAttached
+    ) {
       throw RequestError.invalidParams(
         undefined,
         `Managed external tool guard v1 does not support ${operation}.`,
@@ -4680,6 +4713,7 @@ class QwenAgent implements Agent {
     private readonly expectedPrivateParentCapability?: string,
     private readonly sessionWriterLeaseEnabledAtStartup = false,
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
+    private readonly externalToolGuardProviderAttached = false,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -5810,10 +5844,14 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
     // channel-worker value here). A plain delete would drop that re-injection.
@@ -5822,6 +5860,26 @@ class QwenAgent implements Agent {
       typeof suppliedPromptDisplayText === 'string'
     ) {
       meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] = suppliedPromptDisplayText;
+    }
+    // Channel classification is trusted-parent metadata: only the channel
+    // bridges and the daemon bridge hold the private parent capability. An
+    // untrusted caller must not be able to mark its own prompt as a channel
+    // turn — that opts the turn out of loop-detected rejection and the
+    // repeated-failure guard.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelPrompt === true
+    ) {
+      meta[CHANNEL_PROMPT_META_KEY] = true;
+    }
+    // Channel delivery is a daemon-managed side effect (the prompt route
+    // injects it from the trusted context); an untrusted direct-ACP caller
+    // must not self-schedule its own response delivery through the key.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelDelivery !== undefined
+    ) {
+      meta[DAEMON_CHANNEL_DELIVERY_META_KEY] = suppliedChannelDelivery;
     }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
@@ -8792,8 +8850,10 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability:
         return {
           available:
-            !this.managedToolInvocationGuard &&
-            this.config.isManagedMemoryAvailable(),
+            !(
+              this.managedToolInvocationGuard &&
+              this.externalToolGuardProviderAttached
+            ) && this.config.isManagedMemoryAvailable(),
         };
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryRemember: {
         this.rejectUnsupportedGuardedHiddenAgent(
@@ -10632,7 +10692,10 @@ class QwenAgent implements Agent {
         return { sessionId, answer: result.text || null };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionForkAgent: {
-        if (this.managedToolInvocationGuard) {
+        if (
+          this.managedToolInvocationGuard &&
+          this.externalToolGuardProviderAttached
+        ) {
           throw RequestError.invalidParams(
             undefined,
             'Managed external tool guard v1 does not support /fork.',

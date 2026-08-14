@@ -57,6 +57,7 @@ import {
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
+import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
@@ -805,7 +806,6 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
-  desiredSessionTargetPending?: boolean;
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
     sessionId: string | undefined,
@@ -1745,7 +1745,6 @@ function readScopedModelSetting(
 }
 
 export function App({
-  desiredSessionTargetPending = false,
   onSessionIdChange,
   onSessionCreated,
   theme: providedTheme,
@@ -2002,6 +2001,8 @@ export function App({
   const customization = useMemo(
     () => ({
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -2026,6 +2027,8 @@ export function App({
     }),
     [
       composerTagIcons,
+      builtinAtProviders,
+      atProviders,
       renderToolHeaderExtra,
       renderWelcomeHeader,
       renderWelcomeFooter,
@@ -2059,10 +2062,7 @@ export function App({
     connection.sessionId,
     connection.workspaceCwd,
   );
-  const sessionWriteBlocked =
-    desiredSessionTargetPending ||
-    connection.sessionTransition?.phase === 'queued' ||
-    connection.sessionTransition?.phase === 'preparing';
+  const sessionWriteBlocked = Boolean(connection.loadingTranscript);
   const sessionWriteBlockedRef = useRef(sessionWriteBlocked);
   const sessionWriteBlockGenerationRef = useRef(0);
   if (sessionWriteBlocked && !sessionWriteBlockedRef.current) {
@@ -4087,6 +4087,7 @@ export function App({
     composerSourceVersionRef.current,
   );
   const retryableTurnErrorIdRef = useRef<string | null>(null);
+  const lastTurnErrorIdRef = useRef<string | null>(null);
   const retryableTurnErrorIdentityRef = useRef<
     TranscriptTurnErrorIdentity | undefined
   >(undefined);
@@ -7039,7 +7040,16 @@ export function App({
   ]);
 
   useEffect(() => {
-    const retryableTurnError = getRetryableTurnError(blocks);
+    const lastTurnError = getRetryableTurnError(blocks);
+    // Loop-detected turn errors still surface through turn_complete below,
+    // but resubmitting a prompt the daemon stopped for loop protection
+    // tends to re-loop, so no retry affordance is offered for them.
+    const retryableTurnError =
+      lastTurnError &&
+      lastTurnError.kind === 'error' &&
+      isRetryableTurnErrorKind(lastTurnError.errorKind)
+        ? lastTurnError
+        : undefined;
     if (retryableTurnError) {
       rearmFailedTurnErrorRetry(retryableTurnError, blocks);
     }
@@ -7056,6 +7066,16 @@ export function App({
     ) {
       retriedTurnErrorIdRef.current = retryableTurnError.id;
     }
+    // Same walk as the retry decision above, so turn_complete and the
+    // retry affordance never disagree about whether the current turn has
+    // a turn error (e.g. across a trailing background notification). An
+    // error the user already retried stays suppressed, mirroring the
+    // retry affordance; loop-detected errors are never retried, so they
+    // always surface.
+    lastTurnErrorIdRef.current =
+      lastTurnError && lastTurnError.id !== retriedTurnErrorIdRef.current
+        ? lastTurnError.id
+        : null;
     const canRetry =
       connected &&
       retryableTurnError !== undefined &&
@@ -7085,7 +7105,7 @@ export function App({
     onStreamingStateChange?.(streamingState);
   }, [streamingState, onStreamingStateChange]);
 
-  // Reads retryableTurnErrorIdRef which is set by the blocks effect above.
+  // Reads lastTurnErrorIdRef which is set by the blocks effect above.
   // Declaration order matters: this effect must run after the blocks effect
   // so that within the same render, the ref is already updated before we read it.
   const prevStreamingForTurnCompleteRef = useRef(streamingState);
@@ -7119,8 +7139,8 @@ export function App({
         return;
       }
       const turnError =
-        retryableTurnErrorIdRef.current != null
-          ? new Error(`Turn error (block ${retryableTurnErrorIdRef.current})`)
+        lastTurnErrorIdRef.current != null
+          ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
       if (workspaceCwd) {
         sessionCatalogController.turnCompleted(workspaceCwd);
@@ -7177,6 +7197,7 @@ export function App({
   }, [connection.currentMode, logicalSessionKey]);
 
   useEffect(() => {
+    if (connection.loadingTranscript) return;
     if (!connection.sessionId && connection.missingSession) {
       // Keep the dead-session route visible until the user explicitly starts a
       // new chat; clearing it here would immediately hide the recovery state.
@@ -7213,6 +7234,7 @@ export function App({
     );
   }, [
     connection.missingSession,
+    connection.loadingTranscript,
     connection.sessionId,
     connection.workspaceCwd,
     onSessionIdChange,
@@ -9854,17 +9876,27 @@ export function App({
             });
           }
           if (isDaemonTurnError(error)) {
-            failedTurnErrorRetryRef.current = {
-              errorId: retryErrorId,
-              text: retryText,
-              images: retryImages,
-              inputAnnotations: retryInputAnnotations,
-              owner: retryOwner,
-            };
+            // A loop-detected rejection ends the retry lineage: the
+            // retried turn itself was stopped for loop protection, so
+            // the stashed prompt must not be re-offered — resubmitting
+            // it tends to re-loop.
+            if (error.body !== 'LOOP_DETECTED') {
+              failedTurnErrorRetryRef.current = {
+                errorId: retryErrorId,
+                text: retryText,
+                images: retryImages,
+                inputAnnotations: retryInputAnnotations,
+                owner: retryOwner,
+              };
+            }
             const nextTurnError = getRetryableTurnError(
               store.getSnapshot().blocks,
             );
-            if (nextTurnError) {
+            if (
+              nextTurnError &&
+              nextTurnError.kind === 'error' &&
+              isRetryableTurnErrorKind(nextTurnError.errorKind)
+            ) {
               rearmFailedTurnErrorRetry(
                 nextTurnError,
                 store.getSnapshot().blocks,
@@ -12570,10 +12602,12 @@ export function App({
                   }}
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
-                  <ArtifactPanel
-                    {...artifactPanelSharedProps}
-                    variant="drawer"
-                  />
+                  <WebShellCustomizationProvider value={customization}>
+                    <ArtifactPanel
+                      {...artifactPanelSharedProps}
+                      variant="drawer"
+                    />
+                  </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
             )}
@@ -12636,12 +12670,14 @@ export function App({
                       onPointerDown={handleArtifactPanelResizeStart}
                     />
                   )}
-                  <div className={styles.artifactPanelClip}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      panelWidth={artifactPanelWidth}
-                    />
-                  </div>
+                  <WebShellCustomizationProvider value={customization}>
+                    <div className={styles.artifactPanelClip}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        panelWidth={artifactPanelWidth}
+                      />
+                    </div>
+                  </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
               )}

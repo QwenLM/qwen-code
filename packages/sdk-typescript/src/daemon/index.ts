@@ -23,6 +23,10 @@ export {
   type RestoreSessionRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
+export {
+  isSessionLevelNotFound,
+  isSubagentSessionNotFound,
+} from './DaemonHttpError.js';
 // Transport abstraction layer
 export { DaemonTransportClosedError } from './DaemonTransport.js';
 export type {
