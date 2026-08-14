@@ -583,17 +583,30 @@ function normalizeMidTurnMessageInjected(
       ? rawMessages
       : [];
   const items = data['items'];
-  const hasMedia =
+  // An injected message is renderable when its text is non-empty OR its
+  // content carries an image or a non-empty text block. The drain's
+  // degraded-media path publishes `messages: ['']` whose items hold only the
+  // '[Attached media is no longer available]' text block — dropping that
+  // frame as malformed would erase the echo of the user's message.
+  const hasRenderableItemContent =
     Array.isArray(items) &&
     items.some(
       (item) =>
         isRecord(item) &&
         Array.isArray(item['content']) &&
         item['content'].some(
-          (block) => isRecord(block) && block['type'] === 'image',
+          (block) =>
+            isRecord(block) &&
+            (block['type'] === 'image' ||
+              (block['type'] === 'text' &&
+                typeof block['text'] === 'string' &&
+                (block['text'] as string).length > 0)),
         ),
     );
-  if (messages.length === 0 || (!messages.some(Boolean) && !hasMedia)) {
+  if (
+    messages.length === 0 ||
+    (!messages.some(Boolean) && !hasRenderableItemContent)
+  ) {
     return fallbackDebug(event, base, 'malformed mid_turn_message_injected');
   }
   const messageIds = Array.isArray(data['messageIds'])

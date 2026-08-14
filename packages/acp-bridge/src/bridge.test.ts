@@ -13227,6 +13227,41 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it('releases uploaded media when killSession falls back to a force kill', async () => {
+      // A wedged child rejects the cooperative close-notify, so kill takes
+      // the force-kill fallback; the media must still be removed immediately
+      // instead of degrading to the crash-path detach retention.
+      const close = vi.spyOn(SessionMediaStore.prototype, 'close');
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            throw new Error('close notify wedged');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await bridge.storeSessionMedia(
+          session.sessionId,
+          Uint8Array.from([1, 2, 3]),
+          'image/png',
+          { clientId: session.clientId },
+        );
+
+        await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+
+        expect(close).toHaveBeenCalledOnce();
+        expect(bridge.sessionCount).toBe(0);
+      } finally {
+        close.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
     it('broadcasts prompt_cancelled with originator attribution on cancelSession', async () => {
       // Cross-client sync: a cancel must surface as a first-class event
       // so peer subscribers don't have to infer it from the absence of

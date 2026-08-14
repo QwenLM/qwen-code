@@ -39,6 +39,37 @@ describe('SessionMediaStore', () => {
     }
   });
 
+  it('resolves duplicate references with a single read', async () => {
+    // Duplicate references to one stored item must not multiply the disk
+    // reads and base64 encodes at dispatch — that amplification let one
+    // small request pin gigabytes of heap.
+    const store = new SessionMediaStore();
+    const readFile = vi.spyOn(fs, 'readFile');
+    try {
+      const reference = await store.put(
+        Uint8Array.from([1, 2, 3]),
+        'image/png',
+      );
+      readFile.mockClear();
+
+      const resolved = await store.resolveContent([
+        reference,
+        { ...reference },
+        { ...reference },
+      ]);
+
+      expect(resolved).toEqual([
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      ]);
+      expect(readFile).toHaveBeenCalledTimes(1);
+    } finally {
+      readFile.mockRestore();
+      await store.close();
+    }
+  });
+
   it('keeps media for the lifetime of the store', async () => {
     const store = new SessionMediaStore();
     try {

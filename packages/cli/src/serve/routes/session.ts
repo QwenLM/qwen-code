@@ -198,6 +198,12 @@ const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+// Media blocks are resolved into inline bytes at dispatch, so an unbounded
+// content array lets one small request fan out into gigabytes of heap (a
+// repeated reference resolves to the same 8 MiB image once per occurrence).
+// 256 matches the session media store's item cap, so a message can still
+// reference every stored item.
+const MEDIA_CONTENT_MAX_BLOCKS = 256;
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
   'POST /session/:id/side-task',
@@ -3458,6 +3464,16 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const mediaBlockCount = prompt.filter(
+          (item: unknown) =>
+            (item as Record<string, unknown>)['type'] !== 'text',
+        ).length;
+        if (mediaBlockCount > MEDIA_CONTENT_MAX_BLOCKS) {
+          res.status(400).json({
+            error: `\`prompt\` must carry at most ${MEDIA_CONTENT_MAX_BLOCKS} media blocks`,
+          });
+          return;
+        }
         const rawRequestDeadline = body['deadlineMs'];
         let requestDeadlineMs: number | undefined;
         if (rawRequestDeadline !== undefined && rawRequestDeadline !== null) {
@@ -4903,6 +4919,12 @@ export function registerSessionRoutes(
           if (!Array.isArray(rawContent) || rawContent.length === 0) {
             res.status(400).json({
               error: '`content` must be a non-empty array of media blocks',
+            });
+            return;
+          }
+          if (rawContent.length > MEDIA_CONTENT_MAX_BLOCKS) {
+            res.status(400).json({
+              error: `\`content\` must carry at most ${MEDIA_CONTENT_MAX_BLOCKS} media blocks`,
             });
             return;
           }

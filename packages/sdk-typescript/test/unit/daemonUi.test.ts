@@ -6462,6 +6462,39 @@ describe('R5 review batch — coverage additions', () => {
     ]);
   });
 
+  it('normalizes a degraded-media mid-turn echo instead of dropping it', () => {
+    // The drain's media-failure path publishes `messages: ['']` whose item
+    // content is the media-unavailable text block (no image blocks); the
+    // guard must keep the user's injected echo renderable.
+    const data = {
+      sessionId: 's1',
+      messages: [''],
+      messageIds: ['mid-gone'],
+      items: [
+        {
+          content: [
+            { type: 'text', text: '[Attached media is no longer available]' },
+          ],
+        },
+      ],
+    };
+    expect(
+      normalizeDaemonEvent({
+        id: 5,
+        v: 1,
+        type: 'mid_turn_message_injected',
+        data,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: '',
+        source: 'mid_turn_message_injected',
+        data,
+      }),
+    ]);
+  });
+
   it('store.clearAwaitingResync clears latch', async () => {
     const { createDaemonTranscriptStore } = await import(
       '../../src/daemon/ui/index.js'

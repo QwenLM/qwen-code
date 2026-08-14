@@ -1119,6 +1119,7 @@ function getValidMidTurnContentBlocks(
 function getStructuredMidTurnDisplayText(
   content: ContentBlock[],
   displayText: unknown,
+  hasMediaReferences: boolean,
 ): string {
   if (typeof displayText === 'string' && displayText.trim().length > 0) {
     return displayText.trim();
@@ -1132,6 +1133,16 @@ function getStructuredMidTurnDisplayText(
     .map((part) => part.text)
     .join('\n')
     .trim();
+
+  if (text) return text;
+
+  // Messages with references keep '' so replay projects the media ids.
+  // Inline-media-only messages need a visible placeholder: resume and replay
+  // fall back to the recorded parts, which start with the raw internal
+  // prefix, when displayText is empty.
+  if (!hasMediaReferences && hasInlineMediaContentBlock(content)) {
+    return '[User message with attachments]';
+  }
 
   return text;
 }
@@ -1160,6 +1171,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
             displayText: getStructuredMidTurnDisplayText(
               content,
               item['displayText'],
+              mediaReferences !== undefined,
             ),
             ...(mediaReferences ? { mediaReferences } : {}),
           },

@@ -340,7 +340,6 @@ export class DaemonSessionClient {
     });
     await result.hydrateReplaySnapshot();
     return result;
-    return result;
   }
 
   /**

@@ -439,8 +439,17 @@ function convertToHistoryItems(
         }
 
         const projection = projectUserTranscriptForDisplay(record);
+        const payload = record.systemPayload as
+          | { mediaReferences?: unknown[] }
+          | undefined;
+        const hasMediaReferences =
+          Array.isArray(payload?.mediaReferences) &&
+          payload.mediaReferences.length > 0;
         const text =
-          projection.displayText ?? extractTextFromParts(projection.parts);
+          projection.displayText ||
+          (hasMediaReferences
+            ? '[User message with attachments]'
+            : extractTextFromParts(projection.parts));
         if (text) {
           items.push({ type: 'user', text });
         }

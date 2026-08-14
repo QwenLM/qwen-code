@@ -150,10 +150,19 @@ export class SessionMediaStore {
   async resolveContent(
     content: ReadonlyArray<ContentBlock | SessionMediaReference>,
   ): Promise<ContentBlock[]> {
+    // Resolve each distinct mediaId once: duplicate references share the read
+    // and base64 encode instead of amplifying heap per occurrence.
+    const pendingByMediaId = new Map<string, Promise<ContentBlock>>();
     return await Promise.all(
-      content.map(async (block) =>
-        isSessionMediaReference(block) ? await this.resolve(block) : block,
-      ),
+      content.map(async (block) => {
+        if (!isSessionMediaReference(block)) return block;
+        let pending = pendingByMediaId.get(block.mediaId);
+        if (!pending) {
+          pending = this.resolve(block);
+          pendingByMediaId.set(block.mediaId, pending);
+        }
+        return await pending;
+      }),
     );
   }
 

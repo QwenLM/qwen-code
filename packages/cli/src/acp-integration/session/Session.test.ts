@@ -10580,6 +10580,91 @@ describe('Session', () => {
         );
       });
 
+      it('records inline-media-only mid-turn messages with a placeholder display text', async () => {
+        // An inline image with no text and no references must not record an
+        // empty displayText: resume and replay would otherwise fall back to
+        // the raw internal prefix carried by the recorded parts.
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'aW5saW5lLW9ubHk=',
+                },
+              ],
+              displayText: '',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: [User message with attachments]',
+            },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'aW5saW5lLW9ubHk=',
+              },
+            },
+          ],
+          '[User message with attachments]',
+        );
+      });
+
       it('keeps uncovered audio bytes in the transcript record', async () => {
         // References are image-only: a drain whose only media block is audio
         // must NOT take the reference-recording path (the gate would strip

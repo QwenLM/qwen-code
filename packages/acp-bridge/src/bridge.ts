@@ -11315,6 +11315,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           closingChannel,
           `force kill closing session ${JSON.stringify(sessionId)}`,
         );
+        await releaseSessionMedia(sessionId).catch((releaseError) => {
+          writeStderrLine(
+            `qwen serve: failed to release media for killed session ${JSON.stringify(sessionId)}: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+          );
+        });
         return true;
       }
       entry.closing = true;
@@ -11341,6 +11346,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ci,
             `force kill session ${JSON.stringify(sessionId)}`,
           );
+          // Kill removes media immediately (design: "explicit close, kill, and
+          // daemon shutdown remove them immediately"); without this the
+          // channel-exit handler's crash-path retention would keep it for the
+          // detach TTL.
+          await releaseSessionMedia(sessionId).catch((releaseError) => {
+            writeStderrLine(
+              `qwen serve: failed to release media for killed session ${JSON.stringify(sessionId)}: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+            );
+          });
           return true;
         }
         entry.closing = false;

@@ -9537,6 +9537,22 @@ describe('createServeApp', () => {
       expect(bridge.enqueueMidTurnCalls).toEqual([]);
     });
 
+    it('400 when `content` carries more than 256 media blocks', async () => {
+      // Media blocks are resolved into inline bytes at dispatch; an unbounded
+      // array amplifies one small request into gigabytes of heap.
+      const bridge = fakeBridge();
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'hi',
+        content: Array.from({ length: 257 }, () => ({
+          type: 'image',
+          data: 'aW1n',
+          mimeType: 'image/png',
+        })),
+      });
+      expect(res.status).toBe(400);
+      expect(bridge.enqueueMidTurnCalls).toEqual([]);
+    });
+
     it('maps a bridge SessionNotFoundError to 404', async () => {
       const bridge = fakeBridge({
         enqueueMidTurnImpl: (sessionId) => {
@@ -12770,6 +12786,30 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
+    });
+
+    it('400 when the prompt carries more than 256 media blocks', async () => {
+      // Same amplification guard as the mid-turn route: repeated media
+      // references resolve into per-occurrence inline bytes at dispatch.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'hi' },
+            ...Array.from({ length: 257 }, () => ({
+              type: 'image',
+              data: 'aW1n',
+              mimeType: 'image/png',
+            })),
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(bridge.promptCalls).toHaveLength(0);
     });
 
     it('202 envelope carries eventEpoch alongside lastEventId (DAEMON-001)', async () => {
