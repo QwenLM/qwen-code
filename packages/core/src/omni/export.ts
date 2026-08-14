@@ -5,8 +5,8 @@
  */
 
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { MediaMemoryStore } from '../services/media-memory/store.js';
 import type { MediaMemorySnapshot } from '../services/media-memory/types.js';
 import {
   OMNI_DISCLOSURE_TEXT_PREFIX,
@@ -14,6 +14,8 @@ import {
   OMNI_TRANSCRIPT_TEXT_PREFIX,
   OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
   parseResourceHandleText,
+  splitAnnotationBody,
+  unescapeAnnotationName,
 } from './disclosure.js';
 
 const debugLogger = createDebugLogger('omni:export');
@@ -24,16 +26,21 @@ const debugLogger = createDebugLogger('omni:export');
  *
  * The exporter is a pure READER over two artifacts that already exist —
  * the session's chat-record JSONL and the project's `memory.json` — so it
- * adds no collection points, cannot affect runtime behavior, and works on
- * sessions recorded before it was written.
+ * adds no collection points and cannot affect runtime behavior. The
+ * memory ledger is read RAW (no store-side corruption self-heal: an
+ * export must never rename the live document); an unreadable ledger
+ * degrades the export to transcript-only records.
  *
  * ## Record kinds (the `kind` field of every line)
  *
  * - `turn` — one user request → model response cycle from the transcript:
- *   the request text (system reminders stripped, an injected passive
- *   recall extracted into `recall`), the media annotations the model saw
- *   (handles, disclosures, omissions, transcripts), the assistant text
- *   and its tool calls.
+ *   the request text (system reminders stripped), the media annotations
+ *   the model saw (handles, disclosures, omissions, transcripts —
+ *   harvested from user AND tool_result records), the recall payload the
+ *   sideQuery injected (recorded by the runtime since this exporter
+ *   shipped; older transcripts simply have no `recall`), the assistant's
+ *   VISIBLE text (thought parts are excluded) and its tool calls with
+ *   arguments preserved verbatim.
  * - `execution` — one policy execution from memory, with full provenance
  *   (arguments, config hash, source/output identities, reuse marker).
  * - `file` — one file version from memory: the durable identity
@@ -41,6 +48,25 @@ const debugLogger = createDebugLogger('omni:export');
  *   REDUCED to its safe form (URLs and managed keys verbatim; local
  *   locators are already basenames by construction — M §5.2's no-path
  *   discipline is enforced at collection time, not here).
+ *
+ * ## Session scope
+ *
+ * `memory.json` is project-wide; a single-session export includes only
+ * the records reachable from THIS session's transcript: executions whose
+ * `invocationId` matches a turn's tool callId, files whose display
+ * locator matches a media annotation, and everything reachable from
+ * those through the identity graph (source versions, produced
+ * derivatives, and the executions between them) — computed as a closure,
+ * so fixed-policy chains (extract-audio → transcribe) stay complete.
+ *
+ * ## Branches
+ *
+ * Chat records form a `parentUuid` chain and `/rewind` re-roots it,
+ * leaving abandoned records in the append-only file. The exporter
+ * replays only the ACTIVE chain (walked back from the final record) —
+ * a rewound branch must not export as a genuine turn. Records without
+ * uuids (hand-built fixtures, foreign transcripts) fall back to append
+ * order.
  *
  * ## The join contract (deliberately explicit, not implicit)
  *
@@ -60,15 +86,21 @@ const debugLogger = createDebugLogger('omni:export');
  *
  * ## What is and is not scrubbed
  *
- * The exporter strips exactly the harness-side surface the model never
- * saw: the reserved runtime keys (inputPath/outputDir) that the gate and
- * orchestrator inject into policy calls. Content the MODEL itself saw or
- * produced — a path the user typed into their prompt, a `file_path` the
- * model passed to write_file — is preserved verbatim: it IS the
- * trajectory, and scrubbing it would corrupt the training signal while
- * teaching nothing about the pipeline. Callers publishing exports off
- * the machine own that second category (measured on a real session: 147
- * records, zero pipeline-side leaks, 7 user/model-side absolute paths).
+ * Transcript-side content is preserved VERBATIM — the recorded assistant
+ * turn predates the gate's runtime-key injection, so its tool-call
+ * arguments are exactly what the model emitted (including an `inputPath`
+ * the model legitimately passed to an omni tool); scrubbing them would
+ * corrupt the training signal. The memory side excludes the reserved
+ * runtime keys (`inputPath`/`outputDir`/`resourceId`) from
+ * `finalArguments` at collection time — before this exporter ever runs.
+ * Callers publishing exports off the machine own user/model-authored
+ * absolute paths (they ARE the trajectory).
+ *
+ * ## Known limitation
+ *
+ * Non-text request parts (pasted images, inline blobs) contribute no
+ * annotation and are not represented in `turn.request` beyond any omni
+ * annotations delivered beside them.
  */
 
 // ─── Line shapes ──────────────────────────────────────────────────────────
@@ -94,7 +126,8 @@ export interface OmniTrajectoryTurnRecord {
   request: {
     text: string;
     media: OmniTrajectoryMediaAnnotation[];
-    /** Parsed 【媒体记忆】 sideQuery injection, verbatim JSON when present. */
+    /** The sideQuery recall payload the runtime injected (recorded as a
+     * system record at injection time), verbatim JSON when present. */
     recall?: unknown;
   };
   response: {
@@ -102,8 +135,7 @@ export interface OmniTrajectoryTurnRecord {
     toolCalls: Array<{
       callId?: string;
       name: string;
-      /** Arguments minus reserved runtime keys (inputPath/outputDir) —
-       * the same exclusion memory applies to `finalArguments`. */
+      /** Arguments exactly as the model emitted them. */
       args?: Record<string, unknown>;
     }>;
   };
@@ -166,11 +198,11 @@ interface TranscriptRecordView {
   type?: string;
   subtype?: string;
   timestamp?: string;
+  uuid?: string;
+  parentUuid?: string | null;
   message?: { parts?: unknown[] };
-  toolCallResult?: unknown;
+  systemPayload?: unknown;
 }
-
-const RECALL_REMINDER_MARKER = '【媒体记忆】';
 
 function textOfPart(part: unknown): string | undefined {
   if (typeof part === 'string') return part;
@@ -179,6 +211,14 @@ function textOfPart(part: unknown): string | undefined {
     return typeof text === 'string' ? text : undefined;
   }
   return undefined;
+}
+
+function isThoughtPart(part: unknown): boolean {
+  return (
+    typeof part === 'object' &&
+    part !== null &&
+    (part as { thought?: unknown }).thought === true
+  );
 }
 
 function functionCallOfPart(
@@ -195,46 +235,19 @@ function functionCallOfPart(
     args?: unknown;
   };
   if (typeof name !== 'string') return undefined;
+  // Arguments are preserved verbatim: the assistant turn is recorded
+  // BEFORE the gate injects runtime keys, so whatever is here is what
+  // the model itself emitted — scrubbing it would delete a legitimate
+  // model-authored `inputPath` and corrupt the call record.
   const cleanArgs =
     typeof args === 'object' && args !== null
       ? { ...(args as Record<string, unknown>) }
       : undefined;
-  if (cleanArgs) {
-    // Reserved runtime keys are per-invocation plumbing and may carry
-    // absolute paths — the same exclusion memory's finalArguments applies.
-    delete cleanArgs['inputPath'];
-    delete cleanArgs['outputDir'];
-  }
   return {
     ...(typeof id === 'string' ? { callId: id } : {}),
     name,
     ...(cleanArgs ? { args: cleanArgs } : {}),
   };
-}
-
-/** Split an annotation line `【…】name：payload` into its parts. */
-function splitAnnotation(
-  text: string,
-  prefix: string,
-): { name: string; payload: string } | undefined {
-  if (!text.startsWith(prefix)) return undefined;
-  const rest = text.slice(prefix.length);
-  const sep = rest.indexOf('：');
-  if (sep < 0) return undefined;
-  return { name: rest.slice(0, sep), payload: rest.slice(sep + 1) };
-}
-
-/** Extract the recall reminder's JSON body, if this text part is one. */
-function parseRecallReminder(text: string): unknown | undefined {
-  if (!text.includes(RECALL_REMINDER_MARKER)) return undefined;
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) return undefined;
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return undefined;
-  }
 }
 
 function stripSystemReminders(text: string): string {
@@ -265,32 +278,74 @@ function mediaFor(
   return media;
 }
 
-/** Consume one user-part text line into the accumulating turn. Returns
- * true when the line was a media/recall annotation (not request prose). */
-function consumeAnnotationLine(turn: TurnAccumulator, line: string): boolean {
-  const handle = splitAnnotation(line, OMNI_RESOURCE_HANDLE_TEXT_PREFIX);
-  if (handle) {
-    const resourceId = parseResourceHandleText(line);
-    const media = mediaFor(turn, handle.name);
-    if (resourceId) media.resourceId = resourceId;
+/**
+ * Consume one text PART as a media annotation if it is one. Writers emit
+ * each annotation as a standalone part (`formatDisclosureText` and
+ * friends produce the whole part text), so matching at part granularity
+ * keeps multi-line payloads intact and never harvests look-alike lines
+ * out of surrounding prose. Returns true when the part was an
+ * annotation.
+ */
+function consumeAnnotationPart(turn: TurnAccumulator, text: string): boolean {
+  if (text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) {
+    const resourceId = parseResourceHandleText(text);
+    if (!resourceId) return false;
+    // Name = body minus the end-anchored `：<resourceId>` (the id grammar
+    // is harness-minted, so this parse never guesses at the name).
+    const body = text.slice(OMNI_RESOURCE_HANDLE_TEXT_PREFIX.length);
+    const name = unescapeAnnotationName(
+      body.slice(0, body.length - resourceId.length - 1),
+    );
+    mediaFor(turn, name).resourceId = resourceId;
     return true;
   }
-  const disclosure = splitAnnotation(line, OMNI_DISCLOSURE_TEXT_PREFIX);
-  if (disclosure) {
-    mediaFor(turn, disclosure.name).disclosures.push(disclosure.payload);
-    return true;
-  }
-  const omission = splitAnnotation(line, OMNI_OMISSION_TEXT_PREFIX);
-  if (omission) {
-    mediaFor(turn, omission.name).omitted = omission.payload;
-    return true;
-  }
-  const transcript = splitAnnotation(line, OMNI_TRANSCRIPT_TEXT_PREFIX);
-  if (transcript) {
-    mediaFor(turn, transcript.name).transcripts.push(transcript.payload);
+  for (const [prefix, apply] of [
+    [
+      OMNI_DISCLOSURE_TEXT_PREFIX,
+      (m: OmniTrajectoryMediaAnnotation, payload: string) => {
+        m.disclosures.push(payload);
+      },
+    ],
+    [
+      OMNI_OMISSION_TEXT_PREFIX,
+      (m: OmniTrajectoryMediaAnnotation, payload: string) => {
+        m.omitted = payload;
+      },
+    ],
+    [
+      OMNI_TRANSCRIPT_TEXT_PREFIX,
+      (m: OmniTrajectoryMediaAnnotation, payload: string) => {
+        m.transcripts.push(payload);
+      },
+    ],
+  ] as const) {
+    if (!text.startsWith(prefix)) continue;
+    const split = splitAnnotationBody(text.slice(prefix.length));
+    if (!split) return false;
+    apply(mediaFor(turn, split.name), split.payload);
     return true;
   }
   return false;
+}
+
+/** Harvest media annotations (and request prose, when `collectProse`)
+ * from a record's text parts into the accumulating turn. */
+function consumeRecordParts(
+  turn: TurnAccumulator,
+  record: TranscriptRecordView,
+  collectProse: boolean,
+): void {
+  for (const part of record.message?.parts ?? []) {
+    const raw = textOfPart(part);
+    if (raw === undefined) continue;
+    // Reminders are harness plumbing, never annotation carriers — strip
+    // them BEFORE annotation matching so a reminder quoting an
+    // annotation line cannot be harvested as one.
+    const text = stripSystemReminders(raw);
+    if (!text) continue;
+    if (consumeAnnotationPart(turn, text)) continue;
+    if (collectProse) turn.requestTexts.push(text);
+  }
 }
 
 function finishTurn(
@@ -314,6 +369,44 @@ function finishTurn(
   };
 }
 
+/**
+ * Reduce the append-only record list to the ACTIVE parentUuid chain.
+ * `/rewind` re-roots the chain and leaves the abandoned records in the
+ * file — replaying them would export phantom turns. Records without
+ * uuids (fixtures, foreign transcripts) fall back to the full list.
+ */
+function activeChainRecords(
+  records: TranscriptRecordView[],
+): TranscriptRecordView[] {
+  const byUuid = new Map<string, TranscriptRecordView>();
+  for (const record of records) {
+    if (typeof record.uuid === 'string') byUuid.set(record.uuid, record);
+  }
+  if (byUuid.size === 0) return records;
+  let leaf: TranscriptRecordView | undefined;
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (typeof records[i].uuid === 'string') {
+      leaf = records[i];
+      break;
+    }
+  }
+  if (!leaf) return records;
+  const active = new Set<string>();
+  let current: TranscriptRecordView | undefined = leaf;
+  while (current?.uuid && !active.has(current.uuid)) {
+    active.add(current.uuid);
+    current =
+      typeof current.parentUuid === 'string'
+        ? byUuid.get(current.parentUuid)
+        : undefined;
+  }
+  // Preserve file order; keep uuid-less records (defensive: they cannot
+  // be on a dead branch that rewind knows about).
+  return records.filter(
+    (r) => typeof r.uuid !== 'string' || active.has(r.uuid),
+  );
+}
+
 function buildTurnRecords(
   transcriptLines: TranscriptRecordView[],
 ): OmniTrajectoryTurnRecord[] {
@@ -321,7 +414,7 @@ function buildTurnRecords(
   let sessionId = '';
   let current: TurnAccumulator | undefined;
 
-  for (const record of transcriptLines) {
+  for (const record of activeChainRecords(transcriptLines)) {
     if (typeof record.sessionId === 'string' && sessionId === '') {
       sessionId = record.sessionId;
     }
@@ -337,26 +430,27 @@ function buildTurnRecords(
         responseTexts: [],
         toolCalls: [],
       };
-      for (const part of record.message?.parts ?? []) {
-        const text = textOfPart(part);
-        if (text === undefined) continue;
-        // A recall reminder may share its part with the user's own text
-        // (client.ts prepends reminders INTO the request parts) — extract
-        // the payload, then keep processing what remains of the part.
-        const recall = parseRecallReminder(text);
-        if (recall !== undefined) current.recall = recall;
-        const prose: string[] = [];
-        for (const line of text.split('\n')) {
-          if (!consumeAnnotationLine(current, line.trim())) prose.push(line);
-        }
-        const stripped = stripSystemReminders(prose.join('\n'));
-        if (stripped) current.requestTexts.push(stripped);
-      }
+      consumeRecordParts(current, record, true);
       continue;
     }
     if (!current) continue;
+    if (record.type === 'system' && record.subtype === 'omni_recall') {
+      current.recall = record.systemPayload;
+      continue;
+    }
+    if (record.type === 'tool_result') {
+      // Tool-delivered media carries its annotations in the tool_result
+      // record's parts — harvest them; tool output prose is NOT request
+      // text.
+      consumeRecordParts(current, record, false);
+      continue;
+    }
     if (record.type === 'assistant') {
       for (const part of record.message?.parts ?? []) {
+        // Thought parts are internal chain-of-thought the user never saw
+        // — exporting them as "the response" would mislabel the training
+        // signal.
+        if (isThoughtPart(part)) continue;
         const text = textOfPart(part);
         if (text !== undefined && text.trim()) {
           current.responseTexts.push(text);
@@ -378,77 +472,213 @@ interface MemoryRecords {
   executions: OmniTrajectoryExecutionRecord[];
 }
 
+/**
+ * Read the memory ledger WITHOUT the store's corruption self-heal. The
+ * store backs a corrupt document up (renaming the live file) and
+ * continues on empty — correct for recall, but an EXPORT must never
+ * mutate the thing it reads (and the backup would silently block the GC
+ * for a whole retention window). Any failure degrades to transcript-only
+ * output.
+ */
+async function readSnapshotRaw(
+  omniRootDir: string,
+): Promise<MediaMemorySnapshot | undefined> {
+  const filePath = path.join(omniRootDir, 'memory.json');
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, 'utf8');
+  } catch {
+    return undefined; // Missing ledger: a media-less project is normal.
+  }
+  try {
+    const parsed = JSON.parse(raw) as MediaMemorySnapshot;
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      [parsed.files, parsed.versions, parsed.executions, parsed.entries].some(
+        (c) => typeof c !== 'object' || c === null || Array.isArray(c),
+      )
+    ) {
+      throw new Error('unexpected snapshot shape');
+    }
+    return parsed;
+  } catch (err) {
+    debugLogger.debug(
+      `trajectory export: memory unreadable, exporting transcript only: ` +
+        `${err instanceof Error ? err.message : err}`,
+    );
+    return undefined;
+  }
+}
+
 function buildMemoryRecords(snapshot: MediaMemorySnapshot): MemoryRecords {
   const files: OmniTrajectoryFileRecord[] = [];
   const executions: OmniTrajectoryExecutionRecord[] = [];
   for (const version of Object.values(snapshot.versions)) {
-    const file = snapshot.files[version.fileId];
-    if (!file) continue;
-    files.push({
-      kind: 'file',
-      fileId: version.fileId,
-      fileVersionId: version.fileVersionId,
-      rootFileId: file.rootFileId,
-      sha256: version.sha256,
-      mediaType: version.mediaType,
-      origin: file.origin,
-      sizeBytes: version.sizeBytes,
-      mimeType: version.mimeType,
-      source: version.source,
-      ...(version.producedByExecutionId !== undefined
-        ? { producedByExecutionId: version.producedByExecutionId }
-        : {}),
-      ...(version.parentVersionId !== undefined
-        ? { parentVersionId: version.parentVersionId }
-        : {}),
-      createdAt: version.createdAt,
-    });
+    try {
+      const file = snapshot.files[version.fileId];
+      if (!file) continue;
+      files.push({
+        kind: 'file',
+        fileId: version.fileId,
+        fileVersionId: version.fileVersionId,
+        rootFileId: file.rootFileId,
+        sha256: version.sha256,
+        mediaType: version.mediaType,
+        origin: file.origin,
+        sizeBytes: version.sizeBytes,
+        mimeType: version.mimeType,
+        source: version.source,
+        ...(version.producedByExecutionId !== undefined
+          ? { producedByExecutionId: version.producedByExecutionId }
+          : {}),
+        ...(version.parentVersionId !== undefined
+          ? { parentVersionId: version.parentVersionId }
+          : {}),
+        createdAt: version.createdAt,
+      });
+    } catch {
+      // One malformed record loses that record, not the export.
+    }
   }
   for (const execution of Object.values(snapshot.executions)) {
-    const outputs = execution.outputRefs.flatMap((entryId) => {
-      const entry = snapshot.entries[entryId];
-      if (!entry) return [];
-      return [
-        {
-          kind: entry.kind,
-          ...(entry.role !== undefined ? { role: entry.role } : {}),
-          ...(entry.artifactRef?.managedId?.startsWith('sha256/')
-            ? { sha256: entry.artifactRef.managedId.slice('sha256/'.length) }
-            : {}),
-          ...(entry.artifactRef?.mimeType !== undefined
-            ? { mimeType: entry.artifactRef.mimeType }
-            : {}),
-          ...(entry.artifactRef?.sizeBytes !== undefined
-            ? { sizeBytes: entry.artifactRef.sizeBytes }
-            : {}),
-          ...(entry.disclosure !== undefined
-            ? { disclosure: entry.disclosure }
-            : {}),
-        },
-      ];
-    });
-    executions.push({
-      kind: 'execution',
-      executionId: execution.executionId,
-      invocationId: execution.invocationId,
-      executionOrigin: execution.executionOrigin,
-      toolName: execution.toolName,
-      ...(execution.toolVersion !== undefined
-        ? { toolVersion: execution.toolVersion }
-        : {}),
-      finalArguments: execution.finalArguments,
-      omniConfigHash: execution.omniConfigHash,
-      sourceVersionId: execution.sourceVersionId,
-      rootFileId: execution.rootFileId,
-      startedAt: execution.startedAt,
-      completedAt: execution.completedAt,
-      ...(execution.reusedExecutionId !== undefined
-        ? { reusedExecutionId: execution.reusedExecutionId }
-        : {}),
-      outputs,
-    });
+    try {
+      const outputs = execution.outputRefs.flatMap((entryId) => {
+        const entry = snapshot.entries[entryId];
+        if (!entry) return [];
+        return [
+          {
+            kind: entry.kind,
+            ...(entry.role !== undefined ? { role: entry.role } : {}),
+            ...(entry.artifactRef?.managedId?.startsWith('sha256/')
+              ? { sha256: entry.artifactRef.managedId.slice('sha256/'.length) }
+              : {}),
+            ...(entry.artifactRef?.mimeType !== undefined
+              ? { mimeType: entry.artifactRef.mimeType }
+              : {}),
+            ...(entry.artifactRef?.sizeBytes !== undefined
+              ? { sizeBytes: entry.artifactRef.sizeBytes }
+              : {}),
+            ...(entry.disclosure !== undefined
+              ? { disclosure: entry.disclosure }
+              : {}),
+          },
+        ];
+      });
+      executions.push({
+        kind: 'execution',
+        executionId: execution.executionId,
+        invocationId: execution.invocationId,
+        executionOrigin: execution.executionOrigin,
+        toolName: execution.toolName,
+        ...(execution.toolVersion !== undefined
+          ? { toolVersion: execution.toolVersion }
+          : {}),
+        finalArguments: execution.finalArguments,
+        omniConfigHash: execution.omniConfigHash,
+        sourceVersionId: execution.sourceVersionId,
+        rootFileId: execution.rootFileId,
+        startedAt: execution.startedAt,
+        completedAt: execution.completedAt,
+        ...(execution.reusedExecutionId !== undefined
+          ? { reusedExecutionId: execution.reusedExecutionId }
+          : {}),
+        outputs,
+      });
+    } catch {
+      // Same stance: skip the malformed execution.
+    }
   }
   return { files, executions };
+}
+
+/**
+ * Reduce project-wide memory records to the ones reachable from this
+ * session's transcript. Seeds: executions joined by callId, files whose
+ * display locator matches a media annotation name. Closure: an included
+ * execution pulls in its source version's file and every file it
+ * produced; an included file pulls in the executions that read it and
+ * the executions that produced its versions. Fixed-policy chains
+ * (extract-audio → transcribe) stay complete without timestamp guessing.
+ */
+function filterToSession(
+  memory: MemoryRecords,
+  turns: OmniTrajectoryTurnRecord[],
+): MemoryRecords {
+  const callIds = new Set<string>();
+  const mediaNames = new Set<string>();
+  for (const turn of turns) {
+    for (const call of turn.response.toolCalls) {
+      if (call.callId) callIds.add(call.callId);
+    }
+    for (const media of turn.request.media) mediaNames.add(media.name);
+  }
+
+  const filesByVersion = new Map(
+    memory.files.map((f) => [f.fileVersionId, f]),
+  );
+  const versionsByFile = new Map<string, OmniTrajectoryFileRecord[]>();
+  for (const f of memory.files) {
+    const list = versionsByFile.get(f.fileId) ?? [];
+    list.push(f);
+    versionsByFile.set(f.fileId, list);
+  }
+
+  const includedFiles = new Set<string>(); // fileId
+  const includedExecutions = new Set<string>(); // executionId
+
+  const includeFile = (fileId: string | undefined): boolean => {
+    if (!fileId || includedFiles.has(fileId)) return false;
+    if (!versionsByFile.has(fileId)) return false;
+    includedFiles.add(fileId);
+    return true;
+  };
+
+  // Seeds.
+  for (const f of memory.files) {
+    if (mediaNames.has(f.source.locator)) includeFile(f.fileId);
+  }
+  for (const e of memory.executions) {
+    if (callIds.has(e.invocationId)) includedExecutions.add(e.executionId);
+  }
+
+  // Closure to a fixed point.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const e of memory.executions) {
+      const sourceFile = filesByVersion.get(e.sourceVersionId)?.fileId;
+      if (!includedExecutions.has(e.executionId)) {
+        // An execution joins when it read an included file.
+        if (sourceFile && includedFiles.has(sourceFile)) {
+          includedExecutions.add(e.executionId);
+          changed = true;
+        } else {
+          continue;
+        }
+      }
+      // An included execution pulls in its source file…
+      if (includeFile(sourceFile)) changed = true;
+    }
+    for (const f of memory.files) {
+      if (includedFiles.has(f.fileId)) continue;
+      // …and every file one of its versions produced.
+      if (
+        f.producedByExecutionId !== undefined &&
+        includedExecutions.has(f.producedByExecutionId)
+      ) {
+        includeFile(f.fileId);
+        changed = true;
+      }
+    }
+  }
+
+  return {
+    files: memory.files.filter((f) => includedFiles.has(f.fileId)),
+    executions: memory.executions.filter((e) =>
+      includedExecutions.has(e.executionId),
+    ),
+  };
 }
 
 // ─── Entry points ─────────────────────────────────────────────────────────
@@ -482,19 +712,13 @@ export async function exportOmniTrajectory(
       // One corrupt transcript line loses that line, not the export.
     }
   }
-  const records: OmniTrajectoryRecord[] = buildTurnRecords(transcriptLines);
+  const turns = buildTurnRecords(transcriptLines);
+  const records: OmniTrajectoryRecord[] = [...turns];
 
-  const store = new MediaMemoryStore(options.omniRootDir);
-  const empty: MemoryRecords = { files: [], executions: [] };
-  const memoryRecords = await store
-    .read<MemoryRecords>(empty, (snapshot) => buildMemoryRecords(snapshot))
-    .catch((err) => {
-      debugLogger.debug(
-        `trajectory export: memory unreadable, exporting transcript only: ` +
-          `${err instanceof Error ? err.message : err}`,
-      );
-      return empty;
-    });
+  const snapshot = await readSnapshotRaw(options.omniRootDir);
+  const memoryRecords = snapshot
+    ? filterToSession(buildMemoryRecords(snapshot), turns)
+    : { files: [], executions: [] };
   // files before executions, each sorted by id — deterministic re-export.
   records.push(
     ...memoryRecords.files.sort((a, b) =>
@@ -518,7 +742,17 @@ export function serializeOmniTrajectory(
 export async function writeOmniTrajectoryJsonl(
   options: ExportOmniTrajectoryOptions & { outPath: string },
 ): Promise<{ records: number }> {
+  const outPath = path.resolve(options.outPath);
+  if (outPath === path.resolve(options.transcriptPath)) {
+    // Writing the trajectory over the raw transcript would irreversibly
+    // destroy the non-reconstructible source this pipeline exists to
+    // capture.
+    throw new Error(
+      'trajectory outPath must differ from the transcript path',
+    );
+  }
   const records = await exportOmniTrajectory(options);
-  await fs.writeFile(options.outPath, serializeOmniTrajectory(records), 'utf8');
+  await fs.mkdir(path.dirname(outPath), { recursive: true });
+  await fs.writeFile(outPath, serializeOmniTrajectory(records), 'utf8');
   return { records: records.length };
 }

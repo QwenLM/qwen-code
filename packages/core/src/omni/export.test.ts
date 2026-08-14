@@ -13,6 +13,7 @@ import {
   formatDisclosureText,
   formatOmissionText,
   formatResourceHandleText,
+  formatTranscriptText,
 } from './disclosure.js';
 import {
   exportOmniTrajectory,
@@ -96,6 +97,26 @@ describe('exportOmniTrajectory', () => {
     });
   }
 
+  /** Seed a second, UNRELATED file — a session filter must not export it. */
+  async function seedUnrelatedMemory(): Promise<void> {
+    const memory = new MediaMemoryService(omniRootDir);
+    await memory.recordFileRecognized({
+      fileRef: '/other/unrelated.png',
+      sha256: 'c'.repeat(64),
+      mediaType: 'image',
+      metadata: { width: 8, height: 8 },
+      sizeBytes: 10,
+      mimeType: 'image/png',
+      origin: 'user',
+      source: { protocol: 'local', locator: 'unrelated.png' },
+      recognition: {
+        ingestionConfigHash: '',
+        detectorVersion: 'omni-sniff-ffprobe/1',
+        probeStatus: 'complete',
+      },
+    });
+  }
+
   it('assembles turns with media annotations and joins by identity keys', async () => {
     await seedMemory();
     await writeTranscript([
@@ -119,12 +140,9 @@ describe('exportOmniTrajectory', () => {
               functionCall: {
                 id: 'call-42',
                 name: 'omni_extract_keyframes',
-                args: {
-                  resourceId: 'media-1-ab',
-                  count: 8,
-                  inputPath: '/secret/abs/path.mkv',
-                  outputDir: '/secret/out',
-                },
+                // A gate-possible call shape: the model passes a handle,
+                // never inputPath+resourceId together.
+                args: { resourceId: 'media-1-ab', count: 8 },
               },
             },
           ],
@@ -138,7 +156,8 @@ describe('exportOmniTrajectory', () => {
       | OmniTrajectoryTurnRecord
       | undefined;
     expect(turn).toBeDefined();
-    expect(turn!.request.text).toContain('分析这部电影');
+    // Exact equality: annotation parts must not leak into request prose.
+    expect(turn!.request.text).toBe('分析这部电影 @film.mkv');
     expect(turn!.request.media).toEqual([
       {
         name: 'film.mkv',
@@ -147,8 +166,8 @@ describe('exportOmniTrajectory', () => {
         transcripts: [],
       },
     ]);
-    // Reserved runtime keys are stripped from tool args — the transcript
-    // side must not re-leak the paths memory's finalArguments excludes.
+    // The assistant's visible reply is captured alongside its calls.
+    expect(turn!.response.text).toBe('我先抽取关键帧。');
     expect(turn!.response.toolCalls).toEqual([
       {
         callId: 'call-42',
@@ -188,21 +207,72 @@ describe('exportOmniTrajectory', () => {
       protocol: 'local',
       locator: 'film.mkv',
     });
+    // The fixed-policy join: execution.sourceVersionId resolves to the
+    // source file's version, and the derivative carries its lineage.
+    expect(execution!.sourceVersionId).toBe(sourceFile.fileVersionId);
+    const derived = files.find((f) => f.sha256 === 'b'.repeat(64))!;
+    expect(derived.producedByExecutionId).toBe(execution!.executionId);
+    expect(derived.parentVersionId).toBe(sourceFile.fileVersionId);
   });
 
-  it('captures omissions and extracts an injected passive recall', async () => {
+  it('preserves model-emitted tool arguments verbatim (no scrubbing)', async () => {
+    // The gate explicitly permits a model-authored inputPath (exactly one
+    // of inputPath|resourceId); the recorded assistant turn predates the
+    // harness's runtime-key injection, so whatever is here IS what the
+    // model emitted and must survive the export unchanged.
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: { parts: [{ text: 'compress it' }] },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        message: {
+          parts: [
+            {
+              functionCall: {
+                id: 'call-77',
+                name: 'omni_downsample_image',
+                args: { inputPath: '/data/photo.png', quality: 7 },
+              },
+            },
+          ],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records[0] as OmniTrajectoryTurnRecord;
+
+    expect(turn.response.toolCalls).toEqual([
+      {
+        callId: 'call-77',
+        name: 'omni_downsample_image',
+        args: { inputPath: '/data/photo.png', quality: 7 },
+      },
+    ]);
+  });
+
+  it('captures omissions, multi-line transcripts, and colon-bearing names', async () => {
     await writeTranscript([
       transcriptLine({
         type: 'user',
         message: {
           parts: [
-            {
-              text:
-                '<system-reminder>\n【媒体记忆】Recalled media memory…\n' +
-                '{"status":"partial","entries":[{"entryId":"e-1"}]}\n' +
-                '</system-reminder>continue please',
-            },
+            { text: 'continue please' },
             { text: formatOmissionText('huge.mkv', 'video exceeds limit') },
+            {
+              // Multi-line transcript payload must survive intact.
+              text: formatTranscriptText(
+                'talk.wav',
+                '[00:00-03:00] first segment\n[03:00-06:00] second segment',
+              ),
+            },
+            {
+              // A display name containing the separator (escaped by the
+              // builder) must round-trip without mis-splitting.
+              text: formatDisclosureText('报告：最终版.mkv', '原 1080p → 480p'),
+            },
           ],
         },
       }),
@@ -215,11 +285,6 @@ describe('exportOmniTrajectory', () => {
     const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
     const turn = records[0] as OmniTrajectoryTurnRecord;
 
-    expect(turn.request.recall).toEqual({
-      status: 'partial',
-      entries: [{ entryId: 'e-1' }],
-    });
-    // The reminder wrapper is NOT part of the user's request prose.
     expect(turn.request.text).toBe('continue please');
     expect(turn.request.media).toEqual([
       {
@@ -228,11 +293,278 @@ describe('exportOmniTrajectory', () => {
         omitted: 'video exceeds limit',
         transcripts: [],
       },
+      {
+        name: 'talk.wav',
+        disclosures: [],
+        transcripts: [
+          '[00:00-03:00] first segment\n[03:00-06:00] second segment',
+        ],
+      },
+      {
+        name: '报告：最终版.mkv',
+        disclosures: ['原 1080p → 480p'],
+        transcripts: [],
+      },
     ]);
   });
 
-  it('degrades to transcript-only output when memory is unreadable', async () => {
-    await fs.writeFile(path.join(omniRootDir, 'memory.json'), '{broken');
+  it('reads the recall payload from its system record, not from reminders', async () => {
+    const recall = { status: 'partial', entries: [{ entryId: 'e-1' }] };
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: {
+          parts: [
+            {
+              // A reminder QUOTING annotation grammar must be inert: the
+              // wrapper is stripped before annotation matching.
+              text:
+                '<system-reminder>\n【媒体资源】draft.png：media-3-9f2c\n' +
+                '</system-reminder>ask about the clip',
+            },
+          ],
+        },
+      }),
+      transcriptLine({
+        type: 'system',
+        subtype: 'omni_recall',
+        systemPayload: recall,
+      }),
+      transcriptLine({
+        type: 'assistant',
+        message: { parts: [{ text: 'answering from memory' }] },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records[0] as OmniTrajectoryTurnRecord;
+
+    expect(turn.request.recall).toEqual(recall);
+    expect(turn.request.text).toBe('ask about the clip');
+    // The quoted handle line was NOT harvested as a media annotation.
+    expect(turn.request.media).toEqual([]);
+  });
+
+  it('excludes thought parts from the exported response text', async () => {
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: { parts: [{ text: 'q' }] },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        message: {
+          parts: [
+            { text: 'SECRET-CHAIN-OF-THOUGHT', thought: true },
+            { text: 'visible answer' },
+          ],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records[0] as OmniTrajectoryTurnRecord;
+
+    expect(turn.response.text).toBe('visible answer');
+  });
+
+  it('harvests annotations delivered inside tool_result records', async () => {
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: { parts: [{ text: 'grab the poster' }] },
+      }),
+      transcriptLine({
+        type: 'tool_result',
+        message: {
+          parts: [
+            { text: 'downloaded 1 file' },
+            { text: formatResourceHandleText('poster.png', 'media-2-cd') },
+            { text: formatDisclosureText('poster.png', '原 4096px → 768px') },
+          ],
+        },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        message: { parts: [{ text: 'got it' }] },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records[0] as OmniTrajectoryTurnRecord;
+
+    expect(turn.request.media).toEqual([
+      {
+        name: 'poster.png',
+        resourceId: 'media-2-cd',
+        disclosures: ['原 4096px → 768px'],
+        transcripts: [],
+      },
+    ]);
+    // Tool output prose is not request text.
+    expect(turn.request.text).toBe('grab the poster');
+  });
+
+  it('splits multiple user records into distinct turns with isolated state', async () => {
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: {
+          parts: [
+            { text: 'first question' },
+            { text: formatResourceHandleText('a.mp4', 'media-1-aa') },
+          ],
+        },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        message: { parts: [{ text: 'first answer' }] },
+      }),
+      transcriptLine({
+        type: 'user',
+        message: { parts: [{ text: 'second question' }] },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        message: { parts: [{ text: 'second answer' }] },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turns = records.filter(
+      (r): r is OmniTrajectoryTurnRecord => r.kind === 'turn',
+    );
+
+    expect(turns.map((t) => t.turnIndex)).toEqual([0, 1]);
+    expect(turns[0]!.request.media).toHaveLength(1);
+    // Per-turn media/toolCalls state does not bleed into the next turn.
+    expect(turns[1]!.request.media).toEqual([]);
+    expect(turns[1]!.response.text).toBe('second answer');
+  });
+
+  it('does not open a turn on a subtyped user record (cron/notification)', async () => {
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        subtype: 'cron',
+        message: { parts: [{ text: 'scheduled ping' }] },
+      }),
+      transcriptLine({
+        type: 'user',
+        message: { parts: [{ text: 'real question' }] },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turns = records.filter(
+      (r): r is OmniTrajectoryTurnRecord => r.kind === 'turn',
+    );
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.request.text).toBe('real question');
+  });
+
+  it('replays only the active parentUuid chain, skipping rewound branches', async () => {
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        uuid: 'u1',
+        parentUuid: null,
+        message: { parts: [{ text: 'q1' }] },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        uuid: 'a1',
+        parentUuid: 'u1',
+        message: { parts: [{ text: 'answer 1' }] },
+      }),
+      // Abandoned by a rewind: still in the file, off the active chain.
+      transcriptLine({
+        type: 'user',
+        uuid: 'u2-dead',
+        parentUuid: 'a1',
+        message: { parts: [{ text: 'q2-ABANDONED' }] },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        uuid: 'a2-dead',
+        parentUuid: 'u2-dead',
+        message: { parts: [{ text: 'answer 2 abandoned' }] },
+      }),
+      // The rewind re-rooted here.
+      transcriptLine({
+        type: 'user',
+        uuid: 'u2',
+        parentUuid: 'a1',
+        message: { parts: [{ text: 'q2-survivor' }] },
+      }),
+      transcriptLine({
+        type: 'assistant',
+        uuid: 'a2',
+        parentUuid: 'u2',
+        message: { parts: [{ text: 'answer 2' }] },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turns = records.filter(
+      (r): r is OmniTrajectoryTurnRecord => r.kind === 'turn',
+    );
+
+    expect(turns.map((t) => t.request.text)).toEqual(['q1', 'q2-survivor']);
+    expect(turns.map((t) => t.response.text)).toEqual([
+      'answer 1',
+      'answer 2',
+    ]);
+  });
+
+  it('exports only memory records reachable from this session', async () => {
+    await seedMemory();
+    await seedUnrelatedMemory();
+    // A text-only transcript: nothing in memory is reachable.
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: { parts: [{ text: 'just a question, no media' }] },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+
+    expect(records.filter((r) => r.kind !== 'turn')).toEqual([]);
+
+    // A session that carried the film DOES pull the whole chain — but
+    // still not the unrelated file.
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: {
+          parts: [
+            { text: 'analyse' },
+            { text: formatResourceHandleText('film.mkv', 'media-1-ab') },
+          ],
+        },
+      }),
+    ]);
+    const withMedia = await exportOmniTrajectory({
+      omniRootDir,
+      transcriptPath,
+    });
+    const files = withMedia.filter(
+      (r): r is OmniTrajectoryFileRecord => r.kind === 'file',
+    );
+    expect(files.map((f) => f.sha256).sort()).toEqual([
+      'a'.repeat(64),
+      'b'.repeat(64),
+    ]);
+    expect(
+      withMedia.filter((r) => r.kind === 'execution'),
+    ).toHaveLength(1);
+  });
+
+  it('degrades to transcript-only WITHOUT touching a corrupt ledger', async () => {
+    const ledgerPath = path.join(omniRootDir, 'memory.json');
+    await fs.writeFile(ledgerPath, '{broken');
     await writeTranscript([
       transcriptLine({
         type: 'user',
@@ -244,6 +576,23 @@ describe('exportOmniTrajectory', () => {
 
     expect(records).toHaveLength(1);
     expect(records[0]!.kind).toBe('turn');
+    // Pure-reader contract: the live document is untouched — no
+    // corruption self-heal rename, no `.corrupt-*` backup that would
+    // silently block the GC for a whole retention window.
+    await expect(fs.readFile(ledgerPath, 'utf8')).resolves.toBe('{broken');
+    const siblings = await fs.readdir(omniRootDir);
+    expect(siblings.filter((n) => n.includes('.corrupt-'))).toEqual([]);
+  });
+
+  it('rejects an unreadable transcript instead of degrading', async () => {
+    // The documented asymmetry: memory degrades, transcript REJECTS —
+    // there is no trajectory without it.
+    await expect(
+      exportOmniTrajectory({
+        omniRootDir,
+        transcriptPath: path.join(tmpDir, 'missing.jsonl'),
+      }),
+    ).rejects.toThrow();
   });
 
   it('re-exports byte-identically and writes parseable JSONL', async () => {
@@ -251,7 +600,12 @@ describe('exportOmniTrajectory', () => {
     await writeTranscript([
       transcriptLine({
         type: 'user',
-        message: { parts: [{ text: 'q' }] },
+        message: {
+          parts: [
+            { text: 'q' },
+            { text: formatResourceHandleText('film.mkv', 'media-1-ab') },
+          ],
+        },
       }),
     ]);
 
@@ -263,7 +617,7 @@ describe('exportOmniTrajectory', () => {
     );
     expect(a).toBe(b);
 
-    const outPath = path.join(tmpDir, 'out.jsonl');
+    const outPath = path.join(tmpDir, 'nested', 'out.jsonl');
     const { records } = await writeOmniTrajectoryJsonl({
       omniRootDir,
       transcriptPath,
@@ -275,5 +629,26 @@ describe('exportOmniTrajectory', () => {
     expect(lines).toHaveLength(records);
     // Every line parses on its own — the whole point of JSONL.
     for (const line of lines) expect(() => JSON.parse(line)).not.toThrow();
+  });
+
+  it('refuses to write the trajectory over the source transcript', async () => {
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        message: { parts: [{ text: 'q' }] },
+      }),
+    ]);
+
+    await expect(
+      writeOmniTrajectoryJsonl({
+        omniRootDir,
+        transcriptPath,
+        outPath: transcriptPath,
+      }),
+    ).rejects.toThrow(/must differ/);
+    // The transcript is intact.
+    await expect(fs.readFile(transcriptPath, 'utf8')).resolves.toContain(
+      '"type":"user"',
+    );
   });
 });
