@@ -491,6 +491,30 @@ describe('CDP bridge', () => {
     bridge.shutdownCdpBridge();
   });
 
+  it('does not treat previous-tab detach as new-tab release during attach', async () => {
+    const chromeHarness = installChromeHarness({ deferDetach: true });
+    const bridge = await loadBridge();
+    const send = vi.fn();
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 1 }), send);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    (chrome.tabs.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 9 },
+    ]);
+
+    bridge.handleCdpFrame(frame({ type: 'cdp_attach', id: 2 }), send);
+    await vi.waitFor(() => expect(chromeHarness.detach).toHaveBeenCalled());
+    chromeHarness.debuggerDetachListeners[0]?.({ tabId: 7 }, 'target_closed');
+    chromeHarness.finishDetach();
+
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send.mock.calls[1]?.[0]).toMatchObject({
+      type: 'cdp_attached',
+      id: 2,
+    });
+    expect(send.mock.calls[1]?.[0]).not.toHaveProperty('error');
+  });
+
   it('forwards debugger events for the attached tab', async () => {
     const chromeHarness = installChromeHarness();
     const bridge = await loadBridge();

@@ -231,16 +231,22 @@ describe('WebBridge actions', () => {
       return {};
     });
     const { executeWebBridgeAction } = await loadActions();
-    await executeWebBridgeAction('snapshot', { _tabId: 17 });
+    await executeWebBridgeAction('snapshot', { _tabId: 17, _session: 'one' });
+    await executeWebBridgeAction('snapshot', { _tabId: 17, _session: 'two' });
 
     await expect(
       executeWebBridgeAction('navigate', {
         url: 'https://example.test/next',
         _tabId: 17,
+        _session: 'one',
       }),
     ).rejects.toThrow('net::ERR_FAILED');
     await expect(
-      executeWebBridgeAction('click', { selector: '@e1', _tabId: 17 }),
+      executeWebBridgeAction('click', {
+        selector: '@e1',
+        _tabId: 17,
+        _session: 'two',
+      }),
     ).rejects.toThrow('unknown ref');
   });
 
@@ -780,6 +786,18 @@ describe('WebBridge actions', () => {
     );
   });
 
+  it('rejects key_type without a focused editable element', async () => {
+    cdp.send.mockResolvedValueOnce({ result: { value: false } });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('key_type', { text: 'hello', _tabId: 17 }),
+    ).rejects.toThrow('key_type: no focused editable element');
+    expect(cdp.send).not.toHaveBeenCalledWith('Input.insertText', {
+      text: 'hello',
+    });
+  });
+
   it('releases pressed modifiers when a key event fails', async () => {
     cdp.send
       .mockResolvedValueOnce({})
@@ -868,6 +886,57 @@ describe('WebBridge actions', () => {
         _session: 'research',
       }),
     ).resolves.toMatchObject({ body: { ok: true } });
+  });
+
+  it('marks failed network requests complete', async () => {
+    cdp.send.mockResolvedValueOnce({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    const listener = cdp.listeners[0];
+    listener(
+      'Network.requestWillBeSent',
+      {
+        requestId: 'request-1',
+        request: { url: 'https://missing.example.test', method: 'GET' },
+      },
+      17,
+    );
+    listener(
+      'Network.loadingFailed',
+      { requestId: 'request-1', errorText: 'net::ERR_NAME_NOT_RESOLVED' },
+      17,
+    );
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({
+      requests: [
+        {
+          requestId: 'request-1',
+          completed: true,
+          failed: true,
+          errorText: 'net::ERR_NAME_NOT_RESOLVED',
+        },
+      ],
+    });
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'detail',
+        requestId: 'request-1',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ failed: true });
+    expect(cdp.withTab).toHaveBeenCalledTimes(1);
   });
 
   it('removes the global network listener when capture stops', async () => {
@@ -1089,6 +1158,38 @@ describe('WebBridge actions', () => {
     expect(cdp.release).toHaveBeenCalledWith(17);
   });
 
+  it('does not close a tab another session is using', async () => {
+    (
+      chrome.windows.getLastFocused as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValue({
+      tabs: [{ id: 17, active: true, url: 'https://example.test' }],
+    });
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('navigate', {
+      url: 'https://example.test',
+      newTab: true,
+      _session: 'owner',
+    });
+    await executeWebBridgeAction('find_tab', {
+      url: 'https://example.test',
+      active: true,
+      _session: 'borrower',
+    });
+
+    await expect(
+      executeWebBridgeAction('close_tab', {
+        _session: 'owner',
+        _tabId: 17,
+        _tabIds: [17],
+      }),
+    ).resolves.toEqual({
+      success: false,
+      closed: false,
+      reason: 'tab is used by another session',
+    });
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+  });
+
   it('releases a borrowed current tab after extension state is lost', async () => {
     cdp.send.mockResolvedValue({ nodes: [] });
     const { executeWebBridgeAction } = await loadActions();
@@ -1210,6 +1311,30 @@ describe('WebBridge actions', () => {
         preferCSSPageSize: false,
       }),
     );
+  });
+
+  it('captures element screenshots in document coordinates', async () => {
+    cdp.send
+      .mockResolvedValueOnce({ result: { objectId: 'button-1' } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        model: { border: [10, 20, 30, 20, 30, 60, 10, 60] },
+      })
+      .mockResolvedValueOnce({ cssVisualViewport: { pageX: 4, pageY: 300 } })
+      .mockResolvedValueOnce({ data: 'cG5n' });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('screenshot', {
+        format: 'png',
+        selector: '#submit',
+        _tabId: 17,
+      }),
+    ).resolves.toMatchObject({ data: 'cG5n' });
+    expect(cdp.send).toHaveBeenCalledWith('Page.captureScreenshot', {
+      format: 'png',
+      clip: { x: 14, y: 320, width: 20, height: 40, scale: 1 },
+    });
   });
 
   it('releases a session without closing its owned tabs', async () => {

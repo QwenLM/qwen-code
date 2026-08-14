@@ -92,6 +92,7 @@ let activeSend: CdpSend | null = null;
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 /** True while a `handleAttach` is mid-flight (guards against overlapping attaches). */
 let attaching = false;
+let attachingTabId: number | null = null;
 /**
  * Set when a `cdp_release` (or socket close) arrives while `handleAttach` is
  * mid-flight. A teardown that fires before the attach lands can't detach a tab
@@ -175,7 +176,9 @@ function onDebuggerDetach(
   reason: string,
 ): void {
   if (source.tabId === undefined || !attachedTabIds.has(source.tabId)) return;
-  if (attaching) releaseRequestedDuringAttach = true;
+  if (attaching && source.tabId === attachingTabId) {
+    releaseRequestedDuringAttach = true;
+  }
   console.log(LOG_PREFIX, 'debugger detached:', reason);
   attachedTabIds.delete(source.tabId);
   directTabIds.delete(source.tabId);
@@ -405,6 +408,7 @@ async function handleAttach(
   attaching = true;
   try {
     const tabId = await getActiveTabId();
+    attachingTabId = tabId;
 
     if (rawTabId !== null && rawTabId !== tabId) {
       const previousTabId = rawTabId;
@@ -459,6 +463,7 @@ async function handleAttach(
     send({ type: 'cdp_attached', id: frame.id, error: { message } });
   } finally {
     attaching = false;
+    attachingTabId = null;
     releaseRequestedDuringAttach = false;
   }
 }

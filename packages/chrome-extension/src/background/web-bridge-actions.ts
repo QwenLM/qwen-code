@@ -27,6 +27,8 @@ interface NetworkRequest {
   status?: number;
   mimeType?: string;
   completed?: boolean;
+  failed?: boolean;
+  errorText?: string;
 }
 
 interface NetworkCapture {
@@ -215,7 +217,7 @@ async function navigate(args: Args): Promise<unknown> {
           frameId: currentFrameId,
           loaderId: currentLoaderId,
         };
-        refsByTab.get(currentTabId)?.delete(sessionKey(args));
+        refsByTab.delete(currentTabId);
         await send('Page.reload', {
           ignoreCache: true,
           loaderId: currentLoaderId,
@@ -228,7 +230,7 @@ async function navigate(args: Args): Promise<unknown> {
         target = nextReloadLoader ?? target;
         frameId = target.frameId;
       } else {
-        refsByTab.get(currentTabId)?.delete(sessionKey(args));
+        refsByTab.delete(currentTabId);
         directNavigationStarted = true;
         const result = record(
           await Promise.race([
@@ -567,6 +569,16 @@ async function cdp(args: Args): Promise<unknown> {
 async function keyType(args: Args): Promise<unknown> {
   const text = requiredString(args, 'text', 'key_type', true);
   return onCurrentTab(args, async (send) => {
+    const focused = record(
+      await send('Runtime.evaluate', {
+        expression:
+          "(() => { const el = document.activeElement; return !!el && (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'); })()",
+        returnByValue: true,
+      }),
+    );
+    if (record(focused['result'])['value'] !== true) {
+      throw new Error('key_type: no focused editable element');
+    }
     await send('Input.insertText', { text });
     return { success: true, length: text.length };
   });
@@ -665,6 +677,7 @@ async function network(args: Args): Promise<unknown> {
     const requestId = requiredString(args, 'requestId', 'network');
     const request = requests.get(requestId);
     if (!request) throw new Error(`network: request "${requestId}" not found`);
+    if (request.failed) return request;
     const response = await withCdpTab(tab.id, async (send) =>
       record(await send('Network.getResponseBody', { requestId })),
     );
@@ -721,7 +734,17 @@ async function screenshot(args: Args): Promise<unknown> {
       if (width <= 0 || height <= 0) {
         throw new Error('screenshot: element has zero-size box');
       }
-      params['clip'] = { x, y, width, height, scale: 1 };
+      const metrics = record(await send('Page.getLayoutMetrics'));
+      const viewport = record(
+        metrics['cssVisualViewport'] ?? metrics['visualViewport'],
+      );
+      params['clip'] = {
+        x: x + (number(viewport['pageX']) ?? 0),
+        y: y + (number(viewport['pageY']) ?? 0),
+        width,
+        height,
+        scale: 1,
+      };
     }
     const result = record(await send('Page.captureScreenshot', params));
     return {
@@ -810,6 +833,13 @@ async function closeTab(args: Args): Promise<unknown> {
   const tabId = integer(args['_tabId']);
   if (tabId === undefined) {
     return { success: true, closed: false, reason: 'session has no tab' };
+  }
+  if (tabUsedByAnotherSession(tabId, string(args['_session']))) {
+    return {
+      success: false,
+      closed: false,
+      reason: 'tab is used by another session',
+    };
   }
   let closed = true;
   try {
@@ -1153,6 +1183,13 @@ function installNetworkListener(): void {
       } else if (method === 'Network.loadingFinished') {
         const request = requests.get(requestId);
         if (request) request.completed = true;
+      } else if (method === 'Network.loadingFailed') {
+        const request = requests.get(requestId);
+        if (request) {
+          request.completed = true;
+          request.failed = true;
+          request.errorText = string(params['errorText']);
+        }
       }
     }
   });
