@@ -395,11 +395,17 @@ was_workspace_dir() {
   # Pre-round workspace membership without the on-disk resolver: match the
   # dir against the workspaces globs recorded in the REF's root manifest.
   # Used where the tree can no longer answer (deleted manifests/dirs).
-  local ref="${1}" d="${2}" g
+  # PATH-AWARE matching: npm workspaces globs are wildmatch-style, where
+  # '*' stops at '/'; a bash case '*' would span slashes and swallow
+  # nested fixture dirs. Translate to an anchored regex ('**'→.*,
+  # '*'→[^/]*, '?'→[^/]). Negated ('!') entries are skipped — ignoring a
+  # subtraction only ever classifies MORE dirs as workspaces, the
+  # conservative direction for a protection class.
+  local ref="${1}" d="${2}" g re
   while IFS= read -r g; do
-    [[ -n "${g}" ]] || continue
-    # shellcheck disable=SC2254
-    case "${d}" in ${g}) return 0 ;; esac
+    [[ -n "${g}" && "${g}" != '!'* ]] || continue
+    re="$(printf '%s' "${g}" | sed -e 's/[.^$+(){}|[]/\\&/g' -e 's/]/\\]/g' -e 's/\*\*/\x01/g' -e 's/\*/[^\/]*/g' -e 's/?/[^\/]/g' -e 's/\x01/.*/g')"
+    [[ "${d}" =~ ^${re}$ ]] && return 0
   done < <(git show "${ref}:package.json" 2> /dev/null | jq -r '.workspaces[]?' 2> /dev/null)
   return 1
 }
@@ -548,7 +554,12 @@ if [[ -n "${ROUND_CLASSES}" ]]; then
     if [[ -z "${c}" ]]; then
       case "${f}" in
         package.json | */package.json)
-          if [[ ! -e "${f}" ]]; then
+          # The footprint describes the PR (main → origin/BRANCH); the
+          # round's on-disk tree must not answer for it — a round-deleted,
+          # PR-added workspace manifest is alive at origin/BRANCH and its
+          # class must stay granted, or the round's own deletion walls.
+          if ! git cat-file -e "origin/${BRANCH}:${f}" 2> /dev/null; then
+            # Deleted BY THE PR itself: membership from the merge base.
             if [[ "${f}" == 'package.json' ]]; then
               c='manifest-scripts-root'
             elif was_workspace_dir "${PR_BASE}" "${f%/package.json}"; then
@@ -557,7 +568,11 @@ if [[ -n "${ROUND_CLASSES}" ]]; then
             [[ -n "${c}" ]] && PR_CLASSES+="${c}"$'\n'
             continue
           fi
-          at_workspace_root "${f}" || continue
+          if [[ -e "${f}" ]]; then
+            at_workspace_root "${f}" || continue
+          else
+            was_workspace_dir "origin/${BRANCH}" "${f%/package.json}" || [[ "${f}" == 'package.json' ]] || continue
+          fi
           if manifest_scripts_changed "${f}" "${PR_BASE}" "origin/${BRANCH}"; then
             c='manifest-scripts-ws'
             [[ "${f}" == 'package.json' ]] && c='manifest-scripts-root'
@@ -783,8 +798,10 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
   # test legitimately passes on the pre-round tree, so it takes the advisory
   # arm, never the rejection.
   if [[ "${BITE_ENFORCE}" == 'true' ]]; then
-    TESTSIDE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" '
+    TESTSIDE="$(jq -rs --rawfile ids "${WORKDIR}/resolved-comments.txt" \
+      --slurpfile reviews "${WORKDIR}/rv.json" '
       (add // []) as $comments
+      | ($reviews | add // []) as $reviews
       | ($ids | split("\n")
           | map(sub("^rc:"; "") | sub("\r$"; "")
             | select(test("^[0-9]+$")) | tonumber)) as $resolved
@@ -793,7 +810,10 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
           or (($c.in_reply_to_id // null) as $root
             | $root != null
             and any($comments[];
-              .id == $root and ((.body // "") | contains("**[Critical]**"))));
+              .id == $root and ((.body // "") | contains("**[Critical]**"))))
+          or (($c.pull_request_review_id // null) as $review
+            | $review != null
+            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
       [ $comments[]
         | select(.id as $id | $resolved | index($id) != null)
         | select(critical(.)) | (.path // "") ]

@@ -9380,7 +9380,7 @@ exit 1
 
   it('rejects a round that expands into CI machinery outside the PR footprint', () => {
     const block = reviewVerificationRunner.match(
-      /(at_workspace_root\(\) \{[\s\S]*?reject_fix 'round expands into CI\/verification machinery outside the PR footprint'\n {2}fi\nfi)/,
+      /(was_workspace_dir\(\) \{[\s\S]*?reject_fix 'round expands into CI\/verification machinery outside the PR footprint'\n {2}fi\nfi)/,
     )?.[1];
     expect(block).toBeTruthy();
     const run = (build) => {
@@ -9459,6 +9459,34 @@ exit 1
           write('src/fixtures/pkg/package.json', '{"scripts":{"t":"x"}}\n'),
       }),
     ).toContain('PASSED');
+    // Deleting a nested src-tree FIXTURE manifest is data, not command
+    // surface: pre-round workspaces globs are matched path-aware ('*'
+    // must not span '/').
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"workspaces":["packages/*"]}\n');
+          write('packages/cli/package.json', '{"name":"c"}\n');
+          write('packages/cli/src/examples/starter/package.json', '{}\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ dir }) =>
+          rmSync(join(dir, 'packages/cli/src/examples/starter/package.json')),
+      }),
+    ).toContain('PASSED');
+    // …while deleting a DECLARED (globbed) workspace manifest classifies.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"workspaces":["packages/*"]}\n');
+          write('packages/cli/package.json', '{"name":"c"}\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ dir }) => rmSync(join(dir, 'packages/cli/package.json')),
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
     // A manifest the round ADDS (a new workspace) is the round's own new
     // surface, not a rewrite of commands the gate already ran.
     expect(
@@ -9960,6 +9988,26 @@ exit 1
         },
       }).out,
     ).toContain('REJECT:bite check');
+    // TESTSIDE demotion honors the review-STATE arm too: a CR-attached
+    // comment on a test path demotes like a body-tagged Critical does.
+    const crTestSide = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli'],
+      workdir: {
+        'resolved-comments.txt': '505\n',
+        'rc.json': JSON.stringify([
+          {
+            id: 505,
+            path: 'packages/cli/src/a.test.ts',
+            body: 'this test asserts the wrong behavior',
+            pull_request_review_id: 9,
+          },
+        ]),
+        'rv.json': JSON.stringify([{ id: 9, state: 'CHANGES_REQUESTED' }]),
+      },
+    });
+    expect(crTestSide.out).not.toContain('REJECT:');
+    expect(crTestSide.advisory).toContain('test-side defect claim');
     // Resolving a comment attached to a CHANGES_REQUESTED review enforces
     // the same way a Critical tag does.
     expect(
