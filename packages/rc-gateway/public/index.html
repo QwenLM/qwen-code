@@ -111,12 +111,42 @@
       <button id="watch">Watch</button>
       <button id="stop" disabled>Stop</button>
     </section>
-    <section>
-      <label
-        >New conversation cwd
-        <input id="new-session-cwd" placeholder="(daemon workspace)"
-      /></label>
-      <button id="new-session">New conversation</button>
+    <section id="dir-picker">
+      <strong>New conversation</strong> — pick a directory
+      <div
+        id="dir-current"
+        style="
+          font-family: ui-monospace, monospace;
+          font-size: 0.85rem;
+          overflow-wrap: anywhere;
+          margin: 0.4rem 0 0.2rem;
+        "
+      >
+        (not loaded)
+      </div>
+      <div
+        id="dir-list"
+        style="
+          max-height: 30vh;
+          overflow: auto;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+          margin-bottom: 0.4rem;
+        "
+      >
+        (loading…)
+      </div>
+      <button id="dir-use">Use this folder</button>
+      <div style="margin-top: 0.6rem">
+        <label
+          >Or type an absolute path
+          <input id="new-session-cwd" placeholder="(daemon workspace)"
+        /></label>
+        <button id="new-session">New conversation</button>
+      </div>
+      <div id="dir-recent" style="margin-top: 0.6rem; font-size: 0.85rem">
+        (no recent workspaces)
+      </div>
     </section>
     <section>
       <button id="enable">Enable notifications</button>
@@ -174,8 +204,8 @@
       <pre id="sessions">(not listed)</pre>
     </section>
     <section id="push-prefs">
-      <strong>Push preferences</strong> (quiet hours + rate cap; requires
-      owner scope)
+      <strong>Push preferences</strong> (quiet hours + rate cap; requires owner
+      scope)
       <div>
         <button id="list-subs">List subscriptions</button>
         <button id="test-push-btn">Send test push</button>
@@ -210,7 +240,12 @@
       <strong>Create share link</strong> (requires owner scope)
       <div>
         <input id="share-session" placeholder="session id" />
-        <input id="share-ttl" type="number" placeholder="ttl (sec)" value="3600" />
+        <input
+          id="share-ttl"
+          type="number"
+          placeholder="ttl (sec)"
+          value="3600"
+        />
         <select id="share-scope">
           <option value="view">view</option>
           <option value="approve">approve</option>
@@ -497,11 +532,7 @@
         // A later status-only update may omit title/kind — keep the name the
         // first frame gave this call (mirrors the TUI reducer's previous?.name).
         const label =
-          strOr(u.title, '') ||
-          strOr(u.kind, '') ||
-          row._label ||
-          id ||
-          'tool';
+          strOr(u.title, '') || strOr(u.kind, '') || row._label || id || 'tool';
         row._label = label;
         row._body.innerHTML = '';
         row._body.appendChild(document.createTextNode('🔧 ' + label));
@@ -658,7 +689,8 @@
             );
           case 'session_died':
             return addSystem(
-              'session ended: ' + strOr(ev.data && ev.data.reason, 'session_died'),
+              'session ended: ' +
+                strOr(ev.data && ev.data.reason, 'session_died'),
               true,
             );
           case 'client_evicted':
@@ -894,8 +926,7 @@
         if (list.length === 0) return;
         const label = document.createElement('span');
         label.textContent = 'next:';
-        label.style.cssText =
-          'color:#888;font-size:0.85rem;align-self:center';
+        label.style.cssText = 'color:#888;font-size:0.85rem;align-self:center';
         box.appendChild(label);
         for (const s of list) {
           if (typeof s !== 'string' || !s) continue;
@@ -1041,6 +1072,149 @@
         }
       };
 
+      // ---- Directory picker (browse + type + recent) -----------------------
+      // Lets the phone choose which project directory a new conversation runs
+      // in. Three ways to pick a cwd, all funneling into the SAME existing
+      // New-conversation POST (below): browse (GET /rc/fs), type an absolute
+      // path (#new-session-cwd, unchanged), or tap a recent workspace.
+      const WORKSPACES_KEY = 'qwen-rc-workspaces';
+      const MAX_RECENT = 5;
+
+      function loadRecentWorkspaces() {
+        try {
+          const raw = localStorage.getItem(WORKSPACES_KEY);
+          const arr = raw ? JSON.parse(raw) : [];
+          return Array.isArray(arr)
+            ? arr.filter((p) => typeof p === 'string' && p)
+            : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function renderRecentWorkspaces() {
+        const box = $('dir-recent');
+        if (!box) return;
+        box.textContent = '';
+        const list = loadRecentWorkspaces();
+        if (list.length === 0) {
+          box.textContent = '(no recent workspaces)';
+          return;
+        }
+        const label = document.createElement('div');
+        label.textContent = 'Recent:';
+        label.style.cssText = 'color:#888;margin-bottom:0.2rem';
+        box.appendChild(label);
+        for (const path of list) {
+          const btn = document.createElement('button');
+          btn.textContent = path;
+          btn.style.cssText =
+            'display:block;width:100%;text-align:left;margin:2px 0;' +
+            'font-size:0.8rem;overflow-wrap:anywhere';
+          btn.onclick = () => startConversationIn(path);
+          box.appendChild(btn);
+        }
+      }
+
+      // Most-recent-first, deduped, capped at MAX_RECENT. Called on every
+      // successful session creation (see the new-session handler below).
+      function pushRecentWorkspace(path) {
+        if (!path) return;
+        const list = loadRecentWorkspaces().filter((p) => p !== path);
+        list.unshift(path);
+        try {
+          localStorage.setItem(
+            WORKSPACES_KEY,
+            JSON.stringify(list.slice(0, MAX_RECENT)),
+          );
+        } catch {
+          /* storage full/unavailable — best effort */
+        }
+        renderRecentWorkspaces();
+      }
+
+      let curDirPath = null; // path currently rendered in the folder browser
+      let curDirParent = null;
+
+      function joinPath(base, name) {
+        return base.replace(/\/+$/, '') + '/' + name;
+      }
+
+      function renderDirList(body) {
+        curDirPath = body.path;
+        curDirParent = body.parent ?? null;
+        $('dir-current').textContent = body.path;
+        const list = $('dir-list');
+        list.textContent = '';
+        if (curDirParent) {
+          const up = document.createElement('div');
+          up.className = 'token-row';
+          up.style.cursor = 'pointer';
+          up.textContent = '.. (' + curDirParent + ')';
+          up.onclick = () => browseTo(curDirParent);
+          list.appendChild(up);
+        }
+        const entries = Array.isArray(body.entries) ? body.entries : [];
+        for (const entry of entries) {
+          const row = document.createElement('div');
+          row.className = 'token-row';
+          row.style.cursor = 'pointer';
+          row.textContent = entry.name + '/';
+          const childPath = joinPath(body.path, entry.name);
+          row.onclick = () => browseTo(childPath);
+          list.appendChild(row);
+        }
+        if (entries.length === 0 && !curDirParent) {
+          const none = document.createElement('div');
+          none.textContent = '(no subfolders)';
+          list.appendChild(none);
+        }
+      }
+
+      // GET /rc/fs?path=<abs> (path omitted → server default, $HOME). Renders
+      // `parent` as the ".." target and `entries` as tappable subfolder rows.
+      // On error (403/404/etc), setStatus and DO NOT navigate — curDirPath
+      // stays put so "Use this folder" still targets the last good listing.
+      async function browseTo(path) {
+        if (!token()) return setStatus('pair first');
+        try {
+          const qs = path ? '?path=' + encodeURIComponent(path) : '';
+          const res = await fetch('/rc/fs' + qs, {
+            headers: { Authorization: 'Bearer ' + token() },
+          });
+          if (!res.ok) {
+            let msg = 'browse failed (' + res.status + ')';
+            try {
+              const b = await res.json();
+              if (b && b.error) msg = b.error;
+            } catch {
+              /* non-JSON error body */
+            }
+            setStatus(msg);
+            return;
+          }
+          renderDirList(await res.json());
+        } catch (e) {
+          setStatus('browse error: ' + e);
+        }
+      }
+
+      // Common tail for all three pickers (browse / type / recent): drop the
+      // chosen path into the existing free-text field and drive the existing
+      // New-conversation button, so there is exactly one POST /session path.
+      function startConversationIn(path) {
+        $('new-session-cwd').value = path;
+        return $('new-session').onclick();
+      }
+
+      $('dir-use').onclick = () => {
+        if (!curDirPath) return setStatus('browse a folder first');
+        startConversationIn(curDirPath);
+      };
+
+      renderRecentWorkspaces();
+      void browseTo(); // open the browser at the server default ($HOME)
+
       // Create (or attach to) a daemon session, then hand off to Watch so the
       // composer opens on it immediately. `cwd` empty → the daemon's bound
       // workspace. Needs a write/owner token.
@@ -1066,6 +1240,9 @@
           if (res.status === 200) {
             const j = await res.json();
             $('session').value = j.sessionId;
+            // Record the RESOLVED workspace (not the raw typed/blank input) so
+            // "daemon default" runs still land a real absolute path in Recent.
+            if (j.workspaceCwd) pushRecentWorkspace(j.workspaceCwd);
             setStatus(
               'created ' +
                 j.sessionId.slice(0, 8) +
@@ -2296,7 +2473,8 @@
             headers: { Authorization: 'Bearer ' + token() },
           });
           if (!res.ok && res.status !== 204) {
-            $('snooze-status').textContent = 'unsnooze failed (' + res.status + ')';
+            $('snooze-status').textContent =
+              'unsnooze failed (' + res.status + ')';
             return;
           }
           await refreshSnooze();
