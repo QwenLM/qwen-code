@@ -613,6 +613,27 @@ describe('getVersion', () => {
       );
     });
   });
+
+  it('runCli default dispatch prints the version JSON and exits 0', () => {
+    // The prepare job consumes this path (VERSION_JSON=$(node
+    // scripts/get-release-version.js ...)); pin it through runCli, the
+    // wrapper prepare actually invokes, so a dropped args pass-through or
+    // a flipped exit code fails here instead of at the next release. The
+    // override makes the printed version depend on args reaching
+    // getVersion.
+    vi.mocked(execSync).mockImplementation(mockExecSync);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli({ type: 'stable', stable_version_override: '9.9.9' })).toBe(
+      0,
+    );
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(logSpy.mock.calls[0][0])).toEqual({
+      releaseTag: 'v9.9.9',
+      releaseVersion: '9.9.9',
+      npmTag: 'latest',
+      previousReleaseTag: 'v0.6.1',
+    });
+  });
 });
 
 describe('assertVersionUnreleased', () => {
@@ -635,6 +656,11 @@ describe('assertVersionUnreleased', () => {
     }
     return '';
   };
+
+  // The push-time refusal must tell the operator where the version was
+  // found and that re-running cannot fix a partial publish.
+  const refusalMessage = (foundOn) =>
+    `Version 1.2.3 has already shipped; refusing to force-push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`;
 
   it('pins the full published-package set', () => {
     // The push-time guard derives from this list; the workflow's publish
@@ -694,7 +720,9 @@ describe('assertVersionUnreleased', () => {
       }
       return notFoundAnywhere(command);
     });
-    expect(() => assertVersionUnreleased('1.2.3')).toThrow(/already shipped/);
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      refusalMessage('origin tag v1.2.3'),
+    );
   });
 
   it('refuses when the GitHub release already exists', () => {
@@ -702,7 +730,47 @@ describe('assertVersionUnreleased', () => {
       if (command.includes('gh release view')) return 'v1.2.3';
       return notFoundAnywhere(command);
     });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      refusalMessage('GitHub release v1.2.3'),
+    );
+  });
+
+  it('names every shipped package after a partial publish', () => {
+    // A retry of a partially published release is refused forever; the
+    // refusal must name exactly which packages to complete, which needs
+    // the strict scan of every package, not a stop at the first hit.
+    const shipped = [PUBLISHED_PACKAGES[1], PUBLISHED_PACKAGES[7]];
+    const commands = [];
+    vi.mocked(execSync).mockImplementation((command) => {
+      commands.push(command);
+      if (shipped.some((pkg) => command === `npm view ${pkg}@1.2.3 version`)) {
+        return '1.2.3';
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(
+      refusalMessage(shipped.join(', ')),
+    );
+    expect(commands.filter((c) => c.startsWith('npm view '))).toHaveLength(
+      PUBLISHED_PACKAGES.length,
+    );
+  });
+
+  it('stops probing once the refusal is decided', () => {
+    // A shipped version already decides the refusal; running the remaining
+    // probes would let a flaky one replace the refusal's recovery
+    // guidance with a probe-failure error.
+    const commands = [];
+    vi.mocked(execSync).mockImplementation((command) => {
+      commands.push(command);
+      if (command === `npm view ${PUBLISHED_PACKAGES[0]}@1.2.3 version`) {
+        return '1.2.3';
+      }
+      return notFoundAnywhere(command);
+    });
     expect(() => assertVersionUnreleased('1.2.3')).toThrow(/already shipped/);
+    expect(commands.some((c) => c.includes('ls-remote'))).toBe(false);
+    expect(commands.some((c) => c.includes('gh release view'))).toBe(false);
   });
 
   it('rejects a missing or non-string version instead of failing open', () => {
@@ -749,15 +817,39 @@ describe('assertVersionUnreleased', () => {
     );
   });
 
-  it('CLI dispatch: annotates and exits 1 when the version has shipped', () => {
+  it('CLI dispatch: exits 3 (benign refusal) when the version has shipped', () => {
+    // Exit 3 is the marker the release workflow uses to keep this
+    // decisive, benign refusal out of the release-failed notification.
     vi.mocked(execSync).mockImplementation((command) => {
       if (command.includes('npm view')) return '1.2.3';
       return notFoundAnywhere(command);
     });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(1);
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
     expect(errorSpy).toHaveBeenCalledWith(
-      '::error::Version 1.2.3 has already shipped; refusing to force-push the release branch over it',
+      `::error::${refusalMessage(PUBLISHED_PACKAGES.join(', '))}`,
+    );
+  });
+
+  it('CLI dispatch: exits 2 (not the refusal marker) when a probe fails', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('npm view')) {
+        throw new Error('npm error code ETIMEDOUT');
+      }
+      return notFoundAnywhere(command);
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(2);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('::error::Failed to verify'),
+    );
+  });
+
+  it('CLI dispatch: exits 2 (not the refusal marker) on a missing version', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '' })).toBe(2);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '::error::assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
     );
   });
 

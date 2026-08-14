@@ -335,6 +335,11 @@ jobs:
           )
         )
       }}
+    # Set when the push-time guard decisively refuses because the version
+    # already shipped; notify_failure keeps this benign refusal out of the
+    # release-failed issue and autofix dispatch.
+    outputs:
+      version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
     # Serialize publish per release tag: the pre-push re-validation in the
     # push step is only sound while at most one run pushes and publishes a
     # given version at a time, and --force removed the non-fast-forward
@@ -405,6 +410,7 @@ jobs:
           npm run release:version "${RELEASE_VERSION}"
 
       - name: 'Commit and Conditionally Push package versions'
+        id: 'push_release_branch'
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           GITHUB_TOKEN: '${{ github.token }}'
@@ -431,8 +437,20 @@ jobs:
             # same-version run that shipped in between would otherwise have
             # its branch tip — and the tag and merge-to-main anchored to it —
             # silently replaced. The script owns the published-package list,
-            # so this guard cannot drift from it.
-            node scripts/get-release-version.js --assert-unreleased="${RELEASE_VERSION}"
+            # so this guard cannot drift from it. Exit 3 marks the decisive
+            # "already shipped" refusal, which the version_refusal output
+            # keeps out of the release-failed notification: such a refusal
+            # means the release shipped elsewhere (or partially), not that
+            # it failed. Any other non-zero exit stays a real failure.
+            GUARD_STATUS=0
+            node scripts/get-release-version.js --assert-unreleased="${RELEASE_VERSION}" || GUARD_STATUS=$?
+            if [[ "${GUARD_STATUS}" -eq 3 ]]; then
+              echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+              exit 1
+            fi
+            if [[ "${GUARD_STATUS}" -ne 0 ]]; then
+              exit "${GUARD_STATUS}"
+            fi
             echo "Pushing release branch to remote..."
             git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags
           else
@@ -677,6 +695,12 @@ jobs:
       - 'integration_none'
       - 'integration_docker'
       - 'publish'
+    # The push-time guard's decisive "already shipped" refusal
+    # (version_refusal) is a correct outcome, not a release failure: the
+    # version shipped via another attempt, or partially, so filing a
+    # "Release Failed" issue and dispatching autofix would chase a release
+    # that did not fail. Genuine publish failures — including the guard's
+    # fail-closed probe errors — still notify.
     if: |-
       ${{
         always() &&
@@ -689,7 +713,10 @@ jobs:
           needs.quality.result == 'failure' ||
           needs.integration_none.result == 'failure' ||
           needs.integration_docker.result == 'failure' ||
-          needs.publish.result == 'failure'
+          (
+            needs.publish.result == 'failure' &&
+            needs.publish.outputs.version_refusal != 'true'
+          )
         )
       }}
     permissions:

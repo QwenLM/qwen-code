@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -106,9 +107,46 @@ describe('release workflow', () => {
     // on probe errors, so every push would abort. The script-side checks
     // (every published package, the remote tag, the release, aborting on
     // a hit, failing closed on a probe error) are unit-tested in
-    // get-release-version.test.js.
+    // get-release-version.test.js. The `|| GUARD_STATUS=$?` suffix is
+    // pinned too: notify_failure's refusal gate reads the guard's exit
+    // code through it.
     expect(workflow).toMatch(
-      /name: 'Commit and Conditionally Push package versions'\n {8}env:\n[\s\S]*?GITHUB_TOKEN: '\$\{\{ github\.token \}\}'[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?\n {12}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}"\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
+      /name: 'Commit and Conditionally Push package versions'\n {8}id: 'push_release_branch'\n {8}env:\n[\s\S]*?GITHUB_TOKEN: '\$\{\{ github\.token \}\}'[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?\n {12}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
+    );
+  });
+
+  it('keeps a decisive version refusal out of the release-failed notification', () => {
+    // The guard's exit 3 means the version already shipped (fully or
+    // partially) — a correct refusal, not a release failure. The step
+    // must turn exactly that exit into the version_refusal marker, the
+    // publish job must export the marker, and notify_failure must skip
+    // its "Release Failed" issue + autofix dispatch for it — while any
+    // other guard exit (a fail-closed probe error) and every later
+    // publish failure still notify.
+    expect(workflow).toMatch(
+      /node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}" \|\| GUARD_STATUS=\$\?\n {12}if \[\[ "\$\{GUARD_STATUS\}" -eq 3 \]\]; then\n {14}echo "version_refusal=true" >> "\$\{GITHUB_OUTPUT\}"\n {14}exit 1/,
+    );
+    expect(workflow).toContain(
+      "version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'",
+    );
+    expect(workflow).toMatch(
+      /needs\.publish\.result == 'failure' &&\n {12}needs\.publish\.outputs\.version_refusal != 'true'/,
+    );
+  });
+
+  it('wires the guard exit code to the process exit status end to end', () => {
+    // The workflow reads the guard's decision from the process exit
+    // status. Run the real entry point without mocks — a usage error
+    // needs no network — so an inverted or dropped process.exit fails
+    // here instead of letting a refusal exit 0 at push time.
+    const result = spawnSync(
+      process.execPath,
+      ['scripts/get-release-version.js', '--assert-unreleased='],
+      { encoding: 'utf8' },
+    );
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      '::error::assert-unreleased requires a version',
     );
   });
 
