@@ -87,6 +87,36 @@ describe('buildReviewPrompt', () => {
     );
   });
 
+  it('rejects a separators-only or empty target', () => {
+    // `/` names no file: it survives basename extraction as the empty
+    // string, pinning the unmatchable `qwen-review--composed.json` — a whole
+    // child review burned before the parent reports "no composed verdict".
+    for (const target of ['/', '//', '\\']) {
+      expect(() => buildReviewPrompt({ target })).toThrow(
+        /Invalid review target/,
+      );
+    }
+    // An empty target is a target the caller named and got wrong (an unset
+    // `"$TARGET"`); read as "no target given" it silently becomes a full
+    // local review at the 120-minute default, not an error.
+    for (const target of ['', '   ']) {
+      expect(() => buildReviewPrompt({ target })).toThrow(
+        /Invalid review target/,
+      );
+    }
+  });
+
+  it('keeps accepting separator-bearing paths — the guard is not over-broad', () => {
+    // The rejection cases alone leave over-rejection mutants green: dropping
+    // the `$` from `/^[\\/]+$/` kills every absolute path, dropping the `^`
+    // kills every tab-completed trailing slash. Both shapes are valid
+    // targets and reach the child unchanged.
+    expect(buildReviewPrompt({ target: '/repo/src/foo.ts' })).toBe(
+      '/review /repo/src/foo.ts',
+    );
+    expect(buildReviewPrompt({ target: 'src/' })).toBe('/review src/');
+  });
+
   it('rejects a target carrying quote characters', () => {
     // tokenizeArgs strips quotes, so `src/it's-a-file.ts` would re-tokenize
     // to `src/its-a-file.ts` — silently re-targeting a file never named.
