@@ -3353,6 +3353,57 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.tools?.useRipgrep).toBe(false);
     });
 
+    it('should ignore an explicit workspace false and preserve a user opt-in', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowsEnabled: true } });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowsEnabled: false } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowsEnabled).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('tools.workflowsEnabled'),
+        ),
+      ).toBe(true);
+    });
+
+    it('should ignore workspace env overrides for workflow enablement', () => {
+      delete process.env['QWEN_CODE_ENABLE_WORKFLOWS'];
+      delete process.env['QWEN_CODE_DISABLE_WORKFLOWS'];
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowsEnabled: true } });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              env: {
+                QWEN_CODE_ENABLE_WORKFLOWS: '1',
+                QWEN_CODE_DISABLE_WORKFLOWS: '1',
+              },
+            });
+          return '{}';
+        },
+      );
+
+      try {
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.tools?.workflowsEnabled).toBe(true);
+        expect(process.env['QWEN_CODE_ENABLE_WORKFLOWS']).toBeUndefined();
+        expect(process.env['QWEN_CODE_DISABLE_WORKFLOWS']).toBeUndefined();
+      } finally {
+        delete process.env['QWEN_CODE_ENABLE_WORKFLOWS'];
+        delete process.env['QWEN_CODE_DISABLE_WORKFLOWS'];
+      }
+    });
+
     it('should warn when workspace settings define workflowsEnabled', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
