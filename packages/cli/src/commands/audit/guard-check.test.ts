@@ -8,8 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -318,6 +320,78 @@ describe('guardCheckCommand handler', () => {
     const copied = join(fallback, 'audit-plan-2026-08-13-120000.json');
     writeFileSync(copied, body);
     run({ reportSlug: 'mod', plan: copied });
+    expect(process.exitCode).toBe(5);
+  });
+
+  it('does not credit a plan whose hardlink twin stays committable in the repo', () => {
+    writeFileSync(join(repo, '.gitignore'), 'qwen-home/\n');
+    const fallback = Storage.getAuditFallbackDir(repo);
+    const planTime = report('unprotected', 'unprotected');
+    planTime.fallbackRoot = fallback;
+    // The relocation renames the plan out of .qwen/tmp, but a hardlink
+    // twin keeps a stageable copy at an in-repo path the containment
+    // checks can never see — nlink > 1 voids the credit.
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    mkdirSync(join(repo, 'docs'), { recursive: true });
+    const planName = 'audit-plan-2026-08-13-120000.json';
+    const original = join(repo, '.qwen', 'tmp', planName);
+    writeFileSync(original, JSON.stringify({ guard: planTime }));
+    linkSync(original, join(repo, 'docs', planName));
+    renameSync(original, join(fallback, planName));
+    run({ reportSlug: 'mod', plan: join(fallback, planName) });
+    expect(process.exitCode).toBe(5);
+  });
+
+  it('fails closed when only the post-midnight report shape is re-included at the landing', () => {
+    // The relocated report is written at write time: a checkpoint before
+    // midnight must probe the next calendar date's report shape at the
+    // landing, mirroring checkLocalOnlyGuard's next-date probe.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-08-15T23:59:00'));
+      const fallback = Storage.getAuditFallbackDir(repo);
+      const hash = basename(fallback);
+      writeFileSync(
+        join(repo, '.gitignore'),
+        [
+          'qwen-home/*',
+          '!qwen-home/audits/',
+          'qwen-home/audits/*',
+          `!qwen-home/audits/${hash}/`,
+          `qwen-home/audits/${hash}/*`,
+          `!qwen-home/audits/${hash}/2026-08-16-*.md`,
+        ].join('\n'),
+      );
+      const planTime = report('unprotected', 'unprotected');
+      planTime.fallbackRoot = fallback;
+      const relocatedPlan = join(fallback, 'plan.json');
+      writeFileSync(relocatedPlan, JSON.stringify({ guard: planTime }));
+      run({ reportSlug: 'mod', plan: relocatedPlan });
+      expect(process.exitCode).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('probes the recovered plan ts in the primary directories', () => {
+    // The artifacts keep their plan-time timestamp: a checkpoint probing
+    // only its own instant's names never asks about the plan-ts-named
+    // file, so a name-selective re-include keyed to the plan ts escapes
+    // every checkpoint.
+    const planTs = '2026-08-13-120000';
+    mkdirSync(join(repo, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      join(repo, '.gitignore'),
+      [
+        '.qwen/*',
+        '!.qwen/tmp/',
+        '.qwen/tmp/*',
+        `!.qwen/tmp/audit-plan-${planTs}.json`,
+      ].join('\n'),
+    );
+    const planPath = join(repo, '.qwen', 'tmp', `audit-plan-${planTs}.json`);
+    writeFileSync(planPath, JSON.stringify({ guard: report('ok', 'ok') }));
+    run({ reportSlug: 'mod', plan: planPath });
     expect(process.exitCode).toBe(5);
   });
 

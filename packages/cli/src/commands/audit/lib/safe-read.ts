@@ -17,12 +17,14 @@ import { closeSync, fstatSync, openSync, readSync, constants } from 'node:fs';
  *  an OOM. */
 export const AUDIT_READ_MAX_BYTES = 10 * 1024 * 1024;
 
-/** sha256 of a regular file, streamed in chunks with NO size cap: memory
- *  stays O(chunk), so a file's size limits nothing but the time spent —
- *  the 10MB read cap bounds memory on capped reads, not baseline
- *  eligibility here. Returns undefined for a path that is missing or not
- *  a regular file (FIFO / device / directory); O_NONBLOCK keeps even an
- *  open() raced onto a FIFO from hanging. */
+/** sha256 of a regular file, streamed in chunks and bounded at the
+ *  size-at-open: memory stays O(chunk), and a concurrent appender that
+ *  outpaces the hasher can never drag the loop to a live EOF forever
+ *  (the audited agent writes the very files being read). The at-open
+ *  prefix hash is byte-identical for stable files and still reports
+ *  drift when a file grows. Returns undefined for a path that is missing
+ *  or not a regular file (FIFO / device / directory); O_NONBLOCK keeps
+ *  even an open() raced onto a FIFO from hanging. */
 export function streamSha256(abs: string): string | undefined {
   let fd: number;
   try {
@@ -31,12 +33,16 @@ export function streamSha256(abs: string): string | undefined {
     return undefined;
   }
   try {
-    if (!fstatSync(fd).isFile()) return undefined;
+    const st = fstatSync(fd);
+    if (!st.isFile()) return undefined;
     const hash = createHash('sha256');
     const buf = Buffer.allocUnsafe(64 * 1024);
-    let read: number;
-    while ((read = readSync(fd, buf, 0, buf.length, null)) > 0) {
+    let remaining = st.size;
+    while (remaining > 0) {
+      const read = readSync(fd, buf, 0, Math.min(buf.length, remaining), null);
+      if (read <= 0) break;
       hash.update(buf.subarray(0, read));
+      remaining -= read;
     }
     return hash.digest('hex');
   } catch {

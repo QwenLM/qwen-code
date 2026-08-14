@@ -16,7 +16,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import {
   applyExcludeRemedy,
@@ -28,6 +29,7 @@ import {
   ESTIMATE_HEADROOM,
   estimateTokens,
   FILE_GROUP_LINES,
+  guardProbeShapes,
   LOW_ANGLE_FLOOR_LINES,
   LOW_FINDING_CAP,
   LOW_SUBJECT_LINES_GATE,
@@ -48,6 +50,18 @@ import {
   type AuditCollection,
   type AuditFileEntry,
 } from './files-plan.js';
+
+const AUDIT_SKILL_PATH = resolve(
+  fileURLToPath(import.meta.url),
+  '..',
+  '..',
+  '..',
+  '..',
+  '..',
+  '..',
+  '..',
+  'packages/core/src/skills/bundled/audit/SKILL.md',
+);
 
 let dir: string;
 let originalConfigNosystem: string | undefined;
@@ -1377,6 +1391,26 @@ describe('git-backed checks', () => {
     const tracked = checkLocalOnlyGuard(repo, 'x.md');
     expect(tracked.dirs[1].status).toBe('tracked');
     expect(tracked.dirs[1].trackedFiles).toContain('.qwen/tmp/forced.json');
+  });
+
+  it('probes exactly the specialist findings shape the skill licenses', () => {
+    // SKILL.md is the oracle for the names a run may write: every
+    // licensed specialist shape must appear in guardProbeShapes and vice
+    // versa — a shape written but never probed escapes the local-only
+    // guard (the module's own 'every shape written is a shape probed'
+    // invariant).
+    const skill = readFileSync(AUDIT_SKILL_PATH, 'utf8');
+    const licensed = [
+      ...new Set(
+        [...skill.matchAll(/audit-findings-specialist-[^`\s]*<ts>\.md/g)].map(
+          (m) => m[0],
+        ),
+      ),
+    ].sort();
+    const probed = guardProbeShapes('x.md', '<ts>')
+      .tmp.filter((s) => s.startsWith('audit-findings-specialist'))
+      .sort();
+    expect(licensed).toEqual(probed);
   });
 
   it('catches a name-selective re-include of the dated report shape', () => {

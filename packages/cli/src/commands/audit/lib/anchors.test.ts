@@ -1138,4 +1138,114 @@ describe('resolveAnchors', () => {
     expect(findings[0].locations).toEqual(['dup.ts', 'dup2.ts']);
     expect(resolveAnchors(findings, pairPlan)[0].verdict).toBe('resolved');
   });
+
+  it('keeps a binding field-shaped line quoted at EOF in the needle', () => {
+    // EOF supplies no confirming line: a Location-shaped last line is the
+    // misquoted/hallucinated quote class — dropping it grades the bare
+    // prefix and certifies a snippet tail that exists in no file. The
+    // finding's real location stays bound (the quoted line is held as
+    // pending, never committed).
+    writeFileSync(join(dir, 'template.ts'), 'template says\n');
+    const templatePlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const quoted = [
+      '### [Critical] eof quote',
+      '- Location: template.ts:1',
+      '- Anchor: template says',
+      '- Location: hallucinated line never in the file',
+    ].join('\n');
+    const findings = parseReportFindings(quoted);
+    expect(findings[0].locations).toEqual(['template.ts']);
+    expect(findings[0].anchor).toBe(
+      'template says\n- Location: hallucinated line never in the file',
+    );
+    expect(resolveAnchors(findings, templatePlan)[0].verdict).toBe(
+      'unresolved',
+    );
+  });
+
+  it('counts an occurrence whose first line adds whitespace beyond the needle\u2019s own indent', () => {
+    // The needle keeps its first line's relative indent (the snippet's
+    // minimum sits on a later line); the occurrence adds further leading
+    // whitespace on that first line, so neither the window-minimum nor the
+    // first-line base dedents it onto the needle — the difference base
+    // must.
+    writeFileSync(join(dir, 'offset.ts'), 'const w = {\n    b: 2,\n};\n');
+    const offsetPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const result = resolveAnchors(
+      [
+        {
+          title: 'offset first line',
+          severity: 'Critical',
+          locations: ['offset.ts'],
+          anchor: '  b: 2,\n};',
+        },
+      ],
+      offsetPlan,
+    )[0];
+    expect(result.verdict).toBe('resolved');
+    expect(result.matchCount).toBe(1);
+  });
+
+  it('counts an occurrence whose deepest line is a continuation line', () => {
+    // The window-minimum and first-line bases both dedent by the shallow
+    // first line, leaving the deep continuation line un-dedented; the last
+    // line's own indent is the base that matches.
+    writeFileSync(join(dir, 'deepest.ts'), ' step1();\n      step2();\n');
+    const deepestPlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    const result = resolveAnchors(
+      [
+        {
+          title: 'deepest continuation',
+          severity: 'Critical',
+          locations: ['deepest.ts'],
+          anchor: 'step1();\nstep2();',
+        },
+      ],
+      deepestPlan,
+    )[0];
+    expect(result.verdict).toBe('resolved');
+    expect(result.matchCount).toBe(1);
+  });
+
+  it('grades a single-line token fusion unresolved', () => {
+    // The no-fusion invariant pinned above for multi-line needles applies
+    // to the single-line branch too: a bare indexOf counted 'return x'
+    // inside 'return x2;' and certified a line that does not exist.
+    writeFileSync(join(dir, 'fuse1.ts'), 'return x2;\n');
+    const fusePlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [
+        {
+          title: 'single-line fused',
+          severity: 'Critical',
+          locations: ['fuse1.ts'],
+          anchor: 'return x',
+        },
+        {
+          title: 'single-line exact',
+          severity: 'Critical',
+          locations: ['fuse1.ts'],
+          anchor: 'return x2;',
+        },
+      ],
+      fusePlan,
+    );
+    expect(results[0].verdict).toBe('unresolved');
+    expect(results[1].verdict).toBe('resolved');
+  });
 });

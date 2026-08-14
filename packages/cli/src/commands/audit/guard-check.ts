@@ -60,7 +60,11 @@ function planRelocated(planPath: string, fallbackRoot: string): boolean {
   let realPlan: string;
   let realRoot: string;
   try {
-    if (!lstatSync(planPath).isFile()) return false;
+    const planStat = lstatSync(planPath);
+    // A hardlink twin is a committable copy the containment checks below
+    // can never see: nlink > 1 proves a twin exists somewhere by
+    // definition, so the relocation stays uncredited and exit 5 re-fires.
+    if (!planStat.isFile() || planStat.nlink > 1) return false;
     realPlan = realpathSync(planPath);
     realRoot = realpathSync(fallbackRoot);
   } catch {
@@ -111,6 +115,14 @@ function fallbackLandingSafe(
   // one: the relocated files keep the plan ts, and a post-midnight
   // checkpoint's fresh-ts probes would ask about names never written.
   const shapes = guardProbeShapes(reportFileName, auditTimestamp(new Date()));
+  // Mirror checkLocalOnlyGuard's next-date probe: the relocated report is
+  // written at write time, so its date can roll past the checkpoint
+  // instant — a post-midnight landing must be asked about too.
+  const nextDate = auditTimestamp(new Date(Date.now() + 24 * 60 * 60 * 1000))
+    .split('-')
+    .slice(0, 3)
+    .join('-');
+  shapes.audits.push(`${nextDate}-000000-${reportFileName}`);
   if (planTs) {
     const relocated = guardProbeShapes(reportFileName, planTs);
     shapes.audits.push(...relocated.audits);
@@ -217,12 +229,13 @@ export const guardCheckCommand: CommandModule = {
     const reportFileName = `${
       slugSafe ? effectiveSlug : safeTarget(effectiveSlug)
     }.md`;
-    const guard = checkLocalOnlyGuard(process.cwd(), reportFileName);
-    writeStdoutLine(JSON.stringify(guard, null, 2));
-    // The relocated artifacts carry the plan-time timestamp; recover it
-    // from the SKILL-pinned plan filename so the landing probes cover it.
+    // The artifacts keep the plan-time timestamp; recover it from the
+    // SKILL-pinned plan filename so BOTH the primary probes and the
+    // landing probes ask about the names actually on disk.
     const planTs =
       plan === undefined ? undefined : PLAN_TS_RE.exec(basename(plan))?.[1];
+    const guard = checkLocalOnlyGuard(process.cwd(), reportFileName, planTs);
+    writeStdoutLine(JSON.stringify(guard, null, 2));
     const relocated =
       plan !== undefined &&
       slugSafe &&

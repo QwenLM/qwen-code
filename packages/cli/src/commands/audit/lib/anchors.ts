@@ -144,9 +144,18 @@ function parseLocations(value: string): string[] {
 
 /** The next non-blank line after a would-be terminator: only a recognized
  *  field or finding header confirms the terminator is a real report field
- *  and not a field-shaped line quoted inside an UNFENCED anchor. EOF
- *  confirms — collection ends there anyway. */
-function nextLineFieldShaped(lines: string[], i: number): boolean {
+ *  and not a field-shaped line quoted inside an UNFENCED anchor. At EOF no
+ *  line follows, so the terminator's own kind decides: a non-binding field
+ *  (Issue / Failure scenario / Severity) closes the finding — its value
+ *  never enters the needle, so terminating is safe; a BINDING field
+ *  (Location / Anchor) dropped there would certify a snippet tail that was
+ *  never matched against any file, so it stays in the needle and the grade
+ *  fails closed. */
+function nextLineFieldShaped(
+  lines: string[],
+  i: number,
+  terminator: string,
+): boolean {
   for (let k = i + 1; k < lines.length; k++) {
     const next = lines[k].trim();
     if (next === '') continue;
@@ -154,7 +163,7 @@ function nextLineFieldShaped(lines: string[], i: number): boolean {
       FINDING_RE.test(next) || FIELD_END_RE.test(next) || headerNetted(next)
     );
   }
-  return true;
+  return !FIELD_RE.test(terminator);
 }
 
 /** Parse the finding blocks of a report draft: `### [sev] title` opens a
@@ -361,7 +370,7 @@ export function parseReportFindings(report: string): ReportFinding[] {
         !inFence &&
         FIELD_END_RE.test(line) &&
         leadingIndent(raw) <= anchorIndent &&
-        nextLineFieldShaped(lines, i)
+        nextLineFieldShaped(lines, i, line)
       ) {
         inAnchor = false;
         // The terminating line is itself a field (the reordered
@@ -480,15 +489,24 @@ function windowMatchesAt(
     if (indent < base) base = indent;
   }
   if (base === Number.POSITIVE_INFINITY) base = leadingIndent(hayLines[start]);
-  // The minimum-indent base covers uniformly indented occurrences; an
-  // occurrence whose FIRST line sits deeper than the minimum needs its
-  // own indent tried too, or it matches no base and escapes the count.
+  // The minimum-indent base covers uniformly indented occurrences, and the
+  // first line's own indent covers a FIRST line sitting deeper than the
+  // minimum. Two more shapes escape both: an occurrence whose first line
+  // adds leading whitespace BEYOND the needle's own first-line indent
+  // (dedent by the difference), and one whose DEEPEST line is a
+  // continuation (dedent by the last line's indent). Try each distinct
+  // base, or the occurrence matches none and escapes the count.
   const firstIndent = leadingIndent(hayLines[start]);
-  return (
-    windowMatchesWithBase(hayLines, start, needleLines, base) ||
-    (firstIndent !== base &&
-      windowMatchesWithBase(hayLines, start, needleLines, firstIndent))
-  );
+  const lastIndent = leadingIndent(hayLines[start + needleLines.length - 1]);
+  const offsetBase = firstIndent - leadingIndent(needleLines[0]);
+  const bases = new Set<number>([base, firstIndent, lastIndent]);
+  if (offsetBase >= 0) bases.add(offsetBase);
+  for (const candidate of bases) {
+    if (windowMatchesWithBase(hayLines, start, needleLines, candidate)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function countIndentTolerantMatches(
@@ -590,9 +608,10 @@ export function resolveAnchors(
         // Multi-line needles match indent-tolerantly: the needle is
         // dedented to column 0, so a snippet quoted from an indented body
         // must still resolve (a raw substring search would never find it).
-        // The window matcher tries both the window-minimum and the first
-        // line's indent as bases, so it subsumes every line-start raw
-        // occurrence; add only raw matches starting MID-line.
+        // The window matcher tries the window-minimum, the first and last
+        // lines' indents, and the first-line offset as bases, so it
+        // subsumes every line-start raw occurrence; add only raw matches
+        // starting MID-line.
         const needleLines = needle.split('\n');
         const hayLines = haystack.split('\n');
         locationMatches = countIndentTolerantMatches(hayLines, needleLines);
@@ -605,10 +624,19 @@ export function resolveAnchors(
           idx = haystack.indexOf(needle, idx + 1);
         }
       } else {
+        // The SAME bounded follow rule the multi-line last line applies: a
+        // bare indexOf fuses tokens ('return x' into 'return x2;') unless the
+        // hit ends at EOF, whitespace, or a comment introducer, and would
+        // certify a quoted line that does not exist in the file.
         locationMatches = 0;
         let idx = haystack.indexOf(needle);
         while (idx !== -1) {
-          locationMatches++;
+          const restOfLine = haystack
+            .slice(idx + needle.length)
+            .split('\n', 1)[0];
+          if (restOfLine === '' || /^(?:\s|\/\/|\/\*|#)/.test(restOfLine)) {
+            locationMatches++;
+          }
           idx = haystack.indexOf(needle, idx + 1);
         }
       }

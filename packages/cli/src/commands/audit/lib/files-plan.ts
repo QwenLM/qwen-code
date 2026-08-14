@@ -1006,10 +1006,21 @@ export function guardProbeShapes(
 export function checkLocalOnlyGuard(
   projectRoot: string,
   reportFileName: string,
+  extraTs?: string,
 ): GuardReport {
   const geometry = gitGeometry(projectRoot);
   const ts = auditTimestamp(new Date());
   const shapes = guardProbeShapes(reportFileName, ts);
+  // The artifacts actually sitting in the directories keep the ts they were
+  // written under: a checkpoint probing only its own instant's names never
+  // asks about a plan-ts-named file, so a name-selective re-include keyed
+  // to the plan ts would escape every checkpoint. Probe the caller's
+  // recovered past ts too, whenever it is known.
+  if (extraTs !== undefined && extraTs !== ts) {
+    const extra = guardProbeShapes(reportFileName, extraTs);
+    shapes.audits.push(...extra.audits);
+    shapes.tmp.push(...extra.tmp);
+  }
   // Runs are hours-long: the report is written at write time, so its
   // date can legitimately roll past the probe instant — probe the next
   // calendar date's report shape too.
