@@ -1030,7 +1030,7 @@ export class AcpDispatcher {
     attached: boolean,
     runtime: AcpSessionRuntimeContext,
     options: { initialReplayPending?: boolean; removePersisted?: boolean } = {},
-  ): DeliveryReceipt {
+  ): DeliveryReceipt & { armInitialReplay(): boolean } {
     let settled = false;
     const ownershipIdentity = conn.captureSessionOwnershipIdentity(sessionId);
     const releaseIdentity = () =>
@@ -1075,6 +1075,16 @@ export class AcpDispatcher {
       releaseIdentity();
     };
     return {
+      armInitialReplay: () => {
+        if (
+          settled ||
+          !conn.canCommitSessionOwnership(sessionId, ownershipIdentity)
+        ) {
+          return false;
+        }
+        conn.markInitialReplayPending(sessionId);
+        return true;
+      },
       delivered: () => {
         if (settled) return;
         if (!conn.canCommitSessionOwnership(sessionId, ownershipIdentity)) {
@@ -1893,13 +1903,15 @@ export class AcpDispatcher {
                 return session;
               },
             );
+            const initialReplayOnDelivery =
+              method === 'session/load' && !conn.ownsSession(sessionId);
             const ownership = this.ownershipReceipt(
               conn,
               sessionId,
               restored.clientId,
               restored.attached,
               sessionRuntime,
-              { initialReplayPending: method === 'session/load' },
+              { initialReplayPending: initialReplayOnDelivery },
             );
             try {
               assertGenerationOpen?.();
@@ -1927,16 +1939,22 @@ export class AcpDispatcher {
                     }
                   : undefined;
               assertGenerationOpen?.();
-              // Teardown raced the restore — EITHER the whole connection was
-              // destroyed (`conn.destroyed`) OR a `session/close` for this id
-              // started while the restore response was being assembled.
+              // Teardown raced the restore — the connection was destroyed, a
+              // close is in flight, or the previously-owned binding was
+              // replaced while the restore response was being assembled.
               const closeRaced = conn.closingSessions.has(sessionId);
-              if (conn.destroyed || closeRaced) {
+              const replayArmRaced =
+                !conn.destroyed &&
+                !closeRaced &&
+                method === 'session/load' &&
+                !initialReplayOnDelivery &&
+                !ownership.armInitialReplay();
+              if (conn.destroyed || closeRaced || replayArmRaced) {
                 ownership.discarded();
                 // Connection-still-alive close race → tell the client to retry.
                 // Same rationale as the pre-await guard: a transient server-side
                 // race, so INTERNAL_ERROR (-32603), not INVALID_PARAMS.
-                if (closeRaced && !conn.destroyed) {
+                if ((closeRaced || replayArmRaced) && !conn.destroyed) {
                   conn.sendConn(
                     error(
                       id,

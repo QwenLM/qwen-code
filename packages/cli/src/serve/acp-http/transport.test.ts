@@ -202,6 +202,7 @@ class FakeBridge {
     name?: string;
     clientId?: string;
   }> = [];
+  configGate: Promise<void> | undefined;
 
   closedSessions: string[] = [];
 
@@ -376,6 +377,7 @@ class FakeBridge {
 
   // Session config options live in the child's session context state.
   async getSessionContextStatus(sessionId: string) {
+    if (this.configGate) await this.configGate;
     return {
       v: 1,
       sessionId,
@@ -4079,6 +4081,125 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: '_qwen/notify',
       params: { kind: 'replay_complete' },
     });
+  });
+
+  it('arms initial load replay before an already-owned load reply is delivered', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 1,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'sess-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+      liveJournal: [],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const initialReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 19,
+      method: 'session/new',
+      params: {},
+    });
+    await initialReply;
+    acpHandle?.registry.get(connId)?.connStream?.close();
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'sess-1' },
+    });
+    await waitUntil(
+      () => acpHandle?.getSnapshot().bufferedConnectionFrames === 1,
+    );
+
+    const sessionStream = await openStream(connId, 'sess-1');
+    const sessionReader = frameReader(sessionStream);
+    const replayed = (await sessionReader.next(1000)) as {
+      method: string;
+      params: { update?: { sessionUpdate?: string } };
+    };
+    expect(replayed).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length === 1);
+    bridge.queues.get('sess-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+    await expect(sessionReader.next()).resolves.toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+
+    const replacementConnStream = await openStream(connId);
+    const replacementConnReader = frameReader(replacementConnStream);
+    await expect(replacementConnReader.next()).resolves.toMatchObject({
+      id: 20,
+    });
+
+    const secondSessionStream = await openStream(connId, 'sess-1');
+    const secondSessionReader = frameReader(secondSessionStream);
+    await waitUntil(() => bridge.subscribeCalls.length === 2);
+    expect(bridge.subscribeCalls[1]).toEqual({ sessionId: 'sess-1' });
+    sessionReader.close();
+    secondSessionReader.close();
+    replacementConnReader.close();
+  });
+
+  it('does not arm initial replay on a replacement session generation', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 19,
+      method: 'session/new',
+      params: {},
+    });
+    await expect(connReader.next()).resolves.toMatchObject({ id: 19 });
+
+    let releaseConfig!: () => void;
+    bridge.configGate = new Promise<void>((resolve) => {
+      releaseConfig = resolve;
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'sess-1' },
+    });
+    await waitUntil(() => bridge.loadRequests.length === 1);
+
+    const conn = acpHandle?.registry.get(connId);
+    expect(conn).toBeDefined();
+    conn!.closeSessionStream('sess-1');
+    const replacement = conn!.getOrCreateSession('sess-1');
+    replacement.clientId = 'new-generation';
+    conn!.ownSession('sess-1');
+    releaseConfig();
+
+    await expect(connReader.next()).resolves.toMatchObject({
+      id: 20,
+      error: { code: -32603 },
+    });
+    expect(replacement.initialReplayPending).not.toBe(true);
+    expect(replacement.clientId).toBe('new-generation');
+    expect(conn!.ownsSession('sess-1')).toBe(true);
+    expect(bridge.detached).toContainEqual({
+      sessionId: 'sess-1',
+      clientId: 'client-load',
+    });
+    connReader.close();
   });
 
   it('emits the stderr breadcrumb only when the initial replay snapshot is degraded', async () => {
