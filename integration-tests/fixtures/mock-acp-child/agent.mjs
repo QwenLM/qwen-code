@@ -30,6 +30,7 @@ import {
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { Writable, Readable } from 'node:stream';
 
 // Protect the stdout NDJSON pipe — any console method that writes to
@@ -115,6 +116,17 @@ new AgentSideConnection(
     },
 
     async cancel() {},
+
+    async extMethod(method, params) {
+      if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+        // The daemon's DELETE /session/:id forwards this ext method down the
+        // ACP channel; ack with the production success shape so teardown
+        // completes. The mock keeps no per-session state to drain.
+        const { sessionId } = params;
+        return { sessionId, closed: true };
+      }
+      throw RequestError.methodNotFound(method);
+    },
   }),
   ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)),
 );
