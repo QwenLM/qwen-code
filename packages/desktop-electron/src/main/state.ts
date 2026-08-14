@@ -7,31 +7,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserWindow, Rectangle } from 'electron';
-import {
-  readChatNavigation,
-  type ChatNavigationState,
-} from '../shared/chat-navigation';
 
 const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 820;
 const MIN_WIDTH = 900;
 const MIN_HEIGHT = 600;
-const MAX_RESTORED_CHAT_WINDOWS = 8;
 
 export interface DesktopState {
-  browser?: BrowserWindowState;
-  chatWindows?: ChatWindowState[];
-  /** Phase 1 migration field. */
   window?: WindowState;
   workspace?: string;
 }
-
-export interface BrowserWindowState {
-  url: string;
-  window: WindowState;
-}
-
-export interface ChatWindowState extends WindowState, ChatNavigationState {}
 
 export interface WindowState extends Rectangle {
   maximized: boolean;
@@ -53,19 +38,15 @@ export function normalizeDesktopState(value: unknown): DesktopState {
     typeof candidate['workspace'] === 'string'
       ? candidate['workspace']
       : undefined;
-  const window = normalizeWindowState(candidate['window']);
-  const chatWindows = Array.isArray(candidate['chatWindows'])
+  const legacyWindows = Array.isArray(candidate['chatWindows'])
     ? candidate['chatWindows']
-        .map(normalizeChatWindowState)
-        .filter((item): item is ChatWindowState => item !== undefined)
-        .slice(0, MAX_RESTORED_CHAT_WINDOWS)
-    : undefined;
-  const browser = normalizeBrowserWindowState(candidate['browser']);
+    : [];
+  const window =
+    normalizeWindowState(candidate['window']) ??
+    normalizeWindowState(legacyWindows[0]);
   return {
     ...(workspace ? { workspace } : {}),
     ...(window ? { window } : {}),
-    ...(chatWindows?.length ? { chatWindows } : {}),
-    ...(browser ? { browser } : {}),
   };
 }
 
@@ -110,13 +91,6 @@ export function captureWindowState(window: BrowserWindow): WindowState {
   return { ...normal, maximized: window.isMaximized() };
 }
 
-export function captureChatWindowState(window: BrowserWindow): ChatWindowState {
-  return {
-    ...captureWindowState(window),
-    ...readChatNavigation(window.webContents.getURL()),
-  };
-}
-
 function normalizeWindowState(value: unknown): WindowState | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const candidate = value as Record<string, unknown>;
@@ -129,52 +103,6 @@ function normalizeWindowState(value: unknown): WindowState | undefined {
     height: Math.max(candidate['height'] as number, MIN_HEIGHT),
     maximized: candidate['maximized'] === true,
   };
-}
-
-function normalizeChatWindowState(value: unknown): ChatWindowState | undefined {
-  const window = normalizeWindowState(value);
-  if (!window || !value || typeof value !== 'object') return undefined;
-  const candidate = value as Record<string, unknown>;
-  return {
-    ...window,
-    ...readChatNavigation(
-      writeNavigationCandidate(
-        candidate['sessionId'],
-        candidate['workspaceId'],
-      ),
-    ),
-  };
-}
-
-function writeNavigationCandidate(
-  sessionId: unknown,
-  workspaceId: unknown,
-): string {
-  const url = new URL('qwen-desktop://app/index.html');
-  if (typeof sessionId === 'string') url.searchParams.set('session', sessionId);
-  if (typeof workspaceId === 'string') {
-    url.searchParams.set('workspace', workspaceId);
-  }
-  return url.href;
-}
-
-function normalizeBrowserWindowState(
-  value: unknown,
-): BrowserWindowState | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const candidate = value as Record<string, unknown>;
-  const window = normalizeWindowState(candidate['window']);
-  const url = candidate['url'];
-  if (!window || typeof url !== 'string') return undefined;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      return undefined;
-    }
-    return { url: parsed.href, window };
-  } catch {
-    return undefined;
-  }
 }
 
 function intersects(left: Rectangle, right: Rectangle): boolean {

@@ -12,75 +12,36 @@ describe('Electron desktop state', () => {
     expect(normalizeDesktopState({ workspace: 42, window: 'bad' })).toEqual({});
   });
 
-  it('migrates the single Phase 1 window and normalizes browser state', () => {
+  it('keeps one window and drops removed desktop surfaces', () => {
     expect(
       normalizeDesktopState({
+        workspace: '/workspace',
         window: { x: 1, y: 2, width: 1000, height: 700, maximized: true },
-        browser: {
-          url: 'https://example.com',
-          window: {
+        browser: { url: 'https://example.com' },
+      }),
+    ).toEqual({
+      workspace: '/workspace',
+      window: { x: 1, y: 2, width: 1000, height: 700, maximized: true },
+    });
+  });
+
+  it('migrates the first legacy chat window into the single window', () => {
+    expect(
+      normalizeDesktopState({
+        chatWindows: [
+          {
             x: 3,
             y: 4,
             width: 1100,
             height: 720,
             maximized: false,
-          },
-        },
-      }),
-    ).toEqual({
-      window: { x: 1, y: 2, width: 1000, height: 700, maximized: true },
-      browser: {
-        url: 'https://example.com/',
-        window: {
-          x: 3,
-          y: 4,
-          width: 1100,
-          height: 720,
-          maximized: false,
-        },
-      },
-    });
-  });
-
-  it('caps restored chat windows', () => {
-    const windows = Array.from({ length: 12 }, (_, index) => ({
-      x: index,
-      y: index,
-      width: 1000,
-      height: 700,
-      maximized: false,
-    }));
-    expect(
-      normalizeDesktopState({ chatWindows: windows }).chatWindows,
-    ).toHaveLength(8);
-  });
-
-  it('restores the session owned by each chat window', () => {
-    expect(
-      normalizeDesktopState({
-        chatWindows: [
-          {
-            x: 1,
-            y: 2,
-            width: 1000,
-            height: 700,
-            maximized: false,
-            sessionId: 'session-1',
-            workspaceId: 'workspace-1',
+            sessionId: 'removed-session-state',
           },
         ],
-      }).chatWindows,
-    ).toEqual([
-      {
-        x: 1,
-        y: 2,
-        width: 1000,
-        height: 700,
-        maximized: false,
-        sessionId: 'session-1',
-        workspaceId: 'workspace-1',
-      },
-    ]);
+      }),
+    ).toEqual({
+      window: { x: 3, y: 4, width: 1100, height: 720, maximized: false },
+    });
   });
 
   it('restores visible bounds and clamps the minimum size', () => {

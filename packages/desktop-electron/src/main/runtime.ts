@@ -13,7 +13,6 @@ const LISTEN_PREFIX = 'qwen serve listening on ';
 const STARTUP_TIMEOUT_MS = 45_000;
 const HEALTH_RETRY_MS = 100;
 const FAILURE_OUTPUT_LIMIT = 16 * 1024;
-export const DESKTOP_ORIGIN = 'qwen-desktop://app';
 
 export interface RuntimeLayout {
   entry: string;
@@ -37,8 +36,6 @@ export function runtimeArguments(workspace: string): string[] {
     '--hostname',
     '127.0.0.1',
     '--require-auth',
-    '--allow-origin',
-    DESKTOP_ORIGIN,
     '--workspace',
     workspace,
     '--no-open',
@@ -58,6 +55,15 @@ export function parseListeningUrl(line: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function createAuthenticatedWebUrl(
+  baseUrl: string,
+  token: string,
+): string {
+  const url = new URL(baseUrl);
+  url.hash = new URLSearchParams({ token }).toString();
+  return url.href;
 }
 
 export function resolveRuntimeLayout(
@@ -192,6 +198,10 @@ export class DesktopRuntime {
     this.stopping = true;
     terminateProcessTree(this.child);
     this.log.end();
+  }
+
+  authenticatedWebUrl(): string {
+    return createAuthenticatedWebUrl(this.baseUrl, this.token);
   }
 }
 

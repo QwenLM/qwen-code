@@ -16,6 +16,11 @@ const manifest = readJson(path.join(packageDir, 'package.json'));
 const tauriManifest = readJson(
   path.join(repoRoot, 'packages/desktop-shell/src-tauri/tauri.conf.json'),
 );
+const main = read('src/main/index.ts');
+const runtime = read('src/main/runtime.ts');
+const runtimeBuilder = read('scripts/prepare-runtime.js');
+const entitlements = read('build/entitlements.mac.plist');
+const afterPack = read('scripts/electron-builder-after-pack.cjs');
 const workflow = fs.readFileSync(
   path.join(repoRoot, '.github/workflows/desktop-electron-build.yml'),
   'utf8',
@@ -31,10 +36,11 @@ const rootCiWorkflow = fs.readFileSync(
 
 testPackageIdentity();
 testSecurityBoundary();
-testWebShellOwnership();
+testStandaloneWebShellOwnership();
+testRemovedDesktopSurfaces();
 testReleaseWorkflow();
 testVersionSynchronization();
-console.log('Electron desktop isolation checks passed.');
+console.log('Electron desktop isolation and Web Shell parity checks passed.');
 
 function testPackageIdentity() {
   assert.equal(manifest.name, '@qwen-code/desktop-electron');
@@ -48,21 +54,15 @@ function testPackageIdentity() {
     manifest.build.mac.executableName,
     'Qwen Code Desktop Electron Preview',
   );
-  assert.equal(
-    manifest.build.executableName,
-    'qwen-code-desktop-electron-preview',
-  );
   assert.notEqual(manifest.build.appId, tauriManifest.identifier);
   assert.notEqual(manifest.build.productName, tauriManifest.productName);
+  assert.equal(manifest.build.mac.extendInfo, undefined);
   assert.equal(
-    manifest.build.mac.extendInfo.NSMicrophoneUsageDescription,
-    'Qwen Code uses the microphone for voice input and realtime conversations.',
+    manifest.build.afterPack,
+    'scripts/electron-builder-after-pack.cjs',
   );
   assert.equal(manifest.build.asar, true);
-  assert.equal(
-    manifest.build.beforeBuild,
-    'scripts/electron-builder-before-build.cjs',
-  );
+  assert.deepEqual(manifest.build.files, ['dist/main/**/*', 'package.json']);
   assert.deepEqual(manifest.build.extraResources, [
     { from: 'runtime/qwen-code', to: 'runtime/qwen-code' },
   ]);
@@ -75,63 +75,75 @@ function testPackageIdentity() {
 }
 
 function testSecurityBoundary() {
-  const main = fs.readFileSync(
-    path.join(packageDir, 'src/main/index.ts'),
-    'utf8',
-  );
-  const preload = fs.readFileSync(
-    path.join(packageDir, 'src/preload/index.ts'),
-    'utf8',
-  );
-  const runtime = fs.readFileSync(
-    path.join(packageDir, 'src/main/runtime.ts'),
-    'utf8',
-  );
   assert.match(main, /nodeIntegration: false/);
   assert.match(main, /contextIsolation: true/);
   assert.match(main, /sandbox: true/);
+  assert.match(main, /webSecurity: true/);
   assert.match(main, /setWindowOpenHandler/);
-  assert.match(main, /setPermissionRequestHandler/);
-  assert.match(main, /mediaTypes\[0\] === 'audio'/);
-  assert.match(preload, /contextBridge\.exposeInMainWorld/);
-  assert.doesNotMatch(preload, /ipcRenderer\.(?:send|sendSync|postMessage)/);
+  assert.match(main, /page-title-updated/);
   assert.match(runtime, /--require-auth/);
-  assert.match(runtime, /--allow-origin/);
-  assert.match(runtime, /qwen-desktop:\/\/app/);
   assert.match(runtime, /127\.0\.0\.1/);
+  assert.match(runtime, /url\.hash = new URLSearchParams\(\{ token \}\)/);
+  assert.doesNotMatch(runtime, /--allow-origin|qwen-desktop:\/\//);
+  assert.doesNotMatch(main, /ipcMain|contextBridge|preload:|WebContentsView/);
 }
 
-function testWebShellOwnership() {
-  const renderer = fs.readFileSync(
-    path.join(packageDir, 'src/renderer/main.tsx'),
-    'utf8',
-  );
-  assert.match(
-    renderer,
-    /import \{[\s\S]*WebShellWithProviders[\s\S]*\} from '@qwen-code\/web-shell'/,
-  );
-  assert.match(renderer, /<WebShellWithProviders/);
-  assert.match(renderer, /compactThinking/);
-  assert.match(renderer, /markdownTableMode="advanced"/);
-  const types = fs.readFileSync(
-    path.join(packageDir, 'src/shared/types.ts'),
-    'utf8',
-  );
-  const voiceConfig = types.match(
-    /export interface VoiceOverlayLaunchConfig \{([\s\S]*?)\n\}/,
-  )?.[1];
-  assert.ok(voiceConfig);
-  assert.doesNotMatch(voiceConfig, /daemonBaseUrl|daemonToken|workspace/);
+function testStandaloneWebShellOwnership() {
+  assert.match(main, /loadURL\(runtime\.authenticatedWebUrl\(\)\)/);
+  assert.match(runtimeBuilder, /build.*packages\/web-shell/s);
+  assert.match(runtimeBuilder, /web-shell\/index\.html/);
+  assert.match(runtimeBuilder, /copyDirectory\(distDir, libDir\)/);
+  assert.doesNotMatch(main, /WebShellWithProviders|desktop\.css/);
+  for (const dependency of [
+    '@tailwindcss/vite',
+    '@vitejs/plugin-react',
+    'katex',
+    'react',
+    'react-dom',
+    'tailwindcss',
+    'vite',
+  ]) {
+    assert.equal(manifest.devDependencies[dependency], undefined);
+  }
+}
 
-  const productionFiles = listFiles(path.join(packageDir, 'src'));
+function testRemovedDesktopSurfaces() {
+  assert.doesNotMatch(
+    main,
+    /new-chat-window|open-browser|voice-overlay|WebContentsView|ipcMain/,
+  );
+  assert.doesNotMatch(entitlements, /audio-input/);
+  for (const permission of [
+    'NSAudioCaptureUsageDescription',
+    'NSBluetoothAlwaysUsageDescription',
+    'NSBluetoothPeripheralUsageDescription',
+    'NSCameraUsageDescription',
+    'NSMicrophoneUsageDescription',
+  ]) {
+    assert.match(afterPack, new RegExp(permission));
+  }
+  const sourceFiles = listFiles(path.join(packageDir, 'src'));
+  assert.deepEqual(
+    sourceFiles.map((file) => path.relative(packageDir, file)).sort(),
+    [
+      'src/main/index.ts',
+      'src/main/runtime.test.ts',
+      'src/main/runtime.ts',
+      'src/main/state.test.ts',
+      'src/main/state.ts',
+    ],
+  );
+  const productionFiles = sourceFiles.filter(
+    (file) => !file.endsWith('.test.ts'),
+  );
   for (const file of productionFiles) {
     const contents = fs.readFileSync(file, 'utf8');
+    assert.doesNotMatch(contents, /@tauri-apps|__TAURI__|src-tauri/);
     assert.doesNotMatch(
       contents,
       /packages\/desktop(?:\/|')/,
       `Legacy Electron source referenced by ${file}`,
     );
-    assert.doesNotMatch(contents, /@tauri-apps|__TAURI__|src-tauri/);
   }
 }
 
@@ -199,13 +211,14 @@ function testVersionSynchronization() {
 }
 
 function listFiles(directory) {
-  return fs
-    .readdirSync(directory, { withFileTypes: true })
-    .flatMap((entry) => {
-      const absolute = path.join(directory, entry.name);
-      return entry.isDirectory() ? listFiles(absolute) : [absolute];
-    })
-    .filter((file) => /\.(?:ts|tsx)$/.test(file) && !file.endsWith('.test.ts'));
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const absolute = path.join(directory, entry.name);
+    return entry.isDirectory() ? listFiles(absolute) : [absolute];
+  });
+}
+
+function read(relative) {
+  return fs.readFileSync(path.join(packageDir, relative), 'utf8');
 }
 
 function readJson(file) {

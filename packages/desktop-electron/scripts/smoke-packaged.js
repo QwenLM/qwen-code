@@ -9,7 +9,9 @@ const target = process.argv[2];
 if (!target) {
   throw new Error('Usage: node scripts/smoke-packaged.js <app-or-executable>');
 }
-const executable = resolveExecutable(path.resolve(target));
+const resolvedTarget = path.resolve(target);
+verifyPackageMetadata(resolvedTarget);
+const executable = resolveExecutable(resolvedTarget);
 if (!fs.statSync(executable, { throwIfNoEntry: false })?.isFile()) {
   throw new Error(`Packaged executable is missing: ${executable}`);
 }
@@ -70,6 +72,26 @@ function resolveExecutable(input) {
   return input;
 }
 
+function verifyPackageMetadata(input) {
+  if (process.platform !== 'darwin' || !input.endsWith('.app')) return;
+  const infoPlist = execFileSync(
+    '/usr/bin/plutil',
+    ['-p', path.join(input, 'Contents', 'Info.plist')],
+    { encoding: 'utf8' },
+  );
+  for (const permission of [
+    'NSAudioCaptureUsageDescription',
+    'NSBluetoothAlwaysUsageDescription',
+    'NSBluetoothPeripheralUsageDescription',
+    'NSCameraUsageDescription',
+    'NSMicrophoneUsageDescription',
+  ]) {
+    if (infoPlist.includes(permission)) {
+      throw new Error(`Packaged app retained device permission: ${permission}`);
+    }
+  }
+}
+
 function capture(stream, chunk) {
   if (output.length >= 16 * 1024) return;
   output = `${output}[${stream}] ${chunk.toString('utf8')}`.slice(0, 16 * 1024);
@@ -88,10 +110,7 @@ async function waitForReady() {
     const match = runtime.match(
       /qwen serve listening on (http:\/\/127\.0\.0\.1:\d+)/,
     );
-    if (
-      match &&
-      host.includes('renderer ready at qwen-desktop://app/index.html')
-    ) {
+    if (match && host.includes(`web shell ready at ${match[1]}`)) {
       return match[1];
     }
     await delay(250);
@@ -102,22 +121,10 @@ async function waitForReady() {
 }
 
 async function verifySecurityBoundary(url) {
-  const preflight = await fetch(`${url}/capabilities`, {
-    method: 'OPTIONS',
-    headers: {
-      Origin: 'qwen-desktop://app',
-      'Access-Control-Request-Headers': 'authorization',
-      'Access-Control-Request-Method': 'GET',
-    },
-  });
-  if (
-    preflight.status !== 204 ||
-    preflight.headers.get('access-control-allow-origin') !==
-      'qwen-desktop://app'
-  ) {
-    throw new Error(
-      `Packaged daemon rejected the Electron origin: ${preflight.status}`,
-    );
+  const shell = await fetch(url, { headers: { Accept: 'text/html' } });
+  const html = await shell.text();
+  if (!shell.ok || !html.includes('<div id="root"></div>')) {
+    throw new Error(`Packaged Web Shell is unavailable: ${shell.status}`);
   }
   const unauthenticated = await fetch(`${url}/capabilities`);
   if (unauthenticated.status !== 401) {

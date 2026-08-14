@@ -30,8 +30,6 @@ const child = spawn(
     '--hostname',
     '127.0.0.1',
     '--require-auth',
-    '--allow-origin',
-    'qwen-desktop://app',
     '--workspace',
     packageDir,
     '--no-open',
@@ -93,32 +91,6 @@ async function verify(baseUrl) {
   if (!shell.ok || !html.includes('<div id="root"></div>')) {
     finish(new Error(`Web Shell check failed: ${shell.status}`));
     return;
-  }
-  const allowedOrigin = await fetch(`${baseUrl}/capabilities`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Origin: 'qwen-desktop://app',
-    },
-  });
-  if (
-    !allowedOrigin.ok ||
-    allowedOrigin.headers.get('access-control-allow-origin') !==
-      'qwen-desktop://app'
-  ) {
-    finish(
-      new Error(`Electron renderer CORS check failed: ${allowedOrigin.status}`),
-    );
-    return;
-  }
-  if (process.platform === 'darwin') {
-    const live = await fetch(`${baseUrl}/live/status`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const liveStatus = await live.json().catch(() => undefined);
-    if (!live.ok || liveStatus?.v !== 1) {
-      finish(new Error(`Live status check failed: ${live.status}`));
-      return;
-    }
   }
   const deniedOrigin = await fetch(`${baseUrl}/capabilities`, {
     headers: {

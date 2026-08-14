@@ -10,9 +10,8 @@
     "dev": "npm run build:app && electron .",
     "start": "electron .",
     "build": "npm run build:runtime && npm run build:app && electron-builder",
-    "build:app": "npm run build:main && npm run build:renderer",
+    "build:app": "npm run build:main",
     "build:main": "node scripts/build-main.js",
-    "build:renderer": "vite build --config vite.config.ts",
     "build:runtime": "node scripts/prepare-runtime.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke:runtime": "node scripts/smoke-runtime.js",
@@ -22,20 +21,11 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.2",
     "@types/node": "^22.0.0",
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.2.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
-    "katex": "^0.16.47",
-    "react": "^19.2.0",
-    "react-dom": "^19.0.0",
-    "tailwindcss": "^4.3.2",
     "typescript": "^5.3.3",
-    "vite": "^5.0.0",
     "vitest": "^3.2.4"
   },
   "build": {
@@ -45,10 +35,9 @@
     "artifactName": "Qwen-Code-Desktop-Electron-Preview-${version}-${arch}.${ext}",
     "asar": true,
     "beforeBuild": "scripts/electron-builder-before-build.cjs",
+    "afterPack": "scripts/electron-builder-after-pack.cjs",
     "files": [
       "dist/main/**/*",
-      "dist/preload/**/*",
-      "dist/renderer/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -64,9 +53,6 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "executableName": "Qwen Code Desktop Electron Preview",
-      "extendInfo": {
-        "NSMicrophoneUsageDescription": "Qwen Code uses the microphone for voice input and realtime conversations."
-      },
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",

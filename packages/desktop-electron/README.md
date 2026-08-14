@@ -1,38 +1,27 @@
 # Qwen Code Electron desktop
 
-This package is the Electron host for the existing Qwen Code Web Shell. The
-renderer imports `WebShellWithProviders`; it does not maintain a second chat or
-session implementation.
-
-It lives alongside the retained Tauri implementation in
-`packages/desktop-shell`; the two packages have independent application
-identities, dependencies, build output, and CI workflows.
-
-The package is intentionally isolated from the root npm workspace so Electron
-and electron-builder do not enter the root dependency graph.
+This package is an independent Electron host for the existing standalone Qwen
+Code Web Shell. It lives alongside the retained Tauri implementation in
+`packages/desktop-shell` with a separate application identity, dependency
+graph, build output, and CI workflow.
 
 ## Architecture
 
-- Electron main owns windows, workspace selection, desktop state, and the
-  bundled runtime process.
-- The sandboxed preload exposes a typed, allowlisted desktop bridge.
-- The renderer runs at `qwen-desktop://app` and mounts the public Web Shell
-  component.
-- The renderer connects directly to the authenticated loopback daemon through
-  the existing daemon React SDK.
-- Daemon/Core continues to own models, sessions, tools, permissions, MCP,
-  filesystem access, Computer Use, and voice services.
+Electron starts the same authenticated loopback `qwen serve` runtime used by
+Tauri and navigates its single `BrowserWindow` directly to the daemon-served
+Web Shell URL. The bearer token travels once in the URL fragment and is then
+handled by the standalone Web Shell entry.
 
-Multiple chat windows share one daemon while retaining their own current
-session. The embedded browser uses an isolated `WebContentsView` session and
-never receives the daemon token or preload bridge. Existing Core Computer Use
-tools remain available to agents without adding Electron-specific routes or
-changing shared daemon behavior. The Voice overlay controls the same signed
-Live Host session already exposed by Web Shell.
+Electron does not build or maintain another React renderer. The HTML, CSS,
+providers, routing, settings, plugins, sessions, tools, permissions, MCP, and
+all other product UI come from `lib/web-shell` in the bundled Qwen runtime.
+This makes rendering parity a build invariant instead of a collection of
+desktop CSS overrides.
 
-The bundled daemon listens on an ephemeral `127.0.0.1` port, requires a random
-per-launch bearer token, and allows browser API requests only from
-`qwen-desktop://app`.
+The preview intentionally provides one Web Shell window only. It does not add
+an embedded browser, Voice overlay, additional chat windows, renderer IPC, or
+a preload bridge. Safe external HTTP(S) links are handed to the operating
+system browser.
 
 ## Local development
 
@@ -45,13 +34,8 @@ npm run build:app --workspaces=false
 QWEN_DESKTOP_WORKSPACE=/absolute/path npm start --workspaces=false
 ```
 
-`npm run dev` rebuilds the Electron application processes and starts the same
-packaged renderer. Use the explicit build/start commands when debugging one
-stage.
-
-The renderer resolves Web Shell, Web UI, and SDK sources from the repository
-root. Set `QWEN_CODE_ROOT` when the Qwen source tree is elsewhere, as the
-Electron preview-build workflow does.
+The runtime build compiles the selected Qwen source tree, including the
+standalone Web Shell. Set `QWEN_CODE_ROOT` when that source tree is elsewhere.
 
 ## Verification
 
@@ -59,6 +43,7 @@ Electron preview-build workflow does.
 npm run typecheck --workspaces=false
 npm test --workspaces=false
 npm run smoke:runtime --workspaces=false
+npm run test:release --workspaces=false
 ```
 
 The packaged smoke accepts an application executable or macOS `.app` path:
@@ -69,12 +54,11 @@ npm run smoke:packaged --workspaces=false -- /path/to/application
 
 ## Preview builds
 
-`npm run build` prepares the selected Qwen runtime, builds the Electron
-main/preload/renderer, and invokes electron-builder. Runtime executables are
-shipped as application resources rather than inside ASAR.
+`npm run build` prepares the selected Qwen runtime, bundles the Electron main
+process, and invokes electron-builder. Runtime executables and the standalone
+Web Shell are shipped as application resources rather than inside ASAR.
 
 The dedicated preview-build workflow produces unsigned Actions artifacts only;
 it cannot publish a GitHub release or update the Tauri `desktop-latest` feed.
-The preview uses the separate application identifier
-`com.alibaba.qwen-code.electron-preview` and product name
+The preview uses `com.alibaba.qwen-code.electron-preview` and the product name
 `Qwen Code Desktop Electron Preview`, so it can be installed beside Tauri.
