@@ -142,13 +142,15 @@ describe('agents command', () => {
     if (typeof builder !== 'function') {
       throw new Error('agents command builder must be a function');
     }
-    const parser = builder(
-      yargs([])
-        .exitProcess(false)
-        .fail((message, error) => {
-          throw error ?? new Error(message);
-        })
-        .locale('en'),
+    const parser = await Promise.resolve(
+      builder(
+        yargs([])
+          .exitProcess(false)
+          .fail((message, error) => {
+            throw error ?? new Error(message);
+          })
+          .locale('en'),
+      ),
     );
 
     await parser.parseAsync(`agents ${flags}`.trim());

@@ -638,6 +638,37 @@ describe('parseArguments', () => {
       '--allowed-mcp-server-names',
       ['--bg', 'background task', '--allowed-mcp-server-names', 's'],
     ],
+    ['--input-file', ['--bg', 'background task', '--input-file', 'cmds.jsonl']],
+    [
+      '--fallback-model',
+      ['--bg', 'background task', '--fallback-model', 'qwen-plus'],
+    ],
+    ['--core-tools', ['--bg', 'background task', '--core-tools', 'read_file']],
+    [
+      '--exclude-tools',
+      ['--bg', 'background task', '--exclude-tools', 'run_shell_command'],
+    ],
+    [
+      '--disabled-slash-commands',
+      ['--bg', 'background task', '--disabled-slash-commands', '/help'],
+    ],
+    ['--auth-type', ['--bg', 'background task', '--auth-type', 'qwen-oauth']],
+    ['--experimental-lsp', ['--bg', 'background task', '--experimental-lsp']],
+    ['--json-file', ['--bg', 'background task', '--json-file', 'events.json']],
+    ['--json-fd', ['--bg', 'background task', '--json-fd', '3']],
+    ['--max-wall-time', ['--bg', 'background task', '--max-wall-time', '30m']],
+    [
+      '--max-session-turns',
+      ['--bg', 'background task', '--max-session-turns', '5'],
+    ],
+    [
+      '--max-tool-calls',
+      ['--bg', 'background task', '--max-tool-calls', '100'],
+    ],
+    [
+      '--max-subagent-depth',
+      ['--bg', 'background task', '--max-subagent-depth', '2'],
+    ],
   ])('rejects --bg combined with %s', async (_label, args) => {
     process.argv = ['node', 'script.js', ...args];
 

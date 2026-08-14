@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { INTERNAL_SECRET_ENV_VARS } from '@qwen-code/qwen-code-core';
 import {
   AGENT_VIEW_WORKER_ENV_KEYS,
   createAgentViewWorkerSidebandEnv,
@@ -53,6 +54,15 @@ describe('worker sideband env', () => {
       [QWEN_AGENT_VIEW_ACTIVE_CWD]: '/repo',
     });
     expect(AGENT_VIEW_WORKER_ENV_KEYS).toContain(QWEN_AGENT_VIEW_WORKER);
+  });
+
+  it('keeps every worker identity key covered by the child-env denylist', () => {
+    // sanitizeChildEnv strips INTERNAL_SECRET_ENV_VARS from agent-run
+    // children; a worker key missing from that list would let a child
+    // inherit the worker identity and impersonate the sideband.
+    for (const key of AGENT_VIEW_WORKER_ENV_KEYS) {
+      expect(INTERNAL_SECRET_ENV_VARS).toContain(key);
+    }
   });
 
   it('detects worker mode only when explicitly enabled', () => {

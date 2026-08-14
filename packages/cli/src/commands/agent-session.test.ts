@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs from 'yargs';
+import { AgentViewSupervisorClientError } from '../agent-view/supervisor-client.js';
 import {
   attachCommand,
   killCommand,
@@ -155,6 +156,9 @@ describe('agent session commands', () => {
       'qwen agents respawn requires <id> or --all.',
     );
 
+    // The rejection must surface at the yargs check layer, before the
+    // handler ensures (and may start) the daemon supervisor.
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
     expect(mockSupervisor.respawn).not.toHaveBeenCalled();
   });
 
@@ -173,6 +177,11 @@ describe('agent session commands', () => {
     await parseCommand('respawn 87654321');
 
     expect(mockSupervisor.respawn).toHaveBeenCalledWith('87654321');
+
+    mockSupervisor.remove.mockClear();
+    await parseCommand('rm 12345678');
+
+    expect(mockSupervisor.remove).toHaveBeenCalledWith('12345678');
   });
 
   it('routes respawn --all to the supervisor and prints JSON', async () => {
@@ -183,5 +192,29 @@ describe('agent session commands', () => {
       command: 'respawn',
       target: 'all',
     });
+  });
+
+  it('treats a respawn --all timeout as still in flight', async () => {
+    mockSupervisor.respawn.mockRejectedValueOnce(
+      new AgentViewSupervisorClientError(
+        'Timed out waiting for Agent View supervisor response.',
+        'timeout',
+      ),
+    );
+
+    await parseCommand('respawn --all');
+
+    expect(mockWriteStderrLineSafe).toHaveBeenCalledWith(
+      'Respawn is still running in the supervisor. Check `qwen agents` for session status.',
+    );
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('rethrows non-timeout respawn --all failures', async () => {
+    mockSupervisor.respawn.mockRejectedValueOnce(
+      new AgentViewSupervisorClientError('daemon gone', 'unavailable'),
+    );
+
+    await expect(parseCommand('respawn --all')).rejects.toThrow('daemon gone');
   });
 });

@@ -1048,6 +1048,29 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return 'Cannot use --bg/--background with --sandbox, --sandbox-image, --system-prompt, --append-system-prompt, --mcp-config, --extensions, --allowed-tools, or --allowed-mcp-server-names';
           }
+          if (
+            argv['background'] &&
+            (argv['inputFile'] !== undefined ||
+              argv['fallbackModel'] !== undefined ||
+              argv['coreTools'] !== undefined ||
+              argv['excludeTools'] !== undefined ||
+              argv['disabledSlashCommands'] !== undefined ||
+              argv['authType'] !== undefined ||
+              argv['experimentalLsp'] ||
+              argv['jsonFile'] !== undefined ||
+              argv['jsonFd'] !== undefined)
+          ) {
+            return 'Cannot use --bg/--background with --input-file, --fallback-model, --core-tools, --exclude-tools, --disabled-slash-commands, --auth-type, --experimental-lsp, --json-file, or --json-fd';
+          }
+          if (
+            argv['background'] &&
+            (argv['maxWallTime'] !== undefined ||
+              argv['maxSessionTurns'] !== undefined ||
+              argv['maxToolCalls'] !== undefined ||
+              argv['maxSubagentDepth'] !== undefined)
+          ) {
+            return 'Cannot use --bg/--background with --max-wall-time, --max-session-turns, --max-tool-calls, or --max-subagent-depth';
+          }
           if (argv['background'] && !process.stdin.isTTY) {
             // The positional-prompt gate above already ran, so the prompt
             // is positional here; the only actionable fix is a TTY.

@@ -373,11 +373,16 @@ export async function main() {
   }
 
   if (process.argv.includes('--internal-agent-view-supervisor')) {
-    const { runAgentViewSupervisor } = await import(
-      './agent-view/supervisor-runner.js'
-    );
-    await runAgentViewSupervisor();
-    process.exit(0);
+    // Gate on the supervisor launch env: defaultSpawnSupervisor always sets
+    // it on the daemon child, while a natural-language prompt mentioning the
+    // flag never does. Without the gate such a prompt would hijack the
+    // process into supervisor mode and hang without running the user input.
+    const { runAgentViewSupervisor, INTERNAL_AGENT_VIEW_SUPERVISOR_ENV } =
+      await import('./agent-view/supervisor-runner.js');
+    if (process.env[INTERNAL_AGENT_VIEW_SUPERVISOR_ENV] === '1') {
+      await runAgentViewSupervisor();
+      process.exit(0);
+    }
   }
 
   const ptyHostArgIndex = process.argv.indexOf(
@@ -403,7 +408,12 @@ export async function main() {
         './agent-view/pty-host-process.js'
       );
       const exit = await runAgentViewPtyHostProcess({ launchPath, socketPath });
-      process.exit(exit.exitCode);
+      // node-pty reports signal-kills as {exitCode: 0, signal}; surface them
+      // as failures (shell convention) so the supervisor does not record a
+      // killed worker as successfully completed.
+      process.exit(
+        exit.exitCode === 0 && exit.signal ? 128 + exit.signal : exit.exitCode,
+      );
     }
   }
 
@@ -937,11 +947,13 @@ export async function main() {
       const {
         isManagedAgentViewContinueBlocked,
         MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+        releaseExitedManagedSessionForContinue,
       } = await import('./startup/agent-view-resume-guard.js');
       if (await isManagedAgentViewContinueBlocked(config.getSessionId())) {
         writeStderrLine(MANAGED_AGENT_VIEW_RESUME_MESSAGE);
         process.exit(1);
       }
+      await releaseExitedManagedSessionForContinue(config.getSessionId());
     }
 
     {

@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
+import { sanitizeChildEnv } from './sanitize-child-env.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
 import { createDebugLogger } from './debugLogger.js';
 
@@ -496,6 +497,9 @@ async function runRipgrepOnce(
           maxBuffer: RIPGREP_BUFFER_LIMIT,
           timeout: wslTimeout(),
           signal,
+          // Agent-reachable spawn: scrub Qwen-internal secrets (including
+          // the Agent View worker identity) from the inherited env.
+          env: sanitizeChildEnv(process.env),
         },
         (error, stdout = '', stderr = '') => {
           const stdoutText = stdout.toString();
