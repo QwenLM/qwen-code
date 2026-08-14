@@ -141,7 +141,13 @@ function probeOutput(bin: string, flag: string): ProbeResult {
   // fd exhaustion (the transient condition this file names three times)
   // both probes reported 'not installed', and that false environment claim
   // then persisted into the manifest's degradedBecause. ENOENT is the only
-  // answer that means absent; the rest are this host, right now.
+  // answer that CAN mean absent — with a caveat the refusal wording has to
+  // carry: execve also answers ENOENT when the file exists and is
+  // executable but its interpreter does not (a broken shebang, a dangling
+  // `#!/usr/bin/env` chain — measured: a mode-0755 tmux with
+  // `#!/nonexistent/interp` is indistinguishable here from no tmux at all).
+  // Nothing in the spawn result separates them, so the refusal says both
+  // rather than asserting the one it cannot know.
   if (code && code !== 'ENOENT') {
     return { status: 'hung', code, spawned: false };
   }
@@ -156,6 +162,12 @@ function probeOutput(bin: string, flag: string): ProbeResult {
   }
   return { status: 'absent' };
 }
+
+/** How much stdout+stderr the freeze render spawn will hold. Explicit, not
+ * Node's silent 1 MiB default: an overrun does not truncate, it KILLS the
+ * child (SIGKILL + ENOBUFS), so the value is part of the render contract
+ * and the degradation wording names it. */
+const FREEZE_MAX_BUFFER = 8 * 1024 * 1024;
 
 /** The freeze render invocation, exported as a seam: the 30s belt against a
  * wedged freeze (measured hangs on this repo's own workflows) is otherwise
@@ -211,6 +223,14 @@ function tmux(argv: string[]): string {
     // the whole review agent behind it.
     timeout: tmuxControl.timeoutMs,
     killSignal: 'SIGKILL',
+    // EXPLICIT, like every sibling spawn here: with no stdio option Node's
+    // execFileSync sets `inheritStderr = !options.stdio` and tees the
+    // child's captured stderr into process.stderr with a raw, UNGUARDED
+    // write — outside the broken-pipe guard that keeps the exit
+    // disposition honest, and interleaved with the contract output a
+    // machine reads. Errors reach the caller through the thrown error's
+    // own stderr, which is where this command already reads them.
+    stdio: ['ignore', 'pipe', 'pipe'],
   }) as string;
 }
 
@@ -269,6 +289,11 @@ let artifactsComplete = false;
  * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
  * trace where the machine-read contract promised exit 3 (or 0). Swallow
  * EPIPE only; anything else stays loud. */
+/** Thrown when an artifact path was claimed by something else DURING the
+ * capture window. Distinct from a write failure because the cleanup must
+ * behave differently: the occupant is not ours to remove. */
+class ArtifactCollision extends Error {}
+
 function guardBrokenPipes(): void {
   if (brokenPipeGuarded) return;
   brokenPipeGuarded = true;
@@ -392,6 +417,39 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       // Gone, or unstattable: nothing of ours to credit or remove.
       return false;
+    }
+  };
+  // The collision gate before the capture window is not enough on its own:
+  // the captured command runs for up to --timeout-ms (70 minutes at the
+  // cap) and can claim these paths while it runs. Two shapes, both
+  // probe-reproduced: a command doing `printf … > cap.json` had its file
+  // silently replaced and the run reported success; and a SYMLINK planted
+  // at <out>.ans redirected this run's bytes clean out of the --out base —
+  // the escape the lstat-based gate closes at check time, re-opened through
+  // the window. So occupancy is decided AGAIN at write time, and the open
+  // itself refuses to follow a link (O_NOFOLLOW closes the residual race
+  // between that check and the write).
+  const writeArtifact = (path: string, stamp: Stamp, data: string): void => {
+    if (changed(path, stamp)) {
+      throw new ArtifactCollision(
+        `${path} was claimed during the capture window by something this ` +
+          `capture did not write — refusing to replace it`,
+      );
+    }
+    // O_NOFOLLOW is POSIX-only; on Windows it does not exist and the
+    // occupancy check above is the whole guard.
+    const fd = openSync(
+      path,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_TRUNC |
+        (fsConstants.O_NOFOLLOW ?? 0),
+      0o666,
+    );
+    try {
+      writeFileSync(fd, data, 'utf8');
+    } finally {
+      closeSync(fd);
     }
   };
   // Fail-safe by CONSTRUCTION, not by comment: `changed()` compares
@@ -688,9 +746,29 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   }
   if (tmuxProbe.status === 'absent') {
     refuse(
-      'tmux is not installed. Rendering claims stay argued from the code on ' +
-        'this host; say so in the finding rather than describing an imagined ' +
-        'terminal as evidence.',
+      'tmux is not installed, or is installed but cannot be executed (a ' +
+        'broken interpreter line answers the same ENOENT). Rendering claims ' +
+        'stay argued from the code on this host; say so in the finding ' +
+        'rather than describing an imagined terminal as evidence.',
+    );
+    return;
+  }
+  // The sentinel's HOME is the one path this run writes that no gate looks
+  // at. It moved into the system temp dir precisely so nothing a user can
+  // name collides with it — which also took it out from behind --out's
+  // write probe. An unusable TMPDIR (nonexistent, or not writable) showed
+  // up as the holder simply never becoming ready: the whole --timeout-ms
+  // burned, then a refusal blaming the capture for an environment problem
+  // named nowhere (probe-verified driving the real command). Probed here,
+  // before any server starts, so it refuses in milliseconds and says why.
+  try {
+    accessSync(dirname(holderReadyPath), fsConstants.W_OK | fsConstants.X_OK);
+  } catch (e) {
+    refuse(
+      `the temporary directory is not usable for this capture's ready ` +
+        `sentinel: ${dirname(holderReadyPath)} (${
+          e instanceof Error ? e.message : String(e)
+        }). Point TMPDIR at a writable directory.`,
     );
     return;
   }
@@ -1092,7 +1170,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   }
 
   try {
-    writeFileSync(ansPath, ansText, 'utf8');
+    writeArtifact(ansPath, ansStamp, ansText);
   } catch (e) {
     // The disk can fill (or the target turn hostile) during a long capture
     // window; the same principle as the mkdir guard — refusal contract, not
@@ -1107,7 +1185,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // spared as unrelated — must survive the refusal. A partial write
       // does change it, and that truncated .ans left undescribed is the
       // harm this catch exists for.
-      if (changed(ansPath, ansStamp)) rmSync(ansPath, { force: true });
+      // ...and NEVER on a collision: the thing at the path is precisely
+      // what this run refused to replace, so removing it would be the
+      // data loss the refusal exists to prevent.
+      if (!(e instanceof ArtifactCollision) && changed(ansPath, ansStamp))
+        rmSync(ansPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
     }
@@ -1216,6 +1298,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       timeout: freezeRender.timeoutMs,
       killSignal: 'SIGKILL',
       stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: FREEZE_MAX_BUFFER,
     });
     // Read the size DEFENSIVELY: this was the only unguarded throwable fs
     // call in the function. A png that disappears between the existsSync
@@ -1263,11 +1346,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           ? 'exited 0 but wrote no image'
           : r.signal
             ? // A belt kill carries BOTH signal and error (ETIMEDOUT); name
-              // the belt, or it reads as an unexplained external kill.
+              // the belt, or it reads as an unexplained external kill. The
+              // error CODE decides, not its mere presence: a maxBuffer
+              // overrun kills with the same SIGKILL and also sets an error
+              // (ENOBUFS — probe-measured for this exact spawn), and
+              // blaming the render belt for it is a false causal claim
+              // that sends a reader hunting a hang that never happened.
               `signal ${r.signal}${
-                r.error
+                (r.error as NodeJS.ErrnoException | undefined)?.code ===
+                'ETIMEDOUT'
                   ? ` after the ${freezeRender.timeoutMs}ms render belt`
-                  : ''
+                  : (r.error as NodeJS.ErrnoException | undefined)?.code ===
+                      'ENOBUFS'
+                    ? ` — freeze wrote more than the ${FREEZE_MAX_BUFFER} bytes this spawn captures`
+                    : ''
               }`
             : r.status !== null
               ? `exit ${String(r.status)}`
@@ -1319,10 +1411,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     settledBy,
   };
   try {
-    writeFileSync(
+    writeArtifact(
       manifestPath,
+      manifestStamp,
       `${JSON.stringify(manifest, null, 2)}\n`,
-      'utf8',
     );
   } catch (e) {
     // "THIS run's artifacts or nothing": a refusal must not leave an .ans
@@ -1346,6 +1438,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         [pngPath, pngStamp],
         [manifestPath, manifestStamp],
       ] as const) {
+        // A collision names the ONE path this run refused to replace: the
+        // occupant is someone else's, and removing it here would be the
+        // data loss the refusal exists to prevent. The other two are still
+        // this run's to clean up.
+        if (e instanceof ArtifactCollision && path === manifestPath) continue;
         try {
           if (changed(path, stamp)) rmSync(path, { force: true });
         } catch {

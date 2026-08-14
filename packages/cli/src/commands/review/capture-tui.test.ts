@@ -176,6 +176,45 @@ describe('capture-tui without tmux (probe seam)', () => {
     }
   });
 
+  it('refuses an unusable TMPDIR up front, naming it', async () => {
+    // The sentinel lives under the system temp dir now, and nothing probed
+    // that directory: an unusable TMPDIR burned the whole --timeout-ms
+    // waiting for a holder that could never signal ready, then blamed the
+    // capture. The dir is created BEFORE TMPDIR is overridden — mkdtemp
+    // reads the same variable.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-badtmp-'));
+    const realTmp = process.env['TMPDIR'];
+    process.env['TMPDIR'] = join(dir, 'no-such-temp-dir');
+    const started = Date.now();
+    try {
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: dir,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          // Generous on purpose: the point is that it refuses in
+          // milliseconds instead of sitting out the ready deadline.
+          timeoutMs: 60_000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('temporary directory is not usable');
+      expect(stderr).toContain('TMPDIR');
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+    } finally {
+      if (realTmp === undefined) delete process.env['TMPDIR'];
+      else process.env['TMPDIR'] = realTmp;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a tmux too old for capture-pane -N, naming the version', async () => {
     // -N landed in tmux 3.1; an older host passes -V and would otherwise
     // die MID-capture on the unknown flag — blaming tmux for a version
@@ -921,6 +960,13 @@ describe('capture-tui without tmux (probe seam)', () => {
     probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-barekeys-'));
     try {
+      // Seeded, so the assertions below are not vacuous: against an empty
+      // dir `existsSync(cap.json) === false` passes with or without the
+      // clear, and every other refusal-gate family in this suite pins the
+      // ordering with real artifacts in place.
+      writeFileSync(join(dir, 'cap.ans'), 'old run');
+      writeFileSync(join(dir, 'cap.png'), 'old run');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
       const { stderr } = await withStdio(() =>
         runCaptureTui({
           command: 'printf hi',
@@ -936,6 +982,8 @@ describe('capture-tui without tmux (probe seam)', () => {
       );
       expect(process.exitCode).toBe(3);
       expect(stderr).toContain('no tokens');
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -950,6 +998,13 @@ describe('capture-tui without tmux (probe seam)', () => {
     probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-emptykey-'));
     try {
+      // Seeded, so the assertions below are not vacuous: against an empty
+      // dir `existsSync(cap.json) === false` passes with or without the
+      // clear, and every other refusal-gate family in this suite pins the
+      // ordering with real artifacts in place.
+      writeFileSync(join(dir, 'cap.ans'), 'old run');
+      writeFileSync(join(dir, 'cap.png'), 'old run');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
       const { stderr } = await withStdio(() =>
         runCaptureTui({
           command: 'printf hi',
@@ -965,6 +1020,8 @@ describe('capture-tui without tmux (probe seam)', () => {
       );
       expect(process.exitCode).toBe(3);
       expect(stderr).toContain('empty token');
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.png'))).toBe(false);
       expect(existsSync(join(dir, 'cap.json'))).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1215,9 +1272,14 @@ describe('capture-tui without tmux (probe seam)', () => {
         let out = '';
         child.stdout.on('data', (b: Buffer) => (out += b.toString()));
         child.stderr.on('data', (b: Buffer) => (out += b.toString()));
+        // An external killer, like the FIFO sibling: an in-process timeout
+        // cannot interrupt a child that never exits, so without this a
+        // regression hangs the run instead of reddening it.
+        const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
         const code = await new Promise<number | null>((resolve) =>
           child.once('exit', (c) => resolve(c)),
         );
+        clearTimeout(killer);
         expect(code).toBe(3);
         expect(out).toContain('not writable');
         // Unverifiable is not permission to delete.
@@ -1270,9 +1332,13 @@ describe('capture-tui without tmux (probe seam)', () => {
       });
       // Kill the reader immediately: the child's refusal write hits EPIPE.
       child.stdout.destroy();
+      // Same external killer as the FIFO sibling — see there for why an
+      // in-process timeout cannot stand in for it.
+      const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
       const code = await new Promise<number | null>((resolve) =>
         child.once('exit', (c) => resolve(c)),
       );
+      clearTimeout(killer);
       expect(code).toBe(3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1369,6 +1435,48 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       ...over,
     } as never);
   }
+
+  it('refuses when the CAPTURED COMMAND claims an artifact path mid-window', async () => {
+    // The collision gate runs before the window; the window then lasts up
+    // to --timeout-ms. Probe-reproduced: a command writing its own
+    // <out>.json had that file silently replaced and the run reported
+    // success — the same ownership harm the pre-window gate exists to
+    // prevent, arriving from inside the capture instead of before it. The
+    // refusal must ALSO leave the occupant alone: this run's cleanup path
+    // would otherwise delete the very file it refused to replace.
+    const { stderr } = await withStdio(() =>
+      run({
+        command: `printf 'USER-FILE-CONTENT' > cap.json; printf 'MARK\\n'; sleep 20`,
+        until: 'MARK',
+      }),
+    );
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('claimed during the capture window');
+    expect(readFileSync(join(dir, 'cap.json'), 'utf8')).toBe(
+      'USER-FILE-CONTENT',
+    );
+  });
+
+  it('does not follow a SYMLINK planted at <out>.ans mid-window', async () => {
+    // The write followed links, and the occupancy check that guards it ran
+    // before the window: a symlink planted at <out>.ans during the capture
+    // redirected this run's bytes OUT of the --out base — exactly what the
+    // lstat-based gate refuses at check time. The target must stay empty
+    // and the run must refuse rather than write through the link.
+    const outside = join(dir, 'outside-the-base');
+    writeFileSync(outside, 'untouched');
+    const { stderr } = await withStdio(() =>
+      run({
+        command: `ln -s '${outside}' cap.ans; printf 'MARK\\n'; sleep 20`,
+        until: 'MARK',
+      }),
+    );
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('claimed during the capture window');
+    expect(readFileSync(outside, 'utf8')).toBe('untouched');
+    // The link itself is not ours to remove either.
+    expect(lstatSync(join(dir, 'cap.ans')).isSymbolicLink()).toBe(true);
+  });
 
   it('an ans-only manifest does not authorize clearing <out>.png', async () => {
     // Mutation-probed: dropping the `manifestHadPng` condition shipped the
@@ -2441,6 +2549,20 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
   });
 
+  it('does not blame the render belt for a maxBuffer overrun', async () => {
+    // Both shapes kill with SIGKILL and set r.error, so presence alone
+    // could not tell them apart and the overrun was recorded as 'signal
+    // SIGKILL after the 30000ms render belt' — a hang that never happened.
+    // The fake spews past the cap instead of hanging: same disposition,
+    // different cause.
+    await withFakeFreeze('#!/bin/sh\nexec yes "spew" \n', () => run());
+    const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+    expect(manifest.evidence).toBe('ans-only');
+    expect(manifest.degradedBecause).toContain('signal SIGKILL');
+    expect(manifest.degradedBecause).not.toContain('render belt');
+    expect(manifest.degradedBecause).toContain('bytes this spawn captures');
+  }, 60_000);
+
   it('records a freeze CRASH with its diagnostics, not just its absence', async () => {
     await withFakeFreeze(
       '#!/bin/sh\necho "boom: render exploded" >&2\nexit 9\n',
@@ -2580,9 +2702,16 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         env: { ...process.env, PATH: `${binDir}:${process.env['PATH'] ?? ''}` },
       },
     );
+    // Drained, not just piped: nobody read these, so a spewing regression
+    // fills the ~64KB pipe buffer and blocks the child forever — the same
+    // hang the killer below exists for, reached a different way.
+    child.stdout?.on('data', () => {});
+    child.stderr?.on('data', () => {});
+    const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
     const code = await new Promise<number | null>((resolve) =>
       child.once('exit', (c) => resolve(c)),
     );
+    clearTimeout(killer);
     // A completed capture is a success, whatever happened to stdio after.
     expect(code).toBe(0);
     expect(existsSync(join(dir, 'stdio.ans'))).toBe(true);
@@ -3323,7 +3452,18 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         // child, the disposition never settles, and vitest fails the test —
         // with the guard already cleared, the child then ran out its
         // 60s capture with its private tmux server alive on every red run.
-        const orphanGuard = setTimeout(() => child.kill('SIGKILL'), 20_000);
+        // SIGTERM, not SIGKILL: the child's own handler is what reaps its
+        // private server, and a SIGKILL'd child leaves it standing
+        // (measured) — a guard meant to prevent an orphan would create one.
+        // And the rescue is RECORDED: SIGTERM is also this loop's expected
+        // cause of death, so a child the guard had to kill would otherwise
+        // produce the expected disposition and pass green with nothing
+        // saying the guard fired.
+        let guardFired = false;
+        const orphanGuard = setTimeout(() => {
+          guardFired = true;
+          child.kill('SIGTERM');
+        }, 20_000);
         try {
           expect(seen).toBe(true);
           child.kill(signal);
@@ -3348,6 +3488,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
             else await sleep(50);
           }
           expect(gone).toBe(true);
+          expect(guardFired).toBe(false);
         } catch (e) {
           child.kill('SIGKILL');
           throw e;
@@ -3419,7 +3560,14 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // alive together — measured through a 16s window. SIGTERM, never
     // SIGKILL: the child's own handler is what reaps the server, and a
     // SIGKILL'd child leaves it standing (measured).
-    const orphanGuard = setTimeout(() => child.kill('SIGTERM'), 20_000);
+    // Recorded, not just sent: SIGTERM is also the disposition this test
+    // asserts, so a child the guard had to kill produces exactly the
+    // expected death and would pass green with nothing saying so.
+    let guardFired = false;
+    const orphanGuard = setTimeout(() => {
+      guardFired = true;
+      child.kill('SIGTERM');
+    }, 20_000);
     try {
       let waited = 0;
       while (!existsSync(renderStarted) && waited < 200) {
@@ -3431,6 +3579,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       const { code, signal } = await disposition;
       // Death BY the signal — not a swallowed exit 0 with success JSON.
       expect(signal ?? `code:${code}`).toBe('SIGTERM');
+      expect(guardFired).toBe(false);
     } catch (e) {
       child.kill('SIGTERM');
       throw e;
