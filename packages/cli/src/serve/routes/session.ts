@@ -4832,6 +4832,7 @@ export function registerSessionRoutes(
           trimmed,
           clientId !== undefined ? { clientId } : undefined,
           typeof messageId === 'string' ? messageId : undefined,
+          { rejectIfIdle: true },
         );
         res.status(200).json(result);
       },

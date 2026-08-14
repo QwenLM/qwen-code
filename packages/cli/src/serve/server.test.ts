@@ -691,6 +691,7 @@ interface FakeBridgeOpts {
     message: string,
     context?: BridgeClientRequestContext,
     messageId?: string,
+    options?: Parameters<AcpSessionBridge['enqueueMidTurnMessage']>[4],
   ) => { accepted: boolean; messageId?: string };
   removeMidTurnImpl?: (
     sessionId: string,
@@ -1010,6 +1011,7 @@ interface FakeBridge extends AcpSessionBridge {
     message: string;
     context?: BridgeClientRequestContext;
     messageId?: string;
+    options?: Parameters<AcpSessionBridge['enqueueMidTurnMessage']>[4];
   }>;
   removeMidTurnCalls: Array<{
     sessionId: string;
@@ -2255,14 +2257,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    enqueueMidTurnMessage(sessionId, message, context, messageId) {
+    enqueueMidTurnMessage(sessionId, message, context, messageId, options) {
       enqueueMidTurnCalls.push({
         sessionId,
         message,
         ...(context ? { context } : {}),
         ...(messageId ? { messageId } : {}),
+        ...(options ? { options } : {}),
       });
-      return enqueueMidTurnImpl(sessionId, message, context, messageId);
+      return enqueueMidTurnImpl(
+        sessionId,
+        message,
+        context,
+        messageId,
+        options,
+      );
     },
     removeMidTurnMessage(sessionId, messageId, context) {
       removeMidTurnCalls.push({
@@ -9398,6 +9407,7 @@ describe('createServeApp', () => {
           message: 'hello',
           context: { clientId: 'client-9' },
           messageId: 'client-mid-1',
+          options: { rejectIfIdle: true },
         },
       ]);
     });
@@ -9414,8 +9424,36 @@ describe('createServeApp', () => {
       );
       expect(res.status).toBe(200);
       expect(bridge.enqueueMidTurnCalls).toEqual([
-        { sessionId: 's-1', message: 'hi', context: { clientId: 'client-9' } },
+        {
+          sessionId: 's-1',
+          message: 'hi',
+          context: { clientId: 'client-9' },
+          options: { rejectIfIdle: true },
+        },
       ]);
+    });
+
+    it('rejects an in-flight enqueue that reaches an idle session', async () => {
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: (
+          _sessionId,
+          _message,
+          _context,
+          _messageId,
+          options,
+        ) => (options?.rejectIfIdle ? { accepted: false } : { accepted: true }),
+      });
+
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'late steering',
+        messageId: 'late-steering-1',
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false });
+      expect(bridge.enqueueMidTurnCalls[0]?.options).toEqual({
+        rejectIfIdle: true,
+      });
     });
 
     it.each([[''], [123], ['x'.repeat(129)]])(

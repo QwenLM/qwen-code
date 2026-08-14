@@ -9880,10 +9880,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // If the turn settled while the POST was in flight, start it through the
       // normal prompt path. A client-supplied id keeps retries idempotent.
       if (entry.pendingPromptCount === 0) {
-        // `queueOnly` callers (live steering) drive the next turn themselves:
-        // a promoted message would run as a bare prompt with no collector
-        // forwarding its response to them or arming a deadline.
-        if (options?.queueOnly) {
+        // Both modes refuse new ownership once idle. `queueOnly` callers (live
+        // steering) additionally drive the next turn themselves: a promoted
+        // message would have no collector forwarding its response or deadline.
+        if (options?.queueOnly || options?.rejectIfIdle) {
           writeStderrLine(
             `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(messageId)}: session idle`,
           );
