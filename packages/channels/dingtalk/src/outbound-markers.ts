@@ -87,6 +87,10 @@ function maskCode(text: string): string {
 
 const MEDIA_MARKER_PREFIXES = ['IMAGE:', 'FILE:'];
 
+function previousOpenBracket(text: string, open: number): number {
+  return open === 0 ? -1 : text.lastIndexOf('[', open - 1);
+}
+
 function markerSafeTruncationStart(text: string, start: number): number {
   const before = text.slice(0, start);
   const lastClose = before.lastIndexOf(']');
@@ -96,7 +100,6 @@ function markerSafeTruncationStart(text: string, start: number): number {
     if (!/[\r\n]/u.test(candidate)) {
       const normalized = candidate.toUpperCase();
       if (
-        normalized &&
         MEDIA_MARKER_PREFIXES.some(
           (prefix) =>
             prefix.startsWith(normalized) || normalized.startsWith(prefix),
@@ -110,7 +113,7 @@ function markerSafeTruncationStart(text: string, start: number): number {
         return close + 1;
       }
     }
-    open = before.lastIndexOf('[', open - 1);
+    open = previousOpenBracket(before, open);
   }
   return start;
 }
@@ -137,18 +140,26 @@ export function findOutboundMediaMarkers(
   markerName: 'IMAGE' | 'FILE',
 ): OutboundMediaMarker[] {
   const visibleText = maskCode(text);
-  const markerPattern = new RegExp(
-    `\\[${markerName}:\\s*([^\\]\\r\\n]+)\\]`,
-    'gi',
-  );
+  const markerPattern = /\[(IMAGE|FILE):\s*/giu;
+  const openings = [...visibleText.matchAll(markerPattern)];
   const markers: OutboundMediaMarker[] = [];
 
-  for (const match of visibleText.matchAll(markerPattern)) {
-    const path = match[1]?.trim();
-    if (!path || match.index === undefined) continue;
+  for (let i = 0; i < openings.length; i++) {
+    const match = openings[i]!;
+    if (match.index === undefined || match[1]?.toUpperCase() !== markerName) {
+      continue;
+    }
+    const pathStart = match.index + match[0].length;
+    let boundary = openings[i + 1]?.index ?? visibleText.length;
+    const lineBreak = visibleText.slice(pathStart, boundary).search(/[\r\n]/u);
+    if (lineBreak !== -1) boundary = pathStart + lineBreak;
+    const close = visibleText.lastIndexOf(']', boundary - 1);
+    if (close < pathStart) continue;
+    const path = text.slice(pathStart, close).trim();
+    if (!path) continue;
     markers.push({
       start: match.index,
-      end: match.index + match[0].length,
+      end: close + 1,
       path,
     });
   }
@@ -184,11 +195,12 @@ export function stripPartialOutboundMediaMarker(
   const visibleText = maskCode(text);
   const prefix = `${markerName}:`;
   let open = visibleText.lastIndexOf('[');
+  let stripAt: number | undefined;
   while (open !== -1) {
     const candidate = visibleText.slice(open + 1);
-    if (/[\r\n]/u.test(candidate)) return text;
+    if (/[\r\n]/u.test(candidate)) break;
     if (candidate.includes(']')) {
-      open = visibleText.lastIndexOf('[', open - 1);
+      open = previousOpenBracket(visibleText, open);
       continue;
     }
     const normalizedCandidate = candidate.toUpperCase();
@@ -197,9 +209,11 @@ export function stripPartialOutboundMediaMarker(
       (prefix.startsWith(normalizedCandidate) ||
         normalizedCandidate.startsWith(prefix))
     ) {
-      return `${text.slice(0, open)}${pendingText}`;
+      stripAt = open;
     }
-    open = visibleText.lastIndexOf('[', open - 1);
+    open = previousOpenBracket(visibleText, open);
   }
-  return text;
+  return stripAt === undefined
+    ? text
+    : `${text.slice(0, stripAt)}${pendingText}`;
 }

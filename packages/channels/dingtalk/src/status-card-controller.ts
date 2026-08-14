@@ -53,7 +53,11 @@ export interface StatusCardControllerOptions {
 }
 
 function boundContent(content: string): string {
-  return truncateOutboundMediaText(content, CONTENT_LIMIT, TRUNCATION_MARKER);
+  return truncateOutboundMediaText(
+    sanitizeStreamingMediaMarkers(content),
+    CONTENT_LIMIT,
+    TRUNCATION_MARKER,
+  );
 }
 
 function sanitizeStreamingMediaMarkers(content: string): string {

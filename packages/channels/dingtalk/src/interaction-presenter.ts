@@ -44,7 +44,9 @@ export interface DingtalkInteractionPresenterOptions {
 }
 
 function sanitizeFallbackOutput(text: string): string {
-  return sanitizeStreamingFileMarkers(stripPartialImageMarker(text));
+  return stripPartialImageMarker(
+    sanitizeStreamingFileMarkers(stripPartialImageMarker(text)),
+  );
 }
 
 export interface DingtalkCardSender {
@@ -393,7 +395,11 @@ export class DingtalkInteractionPresenter {
   }
 
   private boundContent(content: string, limit = CONTENT_LIMIT): string {
-    return truncateOutboundMediaText(content, limit, TRUNCATION_MARKER);
+    return truncateOutboundMediaText(
+      sanitizeFallbackOutput(content),
+      limit,
+      TRUNCATION_MARKER,
+    );
   }
 
   private withSenderPrefix(run: RunPresentation, content: string): string {

@@ -790,6 +790,22 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('neutralizes an image marker orphaned by file sanitization', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      'x [IMAGE: /Users/ben/private/report.png [FILE: /tmp/b]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).toBe('x [Image pending]');
+    expect(fallbackText).not.toContain('/Users/ben/private');
+  });
+
   it.each([
     [
       'tilde-fenced code',
@@ -826,7 +842,25 @@ describe('DingtalkInteractionPresenter', () => {
     await presenter.closeOutput('segment-1', '', 'response_boundary');
 
     const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
-    expect(fallbackText).toBe(`${TRUNCATION_MARKER}${suffix}`);
+    expect(fallbackText).toBe(`${prefix}${suffix}`);
+    expect(fallbackText).not.toContain('/Users/ben/private');
+  });
+
+  it('sanitizes markers before truncating across a code fence', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    const output = [
+      '```text',
+      'x'.repeat(CONTENT_LIMIT),
+      '```',
+      '[FILE: /Users/ben/private/report.pdf]',
+    ].join('\n');
+    presenter.appendOutput(segment('segment-1'), output);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
     expect(fallbackText).not.toContain('/Users/ben/private');
   });
 

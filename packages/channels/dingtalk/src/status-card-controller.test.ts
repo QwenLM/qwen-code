@@ -206,7 +206,26 @@ describe('StatusCardController', () => {
     );
     const content = vi.mocked(client.createAndDeliver).mock.calls[0]?.[0]
       .cardParamMap.content;
-    expect(content).toBe(`${TRUNCATION_MARKER}${suffix}`);
+    expect(content).toBe(`${prefix}${suffix}`);
+    expect(content).not.toContain('/Users/ben/private');
+  });
+
+  it('sanitizes markers before truncating across a code fence', async () => {
+    const { client, controller } = createHarness();
+    const output = [
+      '```text',
+      'x'.repeat(CONTENT_LIMIT),
+      '```',
+      '[FILE: /Users/ben/private/report.pdf]',
+    ].join('\n');
+
+    controller.replace(segment(), target, output);
+
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    const content = vi.mocked(client.createAndDeliver).mock.calls[0]?.[0]
+      .cardParamMap.content;
     expect(content).not.toContain('/Users/ben/private');
   });
 
