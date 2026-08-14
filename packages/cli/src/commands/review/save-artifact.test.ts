@@ -283,6 +283,26 @@ describe('saveReviewArtifact', () => {
     expect(existsSync(paths.out)).toBe(false);
   });
 
+  it.each(['two', -1, 1.5] as const)(
+    'refuses a present deferredCount of the wrong shape (%s)',
+    (bad) => {
+      // The absent-means-zero default must not swallow a PRESENT malformed
+      // value: a mutant deleting the refuse arm saved `deferredCount: -1`
+      // into the durable artifact with the suite fully green.
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, deferredCount: bad });
+
+      expect(() =>
+        saveReviewArtifact({
+          ...paths,
+          target: 'local',
+          effort: 'medium',
+        }),
+      ).toThrow(/deferredCount/);
+      expect(existsSync(paths.out)).toBe(false);
+    },
+  );
+
   it('reads an absent deferredCount as zero — a pre-posture composed file must still save', () => {
     const paths = fixture();
     const { deferredCount: _absent, ...prePosture } = verdict;

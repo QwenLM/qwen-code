@@ -217,6 +217,11 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'an unverified claim does not become publishable by being deferred',
     );
+    // ...and the entry format carries the source tag, because the floor's
+    // deterministic exclusion reads it: dropping the tag from the format
+    // makes every [test] deferral demand a verifier that cannot exist
+    // (round-2 review finding).
+    expect(body).toContain('`file:line — [source] title`');
     // The age command is hostile-input-hardened in both operands (round-1
     // review findings: shell injection via unquoted PR-controlled filename;
     // glob pathspec matching a sibling file). A "simplify the command"

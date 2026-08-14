@@ -4442,6 +4442,10 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     );
     expect(comment.event).toBe('COMMENT');
     expect(comment.body).toContain('- a.ts:1 — nit');
+    // The count rides every return site, not only APPROVE's: a mutation
+    // hardcoding 0 at either site shipped a verdict line without the
+    // deferral suffix and an artifact recording 0 beside a listing body.
+    expect(comment.deferredCount).toBe(1);
     const rc = composeReview(
       base({
         bodyCriticals: ['whole-PR blocker'],
@@ -4450,6 +4454,7 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     );
     expect(rc.event).toBe('REQUEST_CHANGES');
     expect(rc.body).toContain('- a.ts:1 — nit');
+    expect(rc.deferredCount).toBe(1);
   });
 
   it('deferrals cast no vote on the event — an all-deferred run is not a Suggestion run', () => {
@@ -4472,6 +4477,31 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     expect(r.body).toContain('- b.ts:2 — forged\n');
     expect(r.body).toContain('…and 3 more (see the run report)');
     expect(r.body).not.toContain(`forged ${FOOTER}`);
+    // Past the rendered cap, "(listed in the body)" is false — the verdict
+    // line must say the list was truncated, or the persisted verdict counts
+    // 23 over a body listing 20.
+    expect(verdictLine(r)).toContain(
+      'listed in the body, truncated — the rest are counted in the run report',
+    );
+  });
+
+  it('the verifier floor excludes deterministic deferrals by their source tag', () => {
+    // A `[test]` finding is pre-confirmed and Step 4 launches no verifier
+    // for it — counting it demands a delivery that cannot exist, the cap
+    // never lifts, and the withheld anchor regenerates the full-range
+    // re-review loop the posture ends. Same exclusion body Criticals get.
+    const planPath = coveredPlan(['reverse-audit']);
+    const deterministic = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      deferredSuggestions: ['a.ts:1 — [test] mutation survivor'],
+    });
+    expect(deterministic.event).toBe('APPROVE');
+    expect(deterministic.cappedBy).toEqual([]);
+    expect(deterministic.deferredCount).toBe(1);
   });
 
   it('refuses a present field of the wrong shape', () => {
