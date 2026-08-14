@@ -14,7 +14,13 @@
 // comments, and issue comments.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -684,6 +690,12 @@ export function latestOwnLedger(
   } | null = null;
   for (const r of reviews) {
     if (r.user?.login !== login) continue;
+    // A PENDING review is an unsubmitted draft — the API serves the caller's
+    // own drafts in this list — and a draft is not a previous round: a run
+    // that crashed between creating and submitting one must not hand the
+    // next round a round number, an age reference and a reviewId from state
+    // the PR never showed anyone.
+    if (r.state === 'PENDING') continue;
     const ledger = parseLedger(r.body);
     if (!ledger) continue;
     const at = r.submitted_at ?? '';
@@ -721,30 +733,43 @@ export interface RecoveredLedger {
 
 /**
  * Persist (or degrade) the prev-ledger side file for this run's recovery.
+ * Three outcomes, each honest about what this run learned:
  *
- * Recovered: the ledger's own fields plus `commitId`/`reviewId` — the age
- * reference and its provenance for Step 6's convergence posture. Readers of
- * the ledger shape (compose-review's round count, Step 1's recovered-anchor
- * check) ignore the extra keys.
+ * - Recovered: the ledger's own fields plus `commitId`/`reviewId` — the age
+ *   reference and its provenance for Step 6's convergence posture. Readers
+ *   of the ledger shape (compose-review's round count, Step 1's
+ *   recovered-anchor check) ignore the extra keys.
+ * - Not recovered, reviews READ (`fetchSucceeded`): the PR demonstrably
+ *   holds no prior round for this account — the file is another account's
+ *   or a deleted round's leftovers, and it is REMOVED whole: carrying its
+ *   round counter would stamp a first review "round N+1" and engage the
+ *   posture on rounds this account never ran.
+ * - Recovery THREW: unknowable, so the stale file keeps its round counter —
+ *   a transient failure must not reset the id space — but loses
+ *   `commitId`/`reviewId`: an age reference this run could not re-vouch can
+ *   suppress a first-time finding on code changed-and-reverted since the
+ *   true previous round (snapshot diffs are not monotonic over intervals),
+ *   while dropping it merely fails open to full posting.
  *
- * NOT recovered while the reviews were readable: the stale side file keeps
- * its round counter — a monotonic id space is the safe direction — but loses
- * `commitId` (and `reviewId` with it): an age reference the PR's current
- * reviews no longer vouch for can suppress a first-time finding on code
- * changed-and-reverted since the true previous round (snapshot diffs are not
- * monotonic over intervals), while dropping it merely fails open to full
- * posting. Best-effort on both paths — a side-file hiccup must never fail
- * the command.
+ * Every write is write-temp-then-rename: a failure mid-write must leave the
+ * previous file intact, never a truncated one that parses as no round and
+ * restarts the id space. Best-effort throughout — a side-file hiccup must
+ * never fail the command.
  */
 export function persistRecoveredLedger(
   sideFilePath: string,
   recovered: RecoveredLedger | null,
+  fetchSucceeded: boolean,
 ): void {
+  const writeAtomic = (text: string) => {
+    const tmp = `${sideFilePath}.tmp`;
+    writeFileSync(tmp, text);
+    renameSync(tmp, sideFilePath);
+  };
   if (recovered) {
     try {
       mkdirSync(dirname(sideFilePath), { recursive: true });
-      writeFileSync(
-        sideFilePath,
+      writeAtomic(
         JSON.stringify(
           {
             ...recovered.ledger,
@@ -756,7 +781,16 @@ export function persistRecoveredLedger(
         ),
       );
     } catch {
-      // No side file: compose-review starts the round count over, nothing else.
+      // The previous file (if any) is intact; compose-review reads it or
+      // starts the round count over, nothing else.
+    }
+    return;
+  }
+  if (fetchSucceeded) {
+    try {
+      rmSync(sideFilePath, { force: true });
+    } catch {
+      // Removal is best-effort; a survivor is the pre-existing stale risk.
     }
     return;
   }
@@ -768,7 +802,7 @@ export function persistRecoveredLedger(
     if ('commitId' in stale || 'reviewId' in stale) {
       delete stale['commitId'];
       delete stale['reviewId'];
-      writeFileSync(sideFilePath, JSON.stringify(stale, null, 2));
+      writeAtomic(JSON.stringify(stale, null, 2));
     }
   } catch {
     // No stale side file (the normal case), or an unreadable one — either
@@ -1066,6 +1100,7 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // the side file for the round number, and Step 6 owes each entry a ruling.
   // Best-effort — offline/unauthenticated just means no ledger, never a failure.
   let prevRecovered: RecoveredLedger | null = null;
+  let recoveryThrew = false;
   try {
     // `currentUser()` is a network round-trip; with no reviews on the PR there
     // is nothing for its answer to match against, so it is not made.
@@ -1074,16 +1109,18 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
       : null;
   } catch {
     prevRecovered = null;
+    recoveryThrew = true;
   }
   const prevLedger = prevRecovered?.ledger ?? null;
-  // The side file's two-speed degradation lives in the helper: a recovery
-  // writes it whole; no recovery keeps a stale file's ROUND COUNTER (a
-  // transient failure must not reset the id space) but strips its
-  // age-sensitive `commitId`/`reviewId` — a reference this run's reviews no
-  // longer vouch for must not date code for the posture.
+  // The side file's three outcomes live in the helper: recovered → written
+  // whole; demonstrably no prior round for this account → removed (a stale
+  // counter would stamp someone else's rounds onto this account's first
+  // review); recovery threw → round counter kept, age-sensitive
+  // `commitId`/`reviewId` stripped.
   persistRecoveredLedger(
     join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
     prevRecovered,
+    !recoveryThrew,
   );
 
   const md = buildMarkdown(

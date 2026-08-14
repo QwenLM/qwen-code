@@ -428,6 +428,31 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
     ).toBe(true);
   });
 
+  it('an unrelated typo never changes WHICH codebase is reviewed', () => {
+    // `--effort 6711` reviews PR 6711 past a flag mistake; adding a second
+    // malformed flag must not silently retarget the review at the local
+    // diff. PR-shaped values survive disposal; enum-typo-shaped ones do not.
+    const got = parseReviewArgs('--severity-floor blocker --effort 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      got.warnings.some(
+        (w) => w.includes('"blocker"') && w.includes('discarded'),
+      ),
+    ).toBe(true);
+  });
+
+  it('a typed target outranks a PR-shaped flag value', () => {
+    // With a real positional target present, `--effort 6712` is a typo, not
+    // a second target — keeping it would make the kept-as-target warning
+    // lie about which PR is reviewed.
+    const got = parseReviewArgs('6711 --effort 6712');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.extraTokens).toEqual([]);
+    expect(
+      got.warnings.some((w) => w.includes('"6712"') && w.includes('discarded')),
+    ).toBe(true);
+  });
+
   it('two invalid values are two typos, not a target and a tiebreak', () => {
     // "Sole target candidate" is literal: with two invalid tokens neither is
     // sole, so both are discarded and the review falls back to the local

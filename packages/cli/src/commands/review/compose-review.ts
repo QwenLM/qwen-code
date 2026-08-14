@@ -173,6 +173,16 @@ export interface ComposeReviewInput {
    */
   deferredSuggestions?: string[];
   /**
+   * The RESOLVED posting floor from the Step 1 verdict (`critical`,
+   * `suggestion`, or `auto`), carried into the state so the deferral
+   * channel's precondition is checkable: deferrals are legitimate under a
+   * `critical` floor at any round, and under `auto` from round 2 (the
+   * code-age rule) — never under an explicit `suggestion` floor (the
+   * operator turned the posture off) and never on round 1 of `auto` (no
+   * posture, no age reference). Absent reads as `auto` — a pre-flag caller.
+   */
+  severityFloor?: 'critical' | 'suggestion' | 'auto';
+  /**
    * Existing Criticals already on the PR whose Step 6 re-check landed on
    * `cannot tell` — one line each (location + what could not be decided).
    * Not counted in `C` (the review did not confirm them), but their
@@ -684,6 +694,42 @@ function composeReviewBody(
         criticalDeferral,
       )}`,
     );
+  }
+  // The channel's OTHER precondition, same fail-closed treatment: deferring
+  // is only ever licensed by the posture, so a deferral under an explicitly
+  // disabled posture (floor `suggestion`) or on round 1 of `auto` (no
+  // posture engaged, no age reference to defer against) is a model
+  // mis-execution that would silently un-post findings — the one direction
+  // this module must never let free text take. `critical` licenses any
+  // round; `auto` licenses round 2+ (the code-age rule) and round 6+ (the
+  // floor). Absent means `auto` — a caller predating the field.
+  const severityFloor = input.severityFloor ?? 'auto';
+  if (
+    severityFloor !== 'critical' &&
+    severityFloor !== 'suggestion' &&
+    severityFloor !== 'auto'
+  ) {
+    throw new TypeError(
+      `compose-review: severityFloor must be critical|suggestion|auto, got ${JSON.stringify(
+        input.severityFloor,
+      )}`,
+    );
+  }
+  if (deferredSuggestions.length > 0) {
+    if (severityFloor === 'suggestion') {
+      throw new TypeError(
+        'compose-review: deferredSuggestions is non-empty under an explicit ' +
+          '`suggestion` floor — the operator turned the posture off, so ' +
+          'nothing may be deferred; post the findings instead',
+      );
+    }
+    if (severityFloor === 'auto' && prevRound === 0) {
+      throw new TypeError(
+        'compose-review: deferredSuggestions is non-empty on round 1 under ' +
+          'the auto floor — no posture is engaged and no age reference ' +
+          'exists; post the findings instead',
+      );
+    }
   }
   const cannotTell = toStringList(
     input.cannotTellCriticals,
@@ -1686,14 +1732,21 @@ function composeReviewBody(
   // spare; the findings artifact keeps every entry whole.
   const deferredShown = deferredSuggestions
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
-    .map((entry) =>
-      entry
+    .map((entry) => {
+      const oneLine = entry
         .split('\n')
         .map((seg) => seg.trim())
         .filter((seg) => seg !== '')
         .join(' ')
-        .slice(0, MAX_DEFERRED_SUGGESTION_CHARS),
-    );
+        .slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
+      // The cap slices UTF-16 code units; a cut landing inside a surrogate
+      // pair leaves a lone high surrogate that serializes as U+FFFD into the
+      // posted body — and the zh clause keeps titles untranslated, so astral
+      // CJK/emoji at the boundary are a real input, not a curiosity.
+      return /[\uD800-\uDBFF]/.test(oneLine.charAt(oneLine.length - 1))
+        ? oneLine.slice(0, -1)
+        : oneLine;
+    });
   const deferredMore = deferredSuggestions.length - deferredShown.length;
   const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
   const deferredSuggestionsBlock: Bi[] = deferredSuggestions.length

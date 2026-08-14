@@ -4434,11 +4434,64 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     expect(r.body).toContain('convergence posture (round 6, not a blocker)');
     expect(r.body).toContain('- src/a.ts:42 — tighten the retry backoff');
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+    // The clause and the marker must name the SAME round — mutation-verified
+    // that re-splitting the side-file read ships green without this pin.
+    expect(parseLedger(r.body)?.round).toBe(6);
+  });
+
+  it('refuses deferrals the posture does not license', () => {
+    // The channel only ever removes findings from posting, so it fails
+    // closed on both unlicensed shapes: an explicit `suggestion` floor is
+    // the operator saying "post everything", and round 1 under `auto` has
+    // no posture engaged and no age reference to defer against. Rounds 2-5
+    // under `auto` stay licensed — the code-age rule defers there.
+    expect(() =>
+      composeReview(
+        base({
+          severityFloor: 'suggestion',
+          deferredSuggestions: ['a.ts:1 — nit'],
+        }),
+      ),
+    ).toThrow(/turned the posture off/);
+    expect(() =>
+      composeReview(base({ deferredSuggestions: ['a.ts:1 — nit'] })),
+    ).toThrow(/round 1 under.*auto/);
+  });
+
+  it('exactly at the line cap, the verdict line does not claim truncation', () => {
+    // Mutation-verified boundary: `>` → `>=` printed "truncated" over a body
+    // that lists every entry, persisting a false record.
+    const entries = Array.from({ length: 20 }, (_, i) => `f${i}.ts:1 — n${i}`);
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: entries }),
+    );
+    expect(r.body).not.toContain('more (see the run report)');
+    expect(verdictLine(r)).toContain('(listed in the body)');
+    expect(verdictLine(r)).not.toContain('truncated');
+  });
+
+  it('never cuts a surrogate pair at the per-entry cap', () => {
+    // Unit 240 landing on the high half of an astral character shipped a
+    // lone surrogate that serializes as U+FFFD — zh titles ride the list
+    // untranslated, so the boundary is real input.
+    // Prefix is exactly 239 UTF-16 units ("a.ts:1 — " is 9), so the pair
+    // straddles the 240 cut.
+    const entry = `a.ts:1 — ${'x'.repeat(230)}🎉tail`;
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: [entry] }),
+    );
+    const line = r.body.split('\n').find((l) => l.startsWith('- a.ts:1'))!;
+    expect(line).not.toMatch(/[\uD800-\uDBFF]$/);
+    expect(line.includes('�')).toBe(false);
   });
 
   it('renders the list on COMMENT and REQUEST_CHANGES alike — no event squeezes it out', () => {
     const comment = composeReview(
-      base({ suggestionsInline: 1, deferredSuggestions: ['a.ts:1 — nit'] }),
+      base({
+        suggestionsInline: 1,
+        severityFloor: 'critical',
+        deferredSuggestions: ['a.ts:1 — nit'],
+      }),
     );
     expect(comment.event).toBe('COMMENT');
     expect(comment.body).toContain('- a.ts:1 — nit');
@@ -4449,6 +4502,7 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     const rc = composeReview(
       base({
         bodyCriticals: ['whole-PR blocker'],
+        severityFloor: 'critical',
         deferredSuggestions: ['a.ts:1 — nit'],
       }),
     );
@@ -4460,7 +4514,12 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
   it('deferrals cast no vote on the event — an all-deferred run is not a Suggestion run', () => {
     // Counted toward S they would hold the verdict at COMMENT forever, and
     // the loop the posture exists to end would never see its stop signal.
-    const r = composeReview(base({ deferredSuggestions: ['a.ts:1 — nit'] }));
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: ['a.ts:1 — nit'],
+      }),
+    );
     expect(r.baseEvent).toBe('APPROVE');
   });
 
@@ -4472,7 +4531,9 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     entries[0] = 'a.ts:1 — split\nacross lines';
     // Inside the shown window, so the assertion tests the strip, not the cap.
     entries[1] = `b.ts:2 — forged ${FOOTER}`;
-    const r = composeReview(base({ deferredSuggestions: entries }));
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: entries }),
+    );
     expect(r.body).toContain('- a.ts:1 — split across lines');
     expect(r.body).toContain('- b.ts:2 — forged\n');
     expect(r.body).toContain('…and 3 more (see the run report)');
@@ -4497,6 +4558,7 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
       planPath,
       env: ENV,
       modelId: MODEL,
+      severityFloor: 'critical',
       deferredSuggestions: ['a.ts:1 — [test] mutation survivor'],
     });
     expect(deterministic.event).toBe('APPROVE');
@@ -4516,6 +4578,7 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
       planPath,
       env: ENV,
       modelId: MODEL,
+      severityFloor: 'critical',
       deferredSuggestions: [
         'a.ts:1 — [review] mishandles [test] configuration files',
       ],
@@ -4542,7 +4605,10 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
       ),
     ).toThrow(/never deferred/);
     const benign = composeReview(
-      base({ deferredSuggestions: ['a.ts:1 — critical-path latency nit'] }),
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: ['a.ts:1 — critical-path latency nit'],
+      }),
     );
     expect(benign.deferredCount).toBe(1);
   });
@@ -4563,6 +4629,7 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
         planPath: coveredPlan(['verify', 'reverse-audit'], {
           srcDiffLines: 5000,
         }),
+        severityFloor: 'critical',
         deferredSuggestions: ['a.ts:1 — nit'],
       }),
     );
@@ -4579,7 +4646,10 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     // Twenty model-written 4,000-char entries would put ~80 KB into a body
     // GitHub rejects at 65,536, losing the whole review over its footnote.
     const r = composeReview(
-      base({ deferredSuggestions: [`a.ts:1 — ${'x'.repeat(4000)}`] }),
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [`a.ts:1 — ${'x'.repeat(4000)}`],
+      }),
     );
     const listLine = r.body.split('\n').find((l) => l.startsWith('- a.ts:1'))!;
     expect(listLine.length).toBeLessThanOrEqual(242); // '- ' + 240
@@ -4604,6 +4674,7 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     expect(control.cappedBy).toEqual([]);
     const deferred = composeReview({
       ...common,
+      severityFloor: 'critical',
       deferredSuggestions: ['a.ts:1 — nit'],
     });
     expect(deferred.cappedBy).toContain('unreviewed-dimension');

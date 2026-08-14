@@ -996,6 +996,32 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(sent.body).toContain('the inline cache is stale after a rebase');
   });
 
+  it('carries a posture deferral through the submit seam into the posted body', () => {
+    // submit's compose() destructures-and-drops distrusted state fields
+    // (env, prBodyFetcher, draftedComments); a future hardening that adds
+    // deferredSuggestions to that drop would post every review without its
+    // deferral disclosure — "a deferral silently dropped is a finding lost"
+    // — while the compose-review unit tests, which call the function
+    // directly, stay green. This is the only production path from the
+    // model-written state to a posted body.
+    const review = file('deferral-seam.json', {
+      ...REVIEW,
+      state: {
+        ...REVIEW.state,
+        planPath: verifiedPlan(),
+        severityFloor: 'critical',
+        deferredSuggestions: ['a.ts:1 — tighten the retry backoff'],
+      },
+      comments: [],
+    });
+
+    withVerifyEnv(() => runSubmit(authorized({ review })));
+    expect(ghMock).toHaveBeenCalledOnce();
+    const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
+    expect(sent.body).toContain('Deferred under the convergence posture');
+    expect(sent.body).toContain('- a.ts:1 — tighten the retry backoff');
+  });
+
   it('rejects a line that is not a positive whole number', () => {
     // Every one of these 422s, and a 422 discards every blocker in the review.
     for (const [i, line] of [-1, 0, 2.5, NaN, Infinity].entries()) {

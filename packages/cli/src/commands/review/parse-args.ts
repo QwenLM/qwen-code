@@ -388,23 +388,34 @@ export function parseReviewArgs(
     kept.push({ token });
   }
 
-  // Disposal rule for invalid flag values: a typo is discarded when any
-  // *other* token is the target; it survives only when it is itself the
-  // SOLE target candidate (`/review --effort 6711`). "Sole" is literal —
-  // one kept token in total: two invalid values (`--severity-floor blocker
-  // --severity-floor warning`) are two typos, not a target and a tiebreak,
-  // and promoting the first to a file target would send the caller off to
-  // stat `blocker` instead of falling back to the local diff the input
-  // never named a target for.
+  // Disposal rule for invalid flag values, by what the token could BE:
+  // - PR-shaped (a pure number, a PR URL) survives as a target candidate —
+  //   `/review --effort 6711` is a user reviewing PR 6711 past a flag
+  //   mistake, and an unrelated second typo (`--severity-floor blocker
+  //   --effort 6711`) must not change WHICH codebase is reviewed.
+  // - File-shaped survives only as the SOLE kept token (`/review
+  //   --severity-floor criticl`): beside anything else, `blocker` is an
+  //   enum typo, not a path — promoting it would send the caller off to
+  //   stat nonsense, and two such typos are two typos, not a target and a
+  //   tiebreak.
+  // A token the user typed OUTSIDE any flag always outranks a flag value:
+  // when one exists, every invalid value is a typo beside the real target.
   const soleCandidate = kept.length === 1;
+  const hasValidCandidate = kept.some((k) => k.invalidValueOf === undefined);
   const targetTokens: string[] = [];
   for (const k of kept) {
     const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
-    if (k.invalidValueOf !== undefined && !soleCandidate) {
-      issues.push({ kind: 'discarded', value: k.token });
-      continue;
-    }
     if (k.invalidValueOf !== undefined) {
+      const shape = classifyToken(k.token);
+      const prShaped =
+        shape !== null &&
+        shape !== 'invalid-url' &&
+        (shape.type === 'pr-number' || shape.type === 'pr-url');
+      const survives = prShaped ? !hasValidCandidate : soleCandidate;
+      if (!survives) {
+        issues.push({ kind: 'discarded', value: k.token });
+        continue;
+      }
       issues.push({ kind: 'kept-as-target', value: k.token });
     }
     targetTokens.push(k.token);

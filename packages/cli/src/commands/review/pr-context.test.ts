@@ -1115,6 +1115,25 @@ describe('latestOwnLedger', () => {
     expect(invalid?.commitId).toBeNull();
   });
 
+  it('never selects a PENDING draft — an unsubmitted review is not a previous round', () => {
+    // The API serves the caller's own drafts in the reviews list; a run that
+    // crashed between creating and submitting one must not hand the next
+    // round a round number, an age reference and a reviewId from state the
+    // PR never showed anyone.
+    const recovered = latestOwnLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', marker(1)),
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(9)),
+          state: 'PENDING',
+          commit_id: 'd'.repeat(40),
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(1);
+  });
+
   it('yields nothing with no login, no marker, or a malformed one', () => {
     expect(
       latestOwnLedger([review('bot', '2026-01-01', marker(1))], null),
@@ -1134,36 +1153,42 @@ describe('latestOwnLedger', () => {
 describe('persistRecoveredLedger', () => {
   // The serialization seam the helper tests could not reach before the
   // extraction: a regression dropping a field here disabled rounds-2-5
-  // code-age behavior while every latestOwnLedger test stayed green.
+  // code-age behavior while every latestOwnLedger test stayed green. The
+  // fixture carries a `sha` on purpose: the side file's sha is the
+  // incremental anchor for cache-absent machines, and a rewrite that
+  // reconstructed the file from known fields dropped it with the suite
+  // green until the fixture carried one.
   const ledger: Ledger = {
     v: 1,
     round: 3,
     findings: [{ id: 'R3-1', sev: 'S', file: 'a.ts', title: 't' }],
+    sha: 'deadbeef00112233',
   };
 
   it('persists the ledger with its age reference and provenance', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'nested', 'qwen-review-pr-1-prev-ledger.json');
     try {
-      persistRecoveredLedger(side, {
-        ledger,
-        commitId: 'a'.repeat(40),
-        reviewId: 42,
-      });
+      persistRecoveredLedger(
+        side,
+        { ledger, commitId: 'a'.repeat(40), reviewId: 42 },
+        true,
+      );
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual({
         ...ledger,
         commitId: 'a'.repeat(40),
         reviewId: 42,
       });
+      expect(written.sha).toBe('deadbeef00112233');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('a no-recovery run strips the stale age reference but keeps the round counter', () => {
-    // A transient failure must not reset the id space; it must also not
-    // leave an age reference the PR's current reviews no longer vouch for —
+  it('a recovery that THREW strips the age reference but keeps round and sha', () => {
+    // A transient failure must not reset the id space or lose the anchor;
+    // it must also not keep an age reference this run could not re-vouch —
     // code changed-and-reverted since the true previous round would look
     // unchanged against the stale head and a first-time finding would be
     // wrongly deferred (snapshot diffs are not monotonic over intervals).
@@ -1174,10 +1199,29 @@ describe('persistRecoveredLedger', () => {
         side,
         JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
       );
-      persistRecoveredLedger(side, null);
+      persistRecoveredLedger(side, null, false);
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written).toEqual(ledger);
       expect(written.round).toBe(3);
+      expect(written.sha).toBe('deadbeef00112233');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a successful fetch with no ledger REMOVES the stale file whole', () => {
+    // The PR demonstrably holds no prior round for this account — another
+    // account's round counter must not stamp this account's first review
+    // "round N+1" and engage the posture on rounds it never ran.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ ...ledger, commitId: 'b'.repeat(40), reviewId: 7 }),
+      );
+      persistRecoveredLedger(side, null, true);
+      expect(existsSync(side)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1187,8 +1231,10 @@ describe('persistRecoveredLedger', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {
-      persistRecoveredLedger(side, null);
+      persistRecoveredLedger(side, null, false);
       expect(existsSync(side)).toBe(false);
+      // The atomic-write temp must not survive either.
+      expect(existsSync(`${side}.tmp`)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
