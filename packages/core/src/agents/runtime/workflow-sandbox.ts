@@ -150,6 +150,9 @@ export interface WorkflowMeta {
 
 function evaluateMetaIsolated(metaSource: string): string {
   const childEnv = { ...process.env };
+  // Parent startup flags can change the evaluator's module mode or preload
+  // hooks, so the isolated child must start with its declared arguments only.
+  delete childEnv['NODE_OPTIONS'];
   // The inline evaluator has no source coverage to collect; inherited V8
   // coverage only adds cold-start cost and races the parent's coverage files.
   delete childEnv['NODE_V8_COVERAGE'];

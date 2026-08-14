@@ -160,6 +160,22 @@ describe('extractAndStripMeta', () => {
     expect(meta).toEqual({ name: 'demo', description: 'a demo workflow' });
   });
 
+  it.each(['--input-type=module', '--experimental-default-type=module'])(
+    'ignores inherited NODE_OPTIONS=%s',
+    (nodeOptions) => {
+      vi.stubEnv('NODE_OPTIONS', nodeOptions);
+      try {
+        const src = `export const meta = { name: 'demo', description: 'a demo workflow' }\nreturn 1`;
+        expect(extractAndStripMeta(src).meta).toEqual({
+          name: 'demo',
+          description: 'a demo workflow',
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it('extracts optional whenToUse + phases array', () => {
     const src = `export const meta = {
       name: 'multi',
