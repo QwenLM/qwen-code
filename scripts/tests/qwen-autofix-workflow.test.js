@@ -5358,10 +5358,12 @@ exit 1
       }
     };
     const K = '2026-07-29T03:00:00Z';
-    // Attribution is POSITIONAL over the comment's own scan-parsed eval
-    // markers: a neutralized marker QUOTED in a handoff excerpt carries the
-    // raw substring `win=<key> -->` but must not attribute the comment to
-    // the window (whole-body contains() did).
+    // Attribution is POSITIONAL and LAST-WINS over the comment's own
+    // scan-parsed eval markers: a comment whose body carries a stray
+    // earlier marker for THIS window plus its own authoritative marker for
+    // another window must not attribute here. Whole-body `win=<key> -->`
+    // matching counted it (a push in this window ⇒ census resets to 0);
+    // last-wins ignores it (count stays 1) — the fixture discriminates.
     expect(
       runCensus(
         [
@@ -5369,7 +5371,7 @@ exit 1
           {
             user: { login: 'qwen-code-dev-bot' },
             created_at: '2026-07-29T05:00:00Z',
-            body: `${PUSH_HEADLINE}\nquoted: <!\\-\\- autofix-eval ts=x acted=true round=9 win=${K} -->`,
+            body: `${PUSH_HEADLINE}\nstray: <!-- autofix-eval ts=x acted=true round=9 win=${K} -->\n<!-- autofix-eval ts=x acted=true round=9 win=OTHER -->`,
           },
         ],
         K,

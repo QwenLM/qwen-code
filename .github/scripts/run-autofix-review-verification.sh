@@ -84,6 +84,10 @@ git checkout "${BRANCH}"
 GATE_LOG="${WORKDIR}/gate-output.log"
 : > "${GATE_LOG}"
 rm -f "${GATE_LOG}.bite"
+# Single reset point for the gate-authored advisory file: every writer
+# below APPENDS, so no later section can wipe an earlier section's
+# advisory (the footprint advisory used to die to the shrink section's rm).
+rm -f "${WORKDIR}/gate-advisories.md"
 reject_fix() {
   local label="${1}"
   local preexisting="${2:-false}"
@@ -618,21 +622,38 @@ not_merge_freight() {
 # workspaces degrade to their top-level segment (conservative: mismatch
 # surfaces rather than hides).
 list_areas() {
-  local wss f matched w
-  wss="$(tr '\0' '\n' < "${1}" | bash "${RUNNER_TEMP}/resolve-owning-packages.sh" 2> /dev/null || true)"
+  # $1: NUL-separated path file; $2: the REF whose recorded workspaces
+  # globs define membership. Ref-anchored on purpose: the round's on-disk
+  # manifest must not redefine its own footprint boundary (same doctrine
+  # as was_workspace_dir), and a resolver failure must not silently
+  # degrade both sides. Longest ancestor wins (nested workspaces);
+  # non-workspace paths under packages/ keep TWO segments so sibling
+  # projects stay distinct areas; emitted areas are newline-sanitized so a
+  # newline-bearing path cannot mint phantom areas in the line pipeline.
+  local ref="${2}" f d a
   while IFS= read -r -d '' f; do
     [[ -n "${f}" ]] || continue
-    matched=''
-    while IFS= read -r w; do
-      [[ -n "${w}" && "${f}" == "${w}"/* ]] && { matched="${w}"; break; }
-    done <<< "${wss}"
-    if [[ -n "${matched}" ]]; then
-      echo "${matched}"
-    elif [[ "${f}" == */* ]]; then
-      echo "${f%%/*}"
-    else
-      echo "/${f}"
+    a=''
+    d="${f%/*}"
+    while [[ "${d}" == */* || ( -n "${d}" && "${d}" != "${f}" ) ]]; do
+      if was_workspace_dir "${ref}" "${d}"; then
+        a="${d}"
+        break
+      fi
+      [[ "${d}" == */* ]] || break
+      d="${d%/*}"
+    done
+    if [[ -z "${a}" ]]; then
+      if [[ "${f}" == packages/*/* ]]; then
+        a="${f#packages/}"
+        a="packages/${a%%/*}"
+      elif [[ "${f}" == */* ]]; then
+        a="${f%%/*}"
+      else
+        a="/${f}"
+      fi
     fi
+    printf '%s\n' "${a//[^A-Za-z0-9._\/ -]/?}"
   done < "${1}" | sort -u
 }
 FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"
@@ -641,7 +662,7 @@ ROUND_FILES_Z="$(mktemp)"
 PR_FILES_Z="$(mktemp)"
 git diff --name-only -z --no-renames "${ROUND_RANGE}" 2> /dev/null | not_merge_freight > "${ROUND_FILES_Z}" || true
 git diff --name-only -z --no-renames "${PR_RANGE}" 2> /dev/null > "${PR_FILES_Z}" || true
-OUT_AREAS="$(comm -23 <(list_areas "${ROUND_FILES_Z}") <(list_areas "${PR_FILES_Z}"))" || OUT_AREAS=''
+OUT_AREAS="$(comm -23 <(list_areas "${ROUND_FILES_Z}" "origin/${BRANCH}") <(list_areas "${PR_FILES_Z}" "origin/${BRANCH}"))" || OUT_AREAS=''
 rm -f "${ROUND_FILES_Z}" "${PR_FILES_Z}"
 if [[ -n "${OUT_AREAS}" ]]; then
   if [[ "${FOOTPRINT_ENFORCE}" == 'reject' ]]; then
@@ -683,7 +704,6 @@ NET_TEST_LINES="$(git diff --numstat -z --no-renames "${ROUND_RANGE}" -- "${TEST
       [[ "${del}" != '-' ]] && total=$(( total - del ))
     done
     echo "${total}"; })"
-rm -f "${WORKDIR}/gate-advisories.md"
 if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
   {
     echo '⚖️ **Gate advisory — test coverage shrank this round** (machine-measured, not agent-authored): '"net ${NET_TEST_LINES} test lines."
@@ -701,7 +721,7 @@ if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
     fi
     echo
     echo 'The justification must be in the round summary above; a deletion is only sound when the pinned behavior itself was wrong (evidence shown) or the coverage demonstrably survives elsewhere. · 本轮测试覆盖净减少（门自动测量，非 agent 文本）；删除是否成立请对照上方轮次摘要中的理由——仅当被钉住的行为本身有误（需给出证据）或覆盖确有替代时才合理。'
-  } > "${WORKDIR}/gate-advisories.md"
+  } >> "${WORKDIR}/gate-advisories.md"
   echo '⚖️ test coverage shrank this round — advisory written for the report' | tee -a "${GATE_LOG}"
 fi
 
@@ -863,15 +883,18 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
       | ($ids | split("\n")
           | map(sub("^rc:"; "") | sub("\r$"; "")
             | select(test("^[0-9]+$")) | tonumber)) as $resolved
-      | def critical($c):
+      | def cr_attached($x):
+          (($x.pull_request_review_id // null) as $review
+            | $review != null
+            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+        def critical($c):
           (($c.body // "") | contains("**[Critical]**"))
           or (($c.in_reply_to_id // null) as $root
             | $root != null
             and any($comments[];
-              .id == $root and ((.body // "") | contains("**[Critical]**"))))
-          or (($c.pull_request_review_id // null) as $review
-            | $review != null
-            and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+              .id == $root
+              and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+          or cr_attached($c);
       [ $comments[]
         | select(.id as $id | $resolved | index($id) != null)
         | select(critical(.)) | (.path // "") ]
