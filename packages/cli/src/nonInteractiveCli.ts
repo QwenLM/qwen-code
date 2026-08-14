@@ -3017,7 +3017,7 @@ export async function runNonInteractive(
             : abortController.signal.aborted
               ? {}
               : {
-                  errorMessage: failureMessage,
+                  errorMessage: 'headless invocation failed',
                   errorType: getErrorType(error),
                 }),
         },

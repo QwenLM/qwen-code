@@ -3611,7 +3611,7 @@ describe('runNonInteractive', () => {
 
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
-    const apiError = new Error('API connection failed');
+    const apiError = new Error('API connection failed: token=secret');
     mockGeminiClient.sendMessageStream.mockImplementation(() => {
       throw apiError;
     });
@@ -3627,7 +3627,7 @@ describe('runNonInteractive', () => {
 
     expect(endInteractionSpanSpy).toHaveBeenCalledWith('error', {
       promptId: 'prompt-id-4',
-      errorMessage: 'API connection failed',
+      errorMessage: 'headless invocation failed',
       errorType: 'Error',
     });
   });

@@ -2253,7 +2253,9 @@ describe('useGeminiStream', () => {
     };
     const finishTurn = vi
       .fn()
-      .mockRejectedValue(new Error('goal journal is unavailable'));
+      .mockRejectedValue(
+        new Error('goal journal is unavailable: token=secret'),
+      );
     const runtime = {
       permitForTurn: vi.fn(() => permit),
       finishTurn,
@@ -2371,8 +2373,7 @@ describe('useGeminiStream', () => {
 
     expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
       promptId: 'prompt-goal-finish-error',
-      errorMessage:
-        'Goal tool continuation could not finish: goal journal is unavailable',
+      errorMessage: 'Goal tool continuation could not finish',
       errorType: 'continuation_goal_finish_failed',
     });
     expect(mockSendMessageStream).toHaveBeenCalledOnce();
@@ -12942,6 +12943,15 @@ describe('useGeminiStream', () => {
     it('continues a deferred main tool batch without leaking its mixed ?btw owner', async () => {
       const mainOwner = {};
       const btwOwner = {};
+      const submissionInFlightRef = { current: false };
+      const waitForReservationSettlement = vi.fn().mockResolvedValue(undefined);
+      const goalQueueRef = {
+        current: {
+          peekNextUserBatchKey: () => undefined,
+          submissionInFlightRef,
+          waitForReservationSettlement,
+        },
+      };
       const ownersByPromptId = new Map<string, object>();
       mockGetActiveInteractionSpan.mockImplementation((promptId?: string) =>
         promptId ? ownersByPromptId.get(promptId) : undefined,
@@ -13020,6 +13030,12 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          goalQueueRef,
         ),
       );
 
@@ -13109,8 +13125,53 @@ describe('useGeminiStream', () => {
       expect(mockEndInteractionSpan).not.toHaveBeenCalledWith('cancelled', {
         promptId: 'main-prompt',
       });
+      expect(submissionInFlightRef.current).toBe(true);
 
-      resolveMainStream();
+      let resolveMemoryRefresh!: (value: boolean) => void;
+      mockRefreshMemoryAfterManagedWrite.mockReturnValueOnce(
+        new Promise<boolean>((resolve) => {
+          resolveMemoryRefresh = resolve;
+        }),
+      );
+      act(() => {
+        resolveMainStream();
+      });
+      await waitFor(() =>
+        expect(mockRefreshMemoryAfterManagedWrite).toHaveBeenCalledOnce(),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          'Too early',
+          SendMessageType.UserQuery,
+          'too-early-prompt',
+        );
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      let resolveToolReservation!: () => void;
+      waitForReservationSettlement.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveToolReservation = resolve;
+          }),
+      );
+      act(() => {
+        resolveMemoryRefresh(false);
+      });
+      await waitFor(() =>
+        expect(waitForReservationSettlement).toHaveBeenCalledTimes(3),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          '?btw still too early',
+          SendMessageType.UserQuery,
+          'btw-too-early-prompt',
+        );
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      expect(submissionInFlightRef.current).toBe(true);
+      act(() => {
+        resolveToolReservation();
+      });
       await act(async () => {
         await mainRequest;
       });
@@ -13133,6 +13194,18 @@ describe('useGeminiStream', () => {
           functionResponse: expect.objectContaining({ id: 'main-tool' }),
         }),
       ]);
+      await act(async () => {
+        await result.current.submitQuery(
+          'After drain',
+          SendMessageType.UserQuery,
+          'after-drain-prompt',
+        );
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+      expect(mockSendMessageStream.mock.calls[3]?.[2]).toBe(
+        'after-drain-prompt',
+      );
+      expect(submissionInFlightRef.current).toBe(false);
     });
 
     it('should prevent concurrent submitQuery calls', async () => {

@@ -3136,6 +3136,7 @@ export const useGeminiStream = (
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&
+        activeModelStreamsRef.current > 0 &&
         typeof query === 'string' &&
         isBtwCommand(query) &&
         !activeGoalAdmissionRef.current;
@@ -3789,7 +3790,7 @@ export const useGeminiStream = (
           const shouldDrainCompletedToolBatches =
             activeModelStreamsRef.current === 0;
           if (shouldDrainCompletedToolBatches) {
-            setIsResponding(false);
+            setSubmissionInFlight(true);
           }
           if (goalBinding) {
             let retainGoalBinding =
@@ -3822,20 +3823,26 @@ export const useGeminiStream = (
           ) {
             activeGoalAdmissionRef.current = null;
           }
-          releaseSubmissionLease();
-          if (shouldDrainCompletedToolBatches) {
-            const pendingCompletedToolBatches =
-              pendingCompletedToolBatchesRef.current.splice(0);
-            const pendingCompletedTools = new Map<string, TrackedToolCall>();
-            for (const pendingBatch of pendingCompletedToolBatches) {
-              for (const toolCall of pendingBatch) {
-                pendingCompletedTools.set(toolCall.request.callId, toolCall);
+          try {
+            if (shouldDrainCompletedToolBatches) {
+              const pendingCompletedToolBatches =
+                pendingCompletedToolBatchesRef.current.splice(0);
+              const pendingCompletedTools = new Map<string, TrackedToolCall>();
+              for (const pendingBatch of pendingCompletedToolBatches) {
+                for (const toolCall of pendingBatch) {
+                  pendingCompletedTools.set(toolCall.request.callId, toolCall);
+                }
+              }
+              if (pendingCompletedTools.size > 0) {
+                await handleCompletedToolsRef.current([
+                  ...pendingCompletedTools.values(),
+                ]);
               }
             }
-            if (pendingCompletedTools.size > 0) {
-              await handleCompletedToolsRef.current([
-                ...pendingCompletedTools.values(),
-              ]);
+          } finally {
+            if (shouldDrainCompletedToolBatches) {
+              setIsResponding(false);
+              setSubmissionInFlight(false);
             }
           }
         }
@@ -4625,7 +4632,7 @@ export const useGeminiStream = (
       );
       if (terminatesGoalTurn && toolGoalBinding) {
         geminiClient.addHistory({ role: 'user', parts: responsesToSend });
-        let goalFinishErrorMessage: string | undefined;
+        let goalFinishFailed = false;
         try {
           await config.getChatRecordingService()?.flush();
           const runtime = await config.getGoalRuntimeReady();
@@ -4654,7 +4661,7 @@ export const useGeminiStream = (
           }
         } catch (error) {
           const errorMessage = getErrorMessage(error);
-          goalFinishErrorMessage = `Goal tool continuation could not finish: ${errorMessage}`;
+          goalFinishFailed = true;
           await failClosedGoalTurn(
             toolGoalBinding,
             `Goal turn could not finish: ${errorMessage}`,
@@ -4663,10 +4670,10 @@ export const useGeminiStream = (
           // Idempotent with the release inside failClosedGoalTurn; also covers the success path.
           releaseGoalTurn(toolGoalBinding);
         }
-        if (goalFinishErrorMessage) {
+        if (goalFinishFailed) {
           endToolInteraction(
             'error',
-            goalFinishErrorMessage,
+            'Goal tool continuation could not finish',
             'continuation_goal_finish_failed',
           );
         } else {
@@ -4872,7 +4879,7 @@ export const useGeminiStream = (
         return;
       }
 
-      void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+      await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
         steerInput: drainedSteer,
         onDelivered: drainedSteer?.accept,
         onAdmissionFailed: () => {
