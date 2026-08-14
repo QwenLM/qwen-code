@@ -2137,14 +2137,17 @@ jobs:
     #   install + build              ~6m measured (run 30284341325: npm ci
     #                                3m00 + build 2m40), budget 15m for a
     #                                cold cache or a heavier dependency tree
+    #   flakiness gate               ~25m worst case (15m round budget,
+    #                                checked before each invocation, plus one
+    #                                in-flight invocation capped at 10m)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
     #   ------------------------------------
-    #   worst case                   ~140m  ⇒ 150 leaves 10m of headroom.
+    #   worst case                   ~165m  ⇒ 175 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
-    # verify run now occupies one ECS slot for up to 2.5h instead of 1h.
-    timeout-minutes: 150
+    # verify run now occupies one ECS slot for up to ~3h instead of 1h.
+    timeout-minutes: 175
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2165,6 +2168,11 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
       agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
+      # Deterministic flakiness gate (#9125): `flaky` demotes the published
+      # headline; every other value is informational. The summary is
+      # gate-authored fixed text plus counters — never PR-controlled strings.
+      flake_verdict: '${{ steps.flake.outputs.flake_verdict }}'
+      flake_summary: '${{ steps.flake.outputs.flake_summary }}'
       skip_reason: '${{ steps.pr.outputs.skip_reason }}'
     steps:
       - name: 'Install PR resolver tools'
@@ -2729,6 +2737,31 @@ jobs:
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
+      # The flakiness gate (#9125) re-runs the PR's changed test files and
+      # compares outcomes across identical rounds. The file list is recorded
+      # HERE — before the workspace is handed to the build user — because
+      # after `npm ci` a PR lifecycle script owns .git and could rewrite the
+      # diff to hide a test file from the gate. The list lives root-owned in
+      # RUNNER_TEMP, so the gate later runs exactly what was recorded. This
+      # pin is honesty, not a security boundary: the gate's verdict can only
+      # ever DEMOTE the published outcome (see the publish job), so hiding a
+      # file from it merely returns the PR to today's baseline of a single
+      # execution.
+      - name: 'Record changed test files for the flakiness gate'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -euo pipefail
+          # Two statements, not a pipeline: `git diff | grep || true` would
+          # swallow a git failure as "no changed test files", silently
+          # narrowing the gate to n/a. A git failure here is pre-build
+          # infrastructure and must fail the step loudly; only a no-match
+          # grep may produce an empty list.
+          files="$(git diff --name-only --diff-filter=ACMR 'HEAD^1' HEAD)"
+          printf '%s\n' "$files" \
+            | grep -E '\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$' \
+            > "${RUNNER_TEMP:?}/flake-gate-files" || true
+          echo "Recorded $(grep -c . "$RUNNER_TEMP/flake-gate-files" || true) changed test file(s) for the flakiness gate."
+
       - name: 'Clear stale npm cache'
         if: "steps.pr.outputs.decision == 'run'"
         run: 'rm -rf "$RUNNER_TEMP/npm-cache"'
@@ -2859,6 +2892,193 @@ jobs:
             exit 0
           fi
           echo "Install/build completed before verification." >> "$GITHUB_STEP_SUMMARY"
+
+      # Deterministic flakiness gate (#9125): re-run the PR's changed test
+      # files N times through the same entry points CI uses and compare the
+      # outcomes. A single execution has no power against non-deterministic
+      # failures — a ~50% flake passes half of all CI runs (PR #9086's mtime
+      # assertion was certified exactly that way) — while N=5 identical
+      # re-runs catch it with ~97% probability. Only run-to-run DIVERGENCE is
+      # a gate signal: a test that fails identically every round is
+      # deterministic, CI already owns that, and an environment-sensitive
+      # suite must not false-positive here.
+      #
+      # Authority is one-way by construction: `flaky` demotes the published
+      # headline, and no gate value can raise or soften one. The test code
+      # under execution is the PR's own, so a PR can always neuter its gate —
+      # but a gate that can only demote is not worth forging, which is what
+      # keeps its evidence meaningful.
+      - name: 'Flakiness gate: re-run changed test files'
+        id: 'flake'
+        if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+          FLAKE_ROUNDS: '${{ vars.QWEN_VERIFY_FLAKE_ROUNDS }}'
+        run: |-
+          # Deliberately NOT -e: the gate is advisory-and-demoting only, so a
+          # bug in it must fail OPEN (verdict `error`, agent still runs) — the
+          # alternative is a gate outage taking down the whole verify lane.
+          set -uo pipefail
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          LOG="${RUNNER_TEMP:?}/flake-gate.log"
+          LIST="$RUNNER_TEMP/flake-gate-files"
+          : > "$LOG"
+          finish() {
+            # Outputs carry FIXED strings and counters only — file paths are
+            # PR-controlled text and belong in the log, which the publisher
+            # HTML-escapes before embedding.
+            echo "flake_verdict=$1" >> "$GITHUB_OUTPUT"
+            echo "flake_summary=$2" >> "$GITHUB_OUTPUT"
+            printf '\nverdict: %s\nsummary: %s\n' "$1" "$2" >> "$LOG"
+            echo "Flakiness gate: $1 — $2" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          ROUNDS="${FLAKE_ROUNDS:-}"
+          case "$ROUNDS" in ''|*[!0-9]*) ROUNDS=5 ;; esac
+          [ "$ROUNDS" -ge 2 ] || ROUNDS=2
+          [ "$ROUNDS" -le 10 ] || ROUNDS=10
+
+          [ -f "$LIST" ] || finish error 'the recorded changed-test list is missing'
+
+          # Partition the recorded files into runnable groups. Every skipped
+          # file is logged with its reason — a silently narrowed gate would
+          # read as "covered" when it was not.
+          scripts_files=()
+          helper_files=()
+          skipped=0
+          declare -A pkg_files=()
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if [ ! -f "$f" ]; then
+              printf 'not present in the merge tree, skipped: %s\n' "$f" >> "$LOG"
+              skipped=$((skipped + 1))
+              continue
+            fi
+            case "$f" in
+              scripts/tests/*) scripts_files+=("$f") ;;
+              .github/scripts/*.test.mjs) helper_files+=("$f") ;;
+              integration-tests/*)
+                # E2E suites need sandbox/model plumbing this gate does not have.
+                printf 'integration test, out of gate scope: %s\n' "$f" >> "$LOG"
+                skipped=$((skipped + 1))
+                ;;
+              packages/*/*)
+                pkg="${f#packages/}"
+                pkg="packages/${pkg%%/*}"
+                pkg_files["$pkg"]+="${f#"$pkg"/}"$'\n'
+                ;;
+              *)
+                printf 'no runner mapped for this path, skipped: %s\n' "$f" >> "$LOG"
+                skipped=$((skipped + 1))
+                ;;
+            esac
+          done < "$LIST"
+
+          group_labels=()
+          group_dirs=()
+          group_cmds=()
+          if [ "${#scripts_files[@]}" -gt 0 ]; then
+            group_labels+=('scripts/tests')
+            group_dirs+=('.')
+            group_cmds+=("npx --no-install vitest run --config ./scripts/tests/vitest.config.ts $(printf '%q ' "${scripts_files[@]}")")
+          fi
+          if [ "${#helper_files[@]}" -gt 0 ]; then
+            group_labels+=('.github/scripts')
+            group_dirs+=('.')
+            group_cmds+=("node --test $(printf '%q ' "${helper_files[@]}")")
+          fi
+          for pkg in "${!pkg_files[@]}"; do
+            mapfile -t rel <<< "${pkg_files[$pkg]%$'\n'}"
+            group_labels+=("$pkg")
+            group_dirs+=("$pkg")
+            # From the package CWD (vitest configs assume it); npx resolves
+            # the workspace-root binary by walking up node_modules.
+            group_cmds+=("npx --no-install vitest run $(printf '%q ' "${rel[@]}")")
+          done
+
+          total="${#group_labels[@]}"
+          if [ "$total" -eq 0 ]; then
+            finish n/a "no changed unit-test files to re-run (${skipped} out-of-scope file(s) noted in the log)"
+          fi
+          {
+            printf 'rounds=%s groups=%s skipped=%s\n' "$ROUNDS" "$total" "$skipped"
+            for i in "${!group_labels[@]}"; do
+              printf 'group %s: (cd %s) %s\n' "${group_labels[$i]}" "${group_dirs[$i]}" "${group_cmds[$i]}"
+            done
+            printf '\n'
+          } >> "$LOG"
+
+          # 15-minute wall budget, checked before every invocation, plus a
+          # 10-minute cap per invocation — worst case ~25m, which the job
+          # timeout budget above accounts for. Divergence needs no uniform
+          # round count: a P and an F for the same group is non-determinism
+          # no matter how many rounds fit the budget.
+          declare -a results=()
+          deadline=$(( $(date +%s) + 900 ))
+          rounds_done=0
+          timed_out=false
+          round=1
+          while [ "$round" -le "$ROUNDS" ]; do
+            for i in "${!group_labels[@]}"; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                timed_out=true
+                break
+              fi
+              out="$RUNNER_TEMP/flake-gate-round-out"
+              (
+                cd "${group_dirs[$i]}" &&
+                timeout -k 30 600 runuser -u node -- \
+                  env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+                  NODE_OPTIONS='--max-old-space-size=3072' CI=true \
+                  bash -c "${group_cmds[$i]}"
+              ) > "$out" 2>&1
+              status=$?
+              mark='P'
+              [ "$status" -eq 0 ] || mark='F'
+              results[$i]="${results[$i]:-}${mark}"
+              printf 'round %s · %s: %s (exit %s)\n' "$round" "${group_labels[$i]}" "$mark" "$status" >> "$LOG"
+              if [ "$status" -ne 0 ]; then
+                {
+                  printf -- '--- output tail · round %s · %s ---\n' "$round" "${group_labels[$i]}"
+                  tail -c 8000 "$out"
+                  printf '\n'
+                } >> "$LOG"
+              fi
+            done
+            [ "$timed_out" = true ] && break
+            rounds_done="$round"
+            round=$((round + 1))
+          done
+
+          flaky=0
+          failing=0
+          for i in "${!group_labels[@]}"; do
+            case "${results[$i]:-}" in
+              *P*F*|*F*P*) flaky=$((flaky + 1)) ;;
+              *P*) : ;;
+              *F*) failing=$((failing + 1)) ;;
+            esac
+          done
+          printf '\nper-group results (P=pass F=fail, one letter per run):\n' >> "$LOG"
+          for i in "${!group_labels[@]}"; do
+            printf '  %s: %s\n' "${group_labels[$i]}" "${results[$i]:-}" >> "$LOG"
+          done
+
+          if [ "$flaky" -gt 0 ]; then
+            finish flaky "${flaky} of ${total} changed-test group(s) returned different results across identical re-runs (${rounds_done} full round(s))"
+          fi
+          if [ "$timed_out" = true ] && [ "$rounds_done" -lt 2 ]; then
+            finish timeout "the 15-minute budget elapsed before two full rounds completed (${rounds_done} done) — no flakiness signal either way"
+          fi
+          if [ "$failing" -gt 0 ]; then
+            finish consistent-fail "${failing} of ${total} changed-test group(s) failed identically in every round — deterministic, so CI owns that signal"
+          fi
+          if [ "$timed_out" = true ]; then
+            finish timeout "only ${rounds_done} of ${ROUNDS} rounds fit the 15-minute budget; the completed rounds agreed"
+          fi
+          finish pass "${total} changed-test group(s) x ${rounds_done} identical rounds, no divergence"
 
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
@@ -3007,6 +3227,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/verify-results"
           if [ -f "$RUNNER_TEMP/prepare.log.keep" ]; then
             mv "$RUNNER_TEMP/prepare.log.keep" "$RUNNER_TEMP/verify-results/prepare.log"
+          fi
+          # The flakiness gate's log is root-owned in RUNNER_TEMP (the build
+          # user cannot rewrite it); copy it into the freshly recreated
+          # results dir so the artifact and the publish job can see it.
+          if [ -f "$RUNNER_TEMP/flake-gate.log" ]; then
+            cp "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"
           fi
 
           # Bypass the runner proxy before launching qwen: the proxy cuts the
@@ -3573,6 +3799,8 @@ jobs:
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
           AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
+          FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
+          FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
           PREPARE_FAILURE_PHASE: '${{ needs.verify.outputs.failure_phase }}'
           VERIFY_RESULT: '${{ needs.verify.result }}'
@@ -4117,6 +4345,7 @@ jobs:
             # whatever directory find visits first, which is unordered.
             REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
             ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            FLAKE_LOG="$(find verify-results -type f -name 'flake-gate.log' 2>/dev/null | sort | head -1 || true)"
             ASSERT_LINE=''
             ASSERT_LINE_ZH=''
             if [ -n "$ASSERTIONS_FILE" ]; then
@@ -4198,6 +4427,40 @@ jobs:
                 fi
               fi
             fi
+            # The flakiness gate (#9125) is deterministic evidence with
+            # ONE-WAY authority: `flaky` demotes any headline — including a
+            # trusted agent `merge-ready` — because non-deterministic tests
+            # are a PR defect the agent's single execution cannot see. No
+            # other gate value may raise or soften an outcome: the gate ran
+            # the PR's own test code, and a gate that can only demote is not
+            # worth forging, which is what keeps its evidence trustworthy.
+            # FLAKE_SUMMARY is gate-authored fixed text plus counters (the
+            # gate keeps PR-controlled paths in its log, which is embedded
+            # through the escaping emit_block below).
+            FLAKE_LINE=''
+            FLAKE_LINE_ZH=''
+            case "${FLAKE_VERDICT:-}" in
+              flaky)
+                QUAL='❌ not passed'
+                QUAL_ZH='❌ 不通过'
+                HEADLINE='non-deterministic tests (flakiness gate)'
+                HEADLINE_ZH='测试结果不确定（抖动门）'
+                FLAKE_LINE="Flakiness gate: ❌ ${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                FLAKE_LINE_ZH="抖动门：❌ ${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                ;;
+              pass)
+                FLAKE_LINE="Flakiness gate: ✅ ${FLAKE_SUMMARY:-changed test files re-ran identically}"
+                FLAKE_LINE_ZH="抖动门：✅ ${FLAKE_SUMMARY:-changed test files re-ran identically}"
+                ;;
+              n/a)
+                FLAKE_LINE="Flakiness gate: not applicable — ${FLAKE_SUMMARY:-no changed unit-test files}"
+                FLAKE_LINE_ZH="抖动门：不适用 — ${FLAKE_SUMMARY:-no changed unit-test files}"
+                ;;
+              consistent-fail|timeout|error)
+                FLAKE_LINE="Flakiness gate: ⚠️ ${FLAKE_VERDICT} — ${FLAKE_SUMMARY:-see flake-gate.log in the run artifacts}"
+                FLAKE_LINE_ZH="抖动门：⚠️ ${FLAKE_VERDICT} — ${FLAKE_SUMMARY:-see flake-gate.log in the run artifacts}"
+                ;;
+            esac
             if [ -z "$REPORT" ]; then
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
@@ -4232,8 +4495,14 @@ jobs:
               if [ -n "$ASSERT_LINE" ]; then
                 printf '%s\n\n' "$ASSERT_LINE"
               fi
+              if [ -n "$FLAKE_LINE" ]; then
+                printf '%s\n\n' "$FLAKE_LINE"
+              fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
+              fi
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
               fi
               printf '<details>\n<summary>中文 — 判定：%s · %s</summary>\n\n' "$QUAL_ZH" "${HEADLINE_ZH:-$HEADLINE}"
               if [ "${VERDICT:-}" = 'pass' ]; then
@@ -4244,14 +4513,21 @@ jobs:
               if [ -n "$ASSERT_LINE_ZH" ]; then
                 printf '%s\n\n' "$ASSERT_LINE_ZH"
               fi
+              if [ -n "$FLAKE_LINE_ZH" ]; then
+                printf '%s\n\n' "$FLAKE_LINE_ZH"
+              fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
+              fi
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"
               fi
               printf '</details>\n\n'
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
               emit_report "$REPORT" 45000
+              emit_block 'Flakiness gate log' "$FLAKE_LOG" 20000
               if [ -n "$EVIDENCE_SECTION" ]; then
                 printf '%s' "$EVIDENCE_SECTION"
               fi

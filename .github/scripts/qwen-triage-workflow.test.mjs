@@ -219,7 +219,10 @@ describe('qwen-triage: fork-PR runner routing', () => {
   it('keeps the authorize gate itself on the same-repo guard', () => {
     // authorize IS the permission check (and loads CI_BOT_PAT); it cannot
     // route on its own output and must not widen to association-based trust.
-    assert.match(authorizeRunsOn, /head\.repo\.full_name == github\.repository/);
+    assert.match(
+      authorizeRunsOn,
+      /head\.repo\.full_name == github\.repository/,
+    );
     assert.doesNotMatch(authorizeRunsOn, /author_association/);
     assert.doesNotMatch(authorizeRunsOn, /needs\./);
   });
@@ -651,8 +654,14 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       const restoreIdx = jobDef.steps.findIndex(
         (s) => s.name === 'Restore npm cache',
       );
-      assert.ok(clearIdx !== -1, `'Clear stale npm cache' step must exist in ${jobName}`);
-      assert.ok(restoreIdx !== -1, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        clearIdx !== -1,
+        `'Clear stale npm cache' step must exist in ${jobName}`,
+      );
+      assert.ok(
+        restoreIdx !== -1,
+        `'Restore npm cache' step must exist in ${jobName}`,
+      );
       assert.ok(
         clearIdx < restoreIdx,
         'clear step must come before restore step',
@@ -708,8 +717,8 @@ describe('qwen-triage: npm cache producer workflow', () => {
   });
 
   it('saves with the same key and path the triage lanes restore', () => {
-    const saveStep = saveJob.steps.find(
-      (s) => s.uses?.startsWith('actions/cache/save@'),
+    const saveStep = saveJob.steps.find((s) =>
+      s.uses?.startsWith('actions/cache/save@'),
     );
     assert.ok(saveStep, 'must have an actions/cache/save step');
     for (const [jobName, jobDef] of [
@@ -733,8 +742,8 @@ describe('qwen-triage: npm cache producer workflow', () => {
   });
 
   it('populates the cache directory it saves', () => {
-    const saveStep = saveJob.steps.find(
-      (s) => s.uses?.startsWith('actions/cache/save@'),
+    const saveStep = saveJob.steps.find((s) =>
+      s.uses?.startsWith('actions/cache/save@'),
     );
     assert.ok(saveStep, 'must have an actions/cache/save step');
     const dir = saveStep.with.path.replace(
@@ -777,6 +786,157 @@ describe('qwen-triage: npm cache producer workflow', () => {
       saveJob.container.options,
       '--init --user node',
       'producer must not leave root-owned files on the self-hosted runner',
+    );
+  });
+});
+
+describe('qwen-triage: flakiness gate (#9125)', () => {
+  const recordStep = verifyJob.steps.find(
+    (s) => s.name === 'Record changed test files for the flakiness gate',
+  );
+  const flakeStep = verifyJob.steps.find((s) => s.id === 'flake');
+  const prepareStep = verifyJob.steps.find(
+    (s) => s.name === 'Install and build PR app',
+  );
+  const agentStep = verifyJob.steps.find(
+    (s) => s.name === 'Run verification agent',
+  );
+  const publishStep = doc.jobs['publish-verify'].steps.find(
+    (s) => s.name === 'Post verification report comment',
+  );
+
+  it('records the changed-test list BEFORE the workspace is handed to the build user', () => {
+    assert.ok(recordStep, 'record step must exist');
+    assert.ok(flakeStep, 'flake gate step must exist');
+    const recordIdx = verifyJob.steps.indexOf(recordStep);
+    const prepareIdx = verifyJob.steps.indexOf(prepareStep);
+    const flakeIdx = verifyJob.steps.indexOf(flakeStep);
+    // After npm ci, PR lifecycle code owns .git and could rewrite the diff
+    // to hide a test file — the list must be pinned while .git is still
+    // root-owned, and the gate must consume that pinned list after the build.
+    assert.ok(
+      recordIdx < prepareIdx,
+      'the list must be recorded before install/build runs PR lifecycle code',
+    );
+    assert.ok(
+      prepareIdx < flakeIdx,
+      'the gate needs node_modules, so it must run after install/build',
+    );
+    assert.match(
+      recordStep.run,
+      /HEAD\^1/,
+      'diff must be against the merge base',
+    );
+    assert.match(
+      flakeStep.run,
+      /flake-gate-files/,
+      'the gate must read the recorded list, not re-derive the diff',
+    );
+    assert.doesNotMatch(
+      flakeStep.run,
+      /git diff/,
+      'the gate must not re-derive the diff from post-build git metadata',
+    );
+  });
+
+  it('runs PR test code as the build user with no tokens, and fails open', () => {
+    assert.equal(flakeStep.env.GITHUB_TOKEN, '', 'no GitHub token in the gate');
+    assert.equal(flakeStep.env.GH_TOKEN, '', 'no gh token in the gate');
+    assert.match(
+      flakeStep.run,
+      /runuser -u node --/,
+      'PR test code must run as the unprivileged build user',
+    );
+    assert.match(
+      flakeStep.run,
+      /^\s*set -uo pipefail/m,
+      'the gate must not run under -e',
+    );
+    assert.doesNotMatch(
+      flakeStep.run,
+      /set -euo/,
+      'a gate bug must fail OPEN (verdict error), never abort the verify job',
+    );
+    assert.equal(
+      flakeStep.if,
+      "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''",
+      'the gate runs exactly when the agent would (after a clean build)',
+    );
+  });
+
+  it('exposes the gate outcome to the publisher and preserves its log', () => {
+    assert.equal(
+      verifyJob.outputs.flake_verdict,
+      '${{ steps.flake.outputs.flake_verdict }}',
+    );
+    assert.equal(
+      verifyJob.outputs.flake_summary,
+      '${{ steps.flake.outputs.flake_summary }}',
+    );
+    assert.equal(
+      publishStep.env.FLAKE_VERDICT,
+      '${{ needs.verify.outputs.flake_verdict }}',
+    );
+    assert.equal(
+      publishStep.env.FLAKE_SUMMARY,
+      '${{ needs.verify.outputs.flake_summary }}',
+    );
+    // The agent step recreates verify-results from scratch; the gate log is
+    // root-owned in RUNNER_TEMP and must be copied back in afterwards, or
+    // the artifact and the comment lose the per-round matrix.
+    const wipeIdx = agentStep.run.indexOf(
+      'rm -rf "$RUNNER_TEMP/verify-results"',
+    );
+    const copyIdx = agentStep.run.indexOf(
+      'cp "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"',
+    );
+    assert.ok(wipeIdx !== -1, 'agent step must still recreate verify-results');
+    assert.ok(copyIdx !== -1, 'agent step must copy the gate log back');
+    assert.ok(copyIdx > wipeIdx, 'the copy must happen AFTER the recreation');
+    assert.match(
+      publishStep.run,
+      /emit_block 'Flakiness gate log' "\$FLAKE_LOG"/,
+      'the publisher must embed the gate log through the escaping emit_block',
+    );
+  });
+
+  it('gate authority is one-way: only `flaky` may touch the headline, and only to demote', () => {
+    const block = publishStep.run.match(
+      /case "\$\{FLAKE_VERDICT:-\}" in[\s\S]*?esac/,
+    );
+    assert.ok(
+      block,
+      'the publisher must map FLAKE_VERDICT through one case block',
+    );
+    const arms = block[0].split(/;;/);
+    for (const arm of arms) {
+      const touchesHeadline = /(QUAL|HEADLINE)(_ZH)?=/.test(arm);
+      if (!touchesHeadline) continue;
+      assert.match(
+        arm,
+        /^\s*flaky\)/m,
+        `only the flaky arm may reassign the headline, found: ${arm.trim().slice(0, 60)}`,
+      );
+      assert.match(
+        arm,
+        /QUAL='❌ not passed'/,
+        'flaky must demote to not-passed',
+      );
+      assert.doesNotMatch(
+        arm,
+        /QUAL='✅/,
+        'no gate value may ever set a passing headline',
+      );
+    }
+  });
+
+  it('the verify job timeout still covers agent + prepare + gate', () => {
+    // agent 120m + install/build 15m + gate ~25m + misc ~5m — the job limit
+    // must stay comfortably above the sum or the container is killed mid-run
+    // and the ship-what-ran path is bypassed (see the budget comment).
+    assert.ok(
+      verifyJob['timeout-minutes'] >= 170,
+      `timeout-minutes must cover the gate budget (got ${verifyJob['timeout-minutes']})`,
     );
   });
 });
