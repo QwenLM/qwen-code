@@ -338,11 +338,14 @@ jobs:
     # Serialize publish per release tag: the pre-push re-validation in the
     # push step is only sound while at most one run pushes and publishes a
     # given version at a time, and --force removed the non-fast-forward
-    # rejection that used to serialize the push itself. Queued, not
-    # cancelled, so a retry that waits out a failed run still gets to
-    # replace its stale branch.
+    # rejection that used to serialize the push itself. In-progress runs are
+    # never cancelled; of queued same-tag runs only the latest survives, but
+    # whichever run reaches the push re-validates first, so the invariant
+    # holds. is_dry_run is part of the key because a dry run ships nothing
+    # (no push, tag, or release) and must not queue ahead of — or delay —
+    # the real release for the same tag.
     concurrency:
-      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}'
+      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
       cancel-in-progress: false
     environment:
       name: 'production-release'
@@ -423,31 +426,13 @@ jobs:
             # but the validation jobs and the production-release approval gate
             # separate that check from this push by minutes to hours, so
             # re-validate prepare's invariant (doesVersionExist in
-            # scripts/get-release-version.js) at push time: a concurrent
+            # scripts/get-release-version.js) at push time against the live
+            # registry, origin's tags, and GitHub releases: a concurrent
             # same-version run that shipped in between would otherwise have
             # its branch tip — and the tag and merge-to-main anchored to it —
-            # silently replaced.
-            for pkg in \
-              @qwen-code/qwen-code \
-              @qwen-code/audio-capture \
-              @qwen-code/channel-base \
-              @qwen-code/channel-dingtalk \
-              @qwen-code/channel-feishu \
-              @qwen-code/channel-github \
-              @qwen-code/channel-qqbot \
-              @qwen-code/channel-telegram \
-              @qwen-code/channel-wecom \
-              @qwen-code/channel-weixin; do
-              if npm view "${pkg}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
-                echo "::error::${pkg}@${RELEASE_VERSION} is already published; refusing to force-push ${BRANCH_NAME} over a shipped release"
-                exit 1
-              fi
-            done
-            if git ls-remote --exit-code origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1 \
-              || gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-              echo "::error::tag or release ${RELEASE_TAG} already exists; refusing to force-push ${BRANCH_NAME} over a shipped release"
-              exit 1
-            fi
+            # silently replaced. The script owns the published-package list,
+            # so this guard cannot drift from it.
+            node scripts/get-release-version.js --assert-unreleased="${RELEASE_VERSION}"
             echo "Pushing release branch to remote..."
             git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags
           else

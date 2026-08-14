@@ -180,7 +180,7 @@ function detectRollbackAndGetBaseline(npmDistTag) {
  * All packages that share the same release version. A version is considered
  * "taken" if it exists on *any* of them — not just the main package.
  */
-const PUBLISHED_PACKAGES = [
+export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
   '@qwen-code/audio-capture',
   '@qwen-code/channel-base',
@@ -193,7 +193,7 @@ const PUBLISHED_PACKAGES = [
   '@qwen-code/channel-weixin',
 ];
 
-function doesVersionExist(version) {
+function doesVersionExist(version, { checkRemoteTags = false } = {}) {
   // Check NPM across all published packages
   for (const pkg of PUBLISHED_PACKAGES) {
     try {
@@ -208,8 +208,15 @@ function doesVersionExist(version) {
     }
   }
 
-  // Check Git tags
+  // Check Git tags. Push-time callers pass checkRemoteTags: the local
+  // checkout predates the approval gate, so a tag a concurrent run pushed
+  // in between is not in it.
   try {
+    if (checkRemoteTags) {
+      execSync(`git ls-remote --exit-code origin "refs/tags/v${version}"`);
+      console.error(`Git tag v${version} already exists on origin.`);
+      return true;
+    }
     const command = `git tag -l 'v${version}'`;
     const tagOutput = execSync(command).toString().trim();
     if (tagOutput === `v${version}`) {
@@ -217,7 +224,11 @@ function doesVersionExist(version) {
       return true;
     }
   } catch (error) {
-    console.error(`Failed to check git tags for conflicts: ${error.message}`);
+    // ls-remote exits 2 when no ref matches; that is "tag absent", not a
+    // failed check.
+    if (!(checkRemoteTags && error.status === 2)) {
+      console.error(`Failed to check git tags for conflicts: ${error.message}`);
+    }
   }
 
   // Check GitHub releases
@@ -237,6 +248,23 @@ function doesVersionExist(version) {
   }
 
   return false;
+}
+
+/**
+ * Push-time re-validation of prepare's doesVersionExist invariant, for the
+ * release branch force push. Throws when the version has shipped anywhere.
+ */
+export function assertVersionUnreleased(version) {
+  if (typeof version !== 'string' || version.length === 0) {
+    throw new Error(
+      'assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
+    );
+  }
+  if (doesVersionExist(version, { checkRemoteTags: true })) {
+    throw new Error(
+      `Version ${version} has already shipped; refusing to force-push the release branch over it`,
+    );
+  }
 }
 
 function getAndVerifyTags(npmDistTag, _gitTagPattern) {
@@ -509,5 +537,15 @@ export function getVersion(options = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  console.log(JSON.stringify(getVersion(getArgs()), null, 2));
+  const args = getArgs();
+  if (args['assert-unreleased'] !== undefined) {
+    try {
+      assertVersionUnreleased(args['assert-unreleased']);
+    } catch (error) {
+      console.error(`::error::${error.message}`);
+      process.exit(1);
+    }
+  } else {
+    console.log(JSON.stringify(getVersion(args), null, 2));
+  }
 }

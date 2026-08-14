@@ -78,12 +78,14 @@ describe('release workflow', () => {
     // The pre-push re-validation below is only sound while at most one
     // publish job pushes and publishes a given version at a time; --force
     // removed the non-fast-forward rejection that used to serialize the
-    // push itself. The group must sit on the publish job (a queued, not
-    // cancelled, second run still gets to replace or refuse the stale
-    // branch), and it must be keyed by the computed tag, which only exists
-    // as a prepare output.
+    // push itself. The group must sit on the publish job — in-progress
+    // runs are never cancelled, and of queued same-tag runs only the
+    // latest survives, but whichever run reaches the push re-validates
+    // first — and it must be keyed by the computed tag, which only exists
+    // as a prepare output, plus is_dry_run, so a dry run (which ships
+    // nothing) never queues ahead of the real release for the same tag.
     expect(workflow).toMatch(
-      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.release_tag \}\}'\n {6}cancel-in-progress: false[\s\S]*?environment:\n {6}name: 'production-release'/,
+      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.release_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false[\s\S]*?environment:\n {6}name: 'production-release'/,
     );
   });
 
@@ -93,10 +95,17 @@ describe('release workflow', () => {
     // gate sit in between). A concurrent same-version run can ship in that
     // window; the force push would then replace the branch tip that the
     // shipped npm packages, tag, and merge to main anchor to. Pin the
-    // re-validation of prepare's invariant — every published package, the
-    // tag, and the release, aborting on a hit — directly before the push.
+    // re-validation of prepare's invariant directly before the push, and
+    // pinned to the script that owns the published-package list so the
+    // guard cannot silently drift from it: the call must sit inside the
+    // dry-run guard, before the push, as an anchored full line (moving it
+    // out of the guard, inverting it, or narrowing it fails), and the
+    // step must receive RELEASE_VERSION — without it the check aborts
+    // every release. The script-side checks (every published package, the
+    // remote tag, the release, aborting on a hit) are unit-tested in
+    // get-release-version.test.js.
     expect(workflow).toMatch(
-      /for pkg in \\[\s\S]*?@qwen-code\/qwen-code \\[\s\S]*?@qwen-code\/channel-weixin; do[\s\S]*?npm view "\$\{pkg\}@\$\{RELEASE_VERSION\}" version[\s\S]*?exit 1[\s\S]*?git ls-remote --exit-code origin "refs\/tags\/\$\{RELEASE_TAG\}"[\s\S]*?exit 1[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
+      /name: 'Commit and Conditionally Push package versions'\n {8}env:\n[\s\S]*?RELEASE_VERSION: '\$\{\{ needs\.prepare\.outputs\.release_version \}\}'[\s\S]*?if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then\n[\s\S]*?\n {12}node scripts\/get-release-version\.js --assert-unreleased="\$\{RELEASE_VERSION\}"\n[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
     );
   });
 

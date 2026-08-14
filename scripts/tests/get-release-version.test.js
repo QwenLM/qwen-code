@@ -5,7 +5,11 @@
  */
 
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { getVersion } from '../get-release-version.js';
+import {
+  assertVersionUnreleased,
+  getVersion,
+  PUBLISHED_PACKAGES,
+} from '../get-release-version.js';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
@@ -607,5 +611,97 @@ describe('getVersion', () => {
         'Derived stable version 0.7.0 is lower than published latest 0.9.0',
       );
     });
+  });
+});
+
+describe('assertVersionUnreleased', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  const notFoundAnywhere = (command) => {
+    if (command.includes('npm view')) throw new Error('npm error code E404');
+    if (command.includes('git ls-remote')) {
+      // --exit-code exits 2 when no ref matches.
+      throw Object.assign(new Error('no match'), { status: 2 });
+    }
+    if (command.includes('gh release view')) {
+      throw new Error('release not found');
+    }
+    return '';
+  };
+
+  it('pins the full published-package set', () => {
+    // The release workflow's publish steps and this guard both derive from
+    // this list; adding or removing a package must update the pin here so
+    // every consumer is reviewed together.
+    expect(PUBLISHED_PACKAGES).toEqual([
+      '@qwen-code/qwen-code',
+      '@qwen-code/audio-capture',
+      '@qwen-code/channel-base',
+      '@qwen-code/channel-dingtalk',
+      '@qwen-code/channel-feishu',
+      '@qwen-code/channel-github',
+      '@qwen-code/channel-qqbot',
+      '@qwen-code/channel-telegram',
+      '@qwen-code/channel-wecom',
+      '@qwen-code/channel-weixin',
+    ]);
+  });
+
+  it('passes when no package, tag, or release has shipped the version', () => {
+    vi.mocked(execSync).mockImplementation(notFoundAnywhere);
+    expect(() => assertVersionUnreleased('1.2.3')).not.toThrow();
+  });
+
+  it('checks origin for tags, not the stale local checkout', () => {
+    const commands = [];
+    vi.mocked(execSync).mockImplementation((command) => {
+      commands.push(command);
+      return notFoundAnywhere(command);
+    });
+    assertVersionUnreleased('1.2.3');
+    expect(commands).toContain(
+      'git ls-remote --exit-code origin "refs/tags/v1.2.3"',
+    );
+    expect(commands.some((c) => c.includes('git tag -l'))).toBe(false);
+  });
+
+  it('refuses when ANY published package has shipped the version', () => {
+    // Ship the version on one package at a time, middle-list packages
+    // included: dropping any of them from PUBLISHED_PACKAGES must fail.
+    for (const pkg of PUBLISHED_PACKAGES) {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command === `npm view ${pkg}@1.2.3 version 2>/dev/null`) {
+          return '1.2.3';
+        }
+        return notFoundAnywhere(command);
+      });
+      expect(() => assertVersionUnreleased('1.2.3')).toThrow(/already shipped/);
+    }
+  });
+
+  it('refuses when the tag already exists on origin', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('git ls-remote')) {
+        return '0123456789abcdef\trefs/tags/v1.2.3';
+      }
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(/already shipped/);
+  });
+
+  it('refuses when the GitHub release already exists', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('gh release view')) return 'v1.2.3';
+      return notFoundAnywhere(command);
+    });
+    expect(() => assertVersionUnreleased('1.2.3')).toThrow(/already shipped/);
+  });
+
+  it('rejects a missing or non-string version instead of failing open', () => {
+    for (const bad of [undefined, '', true]) {
+      expect(() => assertVersionUnreleased(bad)).toThrow(/requires a version/);
+    }
   });
 });
