@@ -8217,6 +8217,10 @@ exit 1
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [prepareStep, 'PR_LIVE="$(gh pr view'],
+      // The review-address failure/handoff report step makes PAT-bearing gh
+      // calls after agent/branch code too (handoff comment + deferred
+      // upsert), so it carries the same hygiene preamble.
+      [reviewAddressReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -10374,6 +10378,22 @@ exit 1
     expect(workflow).toContain(
       'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
     );
+    // RUNNER_TEMP is agent-writable between staging and invocation, so every
+    // invocation verifies the digest the stage step recorded in expression
+    // context; a mismatch skips persistence (best-effort), never the round.
+    expect(workflow).toContain(
+      'echo "upsert_sha256=$(sha256sum "${RUNNER_TEMP}/upsert-deferred-issue.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(
+      workflow.split(
+        'echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+      ).length - 1,
+    ).toBe(3);
+    for (const step of [pushAndReportStep, reviewAddressReportStep]) {
+      expect(step).toContain(
+        "UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'",
+      );
+    }
     expect(reviewAddressJob).toContain(
       'comment-replies.json deferred-findings.json pr.diff',
     );
@@ -10391,9 +10411,11 @@ exit 1
       findings,
       resolved = '',
       list = '[]',
+      listFail = false,
       body = '',
       bodyFail = false,
       comments = '[]',
+      commentsFail = false,
       writeFail = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
@@ -10407,8 +10429,8 @@ exit 1
           '#!/usr/bin/env bash',
           'printf "%s\\n" "$*" >> "$GHLOG"',
           'case "$2" in',
-          '  *"issues?state=open"*) printf "%s" "$LIST_JSON";;',
-          '  */comments?per_page=100*) printf "%s" "$COMMENTS_JSON";;',
+          '  *"issues?state=all"*) [[ "$LIST_FAIL" == 1 ]] && exit 1; printf "%s" "$LIST_JSON";;',
+          '  */comments?per_page=100*) [[ "$COMMENTS_FAIL" == 1 ]] && exit 1; printf "%s" "$COMMENTS_JSON";;',
           '  */comments) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo ok;;',
           '  repos/*/issues) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo 77;;',
           '  repos/*/issues/*) [[ "$BODY_FAIL" == 1 ]] && exit 1; printf "%s" "$BODY_TEXT";;',
@@ -10431,9 +10453,11 @@ exit 1
             AUTOFIX_BOT: 'bot',
             GHLOG: join(dir, 'gh.log'),
             LIST_JSON: list,
+            LIST_FAIL: listFail ? '1' : '0',
             BODY_TEXT: body,
             BODY_FAIL: bodyFail ? '1' : '0',
             COMMENTS_JSON: comments,
+            COMMENTS_FAIL: commentsFail ? '1' : '0',
             WRITE_FAIL: writeFail ? '1' : '0',
           },
         },
@@ -10523,6 +10547,65 @@ exit 1
     });
     expect(forged.calls).toContain('- rc:4');
     expect(forged.calls).not.toContain('- rc:999');
+    // The lookup queries state=all: a maintainer-closed tracking issue is
+    // still found and appended to (commenting on a closed issue works), so
+    // closure cannot fork a duplicate issue.
+    expect(created.calls).toContain('issues?state=all');
+    // Multiline reason bytes are flattened before rendering (a raw newline
+    // in agent-influenced content would forge extra bullet lines).
+    const flat = runUpsert({
+      findings: '[{"id":6,"reason":"line1\\nline2"}]',
+    });
+    expect(flat.calls).toContain('- rc:6 `?`: line1 line2');
+    // Non-integer / non-positive ids fail the shape gate: a float id's dot
+    // would be a regex wildcard in the anchored dedupe and never
+    // index()-match resolved-comments ids.
+    for (const bad of [
+      '[{"id":7.5,"reason":"r"}]',
+      '[{"id":-3,"reason":"r"}]',
+    ]) {
+      const r = runUpsert({ findings: bad });
+      expect(r.out).toContain('malformed');
+      expect(r.calls).toBe('');
+    }
+    // The 20-item cap clips LOUDLY and success is qualified — clipped items
+    // are never retried, so a silent clip would read as full persistence.
+    const capped = runUpsert({
+      findings: JSON.stringify(
+        Array.from({ length: 25 }, (_, i) => ({ id: i + 1, reason: 'r' })),
+      ),
+    });
+    expect(capped.out).toContain('persisting 20 of 25');
+    expect(capped.out).toContain('(20 of 25 new)');
+    expect(capped.calls).toContain('- rc:20 ');
+    expect(capped.calls).not.toContain('- rc:21 ');
+    // A failed tracking-issue LOOKUP skips the round (creating a duplicate
+    // is worse than deferring persistence) — no write call of either kind.
+    const listFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listFail: true,
+    });
+    expect(listFailed.out).toContain('lookup failed');
+    expect(listFailed.calls).not.toContain('-f title=');
+    expect(listFailed.calls).not.toContain('/comments -f body=');
+    // A failed COMMENTS fetch skips too: the dedupe corpus would be
+    // incomplete and history would be re-appended.
+    const commentsFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      commentsFail: true,
+    });
+    expect(commentsFailed.out).toContain('skipping this round');
+    expect(commentsFailed.calls).not.toContain('/comments -f body=');
+    // A failed APPEND write (existing issue) logs NOT persisted — the sole
+    // create-path writeFail case above never reaches this branch.
+    const appendFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      writeFail: true,
+    });
+    expect(appendFail.out).toContain('could not append');
+    expect(appendFail.out).toContain('NOT persisted');
   });
 
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {

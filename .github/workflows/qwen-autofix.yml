@@ -3985,6 +3985,7 @@ jobs:
           # gate itself).
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "upsert_sha256=$(sha256sum "${RUNNER_TEMP}/upsert-deferred-issue.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -5460,6 +5461,7 @@ jobs:
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
           RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
+          UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           # Growth-brake baseline: written into this window's FIRST report
           # comment only (growth_base_new), so later rounds' first-wins parse
@@ -5826,8 +5828,16 @@ jobs:
             # Best-effort: verified out-of-footprint findings persist into
             # the per-PR tracking issue (trusted staged copy; append-only
             # comment design — see the script).
-            bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
-              echo "::warning::deferred-findings upsert failed; continuing"
+            # Verify the staged copy's digest (recorded in expression context
+            # at stage time) before executing: RUNNER_TEMP is writable by the
+            # branch/agent code that ran in between. Best-effort like the
+            # upsert itself — a mismatch skips persistence, never the round.
+            if echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
+              bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+                echo "::warning::deferred-findings upsert failed; continuing"
+            else
+              echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
+            fi
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -5884,8 +5894,16 @@ jobs:
             # Best-effort: verified out-of-footprint findings persist into
             # the per-PR tracking issue (trusted staged copy; append-only
             # comment design — see the script).
-            bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
-              echo "::warning::deferred-findings upsert failed; continuing"
+            # Verify the staged copy's digest (recorded in expression context
+            # at stage time) before executing: RUNNER_TEMP is writable by the
+            # branch/agent code that ran in between. Best-effort like the
+            # upsert itself — a mismatch skips persistence, never the round.
+            if echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
+              bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+                echo "::warning::deferred-findings upsert failed; continuing"
+            else
+              echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
+            fi
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
@@ -6067,7 +6085,16 @@ jobs:
           GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
+          UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'
         run: |-
+          # gh has its own $GITHUB_ENV-injectable channels: pin the host, drop
+          # any planted token and point gh at a fresh config dir BEFORE the
+          # PAT-bearing gh calls below (handoff/report comment + deferred
+          # upsert) — this step runs after agent/branch code, same exposure as
+          # the workflow's other PAT-bearing gh sites.
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
@@ -6592,8 +6619,14 @@ jobs:
           # agent's analysis is independent of whether this round's commit
           # survived verification. Same guards as the handoff itself.
           if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" ]]; then
-            bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
-              echo "::warning::deferred-findings upsert failed; continuing"
+            # Same digest gate as the report-path invocations: RUNNER_TEMP is
+            # agent-writable, and this path runs after the agent too.
+            if echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
+              bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+                echo "::warning::deferred-findings upsert failed; continuing"
+            else
+              echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
+            fi
           fi
 
       # Flip the status comment out of "working" so a finished round never

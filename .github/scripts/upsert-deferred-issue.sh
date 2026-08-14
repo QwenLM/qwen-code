@@ -23,7 +23,7 @@ FINDINGS="${WORKDIR}/deferred-findings.json"
 # present, a string (one malformed sibling must not drop the batch — it
 # fails the whole file loudly instead of being silently formatted away).
 if ! jq -e 'type == "array" and length > 0 and all(.[];
-    (.id | type == "number") and (.reason | type == "string")
+    (.id | type == "number" and . == floor and . > 0) and (.reason | type == "string")
     and ((.path // "?") | type == "string"))' "${FINDINGS}" > /dev/null 2>&1; then
   echo "::warning::deferred-findings.json is malformed; skipping the follow-up upsert"
   exit 0
@@ -35,7 +35,7 @@ MARKER="<!-- autofix-deferred pr=${PR} -->"
 # request, marker matched against the real body (no line-joining), first
 # match wins. A lookup failure is a skip, not "no issue" — creating a
 # duplicate is worse than deferring persistence one round.
-if ! ISSUE_NUM="$(gh api "repos/${REPO}/issues?state=open&creator=${AUTOFIX_BOT}&per_page=100" \
+if ! ISSUE_NUM="$(gh api "repos/${REPO}/issues?state=all&creator=${AUTOFIX_BOT}&per_page=100" \
   --paginate 2> /dev/null |
   jq -rs --arg m "${MARKER}" '
     add // [] | map(select((.pull_request | not)
@@ -44,7 +44,8 @@ if ! ISSUE_NUM="$(gh api "repos/${REPO}/issues?state=open&creator=${AUTOFIX_BOT}
   exit 0
 fi
 
-KNOWN=''
+KNOWN_FILE="$(mktemp)"
+trap 'rm -f "${KNOWN_FILE}"' EXIT
 if [[ -n "${ISSUE_NUM}" && "${ISSUE_NUM}" != 'null' ]]; then
   # Known-id corpus = issue body + every comment. Any fetch failure skips
   # the round: treating it as empty would re-append history (or, under
@@ -58,7 +59,7 @@ if [[ -n "${ISSUE_NUM}" && "${ISSUE_NUM}" != 'null' ]]; then
     echo "::warning::could not read deferred-findings comments on #${ISSUE_NUM}; skipping this round"
     exit 0
   fi
-  KNOWN="${BODY_TEXT}"$'\n'"${COMMENT_TEXT}"
+  printf '%s\n%s' "${BODY_TEXT}" "${COMMENT_TEXT}" > "${KNOWN_FILE}"
 fi
 
 # Build this round's lines: intra-batch dedupe by id, drop ids the round
@@ -68,7 +69,10 @@ fi
 # neutralization matches every other agent-derived publish site.
 RESOLVED_RAW=''
 [[ -f "${WORKDIR}/resolved-comments.txt" ]] && RESOLVED_RAW="$(cat "${WORKDIR}/resolved-comments.txt")"
-NEW_LINES="$(jq -r --arg known "${KNOWN}" --arg resolved "${RESOLVED_RAW}" '
+# --rawfile, not --arg: a large corpus in one argv element hits Linux
+# MAX_ARG_STRLEN and the exec failure would be swallowed into a silent
+# "nothing new" exit.
+NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLVED_RAW}" '
   ($resolved | split("\n")
     | map(sub("^rc:"; "") | sub("\r$"; "")
       | select(test("^[0-9]+$")) | tonumber)) as $done
@@ -78,23 +82,33 @@ NEW_LINES="$(jq -r --arg known "${KNOWN}" --arg resolved "${RESOLVED_RAW}" '
     | select(($done | index($id)) | not)
     | select(($klines | any(test("^- rc:" + ($id | tostring) + " "))) | not)
     | "- rc:\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason | gsub("[\r\n]+"; " ") | .[0:500])")
-  | .[0:20] | .[]' "${FINDINGS}" 2> /dev/null |
+  | .[]' "${FINDINGS}" 2> /dev/null |
   sed 's/<!--/<!\\-\\-/g')" || NEW_LINES=''
 [[ -n "${NEW_LINES}" ]] || exit 0
+# Cap in bash, loudly: clipped items are never retried (the workdir is
+# deleted at job end), so a silent clip would read as full persistence.
+TOTAL_NEW="$(printf '%s\n' "${NEW_LINES}" | wc -l)"
+if (( TOTAL_NEW > 20 )); then
+  NEW_LINES="$(printf '%s\n' "${NEW_LINES}" | head -n 20)"
+  echo "::warning::deferred-findings cap: persisting 20 of ${TOTAL_NEW} new findings; the remaining $(( TOTAL_NEW - 20 )) are NOT persisted (re-defer them in a later round)"
+  KEPT=20
+else
+  KEPT="${TOTAL_NEW}"
+fi
 
 if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   BODY="${MARKER}"$'\n\n'"Verified review findings from PR #${PR} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up. A maintainer can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
   if NUM="$(gh api "repos/${REPO}/issues" \
     -f title="Deferred review findings from PR #${PR}" \
     -f body="${BODY}" --jq '.number' 2> /dev/null)"; then
-    echo "🗂 deferred findings tracked in new issue #${NUM}"
+    echo "🗂 deferred findings tracked in new issue #${NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
     echo "::warning::could not create the deferred-findings issue for PR #${PR}; findings NOT persisted this round"
   fi
 else
   if gh api "repos/${REPO}/issues/${ISSUE_NUM}/comments" \
     -f body="${NEW_LINES}" > /dev/null 2>&1; then
-    echo "🗂 deferred findings appended to issue #${ISSUE_NUM}"
+    echo "🗂 deferred findings appended to issue #${ISSUE_NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
     echo "::warning::could not append to deferred-findings issue #${ISSUE_NUM}; findings NOT persisted this round"
   fi
