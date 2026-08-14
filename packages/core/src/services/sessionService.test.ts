@@ -156,6 +156,107 @@ describe('SessionService', () => {
       expect(result.nextCursor).toBeUndefined();
     });
 
+    it('yields after 128 directory entries and stops statting after cancellation', async () => {
+      const fileNames = Array.from(
+        { length: 129 },
+        (_, index) => `${index.toString(16).padStart(32, '0')}.jsonl`,
+      );
+      readdirSyncSpy.mockReturnValue(
+        fileNames as unknown as Array<fs.Dirent<Buffer>>,
+      );
+      const controller = new AbortController();
+      const reason = Object.assign(new Error('catalog request disconnected'), {
+        code: 'ENOENT',
+      });
+      setImmediate(() => controller.abort(reason));
+
+      await expect(
+        sessionService.listSessions({ signal: controller.signal }),
+      ).rejects.toBe(reason);
+      expect(statSyncSpy).toHaveBeenCalledTimes(128);
+      expect(jsonl.readLines).not.toHaveBeenCalled();
+    });
+
+    it('does not yield during directory enumeration without a signal', async () => {
+      const fileNames = Array.from(
+        { length: 129 },
+        (_, index) => `${index.toString(16).padStart(32, '0')}.jsonl`,
+      );
+      readdirSyncSpy.mockReturnValue(
+        fileNames as unknown as Array<fs.Dirent<Buffer>>,
+      );
+      const setImmediateSpy = vi.spyOn(globalThis, 'setImmediate');
+
+      await sessionService.listSessions({ size: 0 });
+
+      expect(statSyncSpy).toHaveBeenCalledTimes(129);
+      expect(setImmediateSpy).not.toHaveBeenCalled();
+    });
+
+    it('passes cancellation to the per-file JSONL read', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      const controller = new AbortController();
+      const reason = new Error('cancelled during session JSONL read');
+      let readSignal: AbortSignal | undefined;
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (_filePath, _count, options) => {
+          readSignal = options?.signal;
+          await new Promise<void>((_resolve, reject) => {
+            readSignal?.addEventListener(
+              'abort',
+              () => reject(readSignal?.reason),
+              { once: true },
+            );
+          });
+          return [];
+        },
+      );
+
+      const result = sessionService.listSessions({
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(readSignal).toBe(controller.signal));
+      controller.abort(reason);
+
+      await expect(result).rejects.toBe(reason);
+      expect(jsonl.readLines).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.jsonl`),
+        expect.any(Number),
+        { signal: controller.signal },
+      );
+    });
+
+    it('passes cancellation through migrated-session membership reads', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      const migratedRecord = { ...recordA1, cwd: '/old/project' };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      const controller = new AbortController();
+
+      await sessionService.listSessions({ signal: controller.signal });
+
+      expect(readRuntimeStatus).toHaveBeenCalledWith(expect.any(String), {
+        signal: controller.signal,
+      });
+    });
+
     it('should return empty list when chats directory does not exist', async () => {
       const error = new Error('ENOENT') as NodeJS.ErrnoException;
       error.code = 'ENOENT';
@@ -225,6 +326,9 @@ describe('SessionService', () => {
 
     it('should list archived sessions from archive directory only', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        // path.join is mocked above to join with '/', so production paths
+        // always use '/' here regardless of host platform — match that, not
+        // path.sep (which stays the real host separator under the automock).
         if (dir.toString().endsWith('/chats/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
@@ -249,7 +353,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts aggregates active and archived membership', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
-        if (dir.toString().endsWith(`${path.sep}archive`)) {
+        if (dir.toString().endsWith('/archive')) {
           return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
         }
         return [
@@ -282,7 +386,7 @@ describe('SessionService', () => {
 
     it('getSessionInfoCounts excludes sessions from other projects', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
       );
@@ -320,7 +424,7 @@ describe('SessionService', () => {
 
     it('marks counts truncated when a candidate session cannot be read', async () => {
       readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
-        dir.toString().endsWith(`${path.sep}archive`)
+        dir.toString().endsWith('/archive')
           ? ([] as unknown as Array<fs.Dirent<Buffer>>)
           : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
               fs.Dirent<Buffer>
@@ -359,6 +463,114 @@ describe('SessionService', () => {
 
       expect(result.items[0].prompt).toBe('hello session a');
       expect(result.items[0].gitBranch).toBe('main');
+    });
+
+    it('should use recorded display text for the session list prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions\n\nhello' }],
+          },
+          systemPayload: { displayText: 'hello', hookContext: '' },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('hello');
+    });
+
+    it('should keep an intentionally empty display prompt empty', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions' }],
+          },
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('');
+    });
+
+    it('should use a later prompt after an empty display prompt', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: {
+            role: 'user',
+            parts: [{ text: 'internal channel instructions' }],
+          },
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+        {
+          ...recordA1,
+          uuid: 'later-user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('later prompt');
+    });
+
+    it('should skip internal user-subtype records after an empty projection', async () => {
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          systemPayload: { displayText: '', hookContext: '' },
+        },
+        {
+          ...recordA1,
+          uuid: 'cron',
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: 'internal cron prompt' }] },
+        },
+        {
+          ...recordA1,
+          uuid: 'later-user',
+          message: { role: 'user', parts: [{ text: 'later prompt' }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items[0].prompt).toBe('later prompt');
     });
 
     it('should NOT populate messageCount during listing', async () => {
@@ -403,6 +615,28 @@ describe('SessionService', () => {
 
       expect(result.items[0].prompt.length).toBe(203); // 200 + '...'
       expect(result.items[0].prompt.endsWith('...')).toBe(true);
+    });
+
+    it('should truncate long prompts on code-point boundaries', async () => {
+      const longPrompt = '😀'.repeat(300);
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          message: { role: 'user', parts: [{ text: longPrompt }] },
+        },
+      ]);
+
+      const result = await sessionService.listSessions();
+
+      expect(Array.from(result.items[0].prompt)).toHaveLength(203);
+      expect(result.items[0].prompt).toBe(`${'😀'.repeat(200)}...`);
     });
 
     it('should paginate with size parameter', async () => {
@@ -2252,6 +2486,21 @@ describe('SessionService', () => {
     });
   });
 
+  describe('findSessionIdIgnoringCase', () => {
+    it('finds a legacy mixed-case transcript', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSyncSpy.mockReturnValue([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (sessionId) =>
+          sessionId === legacySessionId ? 'active' : undefined,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();
@@ -2311,6 +2560,82 @@ describe('SessionService', () => {
       );
 
       expect(exists).toBe(false);
+    });
+
+    it('does not convert cancellation into a missing session', async () => {
+      const controller = new AbortController();
+      const reason = new Error('existence check cancelled');
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (_filePath, _count, options) => {
+          controller.abort(reason);
+          options?.signal?.throwIfAborted();
+          return [];
+        },
+      );
+
+      await expect(
+        sessionService.sessionExists(sessionIdA, {
+          signal: controller.signal,
+        }),
+      ).rejects.toBe(reason);
+      expect(jsonl.readLines).toHaveBeenCalledWith(expect.any(String), 1, {
+        signal: controller.signal,
+      });
+    });
+
+    it('observes cancellation after the project-membership await', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const controller = new AbortController();
+      const reason = new Error('cancelled after membership resolved');
+
+      const exists = sessionService.sessionExists(sessionIdA, {
+        signal: controller.signal,
+      });
+      queueMicrotask(() => controller.abort(reason));
+
+      await expect(exists).rejects.toBe(reason);
+    });
+
+    it('passes cancellation to migrated-session runtime status reads', async () => {
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+      const controller = new AbortController();
+      const reason = new Error('cancelled during runtime status read');
+      let runtimeStatusSignal: AbortSignal | undefined;
+      vi.mocked(readRuntimeStatus).mockImplementation(
+        async (_filePath, options) => {
+          runtimeStatusSignal = options?.signal;
+          await new Promise<void>((_resolve, reject) => {
+            runtimeStatusSignal?.addEventListener(
+              'abort',
+              () => reject(runtimeStatusSignal?.reason),
+              { once: true },
+            );
+          });
+          return null;
+        },
+      );
+
+      const exists = sessionService.sessionExists(sessionIdA, {
+        signal: controller.signal,
+      });
+      await vi.waitFor(() =>
+        expect(runtimeStatusSignal).toBe(controller.signal),
+      );
+      controller.abort(reason);
+
+      await expect(exists).rejects.toBe(reason);
+      expect(readRuntimeStatus).toHaveBeenCalledWith(expect.any(String), {
+        signal: controller.signal,
+      });
     });
 
     it('should return false for session from different project', async () => {
@@ -2420,6 +2745,7 @@ describe('SessionService', () => {
         info: {
           originalTokenCount: 1000,
           newTokenCount: 300,
+          newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
         },
         compressedHistory: [],
@@ -2441,7 +2767,11 @@ describe('SessionService', () => {
       ).toBe(450);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 450, outputTokenCount: 0 });
+      ).toEqual({
+        promptTokenCount: 450,
+        outputTokenCount: 0,
+        isEstimated: false,
+      });
     });
 
     it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
@@ -2459,7 +2789,11 @@ describe('SessionService', () => {
       ).toBe(200);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, outputTokenCount: 250 });
+      ).toEqual({
+        promptTokenCount: 200,
+        outputTokenCount: 250,
+        isEstimated: false,
+      });
     });
 
     it('should restore disjoint candidate and thought output tokens when total is unavailable', () => {
@@ -2476,7 +2810,11 @@ describe('SessionService', () => {
       };
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 200, outputTokenCount: 100 });
+      ).toEqual({
+        promptTokenCount: 200,
+        outputTokenCount: 100,
+        isEstimated: false,
+      });
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -2494,7 +2832,58 @@ describe('SessionService', () => {
       ).toBe(300);
       expect(
         getResumeTokenCounts(makeConversation([compressionRecord, assistant])),
-      ).toEqual({ promptTokenCount: 300, outputTokenCount: 0 });
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: true,
+      });
+    });
+
+    it('conservatively treats legacy compression checkpoints as estimated', () => {
+      const legacyCompressionRecord: ChatRecord = {
+        ...compressionRecord,
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 300,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      };
+
+      expect(
+        getResumeTokenCounts(makeConversation([legacyCompressionRecord])),
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: true,
+      });
+    });
+
+    it('restores an explicit authoritative compression-checkpoint provenance', () => {
+      const authoritativeCompressionRecord: ChatRecord = {
+        ...compressionRecord,
+        systemPayload: {
+          info: {
+            originalTokenCount: 1000,
+            newTokenCount: 300,
+            newTokenCountIsEstimated: false,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [],
+        },
+      };
+
+      expect(
+        getResumeTokenCounts(
+          makeConversation([authoritativeCompressionRecord]),
+        ),
+      ).toEqual({
+        promptTokenCount: 300,
+        outputTokenCount: 0,
+        isEstimated: false,
+      });
     });
   });
 
@@ -2517,6 +2906,40 @@ describe('SessionService', () => {
       const history = buildApiHistoryFromConversation(conversation);
 
       expect(history).toEqual([recordA1.message, assistantA1.message]);
+    });
+
+    it('keeps Realtime dialogue out of backend model history', () => {
+      const realtimeUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'realtime-user',
+        subtype: 'realtime_message',
+        message: { role: 'user', parts: [{ text: 'voice question' }] },
+      };
+      const realtimeAssistant: ChatRecord = {
+        ...recordB2,
+        uuid: 'realtime-assistant',
+        parentUuid: realtimeUser.uuid,
+        sessionId: sessionIdA,
+        subtype: 'realtime_message',
+        message: { role: 'model', parts: [{ text: 'voice answer' }] },
+      };
+      const backendUser: ChatRecord = {
+        ...recordA1,
+        uuid: 'backend-user',
+        parentUuid: realtimeAssistant.uuid,
+        message: { role: 'user', parts: [{ text: 'backend task' }] },
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [realtimeUser, realtimeAssistant, backendUser],
+      };
+
+      expect(buildApiHistoryFromConversation(conversation)).toEqual([
+        backendUser.message,
+      ]);
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
@@ -3091,6 +3514,69 @@ describe('SessionService', () => {
         .map((l) => JSON.parse(l));
       expect(srcLines.every((r) => r.sessionId === oldId)).toBe(true);
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
+    });
+
+    it('writes source metadata and drops the inherited title for sourced forks', async () => {
+      const oldId = '10101010-1010-1010-1010-101010101010';
+      const newId = '20202020-2020-2020-2020-202020202020';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'title-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'custom_title',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              customTitle: 'Parent title',
+              titleSource: 'manual',
+            },
+          },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId, {
+        source: {
+          sourceType: 'side_task',
+          sourceId: oldId,
+        },
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written[0]).toMatchObject({
+        parentUuid: null,
+        sessionId: newId,
+        type: 'system',
+        subtype: 'session_source',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          sourceType: 'side_task',
+          sourceId: oldId,
+        },
+      });
+      expect(written.some((record) => record.subtype === 'custom_title')).toBe(
+        false,
+      );
+      expect(written[1]).toMatchObject({
+        parentUuid: written[0].uuid,
+        forkedFrom: {
+          sessionId: oldId,
+          messageUuid: 'u1',
+        },
+      });
     });
 
     it('copies artifact side records from the active branch', async () => {

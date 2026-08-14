@@ -59,6 +59,7 @@ function makeBridge(): AcpSessionBridge {
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
         channelIdleTimeoutMs: 0,
         sessionIdleTimeoutMs: 1_800_000,
       },
@@ -96,6 +97,7 @@ function makeRuntime(
   return {
     workspaceId: opts.workspaceId,
     workspaceCwd,
+    sessionRuntimeBaseDir: path.join(workspaceCwd, '.runtime'),
     primary: opts.primary,
     trusted: opts.trusted,
     env: { mode: 'parent-process', overlayKeys: [] },

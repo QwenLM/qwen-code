@@ -23,6 +23,10 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
+import { canonicalToolName } from '../tools/tool-names.js';
+import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
+import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
 import {
@@ -31,6 +35,7 @@ import {
   runForkedAgent,
   runWithForkedChatModel,
 } from '../utils/forkedAgent.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 import {
   finalizeToolResponses,
@@ -40,6 +45,8 @@ import {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+
+const debugLogger = createDebugLogger('SPECULATION');
 
 const MAX_SPECULATION_TURNS = 20;
 const MAX_SPECULATION_MESSAGES = 100;
@@ -292,6 +299,7 @@ async function runSpeculativeLoop(
           args,
           state.overlayFs!,
           approvalMode,
+          config.getTargetDir?.(),
         );
 
         if (gate.action === 'boundary') {
@@ -332,6 +340,31 @@ async function runSpeculativeLoop(
           }
 
           const invocation = tool.build(args);
+          const toolInvocationGuard = config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const invocationContext = getInvocationContext();
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId: persistenceCallId,
+                toolName: canonicalToolName(name),
+                args: invocation.params as Record<string, unknown>,
+                signal: state.abortController!.signal,
+                ...(invocationContext ? { invocationContext } : {}),
+              },
+            );
+            if (state.abortController!.signal.aborted) {
+              hitBoundary = true;
+              break;
+            }
+            if (!guardDecision.allowed) {
+              debugLogger.debug(
+                `Speculative guard denial: ${guardDecision.reason}`,
+              );
+              hitBoundary = true;
+              break;
+            }
+          }
           const result = await invocation.execute(
             state.abortController!.signal,
           );
@@ -345,9 +378,12 @@ async function runSpeculativeLoop(
                 result.error.message,
               )
             : convertToFunctionResponse(name, id ?? '', result.llmContent);
+          const bridgedResponseParts = stripToolResultImages(
+            convertedResponseParts,
+          );
           const responseParts = id
-            ? convertedResponseParts
-            : convertedResponseParts.map((responsePart) => {
+            ? bridgedResponseParts
+            : bridgedResponseParts.map((responsePart) => {
                 if (!responsePart.functionResponse) {
                   return responsePart;
                 }

@@ -28,8 +28,32 @@ describe('normalize', () => {
     expect(normalize('qwen|qwen2.5:qwen2.5-1m')).toBe('qwen2.5-1m');
   });
 
+  it('should keep the model name when the colon carries a variant tag', () => {
+    // OpenRouter variants and Ollama / LM Studio tags put the colon on the
+    // right of the model name — the opposite side from the `family:model`
+    // form above — so the half worth keeping is the left one.
+    expect(normalize('qwen/qwen3-coder:free')).toBe('qwen3-coder');
+    expect(normalize('google/gemini-2.5-pro:online')).toBe('gemini-2.5-pro');
+    expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
+    expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');
+    expect(normalize('qwen2.5-coder:latest')).toBe('qwen2.5-coder');
+  });
+
   it('should collapse whitespace to a single hyphen', () => {
     expect(normalize('claude 3.5 sonnet')).toBe('claude-3.5-sonnet');
+  });
+
+  it('rewrites dotted-minor Claude aliases to the canonical hyphenated form', () => {
+    expect(normalize('claude-opus-4.8')).toBe('claude-opus-4-8');
+    // Multi-component and already-hyphenated-minor shapes fold too, so the
+    // version parser and the limit tables agree on every alias shape.
+    expect(normalize('claude-opus-4.8.0')).toBe('claude-opus-4-8');
+    expect(normalize('claude-opus-4-8.0')).toBe('claude-opus-4-8-0');
+    // Space-separated display names reach the rewrite (ws collapse runs first).
+    expect(normalize('Claude Opus 4.8')).toBe('claude-opus-4-8');
+    // Family-agnostic: a not-yet-enumerated family still folds instead of
+    // collapsing to the bare family name.
+    expect(normalize('claude-newfam-5.1')).toBe('claude-newfam-5-1');
   });
 
   it('should remove date and version suffixes', () => {
@@ -146,6 +170,40 @@ describe('tokenLimit', () => {
       expect(tokenLimit('claude-opus-4-6')).toBe(1_000_000);
       expect(tokenLimit('claude-opus-4-7')).toBe(1_000_000);
       expect(tokenLimit('vertex/claude-opus-4-8')).toBe(1_000_000);
+    });
+
+    it('should return 1M for dotted-minor Opus 4.6-4.8 aliases (LiteLLM/Vertex/Bedrock convention)', () => {
+      // Model Group aliases exposed by LiteLLM/Vertex/Bedrock-style proxies
+      // frequently use `.` between major and minor. normalize() rewrites
+      // these to the canonical hyphenated form so a single downstream
+      // pattern matches both conventions.
+      expect(tokenLimit('claude-opus-4.6')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4.7')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4.8')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-4.8')).toBe(1_000_000);
+      expect(tokenLimit('bedrock/claude-opus-4.8')).toBe(1_000_000);
+    });
+
+    it('should return 1M for dotted-revision and space-separated Opus aliases', () => {
+      // Semver-style groups and hyphenated-minor-with-dotted-revision must not
+      // collapse to the generic 200K fallback while the version parser accepts
+      // them (the two subsystems would otherwise disagree).
+      expect(tokenLimit('claude-opus-4.8.0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4-8.0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-4-8.1')).toBe(1_000_000);
+      // Display-style names pasted into a model field.
+      expect(tokenLimit('Claude Opus 4.8')).toBe(1_000_000);
+      expect(tokenLimit('claude opus 4.8')).toBe(1_000_000);
+    });
+
+    it('should return 1M for Opus 5.x (bare major and dotted/hyphenated minors)', () => {
+      expect(tokenLimit('claude-opus-5')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5-0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5-1')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5.0')).toBe(1_000_000);
+      expect(tokenLimit('claude-opus-5.1')).toBe(1_000_000);
+      expect(tokenLimit('vertex/claude-opus-5')).toBe(1_000_000);
+      expect(tokenLimit('bedrock/claude-opus-5-0')).toBe(1_000_000);
     });
 
     it('should return 200K for other Claude models', () => {
@@ -281,6 +339,37 @@ describe('tokenLimit', () => {
   });
 });
 
+describe('variant-tagged model ids', () => {
+  it('resolves the same limit with and without the tag', () => {
+    for (const [tagged, bare] of [
+      ['qwen/qwen3-coder:free', 'qwen/qwen3-coder'],
+      ['google/gemini-2.5-pro:online', 'google/gemini-2.5-pro'],
+      ['openai/gpt-5:free', 'openai/gpt-5'],
+      ['qwen2.5-coder:32b', 'qwen2.5-coder'],
+      ['qwen3-coder-plus:nitro', 'qwen3-coder-plus'],
+    ] as Array<[string, string]>) {
+      expect(tokenLimit(tagged)).toBe(tokenLimit(bare));
+      expect(tokenLimit(tagged, 'output')).toBe(tokenLimit(bare, 'output'));
+    }
+  });
+
+  it('reports the real window rather than the default fallback', () => {
+    // Pinned absolutely as well as relatively: if both sides of the
+    // comparison above regressed to the default the pairs would still match.
+    expect(tokenLimit('qwen/qwen3-coder:free')).toBe(262_144);
+    expect(tokenLimit('google/gemini-2.5-pro:online')).toBe(1_000_000);
+    expect(tokenLimit('openai/gpt-5:free')).toBe(272_000);
+    expect(tokenLimit('qwen2.5-coder:32b')).toBe(262_144);
+  });
+
+  it('still keeps the right half of a prefixed id', () => {
+    // The guard against over-correcting: a colon suffix is dropped only when
+    // it looks like a tag, so the `family:model` forms stay as they were.
+    expect(tokenLimit('qwen|qwen2.5:qwen2.5-1m')).toBe(262_144);
+    expect(tokenLimit('  a/b/c|GPT-4o:gpt-4o-2024-05-13-q4  ')).toBe(131_072);
+  });
+});
+
 describe('knownTokenLimit', () => {
   it('returns a limit for known input models', () => {
     expect(knownTokenLimit('qwen3-max')).toBe(262144);
@@ -313,6 +402,31 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('claude-opus-4-7', 'output')).toBe(128_000);
       expect(tokenLimit('vertex/claude-opus-4-8', 'output')).toBe(128_000);
       expect(tokenLimit('claude-sonnet-4-6', 'output')).toBe(65536);
+    });
+
+    it('should return 128K output for dotted-minor Opus 4.6-4.8 aliases', () => {
+      expect(tokenLimit('claude-opus-4.6', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4.7', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('bedrock/claude-opus-4.8', 'output')).toBe(128_000);
+    });
+
+    it('should return 128K output for dotted-revision and space-separated Opus aliases', () => {
+      expect(tokenLimit('claude-opus-4.8.0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-4-8.0', 'output')).toBe(128_000);
+      expect(tokenLimit('Claude Opus 4.8', 'output')).toBe(128_000);
+      expect(tokenLimit('claude opus 4.8', 'output')).toBe(128_000);
+    });
+
+    it('should return 128K output for Opus 5.x (bare major and dotted/hyphenated minors)', () => {
+      expect(tokenLimit('claude-opus-5', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5-0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5-1', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5.0', 'output')).toBe(128_000);
+      expect(tokenLimit('claude-opus-5.1', 'output')).toBe(128_000);
+      expect(tokenLimit('vertex/claude-opus-5', 'output')).toBe(128_000);
+      expect(tokenLimit('bedrock/claude-opus-5-0', 'output')).toBe(128_000);
     });
   });
 
@@ -472,6 +586,27 @@ describe('defaultOutputCeiling', () => {
     expect(defaultOutputCeiling('claude-opus-4-6')).toBe(128_000);
     expect(defaultOutputCeiling('claude-opus-4-7')).toBe(128_000);
     expect(defaultOutputCeiling('vertex/claude-opus-4-8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to dotted-minor Opus 4.6-4.8 aliases', () => {
+    expect(defaultOutputCeiling('claude-opus-4.6')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4.7')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4.8')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-4.8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to dotted-revision and space-separated Opus aliases', () => {
+    expect(defaultOutputCeiling('claude-opus-4.8.0')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-4-8.0')).toBe(128_000);
+    expect(defaultOutputCeiling('Claude Opus 4.8')).toBe(128_000);
+  });
+
+  it('extends the 128K ceiling exemption to Opus 5.x', () => {
+    expect(defaultOutputCeiling('claude-opus-5')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5-0')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5-1')).toBe(128_000);
+    expect(defaultOutputCeiling('claude-opus-5.0')).toBe(128_000);
+    expect(defaultOutputCeiling('vertex/claude-opus-5')).toBe(128_000);
   });
 
   it('uses the default output limit for an unknown model', () => {

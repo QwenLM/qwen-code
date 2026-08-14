@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,12 @@ import { WorkflowTool } from './workflow.js';
 import type { Config } from '../../config/config.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import { WorkflowRunRegistry } from '../../agents/workflow-run-registry.js';
+import { WorkflowJournal } from '../../agents/runtime/workflow-journal.js';
+import {
+  DEFAULT_MAX_AGENTS_PER_RUN,
+  MAX_WORKFLOW_AGENTS_ENV,
+  MAX_WORKFLOW_CONCURRENCY_ENV,
+} from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
 
 function fakeConfig(): Config {
@@ -42,6 +48,98 @@ describe('WorkflowTool', () => {
     const tool = new WorkflowTool(fakeConfig());
     expect(tool.name).toBe(ToolNames.WORKFLOW);
     expect(tool.displayName).toBe(ToolDisplayNames.WORKFLOW);
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: {
+        run_in_background: { default?: boolean; description?: string };
+      };
+    };
+    expect(schema.properties.run_in_background.default).toBe(false);
+    expect(schema.properties.run_in_background.description).toContain(
+      'cooperatively pause/resume',
+    );
+  });
+
+  // The description is what makes the model pick pipeline() over a barrier
+  // and verify a finding before reporting it. A refactor that drops the
+  // policy prose leaves a runtime nobody drives well, and no other test
+  // would notice — so anchor the load-bearing claims.
+  it('description carries both the runtime facts and the orchestration policy', () => {
+    const { description } = new WorkflowTool(fakeConfig());
+    // Every env knob the description names is anchored. The two that the
+    // orchestrator exports are anchored *through the exported constant*, so
+    // a rename on the runtime side fails here too — a hardcoded literal
+    // would only have caught a description-side typo, and the model would
+    // go on telling users to set a variable nothing reads.
+    // `QWEN_CODE_MAX_WORKFLOW_SECONDS` has no exported constant
+    // (`workflow-sandbox.ts` reads it inline), so it stays a literal.
+    for (const anchor of [
+      'min(16, cpus-2)',
+      MAX_WORKFLOW_AGENTS_ENV,
+      MAX_WORKFLOW_CONCURRENCY_ENV,
+      'QWEN_CODE_MAX_WORKFLOW_SECONDS',
+      'resumeFromRunId',
+      '/workflows',
+      'node:vm sandbox',
+    ]) {
+      expect(description).toContain(anchor);
+    }
+    // One anchor per policy section — dropping any whole section has to
+    // turn this test red, which is the regression it exists to catch.
+    expect(description).toMatch(/Parallelism on its own is not a reason/);
+    expect(description).toMatch(/only before the orchestration step/);
+    expect(description).toMatch(/Common single-phase shapes/);
+    expect(description).toMatch(/Default to `pipeline\(\)`/);
+    expect(description).toMatch(/A barrier is right only when/);
+    expect(description).toMatch(/refute/);
+    expect(description).toMatch(/against everything already seen/);
+    expect(description).toMatch(/log\(\)` what was dropped/);
+    // Limits the model has to plan around rather than discover from a
+    // mid-run failure — the numbers themselves, not just the knob names.
+    // Anchored *through* the exported constant rather than as a literal:
+    // the description interpolates `DEFAULT_MAX_AGENTS_PER_RUN`, so this
+    // tracks a raised cap automatically, and a regression that pastes the
+    // number back in as prose goes red the next time the constant moves.
+    expect(description).toContain(
+      `up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
+    // `DEFAULT_MAX_WALL_CLOCK_MS` is private to `workflow-sandbox.ts`, so
+    // this one is still a hand-synced literal on both sides.
+    expect(description).toMatch(/30-minute wall-clock cap/);
+    expect(description).toMatch(/nests one level only/);
+    expect(description).toMatch(/read `budget\.total`/);
+    // The `/workflows` capability list is the one part of the description
+    // that trails the runtime: #8320 added cooperative pause/resume to the
+    // dialog while this branch was moving the description into a constant,
+    // and the base merge conflicted exactly here. Nothing else asserts the
+    // control set, so dropping one on the next merge would be silent.
+    expect(description).toMatch(/cooperative pause\/resume/);
+    // #8690 asked the text to speak this project's own vocabulary. Without
+    // a location, "runs a saved workflow" leaves the model no way to reach
+    // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
+    // absolute path it cannot construct.
+    expect(description).toContain('.qwen/workflows');
+  });
+
+  // The tool description is not the only model-visible copy of the caps —
+  // the `script` parameter description states them a second time, and a
+  // model reading one tool call sees both. Anchoring only the tool
+  // description lets a maintainer raise a cap, watch the test above go
+  // green again, and stop while `script` still advertises the old number.
+  it('script parameter description states the same caps as the tool description', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: { script: { description: string } };
+    };
+    const scriptDescription = schema.properties.script.description;
+    expect(scriptDescription).toContain(
+      `At most ${DEFAULT_MAX_AGENTS_PER_RUN} agent() calls per run`,
+    );
+    expect(scriptDescription).toContain(MAX_WORKFLOW_AGENTS_ENV);
+    expect(scriptDescription).toContain(MAX_WORKFLOW_CONCURRENCY_ENV);
+    // Both halves must agree on the agent cap, whatever it is.
+    expect(tool.description).toContain(
+      `${DEFAULT_MAX_AGENTS_PER_RUN} agents total`,
+    );
   });
 
   it('rejects build() when script is missing', () => {
@@ -85,6 +183,172 @@ describe('WorkflowTool', () => {
     expect(invocation.params.scriptPath).toBe('/abs/deep-research.js');
     // Description reflects the saved-workflow filename, not a char count.
     expect(invocation.getDescription()).toContain('deep-research.js');
+  });
+
+  it('rejects background runs outside an interactive completion channel', () => {
+    const headlessRegistry = new WorkflowRunRegistry();
+    headlessRegistry.setCompletionCallback(vi.fn());
+    const headlessConfig = {
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => headlessRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(headlessConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/interactive TUI/i);
+
+    const interactiveRegistry = new WorkflowRunRegistry();
+    const interactiveConfig = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => interactiveRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(interactiveConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/completion channel/i);
+
+    interactiveRegistry.setCompletionCallback(vi.fn());
+    const acpConfig = {
+      isInteractive: () => true,
+      getExperimentalZedIntegration: () => true,
+      getWorkflowRunRegistry: () => interactiveRegistry,
+    } as unknown as Config;
+    expect(() =>
+      new WorkflowTool(acpConfig).build({
+        script: 'return 1',
+        run_in_background: true,
+      }),
+    ).toThrow(/interactive TUI/i);
+  });
+
+  it('does not register a background run when the caller is already aborted', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const dispatch = vi.fn(async () => 'unused');
+    const caller = new AbortController();
+    caller.abort();
+
+    const result = await new WorkflowTool(config, { dispatch })
+      .build({ script: 'return 1', run_in_background: true })
+      .execute(caller.signal);
+
+    expect(result).toEqual({
+      llmContent: 'Workflow was cancelled before it could start.',
+      returnDisplay: 'Workflow cancelled.',
+    });
+    expect(registry.list()).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('does not register when cancellation arrives during background preflight', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      storage: new Storage(path.join(os.tmpdir(), 'workflow-preflight-test')),
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    const caller = new AbortController();
+    const dispatch = vi.fn(async () => 'unused');
+    const load = vi
+      .spyOn(WorkflowJournal.prototype, 'load')
+      .mockImplementation(async () => {
+        caller.abort();
+        return { results: new Map(), started: new Map() };
+      });
+
+    try {
+      const result = await new WorkflowTool(config, { dispatch })
+        .build({
+          script: 'return 1',
+          resumeFromRunId: 'wf_1234abcd',
+          run_in_background: true,
+        })
+        .execute(caller.signal);
+
+      expect(result).toEqual({
+        llmContent: 'Workflow was cancelled before it could start.',
+        returnDisplay: 'Workflow cancelled.',
+      });
+      expect(registry.list()).toHaveLength(0);
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('run_in_background=true returns a live handle without late tool updates', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = {
+      isInteractive: () => true,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    } as unknown as Config;
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const tool = new WorkflowTool(config, {
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    const updateOutput = vi.fn();
+    const execution = tool
+      .build({
+        script: `phase('slow'); return await agent('work');`,
+        run_in_background: true,
+      })
+      .execute(new AbortController().signal, updateOutput);
+
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    const result = await execution;
+    const entry = registry.list()[0]!;
+    expect(entry.status).toBe('running');
+    expect(entry.isBackgrounded).toBe(true);
+    expect(result.llmContent).toEqual([
+      {
+        text: `Workflow started in background.\nRun ID: ${entry.runId}\nStatus: running`,
+      },
+    ]);
+    expect(result.returnDisplay).toBe(
+      `Workflow ${entry.runId} started in the background (status: running). Use Background Tasks to observe, cooperatively pause/resume, or stop it.`,
+    );
+    expect(updateOutput).not.toHaveBeenCalled();
+
+    resolveDispatch?.('done');
+    await registry.getHandle(entry.runId)!.completion;
+    expect(registry.get(entry.runId)?.status).toBe('completed');
+    expect(updateOutput).not.toHaveBeenCalled();
+  });
+
+  it('run_in_background=false preserves the foreground ToolResult byte-for-byte', async () => {
+    const run = async (runInBackground: false | undefined) => {
+      const registry = new WorkflowRunRegistry();
+      const config = {
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      const params = {
+        script: `phase('one'); return { answer: 42 };`,
+        resumeFromRunId: 'wf_1234abcd',
+        ...(runInBackground === undefined
+          ? {}
+          : { run_in_background: runInBackground }),
+      };
+      return new WorkflowTool(config, { dispatch: async () => 'unused' })
+        .build(params)
+        .execute(new AbortController().signal);
+    };
+
+    await expect(run(false)).resolves.toEqual(await run(undefined));
   });
 
   it('execute() loads a saved-workflow scriptPath and records its provenance', async () => {

@@ -61,6 +61,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/side-task',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/side-task',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/cd',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/cd',
@@ -115,15 +121,15 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
-    path: '/session/:id/subagents/:toolCallId',
+    path: '/session/:id/subagents/:subagentRef',
     attribution: 'handler_resolved',
-    route: 'GET /session/:id/subagents/:toolCallId',
+    route: 'GET /session/:id/subagents/:subagentRef',
   },
   {
     method: 'POST',
-    path: '/session/:id/subagents/:toolCallId/cancel',
+    path: '/session/:id/subagents/:subagentRef/cancel',
     attribution: 'handler_resolved',
-    route: 'POST /session/:id/subagents/:toolCallId/cancel',
+    route: 'POST /session/:id/subagents/:subagentRef/cancel',
   },
   {
     method: 'GET',
@@ -247,6 +253,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/config-option',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/config-option',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/recap',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/recap',
@@ -262,6 +274,18 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/mid-turn-message',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/mid-turn-message',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/mid-turn-messages/:messageId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/mid-turn-messages/:messageId',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/mid-turn-messages',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/mid-turn-messages',
   },
   {
     method: 'GET',
@@ -532,6 +556,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/reload' ||
         suffix === '/workspace/file/write' ||
         suffix === '/workspace/file/edit' ||
+        suffix === '/workspace/file/upload' ||
         suffix === '/workspace/mcp/servers' ||
         suffix === '/workspace/memory' ||
         suffix === '/workspace/agents' ||

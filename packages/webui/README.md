@@ -247,16 +247,17 @@ Do NOT nest multiple `<DaemonSessionProvider>` for the same session — that cre
 
 ### Session hooks
 
-| Hook                      | Returns                                                                                                             |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `useTranscriptBlocks()`   | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                                     |
-| `useTranscriptState()`    | Full `DaemonTranscriptState` (blocks + metadata)                                                                    |
-| `useActions()`            | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`              |
-| `useConnection()`         | `{ status, sessionId, currentModel, currentMode, commands, skills, models, tokenCount, tokenUsage, contextWindow }` |
-| `useStreamingState()`     | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                                 |
-| `usePromptStatus()`       | `'idle' \| 'waiting' \| 'streaming'`                                                                                |
-| `usePendingPermissions()` | Unresolved permission blocks                                                                                        |
-| `useActiveTodoList()`     | Latest todo list, only when it still has active items                                                               |
+| Hook                           | Returns                                                                                                                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useTranscriptBlocks()`        | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                                                                                                                 |
+| `useTranscriptState()`         | Full `DaemonTranscriptState` (blocks + metadata)                                                                                                                                                |
+| `useActions()`                 | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`                                                                                          |
+| `useConnection()`              | `{ status, sessionId, clientId, workspaceCwd, currentModel, currentMode, capabilities, commands, skills, models, tokenCount, tokenUsage, contextWindow, loadingTranscript, missingSession, … }` |
+| `useDaemonSessionOwnerGuard()` | Captures the current attachment identity so stale async UI continuations can be ignored                                                                                                         |
+| `useStreamingState()`          | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                                                                                                             |
+| `usePromptStatus()`            | `'idle' \| 'waiting' \| 'streaming'`                                                                                                                                                            |
+| `usePendingPermissions()`      | Unresolved permission blocks                                                                                                                                                                    |
+| `useActiveTodoList()`          | Latest todo list, only when it still has active items                                                                                                                                           |
 
 ### Workspace hooks
 
@@ -286,7 +287,7 @@ All resource hooks accept `{ autoLoad?: boolean, enabled?: boolean }` and return
 | `baseUrl`             | `string?` | inherited | Daemon HTTP base URL (inherited from `DaemonWorkspaceProvider` when nested; required in standalone mode) |
 | `token`               | `string?` | inherited | Bearer token (inherited from `DaemonWorkspaceProvider` when nested)                                      |
 | `workspaceCwd`        | `string?` | —         | Override workspace path (uses capabilities if omitted)                                                   |
-| `initialSessionId`    | `string?` | —         | Restore a specific session on mount                                                                      |
+| `sessionId`           | `string?` | —         | Restore a specific session and control later session switches                                            |
 | `clientId`            | `string?` | —         | Override stable client ID (auto-generated if omitted)                                                    |
 | `autoConnect`         | `boolean` | `true`    | Connect on mount                                                                                         |
 | `autoReconnect`       | `boolean` | `true`    | Auto-reconnect on disconnect                                                                             |

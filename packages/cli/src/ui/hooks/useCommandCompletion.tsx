@@ -26,12 +26,22 @@ import {
 } from './useSlashCompletion.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useCompletion } from './useCompletion.js';
-import { parseSlashCommand } from '../../utils/commands.js';
+import {
+  isStackedSkillCompletableCommand,
+  isValidStackedSkillPrefix,
+  parseSlashCommand,
+} from '../../utils/commands.js';
 
 export enum CompletionMode {
   IDLE = 'IDLE',
   AT = 'AT',
   SLASH = 'SLASH',
+}
+
+enum SlashCompletionContext {
+  LINE_START = 'line-start',
+  MID_INPUT = 'mid-input',
+  STACKED_SKILL = 'stacked-skill',
 }
 
 function isExactMidInputModelInvocableCommand(
@@ -97,7 +107,7 @@ export function useCommandCompletion(
     query,
     completionStart,
     completionEnd,
-    isMidInputSlashCompletion,
+    slashCompletionContext,
   } = useMemo(() => {
     const currentLine = buffer.lines[cursorRow] || '';
 
@@ -137,7 +147,46 @@ export function useCommandCompletion(
           query: partialPath,
           completionStart: pathStart,
           completionEnd: end,
-          isMidInputSlashCompletion: false,
+          slashCompletionContext: null,
+        };
+      }
+    }
+
+    const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
+    const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
+    if (midCmd) {
+      const lineStartOffset = logicalPosToOffset(buffer.lines, cursorRow, 0);
+      const startOnLine = midCmd.startPos - lineStartOffset;
+      const isInitialCommandOnFirstLine =
+        cursorRow === 0 &&
+        isSlashCommand(currentLine.trim()) &&
+        startOnLine >= 0 &&
+        codePoints.slice(0, startOnLine).join('').trim().length === 0;
+      const inputCodePoints = toCodePoints(buffer.text);
+      const prefix = inputCodePoints.slice(0, midCmd.startPos).join('');
+      const isStackedSkill =
+        !isInitialCommandOnFirstLine &&
+        isValidStackedSkillPrefix(prefix, slashCommands);
+      const isSlashLedInput = isSlashCommand(prefix.trimStart());
+      const isRegularMidInput =
+        !isInitialCommandOnFirstLine && !isSlashLedInput;
+      if (
+        startOnLine >= 0 &&
+        (isStackedSkill ||
+          (isRegularMidInput &&
+            !isExactMidInputModelInvocableCommand(
+              midCmd.partialCommand,
+              slashCommands,
+            )))
+      ) {
+        return {
+          completionMode: CompletionMode.SLASH,
+          query: midCmd.token,
+          completionStart: startOnLine,
+          completionEnd: startOnLine + midCmd.token.length,
+          slashCompletionContext: isStackedSkill
+            ? SlashCompletionContext.STACKED_SKILL
+            : SlashCompletionContext.MID_INPUT,
         };
       }
     }
@@ -148,30 +197,8 @@ export function useCommandCompletion(
         query: currentLine,
         completionStart: 0,
         completionEnd: currentLine.length,
-        isMidInputSlashCompletion: false,
+        slashCompletionContext: SlashCompletionContext.LINE_START,
       };
-    }
-
-    const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
-    const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
-    if (
-      midCmd &&
-      !isExactMidInputModelInvocableCommand(
-        midCmd.partialCommand,
-        slashCommands,
-      )
-    ) {
-      const lineStartOffset = logicalPosToOffset(buffer.lines, cursorRow, 0);
-      const startOnLine = midCmd.startPos - lineStartOffset;
-      if (startOnLine >= 0) {
-        return {
-          completionMode: CompletionMode.SLASH,
-          query: midCmd.token,
-          completionStart: startOnLine,
-          completionEnd: startOnLine + midCmd.token.length,
-          isMidInputSlashCompletion: true,
-        };
-      }
     }
 
     return {
@@ -179,17 +206,23 @@ export function useCommandCompletion(
       query: null,
       completionStart: -1,
       completionEnd: -1,
-      isMidInputSlashCompletion: false,
+      slashCompletionContext: null,
     };
   }, [cursorRow, cursorCol, buffer.lines, buffer.text, slashCommands]);
 
-  const slashCommandsForCompletion = useMemo(
-    () =>
-      isMidInputSlashCompletion
-        ? slashCommands.filter(isMidInputCompletableCommand)
-        : slashCommands,
-    [isMidInputSlashCompletion, slashCommands],
-  );
+  const isMidInputSlashCompletion =
+    slashCompletionContext === SlashCompletionContext.MID_INPUT ||
+    slashCompletionContext === SlashCompletionContext.STACKED_SKILL;
+
+  const slashCommandsForCompletion = useMemo(() => {
+    if (slashCompletionContext === SlashCompletionContext.STACKED_SKILL) {
+      return slashCommands.filter(isStackedSkillCompletableCommand);
+    }
+    if (slashCompletionContext === SlashCompletionContext.MID_INPUT) {
+      return slashCommands.filter(isMidInputCompletableCommand);
+    }
+    return slashCommands;
+  }, [slashCompletionContext, slashCommands]);
 
   const {
     suggestions,
@@ -342,6 +375,10 @@ export function useCommandCompletion(
     const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
     if (midCmd) {
       if (isMidInputSlashCompletion) return null;
+      const prefix = toCodePoints(buffer.text)
+        .slice(0, midCmd.startPos)
+        .join('');
+      if (isSlashCommand(prefix.trimStart())) return null;
       const match = getBestSlashCommandMatch(
         midCmd.partialCommand,
         slashCommands,

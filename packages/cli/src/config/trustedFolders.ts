@@ -9,20 +9,26 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import {
   atomicWriteFileSync,
+  createDebugLogger,
   FatalConfigError,
   getErrorMessage,
   ideContextStore,
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
-import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
-import { applyUpdates } from '../utils/commentJson.js';
+import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
 import {
   arePathsEquivalent,
   getPathComparisonVariants,
-  isWithinRoot,
 } from './path-comparison.js';
+import {
+  buildTrustPrecedenceRules,
+  resolveTrustDecision,
+  resolveTrustRule,
+} from './trust-precedence.js';
+
+const debugLogger = createDebugLogger('TRUSTED_FOLDERS');
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 
@@ -113,50 +119,10 @@ export class LoadedTrustedFolders {
    * @returns
    */
   isPathTrusted(location: string): boolean | undefined {
-    const trustedPaths: string[] = [];
-    const untrustedPaths: string[] = [];
-
-    for (const rule of this.rules) {
-      switch (rule.trustLevel) {
-        case TrustLevel.TRUST_FOLDER:
-          trustedPaths.push(rule.path);
-          break;
-        case TrustLevel.TRUST_PARENT:
-          trustedPaths.push(path.dirname(rule.path));
-          break;
-        case TrustLevel.DO_NOT_TRUST:
-          untrustedPaths.push(rule.path);
-          break;
-        default:
-          // Do nothing for unknown trust levels.
-          break;
-      }
-    }
-
-    const locationVariants = getPathComparisonVariants(location);
-    for (const trustedPath of trustedPaths) {
-      for (const locationVariant of locationVariants) {
-        for (const trustedVariant of getPathComparisonVariants(trustedPath)) {
-          if (isWithinRoot(locationVariant, trustedVariant)) {
-            return true;
-          }
-        }
-      }
-    }
-
-    for (const untrustedPath of untrustedPaths) {
-      for (const locationVariant of locationVariants) {
-        for (const untrustedVariant of getPathComparisonVariants(
-          untrustedPath,
-        )) {
-          if (locationVariant === untrustedVariant) {
-            return false;
-          }
-        }
-      }
-    }
-
-    return undefined;
+    return resolveTrustDecision(
+      buildTrustPrecedenceRules(this.rules),
+      getPathComparisonVariants(location),
+    );
   }
 
   setValue(path: string, trustLevel: TrustLevel): void {
@@ -256,9 +222,12 @@ function writeTrustedFolders(
   const release = lockfile.lockSync(filePath, {
     realpath: false,
     stale: 10_000,
+    onCompromised: (err) => {
+      debugLogger.warn('trusted folders lock compromised:', err);
+    },
   });
   try {
-    let parsed: Record<string, unknown> = {};
+    let originalContent = '{}';
     if (fs.existsSync(filePath)) {
       const stat = fs.lstatSync(filePath);
       if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -266,30 +235,28 @@ function writeTrustedFolders(
           'Trusted folders path must be a regular file.',
         );
       }
-      const originalContent = fs.readFileSync(filePath, 'utf-8');
-      const parsedValue = parse(originalContent);
+      originalContent = fs.readFileSync(filePath, 'utf-8');
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseJsoncObject(originalContent);
+    } catch (error) {
       if (
-        typeof parsedValue !== 'object' ||
-        parsedValue === null ||
-        Array.isArray(parsedValue) ||
-        parsedValue instanceof String ||
-        parsedValue instanceof Number ||
-        parsedValue instanceof Boolean
+        error instanceof Error &&
+        error.message === 'JSONC document root is not a JSON object.'
       ) {
         throw new FatalConfigError(
           'Trusted folders file is not a valid JSON object.',
         );
       }
-      parsed = parsedValue as Record<string, unknown>;
+      throw error;
     }
-
     const diskConfig = Object.fromEntries(Object.entries(parsed));
     assertTrustedFoldersConfig(diskConfig);
     const nextConfig = update({ ...diskConfig });
     assertTrustedFoldersConfig(nextConfig);
-    const updated = applyUpdates(parsed, nextConfig, true);
-    const content = stringify(updated, null, 2);
-    parse(content);
+    const content = updateJsoncContent(originalContent, nextConfig, true);
 
     atomicWriteFileSync(
       filePath,
@@ -318,44 +285,20 @@ export function isFolderTrustEnabled(settings: Settings): boolean {
   return folderTrustSetting;
 }
 
-function isWithinRootAcrossVariants(childPath: string, parentPath: string) {
-  for (const childVariant of getPathComparisonVariants(childPath)) {
-    for (const parentVariant of getPathComparisonVariants(parentPath)) {
-      if (isWithinRoot(childVariant, parentVariant)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-function getExplicitTrustLevel(
+export function getExplicitTrustLevel(
   trustConfig: Record<string, TrustLevel>,
   workspaceCwd: string,
 ): TrustLevel | null {
-  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (
-      trustLevel === TrustLevel.TRUST_FOLDER &&
-      isWithinRootAcrossVariants(workspaceCwd, rulePath)
-    ) {
-      return trustLevel;
-    }
-    if (
-      trustLevel === TrustLevel.TRUST_PARENT &&
-      isWithinRootAcrossVariants(workspaceCwd, path.dirname(rulePath))
-    ) {
-      return trustLevel;
-    }
-  }
-  for (const [rulePath, trustLevel] of Object.entries(trustConfig)) {
-    if (
-      trustLevel === TrustLevel.DO_NOT_TRUST &&
-      arePathsEquivalent(workspaceCwd, rulePath)
-    ) {
-      return trustLevel;
-    }
-  }
-  return null;
+  const winner = resolveTrustRule(
+    buildTrustPrecedenceRules(
+      Object.entries(trustConfig).map(([rulePath, trustLevel]) => ({
+        path: rulePath,
+        trustLevel,
+      })),
+    ),
+    getPathComparisonVariants(workspaceCwd),
+  );
+  return winner?.payload ?? null;
 }
 
 function loadTrustedFoldersWithOverrides(

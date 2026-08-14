@@ -25,6 +25,8 @@ import { useInputHistory } from '../hooks/useInputHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useVoiceInput } from '../hooks/use-voice-input.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
+import { LoadedSettings } from '../../config/settings.js';
 
 // Capture the props handed to SuggestionsDisplay so we can drive the mouse
 // hover/select callbacks directly, without simulating raw SGR mouse bytes.
@@ -56,6 +58,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
+    invalidateSubmittedPromptProvenance: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -216,6 +219,35 @@ describe('InputPrompt suggestion mouse routing', () => {
     unmount();
   });
 
+  it('uses the startup VP decision for suggestion mouse when the raw setting is unset', () => {
+    const { unmount } = renderWithProviders(
+      <VirtualViewportContext.Provider value={true}>
+        <InputPrompt {...props} />
+      </VirtualViewportContext.Provider>,
+    );
+    expect(captured.props).not.toBeNull();
+    expect(captured.props!['mouseEnabled']).toBe(true);
+    unmount();
+  });
+
+  it('disables suggestion mouse when ui.mouseTracking is false despite VP being on', () => {
+    const ui = { ui: { useTerminalBuffer: true, mouseTracking: false } };
+    const settingsNoMouse = new LoadedSettings(
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: ui, originalSettings: ui },
+      { path: '', settings: {}, originalSettings: {} },
+      true,
+      new Set(),
+    );
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />, {
+      settings: settingsNoMouse,
+    });
+    expect(captured.props).not.toBeNull();
+    expect(captured.props!['mouseEnabled']).toBe(false);
+    unmount();
+  });
+
   it('hovering a suggestion updates the active index on the default source', () => {
     const { unmount } = renderWithProviders(<InputPrompt {...props} />);
     act(() => {
@@ -233,7 +265,10 @@ describe('InputPrompt suggestion mouse routing', () => {
       (captured.props!['onSelectIndex'] as (i: number) => void)(0);
     });
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
-    expect(props.onSubmit).toHaveBeenCalledWith('/skills');
+    expect(props.onSubmit).toHaveBeenCalledWith('/skills', {
+      deferUntilIdle: false,
+      submittedPrompt: '/skills',
+    });
     unmount();
   });
 

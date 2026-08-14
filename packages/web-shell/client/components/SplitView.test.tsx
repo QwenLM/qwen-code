@@ -22,7 +22,7 @@ let otherWorkspaceSessions: Record<string, any[]>;
 // Stable client object (assigned once per test) so the other-workspace hook's
 // load callback keeps a stable identity and its effect doesn't loop.
 let workspaceClient: {
-  listWorkspaceSessions: ReturnType<typeof vi.fn>;
+  listWorkspaceSessionsPage: ReturnType<typeof vi.fn>;
   workspaceByCwd: ReturnType<typeof vi.fn>;
 };
 // Stable across renders (assigned once per test) so SplitView's reload effects,
@@ -62,6 +62,29 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
 }));
 
+vi.mock('../hooks/useScopedSessions', () => ({
+  useScopedSessions: (workspaceCwd: string | undefined) => {
+    const [sessions, setSessions] = React.useState<any[]>(() =>
+      workspaceCwd ? [] : sessionsState,
+    );
+    React.useEffect(() => {
+      if (!workspaceCwd) return;
+      void Promise.resolve().then(() => {
+        setSessions([...(otherWorkspaceSessions[workspaceCwd] ?? [])]);
+      });
+    }, [workspaceCwd]);
+    const reload = React.useCallback(async () => {
+      reloadMock();
+      const next = workspaceCwd
+        ? (otherWorkspaceSessions[workspaceCwd] ?? [])
+        : sessionsState;
+      setSessions([...next]);
+      return next;
+    }, [workspaceCwd]);
+    return { sessions, reload };
+  },
+}));
+
 vi.mock('./ChatPane', () => ({
   ChatPane: (props: any) => {
     // Let a test force a render crash to exercise the per-pane ErrorBoundary.
@@ -73,8 +96,22 @@ vi.mock('./ChatPane', () => ({
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
+        data-hidden={props.hidden ? 'true' : 'false'}
+        data-report-catalog-turn-completion={
+          props.reportCatalogTurnCompletion ? 'true' : 'false'
+        }
+        data-voice-user-revision={String(props.voiceUserRevision ?? 0)}
+        data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
         <span data-testid="pane-title">{props.title}</span>
+        {props.renderHeaderActions && (
+          <span data-testid="pane-header-slot">
+            {props.renderHeaderActions({
+              sessionId: 'from-props',
+              workspaceCwd: props.workspaceCwd,
+            })}
+          </span>
+        )}
         {props.onToggleMaximize && (
           <button data-testid="pane-maximize" onClick={props.onToggleMaximize}>
             max
@@ -109,13 +146,13 @@ beforeEach(() => {
   ];
   otherWorkspaceSessions = {};
   workspaceClient = {
-    listWorkspaceSessions: vi.fn(
-      async (cwd: string) => otherWorkspaceSessions[cwd] ?? [],
-    ),
+    listWorkspaceSessionsPage: vi.fn(async (cwd: string) => ({
+      sessions: otherWorkspaceSessions[cwd] ?? [],
+    })),
     workspaceByCwd: vi.fn((cwd: string) => ({
-      listWorkspaceSessions: vi.fn(
-        async () => otherWorkspaceSessions[cwd] ?? [],
-      ),
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
     })),
   };
   reloadMock = vi.fn();
@@ -188,6 +225,30 @@ describe('SplitView', () => {
     const s2ClientId = providers[1].getAttribute('data-clientid') ?? '';
     const nonce = clientId.slice('split-pane:'.length, -':s1'.length);
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
+  });
+
+  it('leaves the outer session as the sole catalog turn-completion owner', () => {
+    render({ sessionIds: ['s3', 's1'] });
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('false');
+    expect(
+      panes()[1]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
+  });
+
+  it('reports completion for the same session id in another workspace', async () => {
+    otherWorkspaceSessions['/wsB'] = [
+      { sessionId: 's3', workspaceCwd: '/wsB', displayName: 'Other Three' },
+    ];
+
+    render({ sessionIds: ['s3'], workspaceCwd: '/wsB' });
+    await flushAsync();
+
+    expect(
+      panes()[0]?.getAttribute('data-report-catalog-turn-completion'),
+    ).toBe('true');
   });
 
   it('passes the prompt SSE restart option to pane providers', () => {
@@ -447,11 +508,38 @@ describe('SplitView', () => {
     expect(panes()).toHaveLength(3);
     // …but the two non-maximized slots are hidden, leaving one visible.
     expect(hiddenSlots()).toHaveLength(2);
+    expect(container!.querySelectorAll('[data-hidden="true"]')).toHaveLength(2);
     // The maximized pane reflects its state down to ChatPane.
     const maximized = container!.querySelector('[data-maximized="true"]');
     expect(
       maximized?.querySelector('[data-testid="pane-title"]')?.textContent,
     ).toBe('One');
+  });
+
+  it('forwards Voice revision state to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      voiceUserRevision: 4,
+      voiceWorkspaceRevisions: { workspace: 7 },
+    });
+
+    expect(
+      container!.querySelectorAll('[data-voice-user-revision="4"]'),
+    ).toHaveLength(2);
+  });
+
+  it('forwards the merged Voice workspace list to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      voiceWorkspaces: [
+        { id: 'primary', cwd: '/w', primary: true },
+        { id: 'secondary', cwd: '/other', primary: false, trusted: true },
+      ],
+    });
+
+    expect(
+      container!.querySelectorAll('[data-voice-workspace-count="2"]'),
+    ).toHaveLength(2);
   });
 
   it('toggles back to the tiled layout when the maximized pane’s button is clicked again', () => {
@@ -697,24 +785,6 @@ describe('SplitView', () => {
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
   });
 
-  it('reloads the picker list when the parent bumps the reload token', () => {
-    render({ sessionIds: ['s1'], sessionListReloadToken: 0 });
-    // The initial token is not a change, so it does not trigger a reload.
-    expect(reloadMock).not.toHaveBeenCalled();
-    act(() =>
-      root!.render(
-        <I18nProvider language="en">
-          <SplitView
-            onExit={() => {}}
-            sessionIds={['s1']}
-            sessionListReloadToken={1}
-          />
-        </I18nProvider>,
-      ),
-    );
-    expect(reloadMock).toHaveBeenCalledTimes(1);
-  });
-
   it('mirrors the live pane set up to the parent as panes change', () => {
     const onPanesChange = vi.fn();
     render({ onPanesChange });
@@ -865,7 +935,7 @@ describe('SplitView', () => {
     // must not touch the daemon and the picker stays untagged.
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    expect(workspaceClient.listWorkspaceSessions).not.toHaveBeenCalled();
+    expect(workspaceClient.listWorkspaceSessionsPage).not.toHaveBeenCalled();
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
   });
@@ -886,13 +956,35 @@ describe('SplitView', () => {
     ];
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    const before = workspaceClient.listWorkspaceSessions.mock.calls.length;
+    const before = workspaceClient.listWorkspaceSessionsPage.mock.calls.length;
     openPicker();
     await flushAsync();
     // Opening the picker reloads the other-workspace list so it never offers a
     // stale set (mirrors the primary `reload()` on picker open).
     expect(
-      workspaceClient.listWorkspaceSessions.mock.calls.length,
+      workspaceClient.listWorkspaceSessionsPage.mock.calls.length,
     ).toBeGreaterThan(before);
+  });
+
+  it('passes renderPaneHeaderActions through to each ChatPane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      renderPaneHeaderActions: (info: {
+        sessionId: string;
+        workspaceCwd?: string;
+      }) => (
+        <button type="button" data-testid={`host-${info.sessionId}`}>
+          host
+        </button>
+      ),
+    });
+    expect(
+      container!.querySelectorAll('[data-testid="pane-header-slot"]'),
+    ).toHaveLength(2);
+    // The mock ChatPane invokes the renderer with a stand-in session id; the
+    // important contract is that SplitView forwards the prop at all.
+    expect(
+      container!.querySelectorAll('[data-testid="host-from-props"]'),
+    ).toHaveLength(2);
   });
 });

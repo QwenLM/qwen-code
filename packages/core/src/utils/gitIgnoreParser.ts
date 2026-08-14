@@ -40,10 +40,18 @@ export class GitIgnoreParser implements GitIgnoreFilter {
       ? '.'
       : path.dirname(path.relative(this.projectRoot, patternsFilePath));
 
+    // Git strips a trailing CR, so that CRLF files work, and nothing else.
+    // Leading whitespace is part of the pattern, and trailing whitespace is
+    // stripped only when it is not backslash-escaped — both rules the `ignore`
+    // library already applies to the raw pattern text. `trim()` overrode them
+    // and inverted the match: a pattern ` leading.txt` stopped matching
+    // ` leading.txt` and started matching `leading.txt` instead. A comment is
+    // likewise a line whose FIRST character is `#`, so `  #foo` is a pattern to
+    // git rather than a comment, and testing the untrimmed line reproduces that.
     return content
       .split('\n')
-      .map((p) => p.trim())
-      .filter((p) => p !== '' && !p.startsWith('#'))
+      .map((p) => (p.endsWith('\r') ? p.slice(0, -1) : p))
+      .filter((p) => p.trim() !== '' && !p.startsWith('#'))
       .map((p) => {
         const isNegative = p.startsWith('!');
         if (isNegative) {
@@ -68,19 +76,25 @@ export class GitIgnoreParser implements GitIgnoreFilter {
           // - If `a/b/.gitignore` defines `c` then it needs to be changed to `/a/b/**/c`
           // - If `a/b/.gitignore` defines `c/d` then it needs to be changed to `/a/b/c/d`
 
-          if (!isAnchoredInFile && !p.includes('/')) {
-            // If no slash and not anchored in file, it matches files in any
-            // subdirectory.
-            newPattern = path.join('**', p);
-          }
-
-          // Prepend the .gitignore file's directory.
-          newPattern = path.join(relativeBaseDir, newPattern);
-
-          // Anchor the pattern to a nested gitignore directory.
-          if (!newPattern.startsWith('/')) {
-            newPattern = '/' + newPattern;
-          }
+          // A trailing `/` is not a separator for this test — it only means
+          // "directories only". Git anchors a pattern when a `/` appears at
+          // the start or in the middle, so `foo/` in `a/b/.gitignore` means
+          // `/a/b/**/foo/` and still matches `a/b/x/foo/`, while `c/d` stays
+          // anchored as `/a/b/c/d`. Counting the trailing slash made every
+          // directory-only rule in a nested ignore file stop applying below
+          // its own directory.
+          const withoutDirSuffix = p.endsWith('/') ? p.slice(0, -1) : p;
+          // The prefix is assembled by hand rather than with path.join so the
+          // pattern text is never passed through a platform path function.
+          // `relativeBaseDir` comes from path.relative and is the only piece
+          // that can hold a platform separator, so it is the only piece that
+          // is normalised.
+          const baseDir = relativeBaseDir.replace(/\\/g, '/');
+          // If no slash and not anchored in file, it matches files in any
+          // subdirectory.
+          const anyDepth =
+            !isAnchoredInFile && !withoutDirSuffix.includes('/') ? '**/' : '';
+          newPattern = `/${baseDir}/${anyDepth}${p}`;
         }
 
         // Anchor the pattern if originally anchored
@@ -92,9 +106,13 @@ export class GitIgnoreParser implements GitIgnoreFilter {
           newPattern = '!' + newPattern;
         }
 
-        // Even in windows, Ignore expects forward slashes.
-        newPattern = newPattern.replace(/\\/g, '/');
-
+        // No blanket backslash rewrite here. In gitignore syntax `/` is always
+        // the separator and `\` is an escape character, so rewriting every
+        // backslash to `/` corrupted the pattern instead of normalising it:
+        // `foo\ bar.txt` became `foo/ bar.txt`, `\#hash.txt` became
+        // `/#hash.txt` (a comment escape turned into a root anchor) and
+        // `a\[b\].txt` became `a/[b/].txt`. Windows separators can only enter
+        // through `relativeBaseDir`, which is normalised at its source above.
         return newPattern;
       })
       .filter((p) => p !== '');

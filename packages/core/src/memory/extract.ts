@@ -23,6 +23,7 @@ import {
   rebuildManagedAutoMemoryIndex,
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
+import { refreshMemoryInstruction } from './refresh.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -195,6 +196,9 @@ export async function runAutoMemoryExtract(params: {
         })
       : Promise.resolve();
     await Promise.all([projectRebuild, userRebuild]);
+    await refreshMemoryInstruction(params.config, {
+      logContext: 'managed auto-memory extraction',
+    });
   }
 
   const madeGenuineProgress =

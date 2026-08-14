@@ -57,6 +57,25 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ model: 'gpt-4' });
   });
 
+  it('POST /session maps sessionId into ACP metadata', () => {
+    const result = matchRoute('/session', 'POST')!;
+    const params = result.mapping.extractParams(
+      result.segments,
+      {
+        sessionId: '550E8400-E29B-41D4-A716-446655440000',
+        sessionScope: 'single',
+        _meta: { existing: true },
+      },
+      'POST',
+    );
+    expect(params).toEqual({
+      _meta: {
+        existing: true,
+        'qwen-code/sessionId': '550E8400-E29B-41D4-A716-446655440000',
+      },
+    });
+  });
+
   it('POST /session with non-record body returns empty params', () => {
     const result = matchRoute('/session', 'POST')!;
     const params = result.mapping.extractParams(
@@ -957,9 +976,9 @@ describe('acpRouteTable – query param coercion', () => {
     };
   }
 
-  it('GET /file forwards path (string) + maxBytes/line/limit as NUMBERS', () => {
+  it('GET /file forwards typed range and cursor params', () => {
     const { method, params } = extract(
-      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10',
+      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10&cursor=next%201',
       'GET',
     );
     expect(method).toBe('_qwen/file/read');
@@ -968,6 +987,7 @@ describe('acpRouteTable – query param coercion', () => {
       maxBytes: 123,
       line: 4,
       limit: 10,
+      cursor: 'next 1',
     });
     // The daemon requires real numbers — a regression to strings would break it.
     expect(typeof params['maxBytes']).toBe('number');

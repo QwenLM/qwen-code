@@ -12,6 +12,8 @@ import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
+  ToolArtifact,
+  ToolArtifactKind,
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
   ToolInvocation,
@@ -51,19 +53,30 @@ import {
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  ARTIFACT_TITLE_MAX_LENGTH,
+  ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+  hasControlCharacter,
+  hasUnsafeDisplayPayload,
+} from './record-artifact.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
-const ARTIFACT_LIKE_EXTENSIONS = new Set([
-  '.htm',
-  '.html',
-  '.ipynb',
-  '.jpeg',
-  '.jpg',
-  '.pdf',
-  '.png',
-  '.svg',
-  '.webp',
+const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
+  ['.htm', 'html'],
+  ['.html', 'html'],
+  ['.ipynb', 'notebook'],
+  ['.jpeg', 'image'],
+  ['.jpg', 'image'],
+  ['.pdf', 'pdf'],
+  ['.png', 'image'],
+  ['.svg', 'image'],
+  ['.webp', 'image'],
 ]);
+
+type WorkspaceToolArtifact = ToolArtifact & {
+  storage: 'workspace';
+  workspacePath: string;
+};
 
 /**
  * Parameters for the WriteFile tool
@@ -496,6 +509,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       await this.config.getFileSystemService().writeTextFile({
         path: file_path,
         content,
+        toolWriteOrigin: 'write_file',
         _meta: {
           bom: useBOM,
           encoding: detectedEncoding,
@@ -520,8 +534,10 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // pre-write placeholder. Best-effort: a stat failure here does
       // not undo the successful write — the next Read will re-stat
       // and either see fresh content or treat the entry as stale.
+      let postWriteSizeBytes: number | undefined;
       try {
         const postWriteStats = fs.statSync(file_path);
+        postWriteSizeBytes = postWriteStats.size;
         this.config.getFileReadCache().recordWrite(file_path, postWriteStats);
       } catch {
         // Non-fatal: leaving a stale entry is preferable to failing
@@ -561,12 +577,15 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           `User modified the \`content\` to be: ${content}`,
         );
       }
-      const artifactReminder = buildRecordArtifactReminder(
+      const artifact = buildWorkspaceArtifactMetadata(
         this.config,
         file_path,
+        postWriteSizeBytes,
       );
-      if (artifactReminder) {
-        llmSuccessMessageParts.push(artifactReminder);
+      if (artifact) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
+        );
       }
 
       // Log file operation for telemetry (without diff_stat to avoid double-counting)
@@ -601,6 +620,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       // Capture detailed error information for debugging
@@ -644,24 +664,74 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 }
 
 /**
- * Builds the `record_artifact` hint appended to a successful write.
- *
- * Exported because the string it produces is a CONTRACT with the daemon's
- * `GET /file` route: the `workspacePath` computed here is later resolved by
- * `resolveWithinWorkspace` against the bound workspace root. The two sides live
- * in different packages and drifted apart once already (a worktree session
- * emitted a worktree-relative path that the route resolved against the
- * workspace root, so every artifact preview 404'd). `workspace-file-read.test.ts`
- * pins the round-trip; keep this exported so it can keep doing so.
+ * Kept for the cross-package contract test in `workspace-file-read.test.ts`:
+ * the daemon's `GET /file` route resolves the `workspacePath` this produces.
+ * Delegates to `buildWorkspaceArtifactMetadata` so the two agree by construction.
  */
 export function buildRecordArtifactReminder(
+  config: Config,
+  filePath: string,
+): string | null {
+  const artifact = buildWorkspaceArtifactMetadata(config, filePath);
+  return artifact ? formatRecordArtifactReminder(artifact.workspacePath) : null;
+}
+
+function formatRecordArtifactReminder(workspacePath: string): string {
+  return (
+    `This file was automatically recorded as a workspace artifact with ` +
+    `workspacePath "${workspacePath}". No extra artifact registration step ` +
+    `is needed.`
+  );
+}
+
+export function buildWorkspaceArtifactMetadata(
+  config: Config,
+  filePath: string,
+  sizeBytes?: number,
+): WorkspaceToolArtifact | null {
+  const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
+  if (!workspacePath) {
+    return null;
+  }
+  const title = path.basename(filePath);
+  // The daemon store rejects titles and paths that are too long, carry control
+  // characters, or contain markup; skip the artifact rather than tell the model
+  // it was recorded when it will be dropped.
+  if (
+    title.length > ARTIFACT_TITLE_MAX_LENGTH ||
+    hasControlCharacter(title) ||
+    hasUnsafeDisplayPayload(title) ||
+    workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
+    hasControlCharacter(workspacePath) ||
+    hasUnsafeDisplayPayload(workspacePath)
+  ) {
+    debugLogger.debug('workspace artifact skipped (safety checks)', {
+      path: filePath,
+    });
+    return null;
+  }
+  return {
+    title,
+    kind: inferWorkspaceArtifactKind(filePath),
+    storage: 'workspace',
+    workspacePath,
+    mimeType:
+      getSpecificMimeType(filePath) ??
+      (filePath.toLowerCase().endsWith('.ipynb')
+        ? 'application/x-ipynb+json'
+        : undefined),
+    sizeBytes,
+  };
+}
+
+function getRecordArtifactWorkspacePath(
   config: Config,
   filePath: string,
 ): string | null {
   if (!config.isRecordArtifactEnabled()) {
     return null;
   }
-  if (!ARTIFACT_LIKE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+  if (!ARTIFACT_KIND_BY_EXTENSION.has(path.extname(filePath).toLowerCase())) {
     return null;
   }
   // The daemon's file-read route resolves workspacePath against the
@@ -683,11 +753,13 @@ export function buildRecordArtifactReminder(
   ) {
     return null;
   }
-  const workspacePath = relativePath.split(path.sep).join('/');
+  return relativePath.split(path.sep).join('/');
+}
+
+function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
   return (
-    `If this file is a reusable user-facing artifact, call ` +
-    `record_artifact with workspacePath "${workspacePath}" before telling ` +
-    `the user it is available in the artifacts panel.`
+    ARTIFACT_KIND_BY_EXTENSION.get(path.extname(filePath).toLowerCase()) ??
+    'file'
   );
 }
 
@@ -704,7 +776,7 @@ export class WriteFileTool
     super(
       WriteFileTool.Name,
       ToolDisplayNames.WRITE_FILE,
-      `Writes content to a specified file in the local filesystem. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
+      `Writes content to a specified file in the local filesystem. A request to create or generate a file does not establish that the target path is new. Unless the target's absence or current text contents have already been established in this session, you MUST use the ${ToolNames.READ_FILE} tool first; if the file does not exist, then create it. With prior-read enforcement enabled, blind overwrites are rejected. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
 The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,

@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { seedParseArgs } from './lib/test-utils.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
 vi.mock('./lib/local-diff.js', async (orig) => ({
@@ -148,6 +149,58 @@ describe('capture-local (command boundary)', () => {
     run('plan.json');
 
     expect(errs.join('')).toContain('the working tree is clean');
+  });
+
+  it('records an explicit --effort in the plan', () => {
+    capture();
+    run('plan.json', { effort: 'medium' });
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBe('medium');
+    expect(errs.join('')).toContain('from --effort');
+  });
+
+  it('recovers the effort parse-args resolved when --effort is not re-threaded', () => {
+    // The gap this closes: the orchestrator ran `/review --effort medium`, but did
+    // not copy the level into `capture-local --effort`. Without the fallback the
+    // plan carries no effort and the roster safe-expands to the FULL set — the
+    // user's `medium` is silently ignored. The report parse-args already wrote is
+    // the deterministic source of truth.
+    seedParseArgs(dir, 'medium');
+    capture();
+    run('plan.json'); // note: no effort passed
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBe('medium');
+    expect(errs.join('')).toContain('from parse-args report');
+  });
+
+  it('lets an explicit --effort win over the parse-args report', () => {
+    seedParseArgs(dir, 'high');
+    capture();
+    run('plan.json', { effort: 'low' });
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBe('low');
+  });
+
+  it('omits effort (roster fail-safe to full) when neither flag nor report is present', () => {
+    capture();
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBeUndefined();
+  });
+
+  it('ignores a malformed effort in the report rather than trusting it', () => {
+    // A corrupt/hand-edited report must not smuggle a bogus level into the roster;
+    // an unrecognised value falls through to the full-roster fail-safe.
+    seedParseArgs(dir, 'turbo');
+    capture();
+    run('plan.json');
+
+    const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+    expect(plan.effort).toBeUndefined();
   });
 
   it('escapes a filename carrying terminal control characters', () => {

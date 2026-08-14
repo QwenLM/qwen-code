@@ -13,6 +13,7 @@ import {
 } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
+import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
@@ -78,13 +79,7 @@ function getInitialLanguage(): WebShellLanguage {
 }
 
 function getSessionIdFromUrl(): string | undefined {
-  const match = window.location.pathname.match(/\/session\/([^/]+)/);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
+  return parseSessionId(window.location.pathname);
 }
 
 function getWorkspaceIdFromUrl(): string | undefined {
@@ -98,7 +93,7 @@ function replaceStandaloneSessionUrl(
   workspaceId?: string,
 ): void {
   const url = new URL(window.location.href);
-  url.pathname = sessionId ? `/session/${encodeURIComponent(sessionId)}` : '/';
+  url.pathname = buildSessionPathname(url.pathname, sessionId);
   if (sessionId && workspaceId) {
     url.searchParams.set('workspace', workspaceId);
   } else {
@@ -116,13 +111,15 @@ function replaceStandaloneSessionUrl(
   window.history.replaceState(null, '', url);
 }
 
-function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
   );
-  const [sessionId] = useState<string | undefined>(() => getSessionIdFromUrl());
-  const [workspaceId] = useState<string | undefined>(() =>
+  const [sessionId, setSessionId] = useState<string | undefined>(() =>
+    getSessionIdFromUrl(),
+  );
+  const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
     getWorkspaceIdFromUrl(),
   );
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
@@ -149,6 +146,8 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   }, []);
   const handleSessionIdChange = useCallback(
     (nextSessionId?: string, nextWorkspaceId?: string) => {
+      setSessionId(nextSessionId);
+      setWorkspaceId(nextWorkspaceId);
       replaceStandaloneSessionUrl(nextSessionId, nextWorkspaceId);
     },
     [],
@@ -172,6 +171,15 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onLanguageChange: handleLanguageChange,
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
+            header: {
+              items: ['title', 'environment', 'rightPanel'],
+            },
+            rightPanel: {
+              items: ['review', 'sideTask'],
+            },
+            environmentPanel: {
+              items: ['environment', 'subagents', 'backgroundTasks'],
+            },
             compactThinking: true,
             markdownTableMode: 'advanced',
           }}

@@ -16,6 +16,8 @@ import {
   type GoalTurnHost,
 } from './goal-runtime.js';
 
+const FORMER_GOAL_CONTINUATION_LIMIT = 50;
+
 function journal(): GoalJournal {
   let cursor: TranscriptCursor = { recordId: null };
   return {
@@ -30,7 +32,8 @@ function journal(): GoalJournal {
 }
 
 describe('Goal runtime host integration', () => {
-  it('keeps 150 sequential automatic admissions independent', async () => {
+  it('keeps sequential automatic admissions independent beyond the former fixed limit', async () => {
+    const turns = FORMER_GOAL_CONTINUATION_LIMIT + 25;
     const started: GoalTurnPermit[] = [];
     const host: GoalTurnHost = {
       startGoalTurn: vi.fn(async ({ permit }) => {
@@ -42,17 +45,17 @@ describe('Goal runtime host integration', () => {
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    for (let turn = 0; turn < 150; turn += 1) {
+    for (let turn = 0; turn < turns; turn += 1) {
       const permit = started[turn];
       expect(permit).toBeDefined();
       await runtime.finishTurn(permit!);
     }
 
-    expect(started).toHaveLength(151);
-    expect(new Set(started.map(({ turnId }) => turnId)).size).toBe(151);
+    expect(started).toHaveLength(turns + 1);
+    expect(new Set(started.map(({ turnId }) => turnId)).size).toBe(turns + 1);
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'running',
-      goal: { status: 'active', turnCount: 150 },
+      goal: { status: 'active', turnCount: turns },
     });
   });
 

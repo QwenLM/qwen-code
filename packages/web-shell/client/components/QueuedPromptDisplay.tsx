@@ -9,7 +9,6 @@ import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { Fragment } from 'react';
 import deleteIconUrl from '../assets/icons/delete.svg';
 import editIconUrl from '../assets/icons/edit.svg';
-import insertIconUrl from '../assets/icons/insert.svg';
 import queueIconUrl from '../assets/icons/queue.svg';
 import type { getTranslator } from '../i18n';
 import {
@@ -22,7 +21,6 @@ import {
   splitComposerTagContentByAnnotations,
 } from '../utils/composerTag';
 import { cssUrlVar } from '../utils/cssUrlVar';
-import { isCommandPrompt } from '../utils/localCommandQueue';
 import { ReadonlyComposerTag } from './messages/UserMessage';
 import styles from '../App.module.css';
 
@@ -126,24 +124,35 @@ export interface QueuedPrompt {
   images?: PromptImage[];
   inputAnnotations?: DaemonInputAnnotation[];
   onComplete?: () => void;
+  onAdmitted?: () => void;
   serverPromptId?: string;
   serverState?: 'submitting' | 'queued' | 'running';
+  midTurnState?: 'submitting' | 'queued';
+  midTurnMessageId?: string;
+  midTurnFailedAction?: 'delete' | 'edit';
   isEditing?: boolean;
   isRemoving?: boolean;
+  payloadCompleteness?: 'complete' | 'summary-only';
+  admissionOutcome?: 'unknown';
+  payloadAvailable?: boolean;
 }
 
 export function QueuedPromptDisplay({
   prompts,
   t,
+  canMutateMidTurn = false,
   onDelete,
-  onInsert,
   onEdit,
+  onRestoreUnknown,
+  onDiscardUnknown,
 }: {
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
+  canMutateMidTurn?: boolean;
   onDelete: (id: number) => void;
-  onInsert: (id: number) => void;
   onEdit: (id: number) => void;
+  onRestoreUnknown?: (id: number) => void;
+  onDiscardUnknown?: (id: number) => void;
 }) {
   const {
     parseUserMessageContent,
@@ -153,29 +162,69 @@ export function QueuedPromptDisplay({
     onComposerTagClick,
   } = useWebShellCustomization();
   if (prompts.length === 0) return null;
+  const latestPrompt = prompts[prompts.length - 1];
+  const showQueueShortcuts =
+    latestPrompt !== undefined &&
+    latestPrompt.midTurnState === undefined &&
+    latestPrompt.serverState !== 'submitting' &&
+    latestPrompt.serverState !== 'running' &&
+    !latestPrompt.isEditing &&
+    !latestPrompt.isRemoving &&
+    latestPrompt.payloadCompleteness !== 'summary-only' &&
+    latestPrompt.admissionOutcome !== 'unknown';
+  const mayContainDuplicateAdmission =
+    prompts.some((prompt) => prompt.admissionOutcome === 'unknown') &&
+    prompts.some(
+      (prompt) =>
+        prompt.payloadCompleteness === 'summary-only' &&
+        prompt.serverPromptId !== undefined,
+    );
 
   return (
     <div className={styles.queuedPrompts}>
+      {mayContainDuplicateAdmission ? (
+        <div className={styles.queuedPromptAmbiguity} role="status">
+          {t('queue.mayCorrespond')}
+        </div>
+      ) : null}
       {prompts.map((prompt) => {
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),
         );
         const imageCount = prompt.images?.length ?? 0;
-        const isCommand = isCommandPrompt(prompt.text);
         const isSubmitting = prompt.serverState === 'submitting';
+        const isQueued = prompt.serverState === 'queued';
         const isRunning = prompt.serverState === 'running';
+        const isMidTurnPending = prompt.midTurnState !== undefined;
+        const isMidTurnLocked =
+          prompt.midTurnState === 'submitting' ||
+          (prompt.midTurnState === 'queued' && !prompt.midTurnMessageId);
+        const isSummaryOnly = prompt.payloadCompleteness === 'summary-only';
+        const isAdmissionUnknown = prompt.admissionOutcome === 'unknown';
+        const hasUnknownPayload =
+          isAdmissionUnknown && prompt.payloadAvailable !== false;
+        const showActions = !isMidTurnPending || canMutateMidTurn;
         const isRemoving = prompt.isRemoving === true;
+        const hasStateSpinner =
+          isSubmitting ||
+          prompt.midTurnState === 'submitting' ||
+          prompt.isEditing === true ||
+          isRemoving;
         const isBusy =
-          isSubmitting || isRunning || prompt.isEditing === true || isRemoving;
-        let insertTitle = t('queue.insertTip');
-        if (isBusy) {
-          insertTitle = t('queue.submittingDisabled');
-        } else if (isCommand) {
-          insertTitle = t('queue.insertCommandDisabled');
-        }
+          isSubmitting ||
+          isRunning ||
+          isMidTurnLocked ||
+          isAdmissionUnknown ||
+          prompt.isEditing === true ||
+          isRemoving;
+        const isEditDisabled = isBusy || isSummaryOnly;
         let editTitle = t('queue.editTip');
-        if (isBusy) {
-          editTitle = t('queue.submittingDisabled');
+        if (isEditDisabled) {
+          editTitle = isSummaryOnly
+            ? t('queue.summaryEditDisabled')
+            : isAdmissionUnknown
+              ? t('queue.admissionUnknown')
+              : t('queue.submittingDisabled');
         }
         const deleteTitle = isBusy
           ? t('queue.submittingDisabled')
@@ -208,67 +257,105 @@ export function QueuedPromptDisplay({
               {imageCount > 0
                 ? ` ${t('queue.imageCount', { count: imageCount })}`
                 : ''}
-              {isSubmitting || prompt.isEditing || isRemoving ? (
-                <span className={styles.queuedPromptState}>
+              {isAdmissionUnknown && !hasUnknownPayload
+                ? ` ${t('queue.localCopyDiscarded')}`
+                : ''}
+            </span>
+            {isSubmitting ||
+            isQueued ||
+            isMidTurnPending ||
+            isAdmissionUnknown ||
+            prompt.isEditing ||
+            isRemoving ? (
+              <span
+                className={`${styles.queuedPromptState}${
+                  hasStateSpinner ? ` ${styles.queuedPromptStateLoading}` : ''
+                }`}
+                role="status"
+              >
+                {hasStateSpinner && (
                   <span className={styles.queuedPromptSpinner} />
+                )}
+                <span className={styles.queuedPromptStateLabel}>
                   {isRemoving
                     ? t('queue.removing')
                     : prompt.isEditing
                       ? t('queue.editing')
-                      : t('queue.submitting')}
+                      : isMidTurnPending
+                        ? t('queue.midTurnQueued')
+                        : isAdmissionUnknown
+                          ? t('queue.admissionUnknown')
+                          : isQueued
+                            ? t('queue.serverQueued')
+                            : t('queue.submitting')}
                 </span>
-              ) : null}
-            </span>
+              </span>
+            ) : null}
             <span className={styles.queuedPromptActions}>
-              {imageCount === 0 && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={() => onInsert(prompt.id)}
-                  disabled={isCommand || isBusy}
-                  title={insertTitle}
-                >
-                  <span
-                    className={styles.queuedPromptActionIcon}
-                    style={cssUrlVar('--queued-icon-url', insertIconUrl)}
-                    aria-hidden="true"
-                  />
-                  {t('queue.insert')}
-                </button>
-              )}
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onDelete(prompt.id)}
-                disabled={isBusy}
-                aria-label={t('queue.delete')}
-                title={deleteTitle}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', deleteIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onEdit(prompt.id)}
-                disabled={isBusy}
-                aria-label={t('queue.edit')}
-                title={editTitle}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', editIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
+              {hasUnknownPayload ? (
+                <>
+                  <button
+                    type="button"
+                    className={styles.queuedPromptAction}
+                    onClick={() => {
+                      if (window.confirm(t('queue.continueEditingConfirm'))) {
+                        onRestoreUnknown?.(prompt.id);
+                      }
+                    }}
+                    aria-label={t('queue.restoreUnknown')}
+                    title={t('queue.restoreUnknown')}
+                  >
+                    {t('queue.restoreUnknown')}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.queuedPromptAction}
+                    onClick={() => onDiscardUnknown?.(prompt.id)}
+                    aria-label={t('queue.discardUnknown')}
+                    title={t('queue.discardUnknown')}
+                  >
+                    {t('queue.discardUnknown')}
+                  </button>
+                </>
+              ) : showActions && !isAdmissionUnknown ? (
+                <>
+                  <button
+                    type="button"
+                    className={styles.queuedPromptAction}
+                    onClick={() => onDelete(prompt.id)}
+                    disabled={isBusy}
+                    aria-label={t('queue.delete')}
+                    title={deleteTitle}
+                  >
+                    <span
+                      className={styles.queuedPromptActionIcon}
+                      style={cssUrlVar('--queued-icon-url', deleteIconUrl)}
+                      aria-hidden="true"
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.queuedPromptAction}
+                    onClick={() => onEdit(prompt.id)}
+                    disabled={isEditDisabled}
+                    aria-label={t('queue.edit')}
+                    title={editTitle}
+                  >
+                    <span
+                      className={styles.queuedPromptActionIcon}
+                      style={cssUrlVar('--queued-icon-url', editIconUrl)}
+                      aria-hidden="true"
+                    />
+                  </button>
+                </>
+              ) : null}
             </span>
           </div>
         );
       })}
-      <div className={styles.queuedHint}>{t('queue.footer')}</div>
+      {showQueueShortcuts ? (
+        <div className={styles.queuedHint}>{t('queue.footer')}</div>
+      ) : null}
     </div>
   );
 }

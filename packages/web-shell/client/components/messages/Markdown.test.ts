@@ -3,12 +3,13 @@
  */
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   WebShellCustomizationProvider,
   type WebShellCodeBlockRenderInfo,
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import { ThemeProvider } from '../../themeContext';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
@@ -99,6 +100,10 @@ describe('isSafeImageSrc', () => {
 
   it('allows data:image/webp base64', () => {
     expect(isSafeImageSrc('data:image/webp;base64,UklG')).toBe(true);
+  });
+
+  it('allows data:image/bmp base64', () => {
+    expect(isSafeImageSrc('data:image/bmp;base64,Qk0=')).toBe(true);
   });
 
   it('blocks data:image/svg+xml (can load external resources)', () => {
@@ -248,9 +253,10 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Quick copy');
-    expect(container.textContent).toContain('Details');
-    expect(container.querySelector('button[aria-label*="table"]')).toBeNull();
+    expect(container.textContent).toContain('Copy table');
+    expect(
+      container.querySelector('button[aria-label="View details for row 1"]'),
+    ).not.toBeNull();
 
     act(() => root.unmount());
     container.remove();
@@ -293,7 +299,7 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Quick copy');
+    expect(container.textContent).toContain('Copy table');
     expect(container.querySelector('[data-custom-table="true"]')).toBeNull();
 
     act(() => root.unmount());
@@ -319,7 +325,7 @@ describe('Markdown enhanced tables', () => {
     });
 
     expect(container.querySelector('table')).not.toBeNull();
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
 
     act(() => root.unmount());
     container.remove();
@@ -357,7 +363,7 @@ describe('Markdown enhanced tables', () => {
     expect(table).not.toBeNull();
     expect(table?.textContent).toContain('A');
     expect(table?.textContent).toContain('1');
-    expect(container.textContent).not.toContain('Quick copy');
+    expect(container.textContent).not.toContain('Copy table');
     expect(consoleError).toHaveBeenCalledWith(
       '[web-shell] enhanced markdown table failed:',
       expect.any(Error),
@@ -488,6 +494,7 @@ describe('Markdown custom code block rendering', () => {
       className: 'language-echarts-fulldata',
       code: 'const option = {};',
       isStreaming: true,
+      isIncomplete: false,
       source: 'assistant',
       theme: 'dark',
     });
@@ -496,6 +503,41 @@ describe('Markdown custom code block rendering', () => {
       'assistant:true:const option = {};',
     );
     expect(container.querySelector('pre code')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('marks only the unterminated tail fence as incomplete', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() =>
+      createElement('div', { 'data-custom-code': 'true' }),
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content:
+              '```first-chart\n{"value":1}\n```\n\ntext\n\n```second-chart\n{"value":',
+            source: 'assistant',
+            isStreaming: true,
+          }),
+        ),
+      );
+    });
+
+    const infos = renderCodeBlock.mock.calls.map(
+      ([info]) => info as WebShellCodeBlockRenderInfo,
+    );
+    expect(infos.map((info) => info.isStreaming)).toEqual([true, true]);
+    expect(infos.map((info) => info.isIncomplete)).toEqual([false, true]);
 
     await act(async () => {
       root.unmount();
@@ -1335,6 +1377,8 @@ describe('Markdown code highlighting while streaming', () => {
           isStreaming: true,
         }),
       );
+      // Wait for the 80ms streaming throttle to flush the new content
+      await new Promise((resolve) => setTimeout(resolve, 100));
     });
     expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const b = 2;');
@@ -1482,5 +1526,176 @@ describe('Markdown code highlighting while streaming', () => {
       root.unmount();
     });
     container.remove();
+  });
+});
+
+describe('Markdown streaming throttle', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('flushes the latest content when multiple tokens arrive in one throttle window', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1 Token 2',
+          isStreaming: true,
+        }),
+      );
+    });
+    act(() => {
+      root.render(
+        createElement(Markdown, {
+          content: 'Token 1 Token 2 Token 3',
+          isStreaming: true,
+        }),
+      );
+    });
+
+    expect(container.textContent).toContain('Token 1');
+    expect(container.textContent).not.toContain('Token 1 Token 2 Token 3');
+
+    act(() => {
+      vi.advanceTimersByTime(80);
+    });
+
+    expect(container.textContent).toContain('Token 1 Token 2 Token 3');
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+  });
+});
+
+describe('external links in the desktop shell', () => {
+  type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
+
+  function renderMd(content: string): HTMLDivElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, { content }),
+        ),
+      );
+    });
+    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+      act(() => root.unmount());
+    return container as HTMLDivElement;
+  }
+
+  function clickLink(container: HTMLElement): MouseEvent {
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      container.querySelector('a')!.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  afterEach(() => {
+    delete (window as TauriWindow).__TAURI__;
+  });
+
+  it('routes external link clicks through the desktop opener', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('routes modified desktop clicks through the opener', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+      ctrlKey: true,
+    });
+    act(() => {
+      c.querySelector('a')!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/9060',
+    });
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('requests an error toast when the desktop opener fails', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('no browser'));
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    const toasts: ToastRequestDetail[] = [];
+    const handler = (e: Event) =>
+      toasts.push((e as CustomEvent<ToastRequestDetail>).detail);
+    window.addEventListener(TOAST_REQUEST_EVENT, handler);
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(true);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    window.removeEventListener(TOAST_REQUEST_EVENT, handler);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe('error');
+    expect(toasts[0].message).toContain('no browser');
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('keeps native anchor behavior outside the desktop shell', () => {
+    const openSpy = vi.spyOn(window, 'open');
+    const c = renderMd(
+      '[issue](https://github.com/QwenLM/qwen-code/issues/9060)',
+    );
+    const a = c.querySelector('a')!;
+    expect(a.getAttribute('target')).toBe('_blank');
+    const event = clickLink(c);
+    expect(event.defaultPrevented).toBe(false);
+    expect(openSpy).not.toHaveBeenCalled();
+    openSpy.mockRestore();
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
   });
 });
