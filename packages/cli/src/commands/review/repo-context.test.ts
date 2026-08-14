@@ -24,6 +24,7 @@ import {
   type RepositoryContextProvider,
 } from './lib/repository-context.js';
 import { repoContextCommand, runRepoContext } from './repo-context.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 
 const tempRoots: string[] = [];
 
@@ -47,21 +48,14 @@ function readJson(path: string): unknown {
 // fails the suite for want of a key, and a global `core.hooksPath` runs the
 // developer's hooks inside the test commits (`git worktree add` fires
 // post-checkout too). The wrappers under test read `process.env` per call.
-let savedEnv: NodeJS.ProcessEnv;
-let gitHome: string;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 beforeEach(() => {
-  gitHome = mkdtempSync(join(tmpdir(), 'repo-context-home-'));
-  writeFileSync(join(gitHome, '.gitconfig'), '');
-  savedEnv = { ...process.env };
-  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
-  process.env['GIT_CONFIG_GLOBAL'] = join(gitHome, '.gitconfig');
-  process.env['HOME'] = gitHome;
+  gitIsolation = isolateHostGitConfig();
 });
 
 afterEach(() => {
-  process.env = savedEnv;
-  rmSync(gitHome, { recursive: true, force: true });
+  gitIsolation.dispose();
   // Every test builds fixture worktrees (several with initialized git
   // repos) in the OS tmpdir; leaking them accumulates toward ENOSPC on
   // long-lived machines.

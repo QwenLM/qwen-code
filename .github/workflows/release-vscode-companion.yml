@@ -38,12 +38,16 @@ jobs:
   # First job: Determine version and run tests once
   prepare:
     runs-on: 'ubuntu-latest'
+    # The release-event (sync-with-CLI) path can be paused by setting the
+    # repository variable RELEASE_VSCODE_SYNC_PUBLISH=false; manual
+    # workflow_dispatch releases keep working either way.
     if: |-
       ${{
         github.repository == 'QwenLM/qwen-code' &&
         (
           github.event_name != 'release' ||
           (
+            vars.RELEASE_VSCODE_SYNC_PUBLISH != 'false' &&
             startsWith(github.event.release.tag_name, 'v') &&
             github.event.release.prerelease == false
           )
