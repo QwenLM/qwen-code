@@ -24,6 +24,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   BridgeEvent,
+  LiveReplayMode,
   SessionReplaySnapshot,
   SubscribeOptions,
 } from './eventBus.js';
@@ -164,6 +165,8 @@ export interface BridgeRestoreSessionRequest {
   historyReplay?: 'stream' | 'response';
   /** Optional newest persisted-record page requested for response replay. */
   historyPageSize?: number;
+  /** Load-only live-turn replay projection; defaults to the complete journal. */
+  liveReplayMode?: LiveReplayMode;
   /** Keep inherited fork records as model context without replaying them. */
   hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
@@ -950,7 +953,9 @@ export interface BridgeDaemonSessionDiagnostic {
   currentApprovalMode?: string;
   /**
    * The session's EFFECTIVE live-journal caps right now — the configured
-   * baseline, or higher when adaptive growth raised them mid-turn.
+   * baseline, or higher when adaptive growth raised them mid-turn. One
+   * session retains two journals (full + summary) under the SAME caps, so
+   * its live-journal heap can reach twice the reported byte cap.
    */
   maxJournalEvents: number;
   maxJournalBytes: number;

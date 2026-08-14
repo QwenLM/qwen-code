@@ -11638,6 +11638,90 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('passes the requested live replay mode to load', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-summary',
+          workspaceCwd: WS_BOUND,
+          historyReplay: 'response',
+          liveReplayMode: 'summary',
+        },
+      ]);
+    });
+
+    it('rejects an invalid live replay mode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.loadCalls).toEqual([]);
+    });
+
+    it('rejects an invalid live replay mode on resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.resumeCalls).toEqual([]);
+    });
+
+    it('does not forward a valid live replay mode to resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary-resume/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      // Resume always restores with the full journal; the load-only field
+      // is validated but never forwarded to the bridge.
+      expect(bridge.resumeCalls).toEqual([
+        {
+          sessionId: 'persisted-summary-resume',
+          workspaceCwd: WS_BOUND,
+        },
+      ]);
+    });
+
     it('does not restore through a closed runtime generation', async () => {
       const generationGuard = createWorkspaceGenerationGuard();
       generationGuard.close();

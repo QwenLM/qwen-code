@@ -3032,6 +3032,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     action: 'load' | 'resume';
     historyReplay: 'stream' | 'response';
     historyPageSize?: number;
+    liveReplayMode: 'full' | 'summary';
     hideInheritedHistory: boolean;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
@@ -5393,6 +5394,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       | 'activePromptId'
     >,
     action: 'load' | 'resume',
+    liveReplayMode: 'full' | 'summary' = 'full',
   ): Pick<
     BridgeRestoredSession,
     | 'compactedReplay'
@@ -5418,7 +5420,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // token must travel with it so a daemon restart between this response
     // and the first subscribe is detected (stale cursor + dead epoch).
     const eventEpoch = entry.events.epoch;
-    const snapshot = entry.events.snapshotReplay();
+    const snapshot = entry.events.snapshotReplay(liveReplayMode);
     if (!snapshot) {
       return {
         lastEventId: entry.events.lastEventId,
@@ -5543,6 +5545,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
+    liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -5607,7 +5610,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         break;
       }
     }
-    return replayFieldsFor(entry, 'load');
+    return replayFieldsFor(entry, 'load', liveReplayMode);
   }
 
   /**
@@ -5723,6 +5726,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action === 'load' && historyReplay === 'response'
         ? req.historyPageSize
         : undefined;
+    const requestedLiveReplayMode = req.liveReplayMode;
+    if (
+      requestedLiveReplayMode !== undefined &&
+      requestedLiveReplayMode !== 'full' &&
+      requestedLiveReplayMode !== 'summary'
+    ) {
+      throw new Error(
+        `Invalid liveReplayMode: ${JSON.stringify(requestedLiveReplayMode)}`,
+      );
+    }
+    const liveReplayMode =
+      action === 'load' ? (requestedLiveReplayMode ?? 'full') : 'full';
     if (
       historyPageSize !== undefined &&
       (!Number.isSafeInteger(historyPageSize) ||
@@ -5741,8 +5756,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       assertAttachableSessionEntry(req.sessionId, existing);
       const replayFields =
         historyPageSize !== undefined
-          ? await refreshedReplayFieldsFor(existing, historyPageSize)
-          : replayFieldsFor(existing, action);
+          ? await refreshedReplayFieldsFor(
+              existing,
+              historyPageSize,
+              liveReplayMode,
+            )
+          : replayFieldsFor(existing, action, liveReplayMode);
       // Backfill a pagination anchor when the snapshot's truncation
       // marker carries no recordId (live session, in-flight turn capped
       // the journal before any turn boundary). Best-effort; omitted on
@@ -5806,12 +5825,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Cold restores only coalesce when their effective request shapes
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
-      // caller. Same-shape coalescing is unaffected.
+      // caller. Same-shape coalescing is unaffected. The one directional
+      // exception is liveReplayMode: a summary request safely shares an
+      // in-flight full restore because once the restore settles the daemon
+      // recomputes the waiter's replay fields for its own mode from the
+      // registered entry — the two journals can diverge under cap pressure
+      // (each evicts independently against the shared caps), so the owner's
+      // projected fields can never be reused or filtered down for a waiter
+      // of a different mode. Only the reverse — a full request joining a
+      // summary restore — stays fenced: that projection lacks the nested
+      // detail the full client expects.
       if (
         inFlight.lifecycle.phase === 'abandoned' ||
         action !== inFlight.action ||
         historyReplay !== inFlight.historyReplay ||
         historyPageSize !== inFlight.historyPageSize ||
+        (inFlight.liveReplayMode === 'summary' && liveReplayMode === 'full') ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         // An abandoned restore is fenced until the real ACP request and its
@@ -5863,6 +5892,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.attachCount = Math.max(0, entry.attachCount - 1);
         throw error;
       }
+      // The owner's result carries replay fields selected for the OWNER'S
+      // live replay mode. A waiter whose mode differs (a summary load that
+      // joined a full restore — the only asymmetric direction the fence
+      // admits) recomputes its own fields from the registered entry, exactly
+      // as the existing-entry attach path above does — before registering —
+      // instead of inheriting the owner's unprojected full journal — which
+      // would include nested frames the summary client discards and the full
+      // journal's `history_truncated` marker even when the summary journal
+      // never truncated.
+      const waiterReplayFields =
+        liveReplayMode !== inFlight.liveReplayMode
+          ? historyPageSize !== undefined
+            ? await refreshedReplayFieldsFor(
+                entry,
+                historyPageSize,
+                liveReplayMode,
+              )
+            : replayFieldsFor(entry, action, liveReplayMode)
+          : undefined;
+      // `refreshedReplayFieldsFor` swallows fetch failures into the
+      // in-memory fallback, so re-assert after the await above: a channel
+      // death mid-fetch would otherwise attach the waiter to a session the
+      // daemon already tore down.
+      try {
+        assertAttachableSessionEntry(restored.sessionId, entry);
+      } catch (error) {
+        inFlight.coalesceState.count--;
+        entry.attachCount = Math.max(0, entry.attachCount - 1);
+        throw error;
+      }
       // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
       // already initialized it from coalesceState.count synchronously
       // when the IIFE registered the entry. Spread `restored` so the
@@ -5896,6 +5955,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         clientId,
         createdAt: entry.createdAt,
         hasActivePrompt: entry.promptActive,
+        ...(waiterReplayFields ?? {}),
       };
     }
 
@@ -6340,7 +6400,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : {}),
           state: racedEntry.restoreState ?? {},
           hasActivePrompt: racedEntry.promptActive,
-          ...replayFieldsFor(racedEntry, action),
+          ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
       }
 
@@ -6440,7 +6500,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
         hasActivePrompt: entry.promptActive,
-        ...replayFieldsFor(entry, action),
+        ...replayFieldsFor(entry, action, liveReplayMode),
       };
     })().finally(async () => {
       if (restoreLifecycle.phase === 'abandoned') return;
@@ -6516,6 +6576,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action,
       historyReplay,
       ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+      liveReplayMode,
       hideInheritedHistory,
       publicPromise: promise,
       settlementPromise,
