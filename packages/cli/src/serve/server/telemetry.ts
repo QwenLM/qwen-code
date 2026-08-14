@@ -253,6 +253,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/config-option',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/config-option',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/recap',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/recap',
@@ -562,6 +568,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/reload' ||
         suffix === '/workspace/file/write' ||
         suffix === '/workspace/file/edit' ||
+        suffix === '/workspace/file/upload' ||
         suffix === '/workspace/mcp/servers' ||
         suffix === '/workspace/memory' ||
         suffix === '/workspace/agents' ||

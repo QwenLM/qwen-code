@@ -387,6 +387,24 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     }
   });
 
+  it('normalizes the plural workspace upload route to a stable route label', () => {
+    const mw = daemonTelemetryMiddleware(() => '/ws');
+    const res = mockRes(200);
+    mw(
+      mockReq('POST', '/workspaces/ws-secondary/file/upload'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        method: 'POST',
+        route: 'POST /workspace/file/upload',
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('attributes plural workspace voice requests to the selected workspace', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     for (const [method, path, route] of [
@@ -794,17 +812,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 55 unique routes with the audited 48/7 attribution split', () => {
+  it('contains 56 unique routes with the audited 49/7 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(55);
-    expect(new Set(keys).size).toBe(55);
+    expect(keys).toHaveLength(56);
+    expect(new Set(keys).size).toBe(56);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(48);
+    ).toHaveLength(49);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

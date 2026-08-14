@@ -20,6 +20,8 @@ import type {
   ResumeSessionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -188,6 +190,8 @@ export const LOAD_REPLAY_HIDE_INHERITED_META_KEY =
   'qwen.session.loadReplayHideInherited';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+export const LOAD_REPLAY_MAX_BYTES = 32 * 1024 * 1024;
+export const LOAD_REPLAY_MAX_UPDATES = 10_000;
 
 export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 
@@ -338,6 +342,7 @@ export interface ChannelStartupProfileV1 {
 export interface BridgeLoadReplayEnvelope {
   v: typeof LOAD_REPLAY_VERSION;
   updates: SessionUpdate[];
+  anchorRecordId?: string;
   hasMore?: boolean;
   partial?: true;
   replayError?: string;
@@ -685,6 +690,8 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
+  /** User-facing projection supplied by an authenticated channel worker. */
+  promptDisplayText?: string;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -724,6 +731,8 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
+  'qwen.daemon.promptDisplayText';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -937,8 +946,23 @@ export interface BridgeDaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
+  /**
+   * Per-session BASELINE journal caps. A session's effective caps can be
+   * higher mid-turn under adaptive growth — see
+   * `BridgeDaemonSessionDiagnostic.maxJournalEvents` /
+   * `maxJournalBytes` and `journalGrowth` below.
+   */
   maxJournalEvents: number;
   maxJournalBytes: number;
+  /**
+   * Adaptive live-journal growth configuration, or `null` when growth is
+   * disabled (fixed caps above). The pool is daemon-wide: every bridge of
+   * the daemon accounts its sessions against the same aggregate.
+   */
+  journalGrowth: {
+    poolBytes: number;
+    hardCapBytes: number;
+  } | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }
@@ -958,6 +982,12 @@ export interface BridgeDaemonSessionDiagnostic {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /**
+   * The session's EFFECTIVE live-journal caps right now — the configured
+   * baseline, or higher when adaptive growth raised them mid-turn.
+   */
+  maxJournalEvents: number;
+  maxJournalBytes: number;
 }
 
 export interface BridgeDaemonStatusSnapshot {
@@ -1592,6 +1622,12 @@ export interface AcpSessionBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /** Change one advertised ACP configuration option for a live session. */
+  setSessionConfigOption(
+    sessionId: string,
+    req: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse>;
 
   /**
    * Switch UI language and optionally LLM output language for a live

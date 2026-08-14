@@ -241,6 +241,37 @@ describe('history replay page', () => {
     ]);
   });
 
+  it('fails incrementally before collecting an update above the count limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: Number.MAX_SAFE_INTEGER, maxUpdates: 0 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'updates',
+      observed: 1,
+      limit: 0,
+    });
+  });
+
+  it('fails incrementally before retaining serialized updates above the byte limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: 2, maxUpdates: 1 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'bytes',
+      limit: 2,
+    });
+  });
+
   it('filters malformed replay state before encoding the next cursor', async () => {
     const logger = { warn: vi.fn() };
     const encodeCursor = vi.fn(() => 'next-cursor');
