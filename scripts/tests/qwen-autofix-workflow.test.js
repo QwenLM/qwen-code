@@ -6250,15 +6250,20 @@ exit 1
       key = 'W1',
       {
         login = 'qwen-code-dev-bot',
-        at = '2026-01-01T00:00:00Z',
-        // Default run advances with the round so sort_by(.run) is
-        // deterministic; distinct runs that share round= override it.
+        // measured= (the prepare-time measurement instant) is the dedup/order
+        // key; default advances with the round so sort_by/max_by are
+        // deterministic. A re-run's distinct attempts override it explicitly.
+        measured = `2026-01-01T00:${String(round).padStart(2, '0')}:00Z`,
+        // Default run advances with the round; distinct runs that share round=
+        // override it.
         run = 1000 + round,
       } = {},
     ) => ({
       user: { login },
-      created_at: at,
-      body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} key=${key} -->`,
+      // created_at is no longer read (the filter uses measured=), kept only
+      // as a realistic comment field.
+      created_at: measured,
+      body: `<!-- autofix-growth-now src=${src} test=${test} over=${over} round=${round} run=${run} measured=${measured} key=${key} -->`,
     });
     const diverge = ({
       src,
@@ -6266,7 +6271,9 @@ exit 1
       criticalOnlyGrowth = 'true',
       history,
       div = 2,
-      baseUpdAt = '',
+      // The comparability cutoff (base update OR external head move); markers
+      // measured at/before it are dropped as incomparable.
+      cutoff = '',
       // Distinct from every default fixture run id (1000+round), so existing
       // cases see no self-exclusion; a case can set a fixture marker's run to
       // this to prove the current run's own attempt is excluded.
@@ -6281,7 +6288,7 @@ exit 1
           '-c',
           `set -e\nAUTOFIX_BOT=qwen-code-dev-bot\nLIVE_REARM_KEY=W1\nWORKDIR=${dir}\n` +
             `NET_MEASURED=true\nCRITICAL_ONLY_GROWTH=${criticalOnlyGrowth}\n` +
-            `BASE_UPD_AT='${baseUpdAt}'\nGITHUB_RUN_ID=${currentRun}\n` +
+            `GROWTH_NOW_CUTOFF='${cutoff}'\nGITHUB_RUN_ID=${currentRun}\n` +
             `GROWTH_SRC=${src}\nGROWTH_TEST=${test}\nGROWTH_DIVERGENCE_ROUNDS=${div}\n` +
             `${divBlock}\nprintf '\\n%s %s' "$GROWTH_DIVERGED" "$OVER_ROUNDS_PRIOR"`,
         ],
@@ -6367,11 +6374,11 @@ exit 1
           marker(300, 200, 'true', 1, 'W1', { run: 1001 }),
           marker(600, 300, 'true', 2, 'W1', {
             run: 1002,
-            at: '2026-01-01T00:01:00Z',
+            measured: '2026-01-01T00:01:00Z',
           }),
           marker(150, 150, 'true', 2, 'W1', {
             run: 1002,
-            at: '2026-01-01T00:02:00Z',
+            measured: '2026-01-01T00:02:00Z',
           }),
         ],
       }),
@@ -6434,17 +6441,24 @@ exit 1
         history: climbing.map((m) => ({ ...m, user: { login: 'attacker' } })),
       }),
     ).toBe('false 0');
-    // Markers BEFORE a mid-window base update are excluded (re-anchoring makes
-    // pre-update sums incomparable) — only the post-update round remains.
+    // Markers measured at/before the comparability cutoff (a base update OR an
+    // external head move) are excluded — re-anchoring makes pre-cutoff sums
+    // incomparable; only the post-cutoff round remains.
     expect(
       diverge({
         src: 999,
         test: 999,
-        baseUpdAt: '2026-01-01T12:00:00Z',
+        cutoff: '2026-01-01T12:00:00Z',
         history: [
-          marker(500, 300, 'true', 1, 'W1', { at: '2026-01-01T06:00:00Z' }),
-          marker(600, 400, 'true', 2, 'W1', { at: '2026-01-01T06:30:00Z' }),
-          marker(200, 100, 'true', 3, 'W1', { at: '2026-01-01T18:00:00Z' }),
+          marker(500, 300, 'true', 1, 'W1', {
+            measured: '2026-01-01T06:00:00Z',
+          }),
+          marker(600, 400, 'true', 2, 'W1', {
+            measured: '2026-01-01T06:30:00Z',
+          }),
+          marker(200, 100, 'true', 3, 'W1', {
+            measured: '2026-01-01T18:00:00Z',
+          }),
         ],
       }),
     ).toBe('false 1');
@@ -6492,7 +6506,8 @@ exit 1
         [
           '-c',
           `GROWTH_SRC=500\nGROWTH_TEST=300\nCRITICAL_ONLY_GROWTH=true\n` +
-            `${roundVar}=2\nGITHUB_RUN_ID=1002\nGROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
+            `${roundVar}=2\nGITHUB_RUN_ID=1002\nMEASURED_AT=2026-01-01T00:05:00Z\n` +
+            `GROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
         ],
         { encoding: 'utf8' },
       ).trim();
@@ -6524,7 +6539,7 @@ exit 1
       workflow.match(/<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g) ?? [],
     ).toHaveLength(3);
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=',
     );
     // The failure/handoff report step binds the three growth outputs so its
     // marker is not inert-by-omission.
@@ -6554,11 +6569,49 @@ exit 1
       expect(pushAndReportStep).toContain(bind);
     }
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=',
     );
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=',
     );
+    // Both report STEPS bind MEASURED_AT (push+no-op share one env block, the
+    // failure/handoff report has its own), so all three marker writers can
+    // stamp the prepare-time instant (not the post-agent comment created_at).
+    expect(
+      workflow.match(
+        /MEASURED_AT: '\$\{\{ steps\.prepare\.outputs\.measured_at \}\}'/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(workflow).toContain('echo "measured_at=${MEASURED_AT}"');
+    // The comparability cutoff re-anchors on an external head move (author
+    // push / base update), not only the bot's own base-update marker: extract
+    // the GROWTH_NOW_CUTOFF block and exercise both branches.
+    const cutoffBlock = prepareBranchAndFeedbackStep.match(
+      /GROWTH_NOW_CUTOFF="\$\{BASE_UPD_AT\}"\n[\s\S]*?GROWTH_NOW_CUTOFF="\$\{MEASURED_AT\}"\n\s+fi/,
+    )?.[0];
+    expect(cutoffBlock).toBeTruthy();
+    const cutoffOf = (liveRed, head) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `BASE_UPD_AT=base-ts\nMEASURED_AT=now-ts\n` +
+            `LIVE_RED_HEAD='${liveRed}'\nCHECKED_OUT_HEAD='${head}'\n` +
+            `${cutoffBlock}\nprintf '%s' "$GROWTH_NOW_CUTOFF"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .pop();
+    // Head unchanged since the bot's last judged head → keep the base-update
+    // cutoff (prior sums stay comparable across bot rounds).
+    expect(cutoffOf('abc123', 'abc123')).toBe('base-ts');
+    // Head moved to something the bot did not record (author push / base
+    // update) → re-anchor at now, dropping every prior sum.
+    expect(cutoffOf('abc123', 'def456')).toBe('now-ts');
+    // First round (no prior bot head) → nothing to re-anchor against.
+    expect(cutoffOf('', 'def456')).toBe('base-ts');
     // growth_diverged is NOT emitted as a step output — the handoff is
     // enforced by the feedback.md text, so a dangling dead output would only
     // mislead a future consumer.
