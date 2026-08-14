@@ -42,10 +42,12 @@ describe('issue #7960: compression side-query output budget vs small windows', (
   let mockConfig: Config;
   let capturedPromptTokens: number | undefined;
   let capturedMaxOutputTokens: number | undefined;
+  let capturedModel: string | undefined;
 
   beforeEach(() => {
     capturedPromptTokens = undefined;
     capturedMaxOutputTokens = undefined;
+    capturedModel = undefined;
     service = new ChatCompressionService();
     mockChat = {
       getHistory: vi.fn(),
@@ -81,14 +83,17 @@ describe('issue #7960: compression side-query output budget vs small windows', (
 
   // Emulates the vLLM/OpenAI-compatible backend preflight check:
   // prompt_tokens + max_tokens must fit the model window or the request is
-  // rejected with a 400 before generation starts.
-  function mockVllmBackend(window: number = WINDOW) {
+  // rejected with a 400 before generation starts. With hitCap the mock model
+  // additionally stops exactly at the requested budget and returns an unclosed
+  // <state_snapshot>, like a real model that runs out of output tokens.
+  function mockVllmBackend(window: number = WINDOW, hitCap = false) {
     const generateText = vi.fn(async (opts: GenerateTextOptions) => {
       const contents = opts.contents as Content[];
       const systemText =
         typeof opts.systemInstruction === 'string'
           ? opts.systemInstruction
           : '';
+      capturedModel = opts.model;
       capturedPromptTokens =
         estimateContentTokens(contents) + Math.ceil(systemText.length / 4);
       capturedMaxOutputTokens = (
@@ -106,6 +111,15 @@ describe('issue #7960: compression side-query output budget vs small windows', (
             `total of at least ${capturedPromptTokens + capturedMaxOutputTokens} ` +
             `tokens."}}`,
         );
+      }
+      if (hitCap) {
+        return {
+          text: '<state_snapshot>truncated mid-content...',
+          usage: {
+            promptTokenCount: capturedPromptTokens,
+            candidatesTokenCount: capturedMaxOutputTokens,
+          },
+        };
       }
       return {
         text: '<state_snapshot>summary</state_snapshot>',
@@ -179,6 +193,58 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       originalTokenCount: 45_000,
     });
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
+  });
+
+  it('drops a summary truncated at the clamped budget instead of persisting it', async () => {
+    // The truncation guard must compare against the budget actually
+    // requested, not the fixed 20K ceiling: output can never exceed what
+    // was requested, so against the ceiling the guard could never fire on a
+    // clamped request and a truncated summary would be persisted.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(182_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, true);
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 45_000,
+    });
+    expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+  });
+
+  it('keys the budget to the compaction model window when a distinct compaction model is kept', async () => {
+    // Main window 65K, compaction model window 200K, ~60K history: the
+    // guard keeps the compaction model, and the budget must clamp against
+    // the receiving model's 200K window — not the main window, which would
+    // needlessly shrink the summary ceiling to ~3.6K.
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue('compact-model');
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      { id: 'compact-model', contextWindowSize: 200_000 },
+    ] as never[]);
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(240_000) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(200_000);
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 60_000,
+    });
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(capturedModel).toBe('compact-model');
     expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
   });
 

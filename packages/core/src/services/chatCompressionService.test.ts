@@ -1200,9 +1200,14 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    // Window large enough that the window-clamped output budget (issue
+    // #7960) stays above the ~10K locally-estimated summary below — a 6K
+    // window would clamp the budget to ~4K, making a 10K output physically
+    // impossible and letting the truncation guard preempt the inflation
+    // check this test targets.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 6_000,
+      contextWindowSize: 32_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1281,7 +1286,7 @@ describe('ChatCompressionService', () => {
       expect.stringContaining('local estimate'),
     );
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+      expect.stringContaining('requested output budget'),
     );
   });
 
@@ -1337,7 +1342,7 @@ describe('ChatCompressionService', () => {
       expect.stringContaining('local estimate'),
     );
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+      expect.stringContaining('requested output budget'),
     );
   });
 
@@ -2153,7 +2158,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     );
     expect(result.newHistory).toBeNull();
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+      expect.stringContaining('requested output budget'),
     );
   });
 });

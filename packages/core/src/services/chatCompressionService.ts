@@ -67,15 +67,21 @@ export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
 
 /**
  * Output budget for the compression side-query: the fixed ceiling clamped to
- * the window's remaining room (contextLimit - estimated input - safety
- * margin). Providers validate `prompt_tokens + max_tokens <= window` before
+ * the window's remaining room (window - estimated input - safety margin).
+ * Providers validate `prompt_tokens + max_tokens <= window` before
  * generating, so on small-window deployments (e.g. vLLM with a reduced
  * max_model_len) an unclamped ceiling can push the request over the window
  * and the backend rejects it with a 400 before the model runs
- * (https://github.com/QwenLM/qwen-code/issues/7960). Floored at 1 so the
- * request stays valid even when the estimate already exceeds the window —
- * slimming strips media the estimate still counts, and an unusable result
- * is still discarded by the empty-summary handling below.
+ * (https://github.com/QwenLM/qwen-code/issues/7960). Floored at 1 so
+ * `maxOutputTokens` stays provider-valid even when the estimate already
+ * fills the window — the request itself may still be rejected when the
+ * prompt alone leaves no room. The estimate runs on the already-slimmed
+ * history, so stripped media is no longer counted.
+ *
+ * The main send path enforces the same `prompt + max_tokens <= window`
+ * invariant via clampOutputTokensToWindow in core/tokenLimits.ts, with
+ * deliberately different tunables: that helper's 4K floor can itself exceed
+ * a tight window, which this path must never do.
  *
  * Pure function — no I/O, no shared state — safe to call repeatedly.
  */
@@ -595,6 +601,23 @@ export class ChatCompressionService {
     let effectiveCompactionModel =
       config.getCompactionModel?.() ?? config.getModel();
     let compactionWarning: string | undefined;
+    // Shared estimate of the slimmed side-query payload (history + system
+    // instruction), memoized and lazy: the cache-sharing path must not pay
+    // for slimming. The compaction-model guard adds the output reserve as
+    // its third term; the budget clamp adds the directive — keeping the
+    // leading terms in one place so the two checks cannot drift.
+    let cachedColdInputEstimate: number | undefined;
+    const getColdInputEstimate = () =>
+      (cachedColdInputEstimate ??=
+        estimateContentTokens(
+          getColdInput().slimmedHistory,
+          slimmingConfig.imageTokenEstimate,
+        ) + Math.ceil(systemInstruction.length / CHARS_PER_TOKEN));
+    // Window the output budget clamps against: the window of the model that
+    // actually receives the side-query. Defaults to the main model's window;
+    // switched below to a distinct compaction model's window when the guard
+    // keeps that model (issue #7960).
+    let budgetWindow = contextLimit;
     // Only check the window when the effective model differs from the main
     // model — warning about the main model being "too small" is confusing
     // when no compaction model was explicitly configured.
@@ -609,12 +632,7 @@ export class ChatCompressionService {
         // Include the system prompt and the output reserve: providers check
         // prompt + max_tokens <= window, so all three terms count.
         const slimmedTokenEstimate =
-          estimateContentTokens(
-            getColdInput().slimmedHistory,
-            slimmingConfig.imageTokenEstimate,
-          ) +
-          Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
-          COMPACT_MAX_OUTPUT_TOKENS;
+          getColdInputEstimate() + COMPACT_MAX_OUTPUT_TOKENS;
         if (window && window > 0 && slimmedTokenEstimate > window) {
           compactionWarning =
             `Compaction model "${resolved.modelId}" context window ` +
@@ -625,6 +643,8 @@ export class ChatCompressionService {
             .getDebugLogger()
             .warn(`[chat-compression] ${compactionWarning}`);
           effectiveCompactionModel = config.getModel();
+        } else if (window && window > 0) {
+          budgetWindow = window;
         }
       }
     }
@@ -632,7 +652,9 @@ export class ChatCompressionService {
     const abortSignal = signal ?? new AbortController().signal;
     abortSignal.throwIfAborted();
     // The output budget runColdCompression requests: the fixed ceiling
-    // clamped to the window's remaining room (issue #7960).
+    // clamped to the receiving model's remaining window (issue #7960).
+    // Hoisted because the truncation guard below compares the reported
+    // output count against it.
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
     const runColdCompression = () => {
       const slim = getColdInput();
@@ -644,19 +666,22 @@ export class ChatCompressionService {
               `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
           );
       }
-      // Clamp the output budget to the window's remaining room so
+      // Clamp the output budget to the receiving model's remaining window so
       // `prompt + max_tokens <= window` holds even on small-window
-      // deployments (issue #7960). Same estimate terms the compaction-model
-      // guard above uses.
+      // deployments (issue #7960).
       coldOutputBudget = computeCompactionOutputBudget(
-        estimateContentTokens(
-          slim.slimmedHistory,
-          slimmingConfig.imageTokenEstimate,
-        ) +
-          Math.ceil(systemInstruction.length / CHARS_PER_TOKEN) +
+        getColdInputEstimate() +
           Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN),
-        contextLimit,
+        budgetWindow,
       );
+      if (coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS) {
+        config
+          .getDebugLogger()
+          .debug(
+            `[chat-compression] output budget clamped to ${coldOutputBudget} ` +
+              `(estimated input ${getColdInputEstimate()}, window ${budgetWindow})`,
+          );
+      }
       return runSideQuery(config, {
         purpose: 'chat-compression',
         skipOutputLanguagePreference: true,
@@ -873,31 +898,41 @@ export class ChatCompressionService {
         );
     }
 
-    // Defensive guard: if the dedicated side-query hit
-    // COMPACT_MAX_OUTPUT_TOKENS, the summary is likely truncated mid-content
-    // and unsafe to persist. Drop it and surface as a failure so the
+    // Defensive guard: if the dedicated side-query hit the output budget it
+    // actually requested, the summary is likely truncated mid-content and
+    // unsafe to persist. Drop it and surface as a failure so the
     // consecutive-failure breaker counts it —
     // if the model consistently produces max-length summaries we want to stop
     // trying after MAX_CONSECUTIVE_FAILURES strikes rather than burn an API
     // call on every send. Reactive overflow still catches the catastrophic
     // case. See docs/design/auto-compaction-threshold-redesign.md risk #2.
     //
-    // TODO(finish_reason): the current `>= cap` check is a heuristic that
+    // The comparison is against coldOutputBudget, not the fixed ceiling:
+    // since issue #7960's clamp the requested budget can sit below
+    // COMPACT_MAX_OUTPUT_TOKENS, and output can never exceed what was
+    // requested — comparing against the fixed ceiling would make this guard
+    // unreachable on every clamped request. The floor regime (budget 1)
+    // is excluded: `>= budget` degenerates there (any output "hits" a
+    // 1-token cap), and a prompt that exhausts the window is normally
+    // rejected by the backend before generating anything.
+    //
+    // TODO(finish_reason): the current `>= budget` check is a heuristic that
     // false-positives on legitimate summaries that happen to land exactly at
-    // the cap. The proper signal is `finish_reason === 'length'` (OpenAI) /
+    // the budget. The proper signal is `finish_reason === 'length'` (OpenAI) /
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
-      compressionOutputTokenCount >= COMPACT_MAX_OUTPUT_TOKENS
+      coldOutputBudget > 1 &&
+      compressionOutputTokenCount >= coldOutputBudget
     ) {
       config
         .getDebugLogger()
         .warn(
-          `[chat-compression] summary output reached the ` +
-            `COMPACT_MAX_OUTPUT_TOKENS cap (${COMPACT_MAX_OUTPUT_TOKENS}); ` +
+          `[chat-compression] summary output reached the requested output ` +
+            `budget (${coldOutputBudget}); ` +
             `dropping potentially-truncated result. This counts as a ` +
             `compression failure for the per-chat circuit breaker.`,
         );
