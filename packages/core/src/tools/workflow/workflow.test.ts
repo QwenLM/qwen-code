@@ -83,6 +83,12 @@ describe('WorkflowTool', () => {
     ]) {
       expect(description).toContain(anchor);
     }
+    // The per-call options this half of the description advertises are
+    // anchored too — a refactor that drops their sentences leaves the
+    // capabilities undiscoverable from the tool surface and no other test
+    // would notice.
+    expect(description).toContain('workingDir');
+    expect(description).toMatch(/no-progress stall watchdog/);
     // One anchor per policy section — dropping any whole section has to
     // turn this test red, which is the regression it exists to catch.
     expect(description).toMatch(/Parallelism on its own is not a reason/);

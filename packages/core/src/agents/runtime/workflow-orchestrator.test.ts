@@ -1907,14 +1907,29 @@ describe('createProductionDispatch', () => {
   });
 
   // T11 (PR #4732 R1): subagents must be bounded so a single agent() call
-  // cannot loop the model indefinitely.
+  // cannot loop the model indefinitely. The dispatch site resolves both
+  // bounds from process.env, so delete the two knobs for this test — an
+  // operator shell exporting them must not flip this hermetic assertion.
   it('passes bounded runConfig (max_turns + max_time_minutes)', async () => {
-    const dispatch = createProductionDispatch(fakeConfig());
-    await dispatch('hello', { label: 'h1' });
-    expect(created[0]!.runConfig).toEqual({
-      max_turns: 50,
-      max_time_minutes: 10,
-    });
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+        max_time_minutes: DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   // Resolver-level tests cannot catch a revert at the dispatch site: in a
@@ -3550,6 +3565,32 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect((error as Error).message).not.toContain('\r');
     expect((error as Error).message).not.toContain('\n');
     expect((error as Error).message).not.toContain('\u0000');
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // Same threat on the other interpolated half: the refusal echoes the
+  // model-authored `workingDir` itself, and `JSON.stringify` escapes only
+  // C0 (U+0000-U+001F), so DEL and the C1 range (incl. NEL U+0085) reach
+  // the message raw unless the echo is sanitized too.
+  it('workingDir refusal scrubs control characters from the echoed workingDir', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'not a registered linked worktree.',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'x\u0085forged\u007fline',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\u0085');
+    expect((error as Error).message).not.toContain('\u007f');
     expect(helper.calls).toHaveLength(0);
   });
 

@@ -34,6 +34,7 @@ import {
 import {
   DEFAULT_STALL_MS,
   MAX_STALL_ATTEMPTS,
+  MAX_WORKFLOW_STALL_MS_ENV,
 } from '../../agents/runtime/workflow-stall.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import {
@@ -127,7 +128,7 @@ const WORKFLOW_PARAM_SCHEMA = {
         'subagent time cap, not this watchdog); the timer is suspended ' +
         'while a tool is in flight, so a legitimately slow tool is not ' +
         'a stall. ' +
-        `Default ${DEFAULT_STALL_MS}; \`0\` disables the watchdog. Wall time ` +
+        `Default ${DEFAULT_STALL_MS} (override via \`${MAX_WORKFLOW_STALL_MS_ENV}\`, whole seconds); \`0\` disables the watchdog. Wall time ` +
         'per attempt is bounded separately. ' +
         'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
         'in their disallowed-tool floor regardless of agentType. ' +

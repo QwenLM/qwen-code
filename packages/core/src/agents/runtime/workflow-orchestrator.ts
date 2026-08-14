@@ -825,8 +825,11 @@ async function runOverridePath(
       'workingDir',
     );
     if ('error' in resolved) {
+      // JSON.stringify escapes only C0 — sanitize the echo too so DEL / C1
+      // (incl. NEL) in the model-authored path cannot fragment the message,
+      // the same threat the agentType SECURITY note above names.
       throw new Error(
-        `agent({workingDir: ${JSON.stringify(opts.workingDir)}}): ${sanitizeForErrorMessage(resolved.error)}`,
+        `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
       );
     }
     effectiveContext = createDirScopedConfigOverride(config, resolved.path);
