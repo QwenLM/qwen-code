@@ -43,6 +43,11 @@ export interface UpdateGoalToolParams {
 
 export type GoalToolResult = ToolResult;
 
+type LastGoalSummary = Pick<
+  GoalRecord,
+  'goalId' | 'revision' | 'status' | 'turnCount' | 'activeTimeMs' | 'lastReason'
+>;
+
 type GetGoalRuntime = Pick<GoalRuntime, 'getGoalForWorker'> & {
   getSnapshotForPermit?: GoalRuntime['getSnapshotForPermit'];
 };
@@ -62,7 +67,7 @@ class GetGoalInvocation extends BaseToolInvocation<
     params: GetGoalToolParams,
     private readonly runtime: GetGoalRuntime | undefined,
     private readonly permit: GoalTurnPermit | undefined,
-    private readonly lastGoal: GoalRecord | undefined,
+    private readonly lastGoal: LastGoalSummary | undefined,
   ) {
     super(params);
   }
@@ -103,7 +108,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (status, turnCount, activeTimeMs, lastReason) of the session\'s most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
+      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, and lastReason when one was recorded) of the session\'s most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
       Kind.Read,
       {
         type: 'object',
@@ -137,7 +142,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
    * needs no permit, so report it. Scalars only: the objective and the
    * evidence checkpoint stay behind the permit.
    */
-  private lastGoal(): GoalRecord | undefined {
+  private lastGoal(): LastGoalSummary | undefined {
     let runtime: GoalRuntime;
     try {
       runtime = this.config.getGoalRuntime();
@@ -146,11 +151,20 @@ export class GetGoalTool extends BaseDeclarativeTool<
       return undefined;
     }
     if (typeof runtime?.getSnapshot !== 'function') return undefined;
-    return runtime.getSnapshot().goal ?? undefined;
+    const goal = runtime.getSnapshot().goal;
+    if (!goal) return undefined;
+    return {
+      goalId: goal.goalId,
+      revision: goal.revision,
+      status: goal.status,
+      turnCount: goal.turnCount,
+      activeTimeMs: goal.activeTimeMs,
+      ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
+    };
   }
 }
 
-function unpermittedGoalResult(lastGoal: GoalRecord | undefined) {
+function unpermittedGoalResult(lastGoal: LastGoalSummary | undefined) {
   if (!lastGoal) {
     return {
       llmContent: JSON.stringify({ active: false }),

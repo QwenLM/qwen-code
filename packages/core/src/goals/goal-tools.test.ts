@@ -218,6 +218,16 @@ describe('GetGoalTool', () => {
 
     expect(String(result.llmContent)).not.toContain('SECRET_OBJECTIVE');
     expect(String(result.llmContent)).not.toContain('SECRET_CLAIM');
+    expect(JSON.parse(String(result.llmContent))).toEqual({
+      active: false,
+      lastGoal: {
+        goalId: 'goal-1',
+        revision: 1,
+        status: 'complete',
+        turnCount: 2,
+        activeTimeMs: 10,
+      },
+    });
   });
 
   it('reports no Goal when the session never had one', async () => {
