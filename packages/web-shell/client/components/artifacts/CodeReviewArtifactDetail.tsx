@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
   getImageMimeTypeFromPath,
@@ -314,6 +315,7 @@ export function CodeReviewArtifactDetail({
   workspaceActions: ArtifactWorkspaceActions;
 }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [content, setContent] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [artifactTruncated, setArtifactTruncated] = useState(false);
@@ -645,6 +647,7 @@ export function CodeReviewArtifactDetail({
                             href={asset}
                             target="_blank"
                             rel="noopener noreferrer"
+                            onClick={(event) => openExternalLink(event, asset)}
                           >
                             {asset}
                           </a>
