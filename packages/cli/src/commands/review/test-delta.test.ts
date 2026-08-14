@@ -188,6 +188,52 @@ describe('runTestDelta', () => {
     expect(cwds).toEqual([baseline]);
   });
 
+  it('does not admit a timed-out NON-Maven command that merely echoes a maven marker', () => {
+    // R2-2 over-inclusion: the timed-out arm gates on the STRUCTURED Maven
+    // fact, so an `npm test` that echoes a `[maven-test-failure] ` line
+    // (this repo's own suites carry literal marker strings failing
+    // assertions echo) is not admitted and re-executed — a green rerun
+    // would manufacture netNew failures out of an infrastructure timeout.
+    const calls: string[] = [];
+    runWith(
+      [
+        cmd({
+          command: 'npm test',
+          timedOut: true,
+          exitCode: null,
+          output: '[maven-test-failure] core/target/x.xml: T#fails',
+        }),
+      ],
+      (command) => {
+        calls.push(command);
+        return cmd({ command, output: '' });
+      },
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('admits a timed-out Maven command carrying stdout-only failure evidence', () => {
+    // R2-2 under-inclusion: a timed-out `./mvnw test` with a failing
+    // Surefire summary but NO report markers still carries failure evidence
+    // and must join the disclosure, not drop out to the all-clear note (the
+    // opposite of build-test's verdict). A Maven command never matches the
+    // rerun grammar, so it lands in skippedUnrecognised.
+    const r = runWith(
+      [
+        cmd({
+          command:
+            './mvnw --batch-mode --no-transfer-progress -pl core -am test',
+          timedOut: true,
+          exitCode: null,
+          output: '[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0',
+          maven: { lifecycle: 'test', modules: ['core'], alsoMake: true },
+        }),
+      ],
+      () => cmd({ output: '' }),
+    );
+    expect(r.note).not.toContain('no PR-side test command failed');
+  });
+
   it('an empty netNew with everything shared is the pre-existing verdict', () => {
     // The live-run case this exists for: 3 env-sensitive failures that the
     // model previously had to JUDGE as pre-existing become a measurement.

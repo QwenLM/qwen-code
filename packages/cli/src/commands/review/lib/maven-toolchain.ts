@@ -101,12 +101,13 @@ const MAX_SELECTOR_CHARS = 4096;
 const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 
 /**
- * `.mvn/maven.config` carries the same class of cap: it is split on
- * whitespace, and an uncapped multi-megabyte config a PR commits is this
- * harness's own denial-of-service surface — measured at 37 MB the split cost
- * seconds of synchronous CPU and hundreds of MB of transient heap, scaling
- * linearly to GitHub's 100 MB per-file limit. An oversized config contributes
- * no settings inputs.
+ * `.mvn/maven.config` carries the same class of cap: it is read line-based
+ * (each non-empty, non-`#` line is ONE argument — an argument may carry a
+ * space, e.g. `ci/my settings.xml`), and an uncapped multi-megabyte config
+ * a PR commits is this harness's own denial-of-service surface — measured at
+ * 37 MB the read/tokenize costs seconds of synchronous CPU and hundreds of
+ * MB of transient heap, scaling linearly to GitHub's 100 MB per-file limit.
+ * An oversized config contributes no settings inputs (and reads ambiguous).
  */
 const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 
@@ -279,6 +280,12 @@ export function detectMavenOwnership(
 ): MavenOwnership {
   const modules = new Set<string>();
   let reactorWide = false;
+  // A settings/repository file the config itself declares is a build input
+  // no matter where it lives — the metadata exemption below must not
+  // swallow it (a `-s .github/settings.xml` change redirects resolution).
+  const configDeclaredInputs = new Set(
+    analyzeMavenConfig(root).dependencyInputs,
+  );
   // Every wrapper repo ships both platform variants, but only one is ever
   // executed: a change confined to the OTHER platform's wrapper cannot affect
   // this platform's run, so it neither escalates to reactor-wide nor falls
@@ -291,6 +298,15 @@ export function detectMavenOwnership(
     if (path === null) continue;
     if (path === otherPlatformWrapper) continue;
     if (REACTOR_WIDE_FILES.has(path) || path.startsWith('.mvn/')) {
+      reactorWide = true;
+      continue;
+    }
+    // A settings/repository file the config itself declares is a build input
+    // no matter where it lives or which project owns it — the
+    // documentation/metadata exemptions below must not swallow it (a
+    // `-s .github/settings.xml` change redirects resolution), so it
+    // escalates to reactor-wide ahead of every ownership reading.
+    if (configDeclaredInputs.has(path)) {
       reactorWide = true;
       continue;
     }
@@ -717,8 +733,12 @@ function projectDirOf(report: string): string {
  * the scanned output.
  */
 function markerSafe(text: string): string {
+  // U+2028/U+2029 are line terminators for the `m`-flag regexes that mine
+  // these markers, so a PR-controlled name carrying one (saxes decodes
+  // `&#8232;` to a real U+2028) could forge or split a marker line — strip
+  // them with the ASCII controls.
   // eslint-disable-next-line no-control-regex -- control chars are what gets stripped
-  return text.replace(/[\u0000-\u001f\u007f]/g, '_');
+  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, '_');
 }
 
 /** Evidence the run could not read: rejected by the parser, or unseen past a truncated sweep. */
@@ -1295,8 +1315,12 @@ function mavenConfigTokens(root: string): string[] | null {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     return null;
   }
+  // Maven reads the file with Files.lines, whose readLine semantics
+  // terminate a line on \n, \r\n, OR a lone \r — split on all three, or a
+  // CR-only config mashes several arguments into one token and bypasses the
+  // classification below (a scope-altering flag read as inert releases).
   return config
-    .split(/\r?\n/)
+    .split(/\r\n|\n|\r/)
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'));
 }
@@ -1319,6 +1343,8 @@ interface MavenConfigFacts {
   failNever: boolean;
   testFailureIgnore: boolean;
   skipTests: boolean;
+  /** `-Dmaven.main.skip` — compilation itself is skipped. */
+  mainSkip: boolean;
   logFile: boolean;
   ambiguous: boolean;
   dependencyInputs: string[];
@@ -1330,6 +1356,7 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
     failNever: false,
     testFailureIgnore: false,
     skipTests: false,
+    mainSkip: false,
     logFile: false,
     ambiguous: false,
     dependencyInputs: [],
@@ -1423,8 +1450,33 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
       }
       return;
     }
-    if (property.startsWith('maven.repo.local=')) {
-      addInput(property.slice('maven.repo.local='.length));
+    // Maven defaults a VALUELESS define to `true`, and
+    // `-Dmaven.repo.local`/`-Dmaven.repo.local.tail` with no `=` redirect
+    // the local repository to `<worktree>/true` — so the bare spellings are
+    // dependency inputs too; requiring the `=` let them slip past.
+    if (
+      property === 'maven.repo.local.tail' ||
+      property.startsWith('maven.repo.local.tail=')
+    ) {
+      const value =
+        property === 'maven.repo.local.tail'
+          ? 'true'
+          : property.slice('maven.repo.local.tail='.length);
+      for (const part of value.split(',')) {
+        if (!part) continue;
+        addInput(part);
+      }
+      return;
+    }
+    if (
+      property === 'maven.repo.local' ||
+      property.startsWith('maven.repo.local=')
+    ) {
+      addInput(
+        property === 'maven.repo.local'
+          ? 'true'
+          : property.slice('maven.repo.local='.length),
+      );
       return;
     }
     // A bare property (no `=`) defaults to true in Maven.
@@ -1432,7 +1484,7 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
       facts.testFailureIgnore = true;
       return;
     }
-    if (/^(skipTests|maven\.test\.skip)(=true)?$/i.test(property)) {
+    if (/^(skipTests|maven\.test\.skip(?:\.exec)?)(=true)?$/i.test(property)) {
       facts.skipTests = true;
       return;
     }
@@ -1448,6 +1500,26 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
       /^surefire\.failIfNoSpecifiedTests(=false)?$/i.test(property)
     ) {
       facts.skipTests = true;
+      return;
+    }
+    // The zero-test selection filters: `-Dgroups=…`/`-DexcludedGroups=…`
+    // select tests by JUnit category and `-Dsurefire.includesFile=…`/
+    // `-Dsurefire.excludesFile=…` by file list; a value matching nothing
+    // runs ZERO tests and exits 0 with no reports and no skip marker. Same
+    // strict classification as the other test filters.
+    if (
+      /^(groups|excludedGroups)=/.test(property) ||
+      /^surefire\.(includes|excludes)File=/.test(property)
+    ) {
+      facts.skipTests = true;
+      return;
+    }
+    // `-Dmaven.main.skip=true` (maven-compiler-plugin's documented skip
+    // property) skips COMPILATION ITSELF — in build-only mode that is the
+    // very work the run exists to verify, so record it as a compile-skip
+    // fact the build-only verdict distrusts.
+    if (/^maven\.main\.skip(=true)?$/i.test(property)) {
+      facts.mainSkip = true;
       return;
     }
   };
@@ -1505,6 +1577,13 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
     }
     if (otherPairedFlags.has(token)) {
       i += 1;
+      continue;
+    }
+    // The attached thread-count spellings (`-T1C`, `--threads=1C`) carry
+    // their value in-token — consume them inert like the paired form, or
+    // they fall through to the ambiguity catch-all and distrust a bare
+    // exit 0 over the common attached spelling.
+    if (/^-T.+/.test(token) || /^--threads=.+/.test(token)) {
       continue;
     }
     // Attached define spellings: `-D…`, `--define=…`, `-define=…`, and the
@@ -1749,6 +1828,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     lifecycle,
     modules: narrowing === '' ? null : ownership.modules,
     alsoMake: narrowing !== '',
+    globalSkip: configFacts.skipTests,
   };
   // Disk preflight, mirroring the npm adapter: Maven resolves plugins and
   // dependencies inside the lifecycle command, and a run that dies on ENOSPC
@@ -1967,6 +2047,12 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !args.buildOnly &&
     (configFacts.skipTests ||
       result.output.split('\n').some((line) => isTestsSkippedLine(line)));
+  // A build-only run has no test phase, but `-Dmaven.main.skip` skips the
+  // COMPILATION ITSELF — the very work the run exists to verify — while
+  // still exiting 0. Distrust a bare exit 0 over it exactly like a
+  // suppressed test phase, or the run certifies green having compiled
+  // nothing.
+  const compileSuppressed = args.buildOnly && configFacts.mainSkip;
   const stdoutTestFailures = hasStdoutTestFailure(result.output);
   // A NON-EMPTY wrapper can still exit 0 without launching Maven (a stub
   // `#!/bin/sh` edit keeps the exec bit): zero fresh reports AND zero
@@ -1997,6 +2083,7 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !result.timedOut &&
     !freshFailures &&
     (testsSuppressed ||
+      compileSuppressed ||
       // No reports: the stdout channel is the only evidence left, so the
       // scrapers judge — surefire's `Tests run:` summaries survive a
       // relocated `<reportsDirectory>` the sweep cannot see, and framed
@@ -2095,8 +2182,11 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     // These flags are how test-plan and test-delta see the adapter's exit-0
     // ok:false outcomes: a run carrying ANY of them must not settle a Test
     // Plan claim, and test-delta must not report the all-clear over it.
-    // They are set independently — an acquisition failure under a fail-never
-    // setting can coincide with capped evidence.
+    // They are set independently — a swallowed failure under a fail-never
+    // setting can coincide with capped evidence (the no-reports swallowed
+    // arm plus a rescue-overflow trim are reachable together).
+    // `infrastructure`, by contrast, cannot coincide with `evidenceCapped`:
+    // acquisitionFailure gates on `!evidenceCapped`.
     ...(acquisitionFailure ? { infrastructure: true } : {}),
     ...(swallowedFailure ? { swallowedFailure: true } : {}),
     ...(evidenceCapped ? { evidenceCapped: true } : {}),
@@ -2198,10 +2288,16 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       `. This is ${NOTE_INFRASTRUCTURE_EVIDENCE}, not a source finding.`;
   } else if (!ok && result.exitCode === 0 && freshFailures) {
     const totals = summaryTotals(summaries);
+    // A fail-never setting produces the identical shape (exit 0 over failing
+    // reports), so name the actual cause instead of hardcoding one — the
+    // same distinction the generic exit-0 arm's cascade makes.
+    const swallowCause = configFacts.failNever
+      ? 'a fail-never setting (`-fn`/`--fail-never`)'
+      : 'a testFailureIgnore-style setting';
     report.note =
       `\`${result.command}\` exited 0 but fresh Surefire/Failsafe reports record ` +
-      `${totals.failures} failure(s) and ${totals.errors} error(s) — a testFailureIgnore-style ` +
-      'setting is swallowing them. Treat these as test failures, not a pass.';
+      `${totals.failures} failure(s) and ${totals.errors} error(s) — ${swallowCause} ` +
+      'is swallowing them. Treat these as test failures, not a pass.';
   } else if (!ok && result.exitCode === 0 && evidenceCapped) {
     const gapReasons: string[] = [];
     if (fresh.rejected > 0) {
@@ -2226,15 +2322,28 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
       (swallowedFailure
         ? ' The output also records failures Maven did not fail on.'
         : '');
+  } else if (!ok && result.exitCode === 0 && compileSuppressed) {
+    report.note =
+      `\`${result.command}\` exited 0 but compilation was suppressed: a ` +
+      '`-Dmaven.main.skip` setting in `.mvn/maven.config` skips the compile ' +
+      'mojos a build-only run exists to verify, so nothing was compiled. ' +
+      'Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0 && testsSuppressed) {
     const suppressionSource = configFacts.skipTests
       ? 'a skip setting (`-DskipTests`/`-Dmaven.test.skip`) in `.mvn/maven.config`'
       : 'Maven reporting `Tests are skipped.` — a skip setting (`-DskipTests`/' +
         '`-Dmaven.test.skip` in `.mvn/maven.config` or a POM `<skipTests>`)';
-    report.note =
-      `\`${result.command}\` exited 0 with the test phase suppressed: ${suppressionSource} ` +
-      'skipped every test, so nothing was tested. ' +
-      'Treat this as an unverified run, not a pass.';
+    // Word the scope honestly: a module-local skip coexists with fresh
+    // passing reports from other in-scope modules, so "skipped every test"
+    // is false whenever any report shows a test DID run.
+    report.note = hasReports
+      ? `\`${result.command}\` exited 0 with part of the scope suppressed: ${suppressionSource} ` +
+        'skipped tests for part of the scope, so that part was not tested ' +
+        '(other modules ran, per the appended reports). ' +
+        'Treat this as an unverified run, not a pass.'
+      : `\`${result.command}\` exited 0 with the test phase suppressed: ${suppressionSource} ` +
+        'skipped every test, so nothing was tested. ' +
+        'Treat this as an unverified run, not a pass.';
   } else if (!ok && result.exitCode === 0 && neverRan) {
     const cause = executedWrapperChanged
       ? 'the wrapper this run executed is changed by the diff, so it controls the output ' +

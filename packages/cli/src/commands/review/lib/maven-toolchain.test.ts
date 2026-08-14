@@ -1071,10 +1071,12 @@ describe('maven toolchain adapter', () => {
       '[maven-test-report] 3 more failing project rollup(s) omitted: ' +
         'tests=2, failures=0, errors=0, skipped=0',
     );
-    // 100 kept failing rollups pass one test each; the omitted batch
-    // passes 2. The second reading is the changed module's (`mod0`)
-    // subtotal, emitted beside the reactor-wide sum.
-    expect(observedTestCounts(report)).toEqual([102, 1]);
+    // The omission marker still carries the clamped passed totals (the
+    // agent reads them), but a FAILED run no longer contributes counts to
+    // claim adjudication (R2-11): its partial pass totals once ruled a
+    // count claim `reproduces` while the command-claim twin ruled
+    // `contradicted`. observedTestCounts now excludes non-zero-exit runs.
+    expect(observedTestCounts(report)).toEqual([]);
   });
 
   it('caps failing case lines', () => {
@@ -4353,6 +4355,134 @@ describe('maven toolchain adapter', () => {
 
     expect(report.ok).toBe(false);
     expect(report.test[0]?.testsSuppressed).toBe(true);
+  });
+
+  it('classifies the deprecated maven.test.skip.exec skip property like skipTests', () => {
+    // R2-4: `-Dmaven.test.skip.exec=true` skips test execution and lets the
+    // run exit 0 — the regex must admit the `.exec` suffix or the property
+    // reads inert and a skipped run certifies green.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-Dmaven.test.skip.exec=true\n',
+    );
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.testsSuppressed).toBe(true);
+  });
+
+  it.each([
+    '-Dgroups=nonexistent\n',
+    '-DexcludedGroups=everything\n',
+    '-Dsurefire.includesFile=matches-nothing.txt\n',
+    '-Dsurefire.excludesFile=excludes-all.txt\n',
+  ])('classifies the zero-test selection filter %j like skipTests', (cfg) => {
+    // R2-5: these filters select tests by category or file list; a value
+    // matching nothing runs ZERO tests and exits 0 with no reports and no
+    // skip marker. Same strict classification as the other test filters.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), cfg);
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.testsSuppressed).toBe(true);
+  });
+
+  it('records a bare -Dmaven.repo.local define as a dependency input', () => {
+    // R2-16: Maven defaults a valueless define to `true` and
+    // `-Dmaven.repo.local` redirects the local repository, so the bare
+    // spelling is a dependency input too (suppressing the infrastructure
+    // carve-out over changes under it), exactly like the `=value` twin.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-Dmaven.repo.local\n');
+    mkdirSync(join(root, 'true'));
+
+    const report = runAdapter(['true/corrupt.jar'], {
+      exec: (command) =>
+        result(command, {
+          exitCode: 1,
+          output:
+            '[ERROR] Could not resolve dependencies for project example:core',
+        }),
+    });
+
+    expect(report.note).toContain('Correlate compiler or test errors');
+    expect(report.note).not.toContain('infrastructure evidence');
+  });
+
+  it('tokenizes a CR-only maven.config like the LF twin (no scope-altering bypass)', () => {
+    // R2-1: Maven's Files.lines terminates a line on a lone \r too; a
+    // CR-only config must not mash several arguments into one token and
+    // bypass the scope-altering fail-closed classification.
+    writeReactor();
+    const exec = (command: string) => {
+      const dir = join(root, 'core', 'target', 'surefire-reports');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, 'TEST-Core.xml'),
+        '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+      );
+      return result(command, {
+        exitCode: 0,
+        output: '[INFO] BUILD SUCCESS\n[ERROR] COMPILATION ERROR :',
+      });
+    };
+
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-pl\rmoduleA\r');
+    const cr = runAdapter(['core/src/Main.java'], { exec });
+    expect(cr.ok).toBe(false);
+    expect(cr.test[0]?.swallowedFailure).toBe(true);
+  });
+
+  it('distrusts a build-only run whose config skips compilation itself', () => {
+    // R2-7: `-Dmaven.main.skip` skips the compile mojos a build-only run
+    // exists to verify, while still exiting 0 — distrust the bare exit 0
+    // instead of certifying green over a run that compiled nothing.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-Dmaven.main.skip=true\n',
+    );
+
+    const report = runAdapter(['core/src/Main.java'], {
+      buildOnly: true,
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.note).toContain('compilation was suppressed');
+  });
+
+  it('escalates a config-declared dependency input under .github/ to reactor-wide', () => {
+    // R2-10: a settings file the config itself declares (`-s
+    // .github/settings.xml`) is a build input no matter where it lives —
+    // the `.github/` metadata exemption must not swallow it and certify
+    // "no Maven target" with zero commands.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-s\n.github/settings.xml\n',
+    );
+    mkdirSync(join(root, '.github'));
+    writeFileSync(join(root, '.github', 'settings.xml'), '<settings/>');
+
+    expect(detectMavenOwnership(root, ['.github/settings.xml'])).toEqual({
+      reactorWide: true,
+      modules: [],
+    });
   });
 
   it('fires testsSuppressed on a module-local skip even when upstream reports exist', () => {

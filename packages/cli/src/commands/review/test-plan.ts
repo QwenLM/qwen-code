@@ -505,10 +505,13 @@ export function observedTestCounts(report: BuildTestReport | null): number[] {
     // An exit-0 run over fresh FAILING reports (swallowedReports) is a
     // failed run exactly like its command-claim twin: its derived pass
     // count once ruled a count claim `reproduces` while build-test marked
-    // the same run ok:false.
+    // the same run ok:false. A plain non-zero exit is the commonest failed
+    // shape — contribute counts only when the run finished green, mirroring
+    // ruleCommand's green-settlement family.
     if (
       cmd.timedOut ||
       cmd.exitCode === null ||
+      cmd.exitCode !== 0 ||
       cmd.infrastructure ||
       cmd.swallowedFailure ||
       cmd.evidenceCapped ||
@@ -1546,17 +1549,16 @@ function ruleCommand(
     // falsifies an `-am` claim too, so that direction stays settled.) The
     // exclusion yields when the run's own markers attribute a failure to a
     // module INSIDE the claimed set: that failure is in-scope evidence.
-    // For a CAPPED run the exclusion applies only when the failure location
-    // is POSITIVELY known to be outside the claim — it carries attribution
-    // markers and none names a claimed module. When the evidence was
-    // REJECTED (oversized/unreadable/malformed) the run emits no attribution
-    // markers at all, so `failureInsideClaim` is false by absence, not by
-    // knowledge — discarding it flipped `contradicted` to `unchecked` with a
-    // note that falsely said the command was not run. Keep such runs in
-    // `matches` and let the capped cascade rule the non-zero exit definitive.
-    const hasFailureAttribution = /^\[maven-test-failure\] /m.test(
-      c.output ?? '',
-    );
+    // A CAPPED run is NEVER carved: its markers are incomplete by
+    // construction (a rejected report emits none, and upstream markers do
+    // not prove the claimed module also passed), so whether the failure
+    // lives inside the claim is unknowable — keep it in `matches` and let
+    // the capped cascade rule the non-zero exit definitive.
+    // A suppressed run is carved (excluded) only when the suppression is a
+    // GLOBAL skip — then nothing was tested anywhere. A module-local skip
+    // seen only in stdout can live in an upstream module while the claimed
+    // module ran green, so carving it like other failure evidence avoids a
+    // manufactured "nothing was tested" contradiction.
     return !(
       settledBySameScope(c) &&
       c.maven?.alsoMake === true &&
@@ -1567,13 +1569,15 @@ function ruleCommand(
       !c.infrastructure &&
       (finished(c) || c.evidenceCapped === true) &&
       ranFailed(c) &&
-      // A wrapper that never started Maven and a global skip setting
-      // cannot live in an upstream module: both apply to the claim's own
-      // command at any scope, so the exclusion must not discard them.
+      // A wrapper that never started Maven cannot live in an upstream
+      // module: it applies to the claim's own command at any scope, so the
+      // exclusion must not discard it.
       !c.neverRan &&
-      c.testsSuppressed !== true &&
+      // Suppression: only a GLOBAL skip is kept out of the carve-out (nothing
+      // was tested anywhere); a stdout-only module-local skip is carved.
+      (!c.testsSuppressed || c.maven?.globalSkip !== true) &&
       !failureInsideClaim(c) &&
-      (c.evidenceCapped !== true || hasFailureAttribution)
+      c.evidenceCapped !== true
     );
   });
   // build-test records one scoped command per package and does not stop on
@@ -1628,10 +1632,12 @@ function ruleCommand(
     if (c.infrastructure === true) return null;
     // A never-ran run is not definitive either, capped or not: the cap can
     // fire on `rescueOverflow` from a stub wrapper's OWN output, which is
-    // not proof the toolchain started. The capped cascade below promises
-    // such a run `unchecked`/"Maven never started" — returning a ruling
-    // here would contradict that with wording describing a run that
-    // started.
+    // not proof the toolchain started. Returning a ruling here would
+    // contradict that with wording describing a run that started; instead
+    // fall through to the capped cascade, which rules such a run
+    // `unchecked` with the capped-evidence note (the "Maven never started"
+    // wording lives only in the finished-run exit-0 arm, unreachable for a
+    // capped run).
     if (c.neverRan === true) return null;
     if (c.exitCode !== null && c.exitCode !== 0) {
       return {

@@ -383,6 +383,44 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('Maven also applies');
   });
 
+  it('does not fall back to Maven when npm ran an install but no build/test commands', () => {
+    // The fallback's `install === null` clause's negative boundary: npm
+    // returns a NON-NULL install with zero build/test commands when the
+    // install itself failed. That is a genuine npm-side failure and must
+    // not be discarded under a Maven run that could certify green — a
+    // reformulation of the fallback to just `build.length === 0 &&
+    // test.length === 0` would launder it.
+    pkg('.', {
+      name: 'polyglot',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/a.ts']);
+    // Cold the node_modules marker so `npm ci` actually runs (a warm tree
+    // skips the install, leaving install null — the fallback's positive
+    // case, not this negative boundary).
+    rmSync(join(root, 'node_modules', '.package-lock.json'));
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: true,
+      exec: (command) => ({
+        command,
+        // The install fails; no build/test command is ever reached.
+        exitCode: command.trim().startsWith('npm') ? 1 : 0,
+        seconds: 1,
+        timedOut: false,
+        output: 'npm error install failed',
+      }),
+    });
+
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('Maven also applies');
+  });
+
   it('coerces fractional and zero deadlines at the spawn boundary', () => {
     // spawnSync validates `timeout` as an unsigned integer: a decimal
     // --timeout used to throw ERR_OUT_OF_RANGE out of the whole call (no
@@ -532,6 +570,7 @@ describe('runBuildTest', () => {
       lifecycle: 'test',
       modules: ['.'],
       alsoMake: true,
+      globalSkip: false,
     });
     expect(recorded?.infrastructure).toBeUndefined();
     expect(recorded?.evidenceCapped).toBeUndefined();

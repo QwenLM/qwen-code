@@ -82,6 +82,10 @@ export interface MavenCommandFacts {
   modules: string[] | null;
   /** Whether `-am` upstream expansion was passed. */
   alsoMake: boolean;
+  /** A GLOBAL skip setting applied (config-declared), so the whole run's test
+   * phase was suppressed — as opposed to a module-local skip seen only in
+   * stdout. Absent on non-Maven results and older fixtures. */
+  globalSkip?: boolean;
 }
 
 /** A command this run actually executed, and what it did. */

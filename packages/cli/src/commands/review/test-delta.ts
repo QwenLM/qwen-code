@@ -50,6 +50,11 @@ import {
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
+import {
+  isFailingSurefireSummaryLine,
+  isGoalFailureLine,
+  isSourceFailureLine,
+} from './lib/maven-toolchain.js';
 
 // eslint-disable-next-line no-control-regex -- ESC is the character under test
 const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
@@ -301,10 +306,25 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
       // Surefire already recorded: build-test marks the run ok:false and its
       // note says "treat those as test failures", yet every exit-0 flag
       // requires !timedOut, so the entry carries none and this filter would
-      // drop it — reporting the opposite of build-test's verdict. Route it
-      // into the disclosure: a Maven command never matches the rerun grammar
-      // and lands in skippedUnrecognised, named rather than silently lost.
-      (t.timedOut === true && /^\[maven-test-failure\] /m.test(t.output ?? '')),
+      // drop it — reporting the opposite of build-test's verdict. Gate on
+      // the STRUCTURED Maven fact (only the Maven adapter sets `maven`), so
+      // an npm test that merely echoes a marker string is not admitted, and
+      // broaden to the stdout-only failure shapes a timed-out run can carry
+      // without the report markers. Route it into the disclosure: a Maven
+      // command never matches the rerun grammar and lands in
+      // skippedUnrecognised, named rather than silently lost.
+      (t.timedOut === true &&
+        t.maven !== undefined &&
+        (/^\[maven-test-failure\] /m.test(t.output ?? '') ||
+          (t.output ??
+            ''
+              .split('\n')
+              .some(
+                (line) =>
+                  isFailingSurefireSummaryLine(line) ||
+                  isSourceFailureLine(line) ||
+                  isGoalFailureLine(line),
+              )))),
   );
   if (failed.length === 0) {
     return empty(

@@ -604,12 +604,16 @@ describe('observedTestCounts', () => {
   });
 
   it('counts the omitted totals carried by capped rollup markers', () => {
+    // The producer caps only the FAILING rollups (clean rollups are
+    // uncapped), so the fixture must use the producer's real omission
+    // marker — a fabricated "clean" marker would validate parsing of a
+    // shape the producer contract forbids.
     expect(
       observedTestCounts(
         report(
           [
             '[maven-test-report] mod0 (1 report(s)): tests=1, failures=0, errors=0, skipped=0\n' +
-              '[maven-test-report] 20 more clean project rollup(s) omitted: tests=20, failures=0, errors=0, skipped=0',
+              '[maven-test-report] 20 more failing project rollup(s) omitted: tests=20, failures=0, errors=0, skipped=0',
           ],
           './mvnw test',
         ),
@@ -1005,6 +1009,8 @@ describe('runTestPlan', () => {
         modules?: string[] | null;
         /** Defaults to true whenever the run is narrowed. */
         alsoMake?: boolean;
+        /** A config-declared GLOBAL skip (vs a stdout-only module-local one). */
+        globalSkip?: boolean;
       } & Partial<CommandResult> = {},
     ): CommandResult => {
       const {
@@ -1012,6 +1018,7 @@ describe('runTestPlan', () => {
         lifecycle = 'test',
         modules = ['core'],
         alsoMake = modules !== null,
+        globalSkip = false,
         ...overrides
       } = opts;
       // Selectors are rendered BY the adapter's own shellSelector: quoting
@@ -1031,8 +1038,8 @@ describe('runTestPlan', () => {
         timedOut: false,
         output: '',
         maven: widened
-          ? { lifecycle, modules: null, alsoMake: false }
-          : { lifecycle, modules, alsoMake },
+          ? { lifecycle, modules: null, alsoMake: false, globalSkip }
+          : { lifecycle, modules, alsoMake, globalSkip },
         ...overrides,
       };
     };
@@ -1473,7 +1480,10 @@ describe('runTestPlan', () => {
             testsSuppressed: true,
             // The adapter's own invariant: suppression is one of the
             // swallowed-failure shapes, so the two flags always travel
-            // together on a real result.
+            // together on a real result. `globalSkip` marks this a GLOBAL
+            // (config-declared) skip — the shape that cannot live in an
+            // upstream module, so the carve-out must keep it.
+            globalSkip: true,
             swallowedFailure: true,
           }),
         ],
@@ -2726,6 +2736,7 @@ describe('runTestPlan', () => {
         lifecycle: 'test',
         modules: ['core'],
         alsoMake: true,
+        globalSkip: false,
       });
 
       const r = run('## Test Plan\n\nRan `./mvnw -pl core -am test`', [], bt);
@@ -2898,11 +2909,14 @@ describe('runTestPlan', () => {
       expect(sClaim?.observed).toContain('did not fail on');
     });
 
-    it('does not contradict a -pl claim on a CAPPED -am run failing only upstream', () => {
-      // The finished twin of this carve-out is pinned above; the capped
-      // twin used to reach the capped arm, whose non-zero-exit rule then
-      // contradicted a claim that never tests the upstream modules. The
-      // exclusion must cover capped runs too.
+    it('never carves a CAPPED -am run — the non-zero exit contradicts even on upstream-only markers', () => {
+      // R2-3: a capped run's markers are incomplete BY CONSTRUCTION — a
+      // rejected report emits none, and upstream markers do not prove the
+      // claimed module also passed. So whether the failure lives inside the
+      // claim is unknowable; the carve-out must not discard the run, and
+      // the capped cascade rules the non-zero exit definitive. (The earlier
+      // pin expected `unchecked` here — R2-3 reverses it: discarding the
+      // run read a definitive failure as "not run".)
       const upstreamOnly = {
         build: [],
         test: [
@@ -2920,10 +2934,9 @@ describe('runTestPlan', () => {
         [],
         upstreamOnly,
       );
-      expect(verdictOf(r.claims, './mvnw -pl core test')).toBe('unchecked');
+      expect(verdictOf(r.claims, './mvnw -pl core test')).toBe('contradicted');
 
-      // The converse stays settled: the SAME capped run with failures
-      // inside the claimed module still contradicts.
+      // The in-claim marker case contradicts too (unchanged direction).
       const insideClaim = {
         build: [],
         test: [
