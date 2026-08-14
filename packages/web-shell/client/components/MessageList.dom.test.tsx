@@ -506,7 +506,7 @@ describe('MessageList — failed prompt retry', () => {
 });
 
 describe('MessageList — compact mode', () => {
-  it('hides thinking rows without removing surrounding transcript content', () => {
+  it('keeps thinking without adjacent tools visible in compact mode', () => {
     const container = mount(
       [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
       undefined,
@@ -517,7 +517,7 @@ describe('MessageList — compact mode', () => {
     );
 
     expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
 
     rerenderMessages(container, [
@@ -526,10 +526,14 @@ describe('MessageList — compact mode', () => {
       thinkingMsg('t2'),
       asstMsg('a1'),
     ]);
+    // With turn collapsing back on, the completed thinking folds behind the
+    // turn summary instead of hiding the surrounding transcript.
     expect(container.querySelector('[data-testid="msg-t2"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
   });
 
-  it('merges tool groups separated only by hidden thinking', () => {
+  it('merges tool groups separated by completed thinking', () => {
     const container = mount(
       [
         userMsg('u1'),
@@ -547,20 +551,24 @@ describe('MessageList — compact mode', () => {
       },
     );
 
-    expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-g1"]'),
+    ).not.toBeNull();
     expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
     expect(
       container
-        .querySelector('[data-testid="msg-g1"]')
+        .querySelector('[data-testid="msg-summary-g1"]')
         ?.getAttribute('data-timestamp'),
     ).toBe('1000');
     expect(
       container
-        .querySelector('[data-testid="msg-g1"]')
+        .querySelector('[data-testid="msg-summary-g1"]')
         ?.getAttribute('data-tool-ids'),
     ).toBe('call-g1,call-g2');
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="msg-g3"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-g3"]'),
+    ).not.toBeNull();
   });
 
   it('keeps visible thinking and tool groups in transcript order', () => {
@@ -621,7 +629,9 @@ describe('MessageList — compact mode', () => {
         },
       );
 
-      expect(container.querySelector('[data-testid="msg-g1"]')).not.toBeNull();
+      expect(
+        container.querySelector('[data-testid="msg-summary-g1"]'),
+      ).not.toBeNull();
       expect(
         container.querySelector('[data-testid="msg-special"]'),
       ).not.toBeNull();
@@ -645,11 +655,19 @@ describe('MessageList — compact mode', () => {
     expect(
       container.querySelector('[data-testid="msg-special"]'),
     ).not.toBeNull();
+    // The completed thinking folds into the adjacent tool group, which keeps
+    // the tool while the standalone group stays separate.
     expect(
       container
-        .querySelector('[data-testid="msg-g2"]')
+        .querySelector('[data-testid="msg-special"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-special');
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-t1"]')
         ?.getAttribute('data-tool-ids'),
     ).toBe('call-g2');
+    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
   });
 });
 
@@ -1631,6 +1649,51 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
     expect(queryToggle(c, 'u1')).toBeNull();
     expect(c.textContent).toContain('Processing 3s');
+  });
+
+  it('folds streaming thinking into the tool summary while it runs', () => {
+    const c = mount(
+      [
+        userMsg('u1'),
+        { ...thinkingMsg('t1'), isStreaming: true },
+        toolMsg('g1'),
+      ],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // Streaming thinking merges into the group like a running tool.
+    expect(
+      c
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1');
+    expect(c.querySelector('[data-testid="msg-g1"]')).toBeNull();
+  });
+
+  it('folds completed thinking into the merged tool summary in compact mode', () => {
+    const c = mount(
+      [userMsg('u1'), thinkingMsg('t1'), toolMsg('g1'), asstMsg('a1')],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // The thinking and the adjacent tool collapse into one group carrying
+    // the tool; the standalone thinking row is gone.
+    expect(
+      c
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-g1');
+    expect(c.querySelector('[data-testid="msg-g1"]')).toBeNull();
+  });
+
+  it('does not fold completed thinking without adjacent tools', () => {
+    const c = mount(
+      [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
+      undefined,
+      { isResponding: true, compactMode: true },
+    );
+    // No adjacent tool group: the thinking stays a standalone row.
+    expect(c.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
   });
 
   it('toggle round-trip reveals then re-hides the step', () => {
