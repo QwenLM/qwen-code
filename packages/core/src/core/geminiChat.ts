@@ -4746,7 +4746,7 @@ export class GeminiChat {
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
               if (!yieldedAnyChunk) {
-                deferredFirstChunk = chunk;
+                deferredFirstChunk ??= chunk;
               }
               deferredFinishReason ??= candidate.finishReason;
               delete candidate.finishReason;
@@ -4761,7 +4761,7 @@ export class GeminiChat {
           // and neither consumer rolls back the committed output.
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
-              deferredFirstChunk = chunk;
+              deferredFirstChunk ??= chunk;
               break;
             }
           }
