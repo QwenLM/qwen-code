@@ -238,12 +238,12 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   // args.host while routing at effectiveHost let a GH_HOST-driven Enterprise
   // write pass a github.com authorisation; caught by this skill's own review.
   //
-  // Validate the RAW flag first: a non-empty all-whitespace `--host` resolves
-  // to '' (falsy), which would skip the routing setGhHost below and silently
-  // retarget the Contents-API write at the env/default host. setGhHost's
-  // documented contract rejects it; surface that here, in the refusal
-  // language, naming the flag.
-  if (args.host !== undefined && args.host.trim() !== '') {
+  // Validate the RAW flag first: a non-empty all-whitespace `--host` must
+  // throw setGhHost's documented TypeError here (it resolves to '' / falsy,
+  // which would skip the routing setGhHost below and silently retarget the
+  // Contents-API write at the env/default host). `setGhHost('')` legitimately
+  // resets; `setGhHost(' ')` throws — so guard on presence, not on trim-non-empty.
+  if (args.host !== undefined) {
     try {
       setGhHost(args.host);
     } catch (err) {

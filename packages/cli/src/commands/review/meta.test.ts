@@ -81,8 +81,11 @@ describe('runMeta', () => {
     // an API fork check — an origin-only fork clone resolves to the fork.
     // resolveRepo fetches `parent` and prefers it, so a bare PR number never
     // targets a fork's same-numbered PR.
+    // gh's `parent` field carries id/name/owner only — NO url (real gh
+    // shape). resolveRepo reads the host from the repo's own url, never
+    // parent.url.
     ghMock.mockReturnValue(
-      '{"owner":{"login":"contributor"},"name":"qwen-code","url":"https://github.com/contributor/qwen-code","parent":{"owner":{"login":"QwenLM"},"name":"qwen-code","url":"https://github.com/QwenLM/qwen-code"}}',
+      '{"owner":{"login":"contributor"},"name":"qwen-code","url":"https://github.com/contributor/qwen-code","parent":{"owner":{"login":"QwenLM"},"name":"qwen-code"}}',
     );
     const result = runMeta({});
     expect(result.ownerRepo).toBe('QwenLM/qwen-code');

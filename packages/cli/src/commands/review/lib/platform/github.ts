@@ -9,7 +9,13 @@
 // this module owns the GitHub API *shapes* so the subcommands and the skill
 // prose never name an endpoint.
 
-import { ensureAuthenticated, gh, ghRaw, isOwnerRepo } from '../gh.js';
+import {
+  ensureAuthenticated,
+  gh,
+  ghRaw,
+  ghRawText,
+  isOwnerRepo,
+} from '../gh.js';
 import type {
   ClosingIssueRef,
   CommentKind,
@@ -37,11 +43,11 @@ interface GhRepoView {
   owner: { login: string };
   name: string;
   url: string;
-  /** Present only when the resolved repo is a fork. */
+  /** Present only when the resolved repo is a fork; carries id/name/owner —
+   *  NO `url` (gh does not emit one there), so never read `parent.url`. */
   parent?: {
     owner: { login: string };
     name: string;
-    url: string;
   };
 }
 
@@ -104,7 +110,9 @@ export const githubReader: ReviewPlatformReader = {
     );
     const target = view.parent ?? view;
     return {
-      host: hostOfRepoUrl(target.url),
+      // A fork and its parent share one host, and `parent` carries no `url` —
+      // so the host comes from the resolved repo's own url, always.
+      host: hostOfRepoUrl(view.url),
       owner: target.owner.login,
       repo: target.name,
     };
@@ -216,8 +224,9 @@ export const githubReader: ReviewPlatformReader = {
     // Not ghApi: `--jq` emits the body as RAW text (markdown), which
     // JSON.parse would choke on — measured on the first E2E pass. `.body
     // // ""` because a null body would otherwise print the literal "null".
-    // ghRaw because the body's edges are content — a leading indent is what
-    // puts a log paste inside its code block.
-    return ghRaw('api', path, '--jq', '.body // ""');
+    // ghRawText (UTF-8, edges preserved) — NOT the byte path: comment bodies
+    // are always valid UTF-8 from the API, and a leading indent is what puts
+    // a pasted log inside its Markdown code block.
+    return ghRawText('api', path, '--jq', '.body // ""');
   },
 };

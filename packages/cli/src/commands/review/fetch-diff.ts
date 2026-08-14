@@ -57,7 +57,9 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
   // An empty diff writes a 0-byte file — never '\n': plan-diff parses a
   // one-blank-line file as 1 diff line with zero files and dies with a
   // coverage-hole error instead of taking the designed empty-plan branch.
-  writeFileSync(diffPath, diff === '' ? '' : diff + '\n');
+  // 'latin1' re-encodes each char code back to its byte — ghRaw's byte
+  // fidelity holds end to end (a Latin-1/Shift-JIS diff survives intact).
+  writeFileSync(diffPath, diff === '' ? '' : diff + '\n', 'latin1');
 
   return {
     diffPath,

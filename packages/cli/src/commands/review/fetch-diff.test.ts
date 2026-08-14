@@ -76,9 +76,11 @@ describe('runFetchDiff', () => {
       recursive: true,
     });
     // resolve()d on both sides: a literal '/tmp/...' fails on Windows.
+    // latin1 write preserves ghRaw's byte fidelity (Latin-1/Shift-JIS diffs).
     expect(writeFileSyncMock).toHaveBeenCalledWith(
       resolve(OUT),
       'diff --git a/x b/x\n+one\n+two\n',
+      'latin1',
     );
     expect(result).toEqual({
       diffPath: resolve(OUT),
@@ -93,6 +95,7 @@ describe('runFetchDiff', () => {
     expect(writeFileSyncMock).toHaveBeenCalledWith(
       resolve(OUT),
       'diff --git a/x b/x\n@@ -1 +1 @@\n ctx\n   \n',
+      'latin1',
     );
   });
 
@@ -107,7 +110,7 @@ describe('runFetchDiff', () => {
     expect(result.chars).toBe(0);
     // Never '\n': plan-diff parses a one-blank-line file as 1 line with zero
     // files and dies with a coverage error instead of the empty-plan branch.
-    expect(writeFileSyncMock).toHaveBeenCalledWith(resolve(OUT), '');
+    expect(writeFileSyncMock).toHaveBeenCalledWith(resolve(OUT), '', 'latin1');
   });
 });
 

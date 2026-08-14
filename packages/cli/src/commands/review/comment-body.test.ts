@@ -29,7 +29,8 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
     ...actual,
-    ghRaw: ghRawMock,
+    // getCommentBody uses ghRawText (UTF-8, edges preserved), the text seam.
+    ghRawText: ghRawMock,
     ensureAuthenticated: ensureAuthenticatedMock,
     setGhHost: setGhHostMock,
   };

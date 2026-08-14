@@ -41,25 +41,35 @@ function isTransientGhError(err: unknown): boolean {
  */
 function execGhWithRetry(
   args: string[],
-  options: { input?: string; raw?: boolean },
+  options: { input?: string; mode?: 'default' | 'bytes' | 'text' },
 ): string {
+  const mode = options.mode ?? 'default';
   const execOptions: Parameters<typeof execFileSync>[2] = {
-    encoding: 'utf8',
+    // 'buffer' for the bytes mode: decoding as utf8 would replace any
+    // invalid sequence with U+FFFD before we ever see it.
+    encoding: mode === 'bytes' ? 'buffer' : 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     env: ghEnv(),
     ...(options.input !== undefined ? { input: options.input } : {}),
   };
   for (let attempt = 0; ; attempt++) {
     try {
-      const out = execFileSync('gh', args, execOptions) as string;
-      // The raw path returns bytes untouched: in a diff of a CRLF file the
-      // `\r` before git's line-terminating `\n` is blob CONTENT, and the
-      // trim would drop a trailing whitespace-only context line — fetch-pr
-      // writes raw bytes for the same reason.
-      if (options.raw === true) {
-        return out;
+      const out = execFileSync('gh', args, execOptions);
+      if (mode === 'bytes') {
+        // Byte fidelity end to end: latin1 maps each byte 1:1 onto a char
+        // code, so a diff of a Latin-1/Shift-JIS file survives intact (and
+        // fetch-diff writes it back with the same encoding). In a diff of a
+        // CRLF file the `\r` before git's line-terminating `\n` is blob
+        // CONTENT, and a trailing whitespace-only context line is part of
+        // the last hunk — nothing may be trimmed or rewritten.
+        return (out as unknown as Buffer).toString('latin1');
       }
-      return out.replace(/\r\n/g, '\n').trim();
+      if (mode === 'text') {
+        // UTF-8 text, edges preserved (a leading indent is what puts a
+        // pasted log inside its Markdown code block), no CRLF rewrite.
+        return out as string;
+      }
+      return (out as string).replace(/\r\n/g, '\n').trim();
     } catch (err) {
       if (attempt < MAX_RETRIES && isTransientGhError(err)) {
         const delay = BASE_DELAY_MS * (attempt + 1);
@@ -82,12 +92,17 @@ let ghHost: string | undefined;
 // host "--help" turned the welded issue-context call into a help print).
 export const HOSTNAME_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*(?::\d+)?$/;
 
-// No leading dash either — `--repo -evil/repo` misparses as flags. GitHub
-// owner/repo names cannot start with a hyphen.
-const REPO_SEGMENT = /^(?!-)[A-Za-z0-9._-]+$/;
+// A leading dash makes the value flag-shaped on the command line
+// (`--repo -evil/repo` misparses as flags). Only the OWNER half bans it:
+// GitHub owners cannot start with a hyphen, but REPO names can (real repo
+// `yezhaodan/-Git` has existed since 2018) — banning it on the repo half
+// would make real repositories unreviewable for zero protection.
+const OWNER_SEGMENT = /^(?!-)[A-Za-z0-9._-]+$/;
+const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 /**
- * `owner/repo` — and neither half may be a dot segment.
+ * `owner/repo` — the owner half may not start with a dash and neither half
+ * may be a dot segment.
  *
  * The character class alone admits `../repo`, `owner/..` and `./repo`: `.`
  * and `..` are made of legal characters and mean something else entirely
@@ -97,10 +112,15 @@ const REPO_SEGMENT = /^(?!-)[A-Za-z0-9._-]+$/;
  * other URL-building site on the stale rule.
  */
 export function isOwnerRepo(repo: string): boolean {
-  const parts = repo.split('/');
+  const [owner, repoName] = repo.split('/');
   return (
-    parts.length === 2 &&
-    parts.every((p) => REPO_SEGMENT.test(p) && p !== '.' && p !== '..')
+    repo.split('/').length === 2 &&
+    OWNER_SEGMENT.test(owner) &&
+    REPO_SEGMENT.test(repoName) &&
+    owner !== '.' &&
+    owner !== '..' &&
+    repoName !== '.' &&
+    repoName !== '..'
   );
 }
 
@@ -198,13 +218,23 @@ export function gh(...args: string[]): string {
 }
 
 /**
- * Same transport with the bytes UNTOUCHED — no trim, no CRLF rewrite. For
- * payloads whose edges and line endings are content: a diff of a CRLF file
- * (the `\r` is blob content; fetch-pr writes raw bytes for the same reason),
- * a comment body whose first line is an indented code block.
+ * Same transport with the bytes UNTOUCHED — runs with encoding 'buffer' and
+ * decodes latin1 (1:1 byte→char), so no invalid-UTF-8 byte is lost to U+FFFD
+ * and nothing is trimmed or CRLF-rewritten. For payloads whose bytes are
+ * content: a PR diff (source files may be Latin-1/Shift-JIS, and in a CRLF
+ * file the `\r` is blob content). The caller writes it back with latin1.
  */
 export function ghRaw(...args: string[]): string {
-  return execGhWithRetry(args, { raw: true });
+  return execGhWithRetry(args, { mode: 'bytes' });
+}
+
+/**
+ * UTF-8 text with edges preserved — no trim, no CRLF rewrite. For comment
+ * bodies (always valid UTF-8 from the API) whose leading indent is what puts
+ * a pasted log inside its Markdown code block.
+ */
+export function ghRawText(...args: string[]): string {
+  return execGhWithRetry(args, { mode: 'text' });
 }
 
 /**
