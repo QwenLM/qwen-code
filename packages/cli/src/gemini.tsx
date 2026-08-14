@@ -263,15 +263,11 @@ function getSignalExitCode(signal: NodeJS.Signals): number {
   return 143;
 }
 
-export interface SessionUsageSnapshotDeps {
+interface SessionUsageSnapshotDeps {
   getMetrics: () => SessionMetrics;
   getSessionStartTime: () => Date;
   persist: typeof persistSessionUsage;
   now: () => Date;
-}
-
-function hasUsageActivity(metrics: SessionMetrics): boolean {
-  return Object.values(metrics.models).some((m) => m.api.totalRequests > 0);
 }
 
 export function flushSessionUsageSnapshot(
@@ -284,7 +280,9 @@ export function flushSessionUsageSnapshot(
   },
 ): boolean {
   const metrics = deps.getMetrics();
-  if (!hasUsageActivity(metrics)) return false;
+  if (!Object.values(metrics.models).some((m) => m.api.totalRequests > 0)) {
+    return false;
+  }
 
   deps.persist({
     sessionId: config.getSessionId(),
@@ -326,7 +324,7 @@ export function startSessionUsageSnapshots(
     flush,
     deps?.intervalMs ?? LIVE_USAGE_FLUSH_INTERVAL_MS,
   );
-  timer.unref?.();
+  timer.unref();
 
   registerCleanupFn(() => {
     clearIntervalFn(timer);
