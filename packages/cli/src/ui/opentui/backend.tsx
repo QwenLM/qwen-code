@@ -9,6 +9,8 @@
  *  4. flicker-free rendering (cell diff + DEC 2026, handled by the renderer)
  */
 import { MouseButton } from '@opentui/core';
+import type { MouseEvent , ScrollBoxRenderable } from '@opentui/core';
+import { findUrlAtRow, readBufferRow } from './link-click.js';
 import { C, SYNTAX, applyThemeMode, applyOpenTuiTheme } from './theme.js';
 import { detectInitialThemeMode } from './theme-auto.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
@@ -44,6 +46,7 @@ import {
   Logger,
   MessageSenderType,
   ToolConfirmationOutcome,
+  openBrowserSecurely,
   type Config,
   type ToolCallConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
@@ -60,7 +63,6 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import { fmtTokens } from '../components/stats-helpers.js';
-import type { ScrollBoxRenderable } from '@opentui/core';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth } from '../utils/textUtils.js';
 import { readFileSync } from 'node:fs';
@@ -849,6 +851,29 @@ function App({
     // clear `streaming`; turn-level clears live in startLiveTurn's finally,
     // the scripted/resume drain, and the Esc/interrupt handlers.
   }, []);
+
+  // Click-to-open links (audit gap #54): the framework renders markdown
+  // links as `label (url)` text and never emits OSC 8, while `useMouse`
+  // captures the pointer — so terminal-native cmd+click reaches US and we
+  // open the URL under the cursor. SGR mouse reports no meta bit, hence a
+  // plain left click on a URL cell triggers this; clicks elsewhere (and
+  // clicks during an active drag-select) fall through untouched.
+  const handleLinkClick = useCallback(
+    (e: MouseEvent) => {
+      if (e.button !== MouseButton.LEFT) return;
+      if (renderer.getSelection()?.getSelectedText()) return;
+      const row = readBufferRow(renderer.currentRenderBuffer, e.y);
+      const hit = findUrlAtRow(row, e.x);
+      if (!hit) return;
+      void openBrowserSecurely(hit.url).catch(() => {
+        applyEvent({
+          type: 'text',
+          delta: `Could not open link: ${hit.url}`,
+        });
+      });
+    },
+    [renderer, applyEvent],
+  );
 
   // "Enter to steer": plain queued prompts leave the queue at the next tool
   // boundary and ride with the tool results as user content; slash entries
@@ -2114,6 +2139,7 @@ function App({
         stickyScroll={true}
         stickyStart="bottom"
         verticalScrollbarOptions={{ visible: false }}
+        onMouseUp={handleLinkClick}
       >
         {banner}
         <box paddingLeft={1} paddingRight={1}>
