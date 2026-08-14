@@ -1,0 +1,196 @@
+name: 'Electron Desktop Preview Build'
+
+run-name: 'Electron desktop preview build ${{ inputs.version }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Preview version, for example 0.0.1 or v0.0.1.'
+        required: true
+        default: '0.0.1'
+        type: 'string'
+      qwen_code_ref:
+        description: 'Qwen Code branch, tag, or commit to bundle.'
+        required: true
+        default: 'main'
+        type: 'string'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'desktop-electron-preview-build-${{ inputs.version }}'
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22.20.0'
+
+jobs:
+  prepare:
+    name: 'Prepare build metadata'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    outputs:
+      qwen_code_sha: '${{ steps.source.outputs.sha }}'
+      version: '${{ steps.version.outputs.version }}'
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: 'Resolve version'
+        id: 'version'
+        shell: 'bash'
+        env:
+          INPUT_VERSION: '${{ inputs.version }}'
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Preview version must be valid SemVer: $INPUT_VERSION"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: 'Resolve Qwen Code source'
+        id: 'source'
+        shell: 'bash'
+        env:
+          INPUT_REF: '${{ inputs.qwen_code_ref }}'
+        run: |
+          set -euo pipefail
+          git fetch origin "$INPUT_REF"
+          echo "sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 'Build ${{ matrix.name }}'
+    needs: 'prepare'
+    runs-on: '${{ matrix.os }}'
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'macOS arm64'
+            os: 'macos-latest'
+            electron_platform: 'mac'
+            electron_arch: 'arm64'
+            desktop_target: 'darwin-arm64'
+          - name: 'macOS x64'
+            os: 'macos-15'
+            electron_platform: 'mac'
+            electron_arch: 'x64'
+            desktop_target: 'darwin-x64'
+          - name: 'Windows x64'
+            os: 'windows-latest'
+            electron_platform: 'win'
+            electron_arch: 'x64'
+            desktop_target: 'win32-x64'
+          - name: 'Linux x64'
+            os: 'ubuntu-22.04'
+            electron_platform: 'linux'
+            electron_arch: 'x64'
+            desktop_target: 'linux-x64'
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      QWEN_CODE_COMMIT: '${{ needs.prepare.outputs.qwen_code_sha }}'
+      QWEN_DESKTOP_TARGET: '${{ matrix.desktop_target }}'
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Configure source directory'
+        shell: 'bash'
+        run: 'echo "QWEN_CODE_ROOT=$RUNNER_TEMP/qwen-code-source" >> "$GITHUB_ENV"'
+
+      - name: 'Check out Qwen Code source'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          git init "$QWEN_CODE_ROOT"
+          git -C "$QWEN_CODE_ROOT" remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git -C "$QWEN_CODE_ROOT" fetch --depth=1 origin "$QWEN_CODE_COMMIT"
+          git -C "$QWEN_CODE_ROOT" checkout --detach "$QWEN_CODE_COMMIT"
+
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '${{ env.NODE_VERSION }}'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            packages/desktop-electron/package-lock.json
+
+      - name: 'Install Linux packaging dependencies'
+        if: "runner.os == 'Linux'"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 rpm xvfb
+
+      - name: 'Install Qwen Code dependencies'
+        working-directory: '${{ runner.temp }}/qwen-code-source'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: 'npm ci --no-audit --progress=false'
+
+      - name: 'Install Electron desktop dependencies'
+        working-directory: 'packages/desktop-electron'
+        run: 'npm ci --no-audit --progress=false'
+
+      - name: 'Set preview version'
+        working-directory: 'packages/desktop-electron'
+        run: 'node scripts/version.js "${{ needs.prepare.outputs.version }}"'
+
+      - name: 'Prepare bundled Qwen runtime'
+        working-directory: 'packages/desktop-electron'
+        run: 'npm run build:runtime'
+
+      - name: 'Verify runtime and Electron sources'
+        working-directory: 'packages/desktop-electron'
+        run: 'npm run smoke:runtime && npm run typecheck && npm test && npm run build:app && npm run test:release'
+
+      - name: 'Build unsigned preview installers'
+        working-directory: 'packages/desktop-electron'
+        shell: 'bash'
+        run: 'npx electron-builder --${{ matrix.electron_platform }} --${{ matrix.electron_arch }} --publish never'
+
+      - name: 'Smoke packaged macOS application'
+        if: "runner.os == 'macOS'"
+        working-directory: 'packages/desktop-electron'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          app_path="$(find release -maxdepth 2 -name '*.app' -print -quit)"
+          npm run smoke:packaged -- "$app_path"
+
+      - name: 'Smoke packaged Windows application'
+        if: "runner.os == 'Windows'"
+        working-directory: 'packages/desktop-electron'
+        shell: 'pwsh'
+        run: 'npm run smoke:packaged -- release/win-unpacked/qwen-code-desktop-electron-preview.exe'
+
+      - name: 'Smoke packaged Linux application'
+        if: "runner.os == 'Linux'"
+        working-directory: 'packages/desktop-electron'
+        shell: 'bash'
+        run: 'xvfb-run -a npm run smoke:packaged -- release/linux-unpacked/qwen-code-desktop-electron-preview'
+
+      - name: 'Collect preview artifacts'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/desktop-electron-preview-artifacts"
+          mkdir -p "$destination"
+          find packages/desktop-electron/release -maxdepth 1 -type f \
+            \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.blockmap' \) \
+            -exec cp {} "$destination" \;
+          if [ -z "$(find "$destination" -type f -print -quit)" ]; then
+            echo '::error::No Electron preview artifacts were produced.'
+            exit 1
+          fi
+
+      - uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'desktop-electron-preview-${{ matrix.desktop_target }}'
+          path: '${{ runner.temp }}/desktop-electron-preview-artifacts/*'
+          if-no-files-found: 'error'
+          retention-days: 14

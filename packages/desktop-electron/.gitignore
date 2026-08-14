@@ -1,0 +1,7 @@
+node_modules/
+dist/
+release/
+runtime/*
+!runtime/qwen-code/
+runtime/qwen-code/*
+!runtime/qwen-code/.gitkeep

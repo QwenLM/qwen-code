@@ -1,0 +1,97 @@
+{
+  "name": "@qwen-code/desktop-electron",
+  "version": "0.0.1",
+  "description": "Independent Qwen Code Electron desktop preview built with Web Shell",
+  "author": "Qwen Team",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/index.cjs",
+  "scripts": {
+    "dev": "npm run build:app && electron .",
+    "start": "electron .",
+    "build": "npm run build:runtime && npm run build:app && electron-builder",
+    "build:app": "npm run build:main && npm run build:renderer",
+    "build:main": "node scripts/build-main.js",
+    "build:renderer": "vite build --config vite.config.ts",
+    "build:runtime": "node scripts/prepare-runtime.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:runtime": "node scripts/smoke-runtime.js",
+    "smoke:packaged": "node scripts/smoke-packaged.js",
+    "test:release": "node scripts/test-release.js",
+    "version": "node scripts/version.js",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.0",
+    "katex": "^0.16.47",
+    "react": "^19.2.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.0",
+    "vitest": "^3.2.4"
+  },
+  "build": {
+    "appId": "com.alibaba.qwen-code.electron-preview",
+    "productName": "Qwen Code Desktop Electron Preview",
+    "executableName": "qwen-code-desktop-electron-preview",
+    "artifactName": "Qwen-Code-Desktop-Electron-Preview-${version}-${arch}.${ext}",
+    "asar": true,
+    "beforeBuild": "scripts/electron-builder-before-build.cjs",
+    "files": [
+      "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime/qwen-code",
+        "to": "runtime/qwen-code"
+      }
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "executableName": "Qwen Code Desktop Electron Preview",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Qwen Code uses the microphone for voice input and realtime conversations."
+      },
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "perMachine": false,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "category": "Development",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "build/icon.png"
+    },
+    "publish": null
+  }
+}
