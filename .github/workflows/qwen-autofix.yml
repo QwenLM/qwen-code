@@ -163,14 +163,6 @@ env:
   # tripping engages the brake.
   # TUNABLE WITHOUT A CODE CHANGE like the scan budgets above; a malformed
   # value falls back to its default at the read site.
-  # Staged-rollout switch for the verification gate's deny-by-default
-  # footprint check: a round touching AREAS (declared workspace, else
-  # top-level dir, else root file) outside the PR's own footprint is
-  # surfaced as a gate advisory by default; setting the repo variable to
-  # 'reject' turns expansions into a retryable rejection once advisory
-  # observation shows an acceptable false-positive rate. The class gate's
-  # enumerated protections reject regardless of this switch.
-  FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
   GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
   GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'
   # Non-convergence handoff: once the growth brake has been over budget for

@@ -10148,6 +10148,50 @@ exit 1
       return advisory;
     };
     const manyLines = Array.from({ length: 40 }, (_, i) => `t${i}`).join('\n');
+    // Lifecycle discriminator: the advisory file is reset ONCE at gate
+    // start and every writer appends — a footprint advisory written by an
+    // earlier section must survive the shrink section (the pre-fix shrink
+    // section rm'd the file and truncated on write).
+    {
+      const { dir } = validityFixture({
+        base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
+        pr: () => {},
+        round: ({ dir: d }) => rmSync(join(d, 'src', 'a.test.ts')),
+      });
+      const workdir = mkdtempSync(join(tmpdir(), 'autofix-adv-order-'));
+      writeFileSync(
+        join(workdir, 'gate-advisories.md'),
+        'EARLIER-SECTION-ADVISORY\n',
+      );
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'cd "$1"',
+            'BRANCH=feat',
+            'WORKDIR="$2"',
+            'GATE_LOG="$(mktemp)"',
+            'ROUND_RANGE="origin/feat...feat"',
+            freightHelper(),
+            block,
+            'echo DONE',
+          ].join('\n'),
+          'bash',
+          dir,
+          workdir,
+        ],
+        { encoding: 'utf8', env: isolatedGitEnv },
+      );
+      expect(res.error).toBeUndefined();
+      expect(`${res.stdout}\n${res.stderr}`).toContain('DONE');
+      const out = readFileSync(join(workdir, 'gate-advisories.md'), 'utf8');
+      expect(out).toContain('EARLIER-SECTION-ADVISORY');
+      expect(out).toContain('Gate advisory');
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(workdir, { recursive: true, force: true });
+    }
     // Deleting a test file is surfaced by name.
     const deleted = run({
       base: ({ write }) => write('src/a.test.ts', `${manyLines}\n`),
@@ -10235,6 +10279,14 @@ exit 1
       rmSync(tools, { recursive: true, force: true });
       return { out: `${res.stdout}\n${res.stderr}`, advisory };
     };
+    // Workflow wiring pins: the knob rides step-level env at both verify
+    // gates (outranking $GITHUB_ENV), sourced from the repo variable; no
+    // dead workflow-level copy shadows it.
+    expect(
+      workflow.split(
+        `FOOTPRINT_ENFORCE: "\${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"`,
+      ).length - 1,
+    ).toBe(2);
     const crossWorkspace = {
       base: ({ write }) => {
         write('packages/cli/src/a.ts', 'a\n');
@@ -10272,6 +10324,25 @@ exit 1
         },
       }).advisory,
     ).toBe('');
+    // Declared-workspace membership beats the packages/ two-segment
+    // fallback: with nested workspaces declared, sibling NESTED workspaces
+    // are distinct areas (fallback would fuse them into packages/channels
+    // and hide the expansion).
+    expect(
+      run({
+        base: ({ write }) => {
+          write(
+            'package.json',
+            '{"workspaces":["packages/*","packages/channels/*"]}\n',
+          );
+          write('packages/channels/github/src/a.ts', 'a\n');
+          write('packages/channels/gitlab/src/b.ts', 'b\n');
+        },
+        pr: ({ write }) => write('packages/channels/github/src/a.ts', 'a2\n'),
+        round: ({ write }) =>
+          write('packages/channels/gitlab/src/b.ts', 'b2\n'),
+      }).advisory,
+    ).toContain('packages/channels/gitlab');
     // Root files are each their own area.
     expect(
       run({

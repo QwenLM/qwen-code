@@ -624,22 +624,32 @@ not_merge_freight() {
 list_areas() {
   # $1: NUL-separated path file; $2: the REF whose recorded workspaces
   # globs define membership. Ref-anchored on purpose: the round's on-disk
-  # manifest must not redefine its own footprint boundary (same doctrine
-  # as was_workspace_dir), and a resolver failure must not silently
-  # degrade both sides. Longest ancestor wins (nested workspaces);
-  # non-workspace paths under packages/ keep TWO segments so sibling
-  # projects stay distinct areas; emitted areas are newline-sanitized so a
-  # newline-bearing path cannot mint phantom areas in the line pipeline.
-  local ref="${2}" f d a
+  # manifest must not redefine its own footprint boundary. The ref's globs
+  # are read and translated ONCE per invocation (the per-file ancestor
+  # walk then matches in-bash — was_workspace_dir per (file×dir) re-ran
+  # git+jq+sed each time, ~21 ms a call). Longest ancestor wins (nested
+  # workspaces); non-workspace paths under packages/ keep TWO segments so
+  # sibling projects stay distinct areas. Emitted keys are printf %q —
+  # line-safe AND injective, so two distinct areas can never collapse
+  # into one comparison key (a lossy charset map hid expansions).
+  local ref="${2}" f d a g re
+  local -a ws_res=()
+  while IFS= read -r g; do
+    [[ -n "${g}" && "${g}" != '!'* ]] || continue
+    re="$(printf '%s' "${g}" | sed -e 's/[.^$+(){}|[]/\\&/g' -e 's/]/\\]/g' -e 's/\*\*/\x01/g' -e 's/\*/[^\/]*/g' -e 's/?/[^\/]/g' -e 's/\x01/.*/g')"
+    ws_res+=("${re}")
+  done < <(git show "${ref}:package.json" 2> /dev/null | jq -r '.workspaces[]?' 2> /dev/null)
   while IFS= read -r -d '' f; do
     [[ -n "${f}" ]] || continue
     a=''
     d="${f%/*}"
-    while [[ "${d}" == */* || ( -n "${d}" && "${d}" != "${f}" ) ]]; do
-      if was_workspace_dir "${ref}" "${d}"; then
-        a="${d}"
-        break
-      fi
+    while [[ -n "${d}" && "${d}" != "${f}" ]]; do
+      for re in "${ws_res[@]}"; do
+        if [[ "${d}" =~ ^${re}$ ]]; then
+          a="${d}"
+          break 2
+        fi
+      done
       [[ "${d}" == */* ]] || break
       d="${d%/*}"
     done
@@ -653,29 +663,37 @@ list_areas() {
         a="/${f}"
       fi
     fi
-    printf '%s\n' "${a//[^A-Za-z0-9._\/ -]/?}"
+    printf '%q\n' "${a}"
   done < "${1}" | sort -u
 }
 FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"
 [[ "${FOOTPRINT_ENFORCE}" == 'reject' ]] || FOOTPRINT_ENFORCE='advisory'
 ROUND_FILES_Z="$(mktemp)"
 PR_FILES_Z="$(mktemp)"
-git diff --name-only -z --no-renames "${ROUND_RANGE}" 2> /dev/null | not_merge_freight > "${ROUND_FILES_Z}" || true
-git diff --name-only -z --no-renames "${PR_RANGE}" 2> /dev/null > "${PR_FILES_Z}" || true
+# Unmeasurable is a STATE here too: a failed producer (no merge base on an
+# orphan-history takeover, a transient git error) must skip the check
+# loudly, not shrink one side into a verdict — an empty PR side would
+# read as "every round area is an expansion".
+FOOTPRINT_MEASURED='true'
+git diff --name-only -z --no-renames "${ROUND_RANGE}" 2> /dev/null | not_merge_freight > "${ROUND_FILES_Z}" || FOOTPRINT_MEASURED='false'
+git diff --name-only -z --no-renames "${PR_RANGE}" 2> /dev/null > "${PR_FILES_Z}" || FOOTPRINT_MEASURED='false'
+if [[ "${FOOTPRINT_MEASURED}" != 'true' ]]; then
+  echo "🧭 footprint measurement UNAVAILABLE this round (diff producer failed) — check skipped" | tee -a "${GATE_LOG}"
+fi
 OUT_AREAS="$(comm -23 <(list_areas "${ROUND_FILES_Z}" "origin/${BRANCH}") <(list_areas "${PR_FILES_Z}" "origin/${BRANCH}"))" || OUT_AREAS=''
 rm -f "${ROUND_FILES_Z}" "${PR_FILES_Z}"
-if [[ -n "${OUT_AREAS}" ]]; then
+if [[ "${FOOTPRINT_MEASURED}" == 'true' && -n "${OUT_AREAS}" ]]; then
   if [[ "${FOOTPRINT_ENFORCE}" == 'reject' ]]; then
     {
       echo 'This round modified areas entirely outside the PR footprint:'
-      printf '%s\n' "${OUT_AREAS//[^A-Za-z0-9._\/ -]/?}"
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
       echo 'Footprint enforcement is set to reject: revert these files, or escalate the feedback that requires them to a maintainer as an open question.'
     } >> "${GATE_LOG}"
     reject_fix 'round expands into areas outside the PR footprint'
   else
     {
       echo '🧭 **Gate advisory — this round modified areas outside the PR footprint** (machine-measured, not agent-authored):'
-      printf -- '- %s\n' "${OUT_AREAS//[^A-Za-z0-9._\/ -]/?}"
+      while IFS= read -r a; do [[ -n "${a}" ]] && echo "- ${a}"; done <<< "${OUT_AREAS}"
       echo 'Review the expansion deliberately; the footprint gate is in advisory mode. · 本轮改动了 PR 足迹之外的区域（门自动测量，非 agent 文本），当前足迹门为 advisory 模式，请有意识地审阅该扩张。'
     } >> "${WORKDIR}/gate-advisories.md"
     echo "🧭 footprint expansion (advisory): $(tr '\n' ' ' <<< "${OUT_AREAS}")" | tee -a "${GATE_LOG}"
