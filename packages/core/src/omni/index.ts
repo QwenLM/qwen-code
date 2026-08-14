@@ -37,7 +37,7 @@ import {
   DEFAULT_UPLOAD_CACHE_TTL_HOURS,
 } from './upload-cache.js';
 import { runStartupRecoveryOnce } from './recovery.js';
-import { runOmniGcOnce } from './gc.js';
+import { effectiveOmniStorageMaxTotalBytes, runOmniGcOnce } from './gc.js';
 import { OmniDegradationCache } from './policy/degradation-cache.js';
 import {
   formatDisclosureText,
@@ -494,8 +494,12 @@ export async function processMediaForOmniDelivery(
       uploadCache,
       degradationCache: new OmniDegradationCache(store.getOmniRootDir()),
       retentionDays: config.getOmniStorageRetentionDays?.() ?? 14,
+      // Floor-clamped: a budget below 10× the single-media limit cannot
+      // hold normal artifacts and would read as permanent suspension.
       maxTotalBytes:
-        config.getOmniStorageMaxTotalBytes?.() ?? 20 * 1024 * 1024 * 1024,
+        typeof config.getOmniStorageMaxTotalBytes === 'function'
+          ? effectiveOmniStorageMaxTotalBytes(config)
+          : 20 * 1024 * 1024 * 1024,
     });
   }
   // Session resource registry (M §5.2): every memory-known resource this

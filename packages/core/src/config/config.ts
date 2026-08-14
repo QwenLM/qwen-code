@@ -6554,11 +6554,12 @@ export class Config {
   }
 
   getOmniStorageRetentionDays(): number {
-    // Zero/negative/NaN would make the GC treat every unreferenced object
-    // as expired — fall back to the default instead (same fail-safe stance
-    // as the quarantine accessors above).
+    // Zero/negative/NaN/sub-day values would gut the retention grace the
+    // GC's multi-process argument leans on — fall back to the default
+    // instead (the schema promises `minimum: 1`; enforce it here too,
+    // since settings loading never validates jsonSchemaOverride).
     const days = this.omniStorageRetentionDays;
-    return typeof days === 'number' && Number.isFinite(days) && days > 0
+    return typeof days === 'number' && Number.isFinite(days) && days >= 1
       ? days
       : 14;
   }

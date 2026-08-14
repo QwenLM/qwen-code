@@ -7,7 +7,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MediaMemoryService,
   MediaResourceRegistry,
@@ -15,6 +15,7 @@ import {
 import { MEDIA_MEMORY_FILE_NAME } from '../services/media-memory/store.js';
 import { OmniObjectStore } from './storage.js';
 import {
+  effectiveOmniStorageMaxTotalBytes,
   isOmniDerivationSuspended,
   resetGcLatchForTests,
   runOmniGcOnce,
@@ -214,9 +215,35 @@ describe('runOmniGcOnce', () => {
     await expect(fs.access(p)).resolves.toBeUndefined();
   });
 
-  it('deletes NOTHING when the memory snapshot is unreadable', async () => {
-    // Fail-closed hard rule: an unreadable ledger must never read as an
-    // empty one — that misread would sweep the entire store.
+  it('ignores a registry fileRef OUTSIDE the store, even with a matching name', async () => {
+    // The registry-root scope guard: a handle on a user file protects
+    // nothing — only locators inside objects/ count. A same-named file
+    // outside the store must not shield the store copy.
+    const sha = '6'.repeat(64);
+    const p = await writeObject(sha, 30);
+    const outside = path.join(qwenDir, `${sha}.bin`);
+    await fs.writeFile(outside, 'user copy');
+    const registry = new MediaResourceRegistry();
+    registry.bind({
+      fileId: 'f1',
+      fileVersionId: 'v1',
+      rootFileId: 'f1',
+      fileRef: outside,
+      mediaType: 'image',
+    });
+
+    const result = await runOmniGcOnce(gcOptions({ registry }));
+
+    expect(result.deletedObjects).toBe(1);
+    await expect(fs.access(p)).rejects.toThrow();
+    await expect(fs.access(outside)).resolves.toBeUndefined();
+  });
+
+  it('deletes NOTHING when the ledger was corrupt (recovery-backup guard)', async () => {
+    // A corrupt document does not read as null: the store SELF-HEALS it
+    // (rename to `.corrupt-<ts>`, continue on empty). What blocks this
+    // run is the corruption-recovery guard — an empty post-heal ledger
+    // must not read as "nothing is referenced".
     await writeObject('a'.repeat(64), 400);
     await fs.writeFile(
       path.join(store.getOmniRootDir(), MEDIA_MEMORY_FILE_NAME),
@@ -232,6 +259,53 @@ describe('runOmniGcOnce', () => {
         path.join(store.getObjectsDir(), 'aa', `${'a'.repeat(64)}.bin`),
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it('deletes NOTHING when the root set is unknowable (refs === null)', async () => {
+    // Hard rule 1 proper: a service that cannot READ the ledger (EACCES,
+    // I/O error — distinct from corrupt-and-healed) reports null, and
+    // null must never be treated as an empty root set.
+    const p = await writeObject('a'.repeat(64), 400);
+    const unreadableService = {
+      collectManagedRefs: async () => null,
+    } as unknown as MediaMemoryService;
+
+    const result = await runOmniGcOnce(
+      gcOptions({ memoryService: unreadableService }),
+    );
+
+    expect(result.ran).toBe(false);
+    expect(result.deletedObjects).toBe(0);
+    await expect(fs.access(p)).resolves.toBeUndefined();
+  });
+
+  it('roots an entry artifactRef on its own (no version locator for it)', async () => {
+    // `entries[].artifactRef.managedId` must be an independent root: a
+    // hand-written ledger references the object ONLY through an entry —
+    // no version record backs it up (the service's own commit would
+    // double-root, masking a regression in this branch).
+    const sha = '8'.repeat(64);
+    const p = await writeObject(sha, 30);
+    await fs.writeFile(
+      path.join(store.getOmniRootDir(), MEDIA_MEMORY_FILE_NAME),
+      JSON.stringify({
+        schemaVersion: 1,
+        files: {},
+        versions: {},
+        executions: {},
+        entries: {
+          'e-1': {
+            kind: 'derived_media',
+            artifactRef: { storage: 'managed', managedId: `sha256/${sha}` },
+          },
+        },
+      }),
+    );
+
+    const result = await runOmniGcOnce(gcOptions());
+
+    expect(result.deletedObjects).toBe(0);
+    await expect(fs.access(p)).resolves.toBeUndefined();
   });
 
   it('over budget: deletes oldest unreferenced objects regardless of age', async () => {
@@ -318,8 +392,11 @@ describe('runOmniGcOnce', () => {
     expect(result.derivationsSuspended).toBe(true);
     expect(isOmniDerivationSuspended(root)).toBe(true);
 
-    // A later run under a raised budget clears the suspension.
-    resetGcLatchForTests();
+    // A later run under a raised budget clears the suspension. Re-arm
+    // ONLY the run latch — the flag must stand until the relaxed sweep
+    // itself clears it, or this assertion proves nothing.
+    resetGcLatchForTests({ keepSuspension: true });
+    expect(isOmniDerivationSuspended(root)).toBe(true);
     const relaxed = await runOmniGcOnce(gcOptions({ maxTotalBytes: 10_000 }));
     expect(relaxed.derivationsSuspended).toBe(false);
     expect(isOmniDerivationSuspended(root)).toBe(false);
@@ -327,13 +404,21 @@ describe('runOmniGcOnce', () => {
 
   it('cascades a deletion into the upload and degradation caches', async () => {
     const dead = 'a'.repeat(64);
-    await writeObject(dead, 30);
+    const deadPath = await writeObject(dead, 30);
     const uploadRemoved: string[] = [];
     const degradedRemoved: string[] = [];
+    let bytesGoneAtCascade: boolean | undefined;
     await runOmniGcOnce(
       gcOptions({
         uploadCache: {
           removeBySha256: async (sha: string) => {
+            // Load-bearing ORDER: the bytes must be gone before the
+            // cache entry — the reverse could re-serve a deleted object
+            // from cache.
+            bytesGoneAtCascade = await fs.access(deadPath).then(
+              () => false,
+              () => true,
+            );
             uploadRemoved.push(sha);
           },
         } as never,
@@ -350,6 +435,90 @@ describe('runOmniGcOnce', () => {
 
     expect(uploadRemoved).toEqual([dead]);
     expect(degradedRemoved).toEqual([`orig:${dead}`, `deg:${dead}`]);
+    expect(bytesGoneAtCascade).toBe(true);
+  });
+
+  it('accounts a failed rm as a survivor (budget keeps its bytes)', async () => {
+    const stuck = 'a'.repeat(64);
+    const p = await writeObject(stuck, 30, 600);
+    const rmSpy = vi
+      .spyOn(fs, 'rm')
+      .mockRejectedValue(new Error('EPERM: operation not permitted'));
+    try {
+      const result = await runOmniGcOnce(gcOptions({ maxTotalBytes: 100 }));
+
+      // Nothing was deleted, nothing was double-counted, and the
+      // undeletable bytes still count against the budget.
+      expect(result.ran).toBe(true);
+      expect(result.deletedObjects).toBe(0);
+      expect(result.deletedBytes).toBe(0);
+      expect(result.remainingBytes).toBe(600);
+      expect(result.derivationsSuspended).toBe(true);
+    } finally {
+      rmSpy.mockRestore();
+    }
+    await expect(fs.access(p)).resolves.toBeUndefined();
+  });
+
+  it('keys the latch and the suspension per store root', async () => {
+    // Two roots in ONE process: each gets its own sweep and its own
+    // suspension verdict — the Map/Set keying is what this pins.
+    const otherQwenDir = await fs.mkdtemp(path.join(os.tmpdir(), 'omni-gc2-'));
+    try {
+      const otherStore = new OmniObjectStore(otherQwenDir);
+      const otherMemory = new MediaMemoryService(otherStore.getOmniRootDir());
+      await fs.mkdir(otherStore.getObjectsDir(), { recursive: true });
+
+      // Root A: over budget with only referenced bytes → suspended.
+      const kept = 'b'.repeat(64);
+      await writeObject(kept, 30, 2048);
+      await referenceViaEntry(kept);
+      const first = await runOmniGcOnce(gcOptions({ maxTotalBytes: 100 }));
+
+      // Root B: one expired orphan, comfortable budget → swept, clean.
+      const orphan = 'a'.repeat(64);
+      const shard = path.join(otherStore.getObjectsDir(), orphan.slice(0, 2));
+      await fs.mkdir(shard, { recursive: true });
+      const orphanPath = path.join(shard, `${orphan}.bin`);
+      await fs.writeFile(orphanPath, Buffer.alloc(4, 1));
+      const old = new Date(Date.now() - 30 * 24 * 3600_000);
+      await fs.utimes(orphanPath, old, old);
+      const second = await runOmniGcOnce({
+        store: otherStore,
+        memoryService: otherMemory,
+        retentionDays: 14,
+        maxTotalBytes: 1024 * 1024,
+      });
+
+      // Distinct runs, not the first root's settled result.
+      expect(second).not.toBe(first);
+      expect(second.deletedObjects).toBe(1);
+      expect(isOmniDerivationSuspended(store.getOmniRootDir())).toBe(true);
+      expect(isOmniDerivationSuspended(otherStore.getOmniRootDir())).toBe(
+        false,
+      );
+    } finally {
+      await fs.rm(otherQwenDir, { recursive: true, force: true });
+    }
+  });
+
+  it('effectiveOmniStorageMaxTotalBytes floors the budget at 10× the media limit', () => {
+    const configFor = (budget: number, singleMedia?: number) =>
+      ({
+        getOmniStorageMaxTotalBytes: () => budget,
+        getOmniMaxUploadFileBytes: () => singleMedia,
+      }) as never;
+
+    // Below the floor: clamped up (storage design §7 — the budget must
+    // hold at least ten normal uploads or it reads as a broken pipeline).
+    expect(effectiveOmniStorageMaxTotalBytes(configFor(1000, 500))).toBe(5000);
+    // At or above the floor: honored verbatim.
+    expect(effectiveOmniStorageMaxTotalBytes(configFor(5000, 500))).toBe(5000);
+    expect(effectiveOmniStorageMaxTotalBytes(configFor(9999, 500))).toBe(9999);
+    // No explicit media limit: the guard default (1 GiB) drives the floor.
+    expect(effectiveOmniStorageMaxTotalBytes(configFor(1000))).toBe(
+      10 * 1024 * 1024 * 1024,
+    );
   });
 
   it('runs once per store root per process', async () => {

@@ -7,11 +7,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { Config } from '../config/config.js';
 import type { MediaMemoryService } from '../services/media-memory/service.js';
 import type { MediaResourceRegistry } from '../services/media-memory/registry.js';
 import type { OmniObjectStore } from './storage.js';
 import type { OmniUploadCache } from './upload-cache.js';
 import type { OmniDegradationCache } from './policy/degradation-cache.js';
+import { effectiveMaxUploadFileBytes } from './guard.js';
 import { MEDIA_MEMORY_FILE_NAME } from '../services/media-memory/store.js';
 
 const debugLogger = createDebugLogger('omni:gc');
@@ -99,10 +101,37 @@ const SKIPPED: OmniGcResult = {
 const gcOnce = new Map<string, Promise<OmniGcResult>>();
 const suspendedRoots = new Set<string>();
 
-/** Test-only: allow re-running GC within one process. */
-export function resetGcLatchForTests(): void {
+/** Test-only: allow re-running GC within one process. Pass
+ * `keepSuspension` to re-arm the run latch while leaving the suspension
+ * flag standing — the only way to prove a later run actually CLEARS it
+ * (a full reset would make that assertion vacuous). */
+export function resetGcLatchForTests(options?: {
+  keepSuspension?: boolean;
+}): void {
   gcOnce.clear();
-  suspendedRoots.clear();
+  if (!options?.keepSuspension) suspendedRoots.clear();
+}
+
+/**
+ * Effective byte budget for the sweep (storage design §7): never below
+ * 10× the transport guard's single-media ceiling. A budget smaller than
+ * a handful of normal uploads cannot hold legitimate experiment
+ * artifacts — the first referenced object would tip it into permanent
+ * derivation suspension, which reads as a broken pipeline rather than a
+ * configuration mistake.
+ */
+export function effectiveOmniStorageMaxTotalBytes(config: Config): number {
+  const configured = config.getOmniStorageMaxTotalBytes();
+  const floor = 10 * effectiveMaxUploadFileBytes(config);
+  if (configured < floor) {
+    debugLogger.warn(
+      `omni.storage.maxTotalBytes (${configured}) is below 10× the ` +
+        `transport guard's single-media limit; using ${floor} bytes ` +
+        `instead (the budget must hold at least ten normal uploads).`,
+    );
+    return floor;
+  }
+  return configured;
 }
 
 /**

@@ -4769,3 +4769,53 @@ describe('loadCliConfig skills.directories', () => {
     expect(config.getCustomSkillDirs()).toEqual([]);
   });
 });
+
+describe('loadCliConfig omni settings key validation', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    process.argv = ['node', 'script.js'];
+  });
+
+  it('accepts known nested omni keys (storage, memory, processing maps)', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      omni: {
+        storage: { retentionDays: 7, maxTotalBytes: 1024 * 1024 * 1024 },
+        memory: { recall: { mode: 'active' } },
+        processing: {
+          // Free-form map: policy names are user-defined — the walk must
+          // stop at map nodes instead of rejecting every name.
+          fixedPolicies: {
+            'my-policy': { priority: 10, toolName: 'omni_extract_audio' },
+          },
+        },
+      },
+    } as Settings;
+
+    await expect(loadCliConfig(settings, argv)).resolves.toBeDefined();
+  });
+
+  it('rejects an unknown key directly under omni', async () => {
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storag: { retentionDays: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni".*"storag"/s,
+    );
+  });
+
+  it('rejects an unknown NESTED key with its full path', async () => {
+    // The deletion-controlling knobs live at omni.storage.* — a typo
+    // there must fail loud instead of leaving the GC on defaults.
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storage: { retentionDay: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni\.storage".*"retentionDay"/s,
+    );
+  });
+});
