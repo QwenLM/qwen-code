@@ -85,6 +85,11 @@ const VALUE_FLAGS = new Set(
       : [],
   ),
 );
+// Value-taking options registered outside TOP_LEVEL_HELP_OPTIONS: hidden options
+// are inline-registered in config.ts and never appear in the help-display
+// list. The scanner must still consume their values, otherwise the value
+// becomes the first positional and defeats a later --help/--version fast path.
+VALUE_FLAGS.add('--sandbox-session-id');
 
 const ARRAY_VALUE_FLAGS = new Set(
   TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
@@ -96,12 +101,21 @@ function isValueToken(arg: string | undefined): arg is string {
   return arg !== undefined && arg !== '--' && !arg.startsWith('-');
 }
 
+// Known scanner limitations (all direction-safe — they demote the fast path
+// to the slow path, never misfire it): short-option clusters are matched as
+// whole tokens, so `-vh`/`-sh` and clusters ending in a value-taking short
+// (e.g. `-sm gpt-4`) are not recognized and boot the full CLI graph.
 function skipOptionValues(argv: readonly string[], index: number): number {
-  if (!VALUE_FLAGS.has(argv[index]!)) {
+  const raw = argv[index]!;
+  const eq = raw.indexOf('=');
+  const flag = eq === -1 ? raw : raw.slice(0, eq);
+  if (!VALUE_FLAGS.has(flag)) {
     return index;
   }
-  if (!ARRAY_VALUE_FLAGS.has(argv[index]!)) {
-    return isValueToken(argv[index + 1]) ? index + 1 : index;
+  if (!ARRAY_VALUE_FLAGS.has(flag)) {
+    // `--flag=value` carries its value inside the token; only the
+    // space-separated form consumes the next token.
+    return eq === -1 && isValueToken(argv[index + 1]) ? index + 1 : index;
   }
   let next = index + 1;
   while (isValueToken(argv[next])) {

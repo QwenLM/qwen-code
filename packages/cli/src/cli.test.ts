@@ -158,6 +158,31 @@ describe('resolveBootstrapRoute', () => {
     ).toBe('help');
   });
 
+  it('consumes hidden value options and =-form values before route detection', () => {
+    // Hidden options registered outside TOP_LEVEL_HELP_OPTIONS still take
+    // values the scanner must skip over.
+    expect(
+      resolveBootstrapRoute(['--sandbox-session-id', 'uuid', '--help']),
+    ).toBe('help');
+    // Array `--flag=a b c` keeps consuming after the `=` token.
+    expect(resolveBootstrapRoute(['--extensions=a', 'b', 'c', '--help'])).toBe(
+      'help',
+    );
+    // Non-array `--flag=value` keeps its value inside the token: the next
+    // token must NOT be consumed (consuming it would misroute this to
+    // top-level help instead of the slow-path `serve --help`).
+    expect(resolveBootstrapRoute(['--model=gpt-4', 'serve', '--help'])).toBe(
+      'default',
+    );
+  });
+
+  it('demotes unrecognized short-option clusters to the slow path', () => {
+    // Documented limitation (see skipOptionValues): clusters are matched as
+    // whole tokens, so -h/-v inside a cluster falls back to the full boot.
+    // Output stays correct via the slow path.
+    expect(resolveBootstrapRoute(['-vh'])).toBe('default');
+  });
+
   it('does not treat flags after -- as bootstrap flags', () => {
     expect(resolveBootstrapRoute(['--', '--version'])).toBe('default');
     expect(resolveBootstrapRoute(['mcp', '--', '--version'])).toBe('mcp');
