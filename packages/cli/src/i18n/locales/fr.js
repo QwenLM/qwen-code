@@ -135,14 +135,10 @@ export default {
   'type to filter…': 'tapez pour filtrer…',
   'No skills are currently available.':
     'Aucune compétence n’est actuellement disponible.',
-  'All available skills are locked at a higher scope (see below).':
-    'Toutes les compétences disponibles sont verrouillées à une portée supérieure (voir ci-dessous).',
   'No skills match the search.':
     'Aucune compétence ne correspond à la recherche.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
-  'Hidden locked skills: {{count}} · type to search':
-    'Compétences verrouillées masquées : {{count}} · saisissez pour rechercher',
   '(+{{count}} locked)': '(+{{count}} verrouillé(s))',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':

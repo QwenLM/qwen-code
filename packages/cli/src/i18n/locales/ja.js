@@ -99,13 +99,9 @@ export default {
   'Search:': '検索：',
   'type to filter…': 'フィルタを入力…',
   'No skills are currently available.': '利用可能なスキルはありません。',
-  'All available skills are locked at a higher scope (see below).':
-    'すべての利用可能なスキルは上位スコープでロックされています（下記参照）。',
   'No skills match the search.': '検索に一致するスキルはありません。',
   'Locked by higher-scope settings (cannot toggle here):':
     '上位スコープ設定によってロックされています（ここでは切替不可）：',
-  'Hidden locked skills: {{count}} · type to search':
-    '非表示のロック済みスキル: {{count}} · 入力して検索',
   '(+{{count}} locked)': '（+{{count}} 件ロック中）',
   'higher scope': '上位スコープ',
   '  {{name}} {{description}}  [locked: {{scope}}]':

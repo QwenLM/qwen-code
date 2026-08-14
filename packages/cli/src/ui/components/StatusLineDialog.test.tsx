@@ -4,10 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, type ReactElement } from 'react';
-import { EventEmitter } from 'node:events';
-import { render as inkRender } from 'ink';
+import { act, type ComponentProps } from 'react';
 import { render } from 'ink-testing-library';
+import stripAnsi from 'strip-ansi';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { mkdtempSync } from 'node:fs';
@@ -20,54 +19,6 @@ import { MessageType, StreamingState } from '../types.js';
 import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
 import { truncateToWidth } from '../utils/textUtils.js';
 import { StatusLineDialog } from './StatusLineDialog.js';
-
-const stripAnsi = (s: string): string =>
-  // eslint-disable-next-line no-control-regex
-  s.replace(/\u001b\[[0-9;]*m/g, '');
-
-// ink-testing-library hard-codes a 100-column buffer, so wrap-driven
-// overflow below 100 columns can never fail a budget assertion. Render
-// through ink directly with a fake narrow stdout — same pattern as
-// DiffDialog.test.tsx's renderWide.
-const renderNarrow = (columns: number, ui: ReactElement) => {
-  let lastFrame = '';
-  const stdout = Object.assign(new EventEmitter(), {
-    columns,
-    rows: 50,
-    write: (frame: string) => {
-      lastFrame = frame;
-    },
-  });
-  const stderr = Object.assign(new EventEmitter(), {
-    columns,
-    rows: 50,
-    write: () => {},
-  });
-  const stdin = Object.assign(new EventEmitter(), {
-    isTTY: true,
-    setRawMode: () => {},
-    setEncoding: () => {},
-    resume: () => {},
-    pause: () => {},
-    ref: () => {},
-    unref: () => {},
-    read: () => null,
-  });
-  const instance = inkRender(ui, {
-    stdout: stdout as unknown as NodeJS.WriteStream,
-    stderr: stderr as unknown as NodeJS.WriteStream,
-    stdin: stdin as unknown as NodeJS.ReadStream,
-    // debug:true writes the full frame synchronously (true widths) instead
-    // of throttled cursor-diff output, so row counts can be measured.
-    debug: true,
-    patchConsole: false,
-    exitOnCtrlC: false,
-  });
-  return {
-    lastFrame: () => lastFrame.replace(/\n+$/, ''),
-    unmount: instance.unmount,
-  };
-};
 
 function createSettings(): LoadedSettings {
   const dir = mkdtempSync(path.join(tmpdir(), 'qwen-statusline-'));
@@ -122,21 +73,33 @@ const uiState = {
   },
 } as UIState;
 
+type DialogProps = ComponentProps<typeof StatusLineDialog>;
+
+function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
+  const ui = (
+    <KeypressProvider kittyProtocolEnabled={false}>
+      <StatusLineDialog
+        settings={createSettings()}
+        config={config}
+        uiState={uiState}
+        addItem={vi.fn()}
+        onClose={vi.fn()}
+        availableTerminalHeight={18}
+        {...overrides}
+      />
+    </KeypressProvider>
+  );
+  const result = render(ui);
+  if (columns !== undefined) {
+    Object.defineProperty(result.stdout, 'columns', { value: columns });
+    result.rerender(ui);
+  }
+  return result;
+}
+
 describe('StatusLineDialog', () => {
   it('renders a searchable preset picker with preview', () => {
-    const settings = createSettings();
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={25}
-        />
-      </KeypressProvider>,
-    );
+    const { lastFrame } = renderDialog({ availableTerminalHeight: 25 });
 
     expect(lastFrame()).toContain('Configure Status Line');
     expect(lastFrame()).toContain('Type to search');
@@ -175,19 +138,13 @@ describe('StatusLineDialog', () => {
       ...config,
       getChatRecordingService: () => ({ recordSlashCommand }),
     } as unknown as Config;
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={recordingConfig}
-          uiState={uiState}
-          addItem={addItem}
-          onSaved={onSaved}
-          onClose={onClose}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin } = renderDialog({
+      settings,
+      config: recordingConfig,
+      addItem,
+      onSaved,
+      onClose,
+    });
 
     act(() => {
       stdin.write('\r');
@@ -230,18 +187,7 @@ describe('StatusLineDialog', () => {
 
   it('keeps preset priority order after an item is toggled off and on', async () => {
     const settings = createSettings();
-    const { stdin, lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin, lastFrame } = renderDialog({ settings });
 
     const press = async (input: string) => {
       act(() => {
@@ -289,18 +235,7 @@ describe('StatusLineDialog', () => {
       settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
       settings.recomputeMerged();
       const addItem = vi.fn();
-      const { stdin } = render(
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <StatusLineDialog
-            settings={settings}
-            config={config}
-            uiState={uiState}
-            addItem={addItem}
-            onClose={vi.fn()}
-            availableTerminalHeight={18}
-          />
-        </KeypressProvider>,
-      );
+      const { stdin } = renderDialog({ settings, addItem });
 
       act(() => {
         stdin.write('\r');
@@ -337,18 +272,7 @@ describe('StatusLineDialog', () => {
     };
     settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
     settings.recomputeMerged();
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin } = renderDialog({ settings });
 
     act(() => {
       stdin.write('\r');
@@ -376,18 +300,7 @@ describe('StatusLineDialog', () => {
       },
     };
     settings.recomputeMerged();
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin } = renderDialog({ settings });
 
     act(() => {
       stdin.write('\r');
@@ -403,19 +316,7 @@ describe('StatusLineDialog', () => {
   });
 
   it('does not append navigation keys to the search query', async () => {
-    const settings = createSettings();
-    const { stdin, lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={18}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin, lastFrame } = renderDialog();
 
     act(() => {
       stdin.write('m');
@@ -435,18 +336,7 @@ describe('StatusLineDialog', () => {
   ] as const)(
     'uses the expected layout at the %i-row boundary',
     (availableTerminalHeight, hasFullLayout) => {
-      const { lastFrame } = render(
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <StatusLineDialog
-            settings={createSettings()}
-            config={config}
-            uiState={uiState}
-            addItem={vi.fn()}
-            onClose={vi.fn()}
-            availableTerminalHeight={availableTerminalHeight}
-          />
-        </KeypressProvider>,
-      );
+      const { lastFrame } = renderDialog({ availableTerminalHeight });
 
       const frame = lastFrame() ?? '';
       expect(frame.split('\n').length).toBeLessThanOrEqual(
@@ -465,18 +355,10 @@ describe('StatusLineDialog', () => {
     // uiState.mainAreaWidth read (cap 70) renders a different string and
     // fails this test.
     const narrowUiState = { ...uiState, mainAreaWidth: 60 };
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={createSettings()}
-          config={config}
-          uiState={narrowUiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={25}
-        />
-      </KeypressProvider>,
-    );
+    const { lastFrame } = renderDialog({
+      uiState: narrowUiState,
+      availableTerminalHeight: 25,
+    });
 
     const frame = lastFrame() ?? '';
     expect(frame.split('\n').length).toBeLessThanOrEqual(25);
@@ -492,37 +374,14 @@ describe('StatusLineDialog', () => {
   });
 
   it('uses every available row in an intermediate compact layout', () => {
-    const { lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={createSettings()}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={5}
-        />
-      </KeypressProvider>,
-    );
+    const { lastFrame } = renderDialog({ availableTerminalHeight: 5 });
 
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
     expect(lastFrame()).toContain('model-with-reasoning');
   });
 
   it('keeps every option reachable in a one-line layout', async () => {
-    const settings = createSettings();
-    const { stdin, lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={1}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin, lastFrame } = renderDialog({ availableTerminalHeight: 1 });
 
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(1);
     expect(lastFrame()).not.toContain('Configure Status Line');
@@ -544,18 +403,10 @@ describe('StatusLineDialog', () => {
     // off and MultiSelect has no escape handling of its own — the
     // fall-through to onClose() is the dialog's only dismissal path.
     const onClose = vi.fn();
-    const { stdin } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={createSettings()}
-          config={config}
-          uiState={uiState}
-          addItem={vi.fn()}
-          onClose={onClose}
-          availableTerminalHeight={5}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin } = renderDialog({
+      onClose,
+      availableTerminalHeight: 5,
+    });
 
     act(() => {
       stdin.write('\u001b');
@@ -570,18 +421,10 @@ describe('StatusLineDialog', () => {
     // tail — including "available" — to display truncation. Search must
     // still match the full source text, so results stay width-independent.
     const narrowUiState = { ...uiState, mainAreaWidth: 80 };
-    const { stdin, lastFrame } = render(
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={createSettings()}
-          config={config}
-          uiState={narrowUiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={25}
-        />
-      </KeypressProvider>,
-    );
+    const { stdin, lastFrame } = renderDialog({
+      uiState: narrowUiState,
+      availableTerminalHeight: 25,
+    });
 
     act(() => {
       stdin.write('available');
@@ -598,22 +441,14 @@ describe('StatusLineDialog', () => {
     // model-with-reasoning label (5th option, inside the budget-20 window)
     // must stay on one capped row.
     const narrowUiState = { ...uiState, mainAreaWidth: 54 };
-    const { lastFrame, unmount } = renderNarrow(
+    const { lastFrame, unmount } = renderDialog(
+      { uiState: narrowUiState, availableTerminalHeight: 20 },
       54,
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={createSettings()}
-          config={config}
-          uiState={narrowUiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={20}
-        />
-      </KeypressProvider>,
     );
     try {
-      expect(lastFrame()).toContain('model-with-reasoning');
-      expect(lastFrame().split('\n').length).toBeLessThanOrEqual(20);
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('model-with-reasoning');
+      expect(frame.split('\n').length).toBeLessThanOrEqual(20);
     } finally {
       unmount();
     }
@@ -624,21 +459,12 @@ describe('StatusLineDialog', () => {
     // exceed the available label width (30 - 10 overhead = 20) and wrap
     // every option to 2 rows — the floor must be 1 instead.
     const narrowUiState = { ...uiState, mainAreaWidth: 30 };
-    const { lastFrame, unmount } = renderNarrow(
+    const { lastFrame, unmount } = renderDialog(
+      { uiState: narrowUiState, availableTerminalHeight: 25 },
       30,
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={createSettings()}
-          config={config}
-          uiState={narrowUiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={25}
-        />
-      </KeypressProvider>,
     );
     try {
-      expect(lastFrame().split('\n').length).toBeLessThanOrEqual(25);
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(25);
     } finally {
       unmount();
     }
@@ -653,22 +479,14 @@ describe('StatusLineDialog', () => {
     };
     settings.recomputeMerged();
     const narrowUiState = { ...uiState, mainAreaWidth: 50 };
-    const { lastFrame, unmount } = renderNarrow(
+    const { lastFrame, unmount } = renderDialog(
+      { settings, uiState: narrowUiState, availableTerminalHeight: 20 },
       50,
-      <KeypressProvider kittyProtocolEnabled={false}>
-        <StatusLineDialog
-          settings={settings}
-          config={config}
-          uiState={narrowUiState}
-          addItem={vi.fn()}
-          onClose={vi.fn()}
-          availableTerminalHeight={20}
-        />
-      </KeypressProvider>,
     );
     try {
-      expect(lastFrame()).toContain('Select at least one item');
-      expect(lastFrame().split('\n').length).toBeLessThanOrEqual(20);
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Select at least one item');
+      expect(frame.split('\n').length).toBeLessThanOrEqual(20);
     } finally {
       unmount();
     }
