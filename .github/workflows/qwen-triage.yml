@@ -3094,12 +3094,31 @@ jobs:
           # timeout budget above accounts for. Divergence needs no uniform
           # round count: a P and an F for the same group is non-determinism
           # no matter how many rounds fit the budget.
+          # Round-state reset — run AS THE BUILD USER, not root: a root
+          # checkout restores node-mutated tracked files as new root-owned
+          # inodes that later node rounds cannot write (EACCES),
+          # manufacturing the very divergence the reset exists to prevent.
+          # `git clean -fd` (no -x: gitignored node_modules/dist must
+          # survive) drops the untracked residue `checkout -- .` never
+          # touches — lock files, output dirs a test creates in round 1.
+          reset_round_state() {
+            runuser -u node -- git checkout -- . 2>/dev/null || true
+            runuser -u node -- git clean -fd 2>/dev/null || true
+            pkill -u node || true
+          }
+
           declare -a results=()
           deadline=$(( $(date +%s) + 900 ))
           rounds_done=0
           timed_out=false
           infra_exits=0
           round=1
+          # Reset BEFORE round 1 too: PR lifecycle scripts (npm ci/build,
+          # run as node) may have mutated the tree since the list was
+          # recorded — without this, round 1 samples mutated content while
+          # rounds 2..N sample restored content, and the difference reads
+          # as divergence.
+          reset_round_state
           while [ "$round" -le "$ROUNDS" ]; do
             for i in "${!group_labels[@]}"; do
               if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -3141,13 +3160,11 @@ jobs:
                 } >> "$LOG"
               fi
             done
-            # Round-state reset: repeated samples share this tree and its
-            # process table, so restore the equivalent of a clean checkout
-            # before the next sample — a deterministic test that mutates a
-            # fixture or leaves a daemon/port behind must not fail later
-            # rounds on its own residue and fake a divergence (PFF).
-            git checkout -- . || true
-            pkill -u node || true
+            # Restore the equivalent of a clean checkout before the next
+            # sample — a deterministic test that mutates a fixture or leaves
+            # a daemon/port/untracked file behind must not fail later rounds
+            # on its own residue and fake a divergence (PFF).
+            reset_round_state
             [ "$timed_out" = true ] && break
             rounds_done="$round"
             round=$((round + 1))
@@ -3772,6 +3789,13 @@ jobs:
       # dir cannot shadow it either.
       - name: 'Stage flakiness gate log for upload'
         if: "always() && steps.pr.outputs.decision == 'run'"
+        # Evidence-copying only, and the verdict outputs are already
+        # written: a failure here (ENOSPC from disk-filling PR tests, a
+        # hostile mount) must not flip the job red — the publisher's
+        # VERIFY_RESULT != success branch would then discard the recorded
+        # verdict and report "infrastructure failure" instead. Same rule
+        # the Upload step below documents.
+        continue-on-error: true
         run: |-
           set -euo pipefail
           if [ -f "${RUNNER_TEMP:?}/flake-gate.log" ]; then
@@ -4404,13 +4428,28 @@ jobs:
             # claims the A/B, the harnesses and the gates were delivered —
             # when nothing was.
             WEAK_BODY=true
+            # The flake verdict travels via job outputs, independent of the
+            # artifact — the gate's demotion contract ("reported as not
+            # passed regardless of the agent verdict") must fire even when
+            # the download did not, or a flaky PR gets a neutral
+            # "results unavailable" notice instead of its ❌.
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
-              printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
-              printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
-              printf '</details>\n\n'
+              if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
+                printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf 'The verification ran and its deterministic flakiness gate observed run-to-run divergence, but the result artifact (report and per-round matrix) could not be retrieved for publishing. The run log still has the full output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf '<details>\n<summary>中文 — 判定：❌ 不通过 · 测试结果不确定（抖动门）；结果产物不可用</summary>\n\n'
+                printf '抖动门：❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
+                printf '验证已执行，其确定性抖动门观测到轮间分歧，但结果产物（报告与各轮矩阵）未能取回用于发布。运行日志中仍有完整输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '</details>\n\n'
+              else
+                printf '**Sandboxed verification: ⚠️ incomplete — results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+                printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 结果不可用</summary>\n\n'
+                printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+                printf '</details>\n\n'
+              fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then

@@ -844,38 +844,78 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // empty list. A `git diff ... | grep ... || true` pipeline would
     // swallow the failure as "no changed test files" and certify the PR
     // with an n/a gate.
+    // Exact-line pin (round-4 R2-P1): the earlier `[^|)]` separator class
+    // admitted `;`/`&` status swallowing inside the substitution, and a
+    // `git diff` adjacency check can never match the mandated `-c` form.
+    // Pinning the whole assignment leaves no room for any separator.
     assert.match(
       recordStep.run,
-      /^\s*files="\$\(git [^|)]*\)"\s*$/m,
-      'git diff must run as a standalone assignment, not feed a pipeline',
+      /^\s*files="\$\(git -c core\.quotePath=false diff --name-only --diff-filter=ACMR 'HEAD\^1' HEAD\)"$/m,
+      'git diff must run as a standalone, exactly-shaped assignment — no pipeline, no `;`/`&` status swallowing',
     );
-    assert.doesNotMatch(
-      recordStep.run
-        .split('\n')
-        .filter((l) => !l.trim().startsWith('#'))
-        .join('\n'),
-      /git diff[^\n]*\|/,
-      'a git failure must not be swallowable by a pipeline || true',
+    // The intake extension set is load-bearing: dropping `mjs` would
+    // silently drop .github/scripts/*.test.mjs files from the gate list in
+    // production — behavioral scenarios plant the list by hand and cannot
+    // see the record step narrow.
+    assert.ok(
+      recordStep.run.includes(
+        "grep -E '\\.(test|spec)\\.(ts|tsx|js|jsx|mjs|cjs)$'",
+      ),
+      'the intake extension set must stay pinned',
+    );
+    assert.match(
+      recordStep.run,
+      /flake-gate-files/,
+      'the record step must write the list where the gate reads it',
     );
     assert.match(
       flakeStep.run,
       /flake-gate-files/,
       'the gate must read the recorded list, not re-derive the diff',
     );
+    // Word-based, not adjacency: `git -c … diff` is still a re-derivation.
+    // The gate's own `git checkout`/`git clean` reset lines stay legal.
     assert.doesNotMatch(
       flakeStep.run,
-      /git diff/,
-      'the gate must not re-derive the diff from post-build git metadata',
+      /\bgit\b[^\n]*\bdiff\b/,
+      'the gate must not re-derive the diff from post-build git metadata in any spelling',
     );
   });
 
   it('runs PR test code as the build user with no tokens, and fails open', () => {
     assert.equal(flakeStep.env.GITHUB_TOKEN, '', 'no GitHub token in the gate');
     assert.equal(flakeStep.env.GH_TOKEN, '', 'no gh token in the gate');
+    // Line-anchored (round-4 R2-P1): an unanchored substring is satisfied
+    // by a comment while the invocation itself runs as root — and this one
+    // line also pins the per-invocation `timeout` cap, without which a
+    // single hung test holds the invocation to the job timeout's SIGKILL,
+    // which the EXIT-trap fail-open cannot survive.
     assert.match(
       flakeStep.run,
-      /runuser -u node --/,
-      'PR test code must run as the unprivileged build user',
+      /^\s*timeout -k 30 600 runuser -u node -- \\$/m,
+      'PR test code must run as the build user under the per-invocation timeout cap',
+    );
+    assert.match(
+      flakeStep.run,
+      /unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL/,
+      'cache-service credentials must be stripped before PR test code runs',
+    );
+    assert.match(
+      flakeStep.run,
+      /env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY/,
+      'runner-injection files must be invisible to PR test code',
+    );
+    // Whole-env pin: any future secret added to this step env reaches
+    // process.env of PR test code, so it must be an explicit test decision.
+    assert.deepEqual(
+      Object.keys(flakeStep.env).sort(),
+      ['FLAKE_ROUNDS', 'GH_TOKEN', 'GITHUB_TOKEN'],
+      'the gate env must stay tokens-blanked and secret-free',
+    );
+    assert.match(
+      flakeStep.run,
+      /NODE_OPTIONS='--max-old-space-size=3072' CI=true TMPDIR="\$inv_tmp"/,
+      'child env must pin CI parity, the heap limit, and the per-invocation TMPDIR',
     );
     assert.match(
       flakeStep.run,
@@ -902,23 +942,50 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /set -euo/,
       'a gate bug must fail OPEN (verdict error), never abort the verify job',
     );
-    // Repeated samples share one tree and one process table: without a
-    // per-round reset, a deterministic test fails on its own residue
-    // (mutated fixture, leftover daemon/port) and fakes a divergence.
+    // Round-4 Critical: the reset must run AS THE BUILD USER — a root
+    // checkout restores node-mutated tracked files as new root-owned
+    // inodes that later node rounds cannot write (EACCES divergence) —
+    // and must also drop untracked residue (`git clean -fd`, no -x so
+    // gitignored node_modules/dist survive). Line-anchored: a comment
+    // cannot satisfy these.
     assert.match(
       flakeStep.run,
-      /^\s*git checkout -- \. \|\| true$/m,
-      'each round must restore tracked files before the next sample',
+      /^\s*runuser -u node -- git checkout -- \. 2>\/dev\/null \|\| true$/m,
+      'the tracked-file restore must run as the build user',
+    );
+    assert.match(
+      flakeStep.run,
+      /^\s*runuser -u node -- git clean -fd 2>\/dev\/null \|\| true$/m,
+      'untracked round residue must be cleaned without touching gitignored build outputs',
     );
     assert.match(
       flakeStep.run,
       /^\s*pkill -u node \|\| true$/m,
       'each round must tear down leftover test-user processes',
     );
+    // And the reset must also run BEFORE round 1: lifecycle scripts (npm
+    // ci/build, run as node) mutate the tree between list-record and the
+    // first sample, so round 1 must sample the same restored tree as
+    // rounds 2..N.
+    const firstReset = flakeStep.run.search(/^\s*reset_round_state$/m);
+    const loopStart = flakeStep.run.indexOf('while [ "$round" -le "$ROUNDS" ]');
+    assert.ok(
+      firstReset !== -1 && loopStart !== -1 && firstReset < loopStart,
+      'one reset must precede round 1, not only the between-round resets',
+    );
     assert.equal(
       flakeStep.if,
       "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''",
       'the gate runs exactly when the agent would (after a clean build)',
+    );
+    // The message above is only true while both conditions stay identical:
+    // if the agent's `if:` drifts wider, the agent publishes a verdict on
+    // runs the gate never sampled, and the empty FLAKE_VERDICT leaves the
+    // headline untouched (the behavioral drive test proves '' is a no-op).
+    assert.equal(
+      agentStep.if,
+      flakeStep.if,
+      'gate and agent must run under identical conditions',
     );
   });
 
@@ -963,20 +1030,43 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       agentIdx < stageIdx && stageIdx < uploadIdx,
       'staging must run after the agent and before the upload',
     );
-    assert.match(
-      stageStep.run,
-      /cp -f "\$RUNNER_TEMP\/flake-gate\.log" "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"/,
-      'staging must overwrite whatever the agent era left under that name',
+    // Evidence-copying only, after the verdict outputs are written: a
+    // staging failure (ENOSPC, hostile mount) must not flip the job red or
+    // the publisher discards the recorded verdict as "infrastructure".
+    assert.equal(
+      stageStep['continue-on-error'],
+      true,
+      'staging must not be able to fail the job',
     );
-    assert.match(
-      stageStep.run,
-      /rm -rf -- "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"/,
-      'staging must remove a planted destination BEFORE copying — cp would open a FIFO and block, or follow a symlink',
+    // The ORDER is the guard (round-4 R2-P1): presence-only pins stayed
+    // green with `cp` reordered before the unlinks, reopening the planted
+    // FIFO/symlink hazard. Kill racers → drop a planted dir/symlink at the
+    // directory level → recreate → unlink the destination entry → copy.
+    const sr = stageStep.run;
+    const iPkill = sr.indexOf('pkill -KILL -u node');
+    const iDirGuard = sr.search(/\[ -L "\$RUNNER_TEMP\/verify-results" \]/);
+    const iMkdir = sr.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
+    const iRmDst = sr.indexOf(
+      'rm -rf -- "$RUNNER_TEMP/verify-results/flake-gate.log"',
     );
-    assert.match(
-      stageStep.run,
-      /pkill -KILL -u node/,
-      'staging must kill leftover build-user processes so nothing races the copy',
+    const iCp = sr.indexOf(
+      'cp -f "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"',
+    );
+    for (const [label, idx] of [
+      ['pkill', iPkill],
+      ['directory-level symlink/non-dir guard', iDirGuard],
+      ['mkdir -p', iMkdir],
+      ['destination unlink', iRmDst],
+      ['copy', iCp],
+    ]) {
+      assert.ok(idx !== -1, `staging must contain the ${label}`);
+    }
+    assert.ok(
+      iPkill < iDirGuard &&
+        iDirGuard < iMkdir &&
+        iMkdir < iRmDst &&
+        iRmDst < iCp,
+      'staging order must be: kill racers, dir guard, recreate, unlink destination, copy',
     );
     assert.doesNotMatch(
       agentStep.run,
@@ -1023,6 +1113,27 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
         'no gate value may ever set a passing headline',
       );
     }
+  });
+
+  it('the flaky demotion also fires when the result artifact is unavailable', () => {
+    // FLAKE_VERDICT travels via job outputs, independent of the artifact.
+    // Without this branch handling, a flaky PR whose artifact download
+    // failed got a neutral "results unavailable" notice — the demotion
+    // contract silently not firing.
+    const branch = publishStep.run.match(
+      /elif \[ "\$\{DOWNLOAD_OUTCOME:-success\}" != "success" \];[\s\S]*?\nelif /,
+    );
+    assert.ok(branch, 'the download-failure branch must exist');
+    assert.match(
+      branch[0],
+      /"\$\{FLAKE_VERDICT:-\}" = 'flaky'/,
+      'the branch must consult the gate verdict',
+    );
+    assert.match(
+      branch[0],
+      /❌ not passed — non-deterministic tests \(flakiness gate\)/,
+      'flaky must still demote the headline without the artifact',
+    );
   });
 
   it('the verify job timeout still covers agent + prepare + gate', () => {
@@ -1108,6 +1219,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     stubs = {},
     env: envOverrides = {},
     git = false,
+    mutate,
   }) => {
     const root = mkdtempSync(join(scenarioRoot, 'case-'));
     const ws = join(root, 'ws');
@@ -1143,6 +1255,9 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
         assert.equal(g.status, 0, `git ${args.join(' ')}: ${g.stderr}`);
       }
     }
+    // Applied AFTER the commit: models PR lifecycle scripts (npm ci/build)
+    // mutating the tree between list-record and round 1.
+    if (mutate) mutate(ws);
     const stubSet = {
       runuser: STUB_RUNUSER,
       npx: STUB_TESTRUNNER,
@@ -1307,6 +1422,115 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.match(log, /stateful\.test\.js: PPPPP/);
   });
 
+  it('untracked residue from round 1 is cleaned, not left to fail later rounds', () => {
+    // `git checkout -- .` never removes untracked files (round-4 Critical
+    // mechanism a): a test whose first invocation leaves an untracked
+    // lock/output dir would fail rounds 2-5 on that residue (PFFFF ->
+    // false flaky) unless the reset also runs `git clean -fd`.
+    const STUB_UNTRACKED = [
+      '#!/bin/bash',
+      'if [ -e out-residue ]; then',
+      '  echo "untracked residue from an earlier round"',
+      '  exit 1',
+      'fi',
+      'mkdir out-residue',
+      'exit 0',
+      '',
+    ].join('\n');
+    const { res, outputs, log } = runGate({
+      layout: { 'scripts/tests/untracked.test.js': '' },
+      list: 'scripts/tests/untracked.test.js\n',
+      stubs: { npx: STUB_UNTRACKED },
+      git: true,
+    });
+    assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(log, /untracked\.test\.js: PPPPP/);
+  });
+
+  it('a pre-gate tree mutation cannot make round 1 sample different content than rounds 2..N', () => {
+    // Round-4 Critical mechanism c: PR lifecycle scripts run as node
+    // between list-record and round 1. Without a reset BEFORE round 1 the
+    // first sample sees the mutated tree and later samples see the
+    // restored one — the difference reads as divergence (F then PPPP).
+    const STUB_MARKER = [
+      '#!/bin/bash',
+      'if grep -q clean marker.txt; then exit 0; fi',
+      'echo "sampled the lifecycle-mutated tree"',
+      'exit 1',
+      '',
+    ].join('\n');
+    const { res, outputs, log } = runGate({
+      layout: {
+        'scripts/tests/marker.test.js': '',
+        'marker.txt': 'clean\n',
+      },
+      list: 'scripts/tests/marker.test.js\n',
+      stubs: { npx: STUB_MARKER },
+      git: true,
+      mutate: (ws) => writeFileSync(join(ws, 'marker.txt'), 'dirty\n'),
+    });
+    assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(log, /marker\.test\.js: PPPPP/);
+  });
+
+  it('wall-budget expiry before two full rounds is the informational timeout verdict', () => {
+    // A scripted `date` stub drives the clock: deadline init at 0 (so the
+    // budget ends at 900), round 1 checked at 100 and run, round 2 checked
+    // at 1000 — expired with only one full round done.
+    const STUB_DATE = [
+      '#!/bin/bash',
+      'n_file="$FLAKE_SEQ_DIR/.count-date"',
+      'n=$(cat "$n_file" 2>/dev/null || echo 0)',
+      'echo $((n+1)) > "$n_file"',
+      'mapfile -t vals < "$FLAKE_SEQ_DIR/dates"',
+      'i=$n',
+      '[ "$i" -ge "${#vals[@]}" ] && i=$((${#vals[@]} - 1))',
+      'echo "${vals[$i]}"',
+      '',
+    ].join('\n');
+    const one = runGate({
+      layout: { 'scripts/tests/a.test.js': '' },
+      list: 'scripts/tests/a.test.js\n',
+      stubs: { date: STUB_DATE },
+      sequences: { dates: '0\n100\n1000\n' },
+    });
+    assert.equal(one.res.status, 0, one.res.stderr);
+    assert.equal(one.outputs.flake_verdict, 'timeout');
+    assert.match(one.outputs.flake_summary, /before two full rounds/);
+    // With two agreeing rounds completed before expiry, the summary must
+    // say the completed rounds agreed — rounds_done must track completed
+    // rounds, not the loop counter.
+    const two = runGate({
+      layout: { 'scripts/tests/a.test.js': '' },
+      list: 'scripts/tests/a.test.js\n',
+      stubs: { date: STUB_DATE },
+      sequences: { dates: '0\n100\n200\n1000\n' },
+    });
+    assert.equal(two.res.status, 0, two.res.stderr);
+    assert.equal(two.outputs.flake_verdict, 'timeout');
+    assert.match(two.outputs.flake_summary, /the completed rounds agreed/);
+  });
+
+  it('a space-bearing filename survives the %q quoting as one operand', () => {
+    // The operands are re-parsed by `bash -c`: without `printf %q` a space
+    // splits the path into two operands, vitest finds no file, and every
+    // round fails identically — a bogus consistent-fail without one
+    // sample. (Round-4 R2-P3.)
+    const { res, outputs, log } = runGate({
+      layout: { 'scripts/tests/has space.test.js': '' },
+      list: 'scripts/tests/has space.test.js\n',
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(
+      log,
+      /has\\ space\.test\.js/,
+      'the logged command must carry the escaped, single operand',
+    );
+  });
+
   it('a missing recorded list degrades to the `error` verdict, exit 0', () => {
     const { res, outputs } = runGate({ layout: UNIT, list: null });
     assert.equal(res.status, 0, res.stderr);
@@ -1428,7 +1652,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       list: 'scripts/tests/a.test.js\n',
       env: { RUNNER_TEMP: undefined },
     });
-    assert.equal(res.status, 0, `the trap must convert the abort to exit 0: ${res.stderr}`);
+    assert.equal(
+      res.status,
+      0,
+      `the trap must convert the abort to exit 0: ${res.stderr}`,
+    );
     assert.equal(outputs.flake_verdict, 'error');
     assert.match(outputs.flake_summary, /aborted before reaching a verdict/);
   });
@@ -1503,7 +1731,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
             "FLAKE_LINE=''",
             "FLAKE_LINE_ZH=''",
             block[0],
-            'printf \'%s|%s\' "$QUAL" "$HEADLINE"',
+            'printf \'%s|%s|%s|%s\' "$QUAL" "$HEADLINE" "$QUAL_ZH" "$HEADLINE_ZH"',
           ].join('\n'),
         ],
         {
@@ -1519,6 +1747,10 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       assert.equal(res.status, 0, res.stderr);
       return res.stdout;
     };
+    // Both language pairs are asserted (round 4): the Chinese summary line
+    // is the ONE verdict a collapsed-details reader sees — if the _ZH
+    // assignments drop, a demoted PR renders `判定：✅ 通过` in Chinese
+    // while the English headline says ❌.
     for (const v of [
       '',
       'pass',
@@ -1529,14 +1761,14 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     ]) {
       assert.equal(
         drive(v),
-        '✅ passed|merge-ready (agent verdict)',
-        `'${v}' must not touch the headline`,
+        '✅ passed|merge-ready (agent verdict)|✅ 通过|可合入',
+        `'${v}' must not touch the headline in either language`,
       );
     }
     assert.equal(
       drive('flaky'),
-      '❌ not passed|non-deterministic tests (flakiness gate)',
-      'flaky must demote — deleting the flaky arm has to fail this test',
+      '❌ not passed|non-deterministic tests (flakiness gate)|❌ 不通过|测试结果不确定（抖动门）',
+      'flaky must demote in BOTH languages — deleting either pair has to fail this test',
     );
   });
 });
