@@ -23,7 +23,11 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { CAPTURE_SERVER_PREFIX, isNothingToKill } from './lib/tui-capture.js';
+import {
+  CAPTURE_SERVER_PREFIX,
+  isNothingToKill,
+  isSocketDirUnusable,
+} from './lib/tui-capture.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
@@ -489,6 +493,7 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
     // identical second attempt reaps what otherwise lives out the holder's
     // bounded three-hour window.
     let serverDead = false;
+    let dirUnusable = false;
     for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
       try {
         execFileSync('tmux', ['-L', name, 'kill-server'], {
@@ -511,15 +516,25 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
         });
         serverDead = true;
       } catch (e) {
-        serverDead = isNothingToKill(
-          String((e as { stderr?: unknown }).stderr ?? ''),
-        );
+        const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
+        // Same rule as capture-tui's own reap: a client-side refusal
+        // establishes nothing about the server, so it must not reach the
+        // unlink below — a live orphan sits behind that socket, and
+        // removing it makes the server unreachable forever while this
+        // sweep reports "Reaped".
+        serverDead = isNothingToKill(stderrText);
+        dirUnusable = isSocketDirUnusable(stderrText);
       }
     }
     if (!serverDead) {
       failedAny = true;
       writeStderrLine(
-        `note: could not reap orphaned capture server ${name} ` +
+        `note: could not reap orphaned capture server ${name}` +
+          (dirUnusable
+            ? ' (tmux refused before reaching the socket directory — its ' +
+              'permissions or type, not the server)'
+            : '') +
+          ' ' +
           // WITH the base override: `-L` re-resolves the socket directory
           // from the invoking environment and does not fall back, so on
           // the very hosts where this note appears the bare command

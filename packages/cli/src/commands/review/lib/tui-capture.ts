@@ -40,14 +40,26 @@ export function isNothingToKill(stderr: string): boolean {
     // printed a false orphan WARNING (reproduced on 3.3a with a long
     // TMUX_TMPDIR).
     /file name too long/i.test(stderr) ||
-    // Directory-level refusals, probed verbatim on 3.4: tmux answers both
-    // to new-session AND kill-server, so a start that never created a
-    // socket printed a false orphan WARNING naming a server that cannot
-    // exist. A socket dir that is not 0700, and one that is not a
-    // directory at all.
-    /directory .* has unsafe permissions/i.test(stderr) ||
-    /is not a directory/i.test(stderr) ||
     /no such file or directory/i.test(stderr)
+  );
+}
+
+/** Whether a failed `kill-server` says the CLIENT could not reach the
+ * socket directory at all — `directory <dir> has unsafe permissions` (not
+ * 0700) and `<dir> is not a directory`, probed verbatim on 3.4.
+ *
+ * Deliberately NOT part of isNothingToKill, though both wordings also
+ * appear when there was never a server: they are refusals the client makes
+ * BEFORE looking, so they establish nothing about the server. Folding them
+ * in (an earlier revision of this PR did) made a live orphan read as
+ * reaped — the WARNING skipped, and the socket of a server still running
+ * unlinked under both candidate bases, which makes that server unreachable
+ * forever. A false WARNING is the cheaper wrong answer, so these get their
+ * own state: never reaped, always surfaced, and the socket left alone. */
+export function isSocketDirUnusable(stderr: string): boolean {
+  return (
+    /directory .* has unsafe permissions/i.test(stderr) ||
+    /is not a directory/i.test(stderr)
   );
 }
 
@@ -114,7 +126,13 @@ export function tmuxPadsWithCaptureN(versionLine: string): boolean | undefined {
   const major = Number(m[1]);
   const minor = Number(m[2]);
   if (major !== 3) return false;
-  return minor < 3;
+  // 3.1 is the floor, not 3.0: `capture-pane -N` does not exist before
+  // then (tmuxSupportsCaptureN says so, and the version gate refuses those
+  // hosts first), so answering "pads" for 3.0.x contradicted this
+  // function's own documented range. No shipped path reached the wrong
+  // value — but this is an exported predicate, and the next caller has no
+  // reason to re-derive the gate that protected it.
+  return minor >= 1 && minor < 3;
 }
 
 /** Whether a `tmux -V` line names a tmux whose `capture-pane` takes `-T`
@@ -171,6 +189,24 @@ export interface CaptureManifest {
   degradedBecause?: string;
   /** How long the run waited before capturing, and why it stopped waiting. */
   settledBy: 'until-match' | 'timeout' | 'fixed-delay';
+  /** Identity of the files this run actually wrote, so a LATER run can
+   * tell "the artifacts my manifest describes" from "whatever holds those
+   * names now". The signature on the manifest authenticates the manifest;
+   * it says nothing about the files beside it, and a genuine manifest was
+   * enough to authorize unlinking a file that had since replaced the
+   * .ans it named. `png` is null on an ans-only rung — the run wrote none. */
+  artifacts: {
+    ans: ArtifactId;
+    png: ArtifactId | null;
+  };
+}
+
+/** A file's identity as this command checks it: the same triple `changed()`
+ * compares, recorded so it survives into the next run. */
+export interface ArtifactId {
+  ino: number;
+  size: number;
+  mtimeMs: number;
 }
 
 /**

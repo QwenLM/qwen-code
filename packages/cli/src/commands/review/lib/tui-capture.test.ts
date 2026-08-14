@@ -8,12 +8,55 @@ import { describe, expect, it } from 'vitest';
 import {
   captureServerName,
   freezePlan,
+  isNothingToKill,
+  isSocketDirUnusable,
   tmuxPlan,
   tmuxSupportsCaptureN,
   tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
   validGeometry,
 } from './tui-capture.js';
+
+describe('kill-server stderr classification', () => {
+  // The two predicates answer DIFFERENT questions, and conflating them
+  // unlinks live servers: "nothing to kill" authorizes removing the socket,
+  // so it may only contain wordings that establish there is no server.
+  const nothingToKill = [
+    'no server running on /tmp/tmux-501/qwen-review-capture-1-a',
+    'error connecting to /tmp/x (No such file or directory)',
+    "can't create directory /tmp/tmux-501: Permission denied",
+    "couldn't create directory /tmp/tmux-501 (Permission denied)",
+    'error connecting to /very/long/... (File name too long)',
+  ];
+  for (const line of nothingToKill) {
+    it(`treats as nothing to kill: ${line.slice(0, 40)}`, () => {
+      expect(isNothingToKill(line)).toBe(true);
+      expect(isSocketDirUnusable(line)).toBe(false);
+    });
+  }
+
+  // Client-side refusals: tmux never looked at the server. An earlier
+  // revision of this PR folded these into isNothingToKill on the strength
+  // of "they also appear when no server was ever created" — which is true
+  // and beside the point: a LIVE server behind such a socket then read as
+  // reaped, the WARNING was skipped, and the socket was unlinked under
+  // both bases, making that server unreachable forever.
+  const dirUnusable = [
+    'directory /tmp/tmux-501 has unsafe permissions',
+    '/tmp/tmux-501 is not a directory',
+  ];
+  for (const line of dirUnusable) {
+    it(`never authorizes an unlink: ${line.slice(0, 40)}`, () => {
+      expect(isSocketDirUnusable(line)).toBe(true);
+      expect(isNothingToKill(line)).toBe(false);
+    });
+  }
+
+  it('answers neither for an unrecognized failure', () => {
+    expect(isNothingToKill('server exited unexpectedly')).toBe(false);
+    expect(isSocketDirUnusable('server exited unexpectedly')).toBe(false);
+  });
+});
 
 describe('captureServerName', () => {
   it('scopes by pid and nonce so concurrent reviews cannot collide', () => {
@@ -248,6 +291,12 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(tmuxPlan(opts).capture).toContain('-N');
     expect(tmuxPadsWithCaptureN('tmux 3.2a')).toBe(true);
     expect(tmuxPadsWithCaptureN('tmux 3.1')).toBe(true);
+    // The documented range is exactly 3.1-3.2.x. 3.0.x answered true,
+    // contradicting the sibling predicate (there is no `capture-pane -N`
+    // before 3.1) and the version gate that refuses those hosts first.
+    for (const v of ['tmux 3.0', 'tmux 3.0a', 'tmux 3.0b']) {
+      expect(tmuxPadsWithCaptureN(v)).toBe(false);
+    }
     expect(tmuxPadsWithCaptureN('tmux 3.3a')).toBe(false);
     expect(tmuxPadsWithCaptureN('tmux 3.4')).toBe(false);
     expect(tmuxPadsWithCaptureN('tmux 4.0')).toBe(false);

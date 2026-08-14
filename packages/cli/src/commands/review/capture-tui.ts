@@ -51,7 +51,7 @@ import {
   fstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   rmSync,
   lstatSync,
   statSync,
@@ -76,7 +76,9 @@ import {
   tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
   isNothingToKill,
+  isSocketDirUnusable,
   validGeometry,
+  type ArtifactId,
   type CaptureManifest,
 } from './lib/tui-capture.js';
 
@@ -285,6 +287,41 @@ let brokenPipeGuarded = false;
  * successful capture as a failed command. */
 let artifactsComplete = false;
 
+/** The host conditions that must not be reported as a bad `--out`. This
+ * block wraps the mkdir, the write probe and the clear-phase removals, and
+ * its refusal reason is machine-read: attributing a full disk or an
+ * exhausted fd table to the caller's argument sends an agent to fix
+ * something that is fine. Exported so each arm is pinned directly — every
+ * one of them but EMFILE needs a fault injector to reach through the real
+ * syscalls, which left three of the four asserted nowhere. */
+export function hostStateFor(code: string | undefined): string | null {
+  switch (code) {
+    case 'EMFILE':
+    case 'ENFILE':
+      return 'this process is out of file descriptors';
+    case 'ENOSPC':
+      return 'the filesystem is full';
+    case 'EDQUOT':
+      return "this user's disk quota is exhausted";
+    case 'EROFS':
+      return 'the filesystem is read-only';
+    default:
+      return null;
+  }
+}
+
+/** The identity triple, and the comparison a later run makes against it.
+ * `changed()` answers "did THIS run touch it"; this answers "is this the
+ * file some PREVIOUS run recorded", which is what makes a manifest's
+ * authority stop at the artifacts it actually produced. */
+export function idOf(st: {
+  size: number;
+  mtimeMs: number;
+  ino: number;
+}): ArtifactId {
+  return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
+}
+
 /** Thrown when an artifact path was claimed by something else DURING the
  * capture window. Distinct from a write failure because the cleanup must
  * behave differently: the occupant is not ours to remove. */
@@ -409,6 +446,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       return { existed: false, size: 0, mtimeMs: 0, ino: 0 };
     }
+  };
+  /** Whether the file at `path` right now is the one a previous run
+   * recorded in its manifest. Absent, replaced, or recorded by an older
+   * manifest that carried no identity at all: all "not the file that
+   * manifest describes", and none of them is permission to delete. */
+  const sameFile = (recorded: unknown, path: string): boolean => {
+    if (recorded === null || typeof recorded !== 'object') return false;
+    const r = recorded as { ino?: unknown; size?: unknown; mtimeMs?: unknown };
+    const st = stampOf(path);
+    return (
+      st.existed &&
+      st.ino === r.ino &&
+      st.size === r.size &&
+      st.mtimeMs === r.mtimeMs
+    );
   };
   const changed = (path: string, stamp: Stamp): boolean => {
     // Never taken: nothing here is ours to credit or remove.
@@ -572,7 +624,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // `FATAL ERROR: Reached heap limit` — and lstat already has the size,
       // so the cap costs nothing. Too big to be ours: treat as unverified.
       if (st.size > MAX_MANIFEST_BYTES) throw new Error('too large');
-      const m = JSON.parse(readFileSync(manifestFd, 'utf8')) as {
+      // Read a BOUNDED number of bytes, not "to EOF": fstat measured the
+      // file once, and readFileSync then reads to the LIVE end of the
+      // pinned inode — an appender writing through its own descriptor
+      // defeats the cap and reproduces the heap-limit death the cap was
+      // measured against. The cap+1 read also makes "it grew past the cap
+      // between the fstat and here" observable rather than silent.
+      const buf = Buffer.allocUnsafe(MAX_MANIFEST_BYTES + 1);
+      const read = readSync(manifestFd, buf, 0, buf.length, 0);
+      if (read > MAX_MANIFEST_BYTES) throw new Error('too large');
+      const m = JSON.parse(buf.subarray(0, read).toString('utf8')) as {
         evidence?: unknown;
         pngPath?: unknown;
         ansPath?: unknown;
@@ -617,6 +678,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // a foreign <out>.png on an ans-only rung (probe-reproduced),
       // contradicting this guard's own invariant.
       manifestHadPng = shaped && m.evidence === 'png';
+      // ...and the FILES have to be the ones that manifest describes. The
+      // signature authenticates the manifest; the files beside it are a
+      // separate question, and a genuine previous manifest was enough to
+      // authorize unlinking whatever had since taken the .ans name. A
+      // mismatch is simply not ours: the clear is skipped and the
+      // collision gate refuses, which is the fail-closed direction.
+      const ids = (m as { artifacts?: unknown }).artifacts as
+        | { ans?: unknown; png?: unknown }
+        | undefined;
+      if (shaped && !sameFile(ids?.ans, ansPath)) shaped = false;
+      if (manifestHadPng && !sameFile(ids?.png, pngPath)) {
+        manifestHadPng = false;
+      }
     } catch {
       // ANY read failure means the capture signature could not be verified —
       // including fd exhaustion (EMFILE/ENFILE), which is transient under
@@ -710,17 +784,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // exhaustion and a full disk to `--out` — telling an agent consumer to
     // fix an argument that is fine while the host is the thing that is not.
     // The refusal reason is machine-read, so the misattribution propagates.
-    const code = (e as NodeJS.ErrnoException).code;
-    const hostState =
-      code === 'EMFILE' || code === 'ENFILE'
-        ? 'this process is out of file descriptors'
-        : code === 'ENOSPC'
-          ? 'the filesystem is full'
-          : code === 'EDQUOT'
-            ? "this user's disk quota is exhausted"
-            : code === 'EROFS'
-              ? 'the filesystem is read-only'
-              : null;
+    const hostState = hostStateFor((e as NodeJS.ErrnoException).code);
     refuse(
       hostState
         ? `--out could not be prepared — ${hostState}, not a problem with ` +
@@ -1064,6 +1128,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // named shape, and a second attempt reaps it (measured).
     let serverDead = false;
     let killSpawnFailed = false;
+    let killDirUnusable = false;
     for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
       // Back-to-back, the second attempt was a copy of the first: under fd
       // exhaustion — the condition the comment above names, and the one
@@ -1100,9 +1165,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         // socket existed produces (measured with a mode-0555 TMUX_TMPDIR:
         // both attempts answered `couldn't create directory …` and the
         // one-wording test printed a false orphan WARNING).
-        serverDead = isNothingToKill(
-          String((e as { stderr?: unknown }).stderr ?? ''),
-        );
+        const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
+        serverDead = isNothingToKill(stderrText);
+        // ...but NOT for a refusal the client made before it looked. Those
+        // two wordings were briefly folded into isNothingToKill, which made
+        // a LIVE server read as reaped: no WARNING, exit 0, and its socket
+        // unlinked under both bases — unreachable forever (probe-verified
+        // by making the socket dir non-0700 after the start).
+        if (isSocketDirUnusable(stderrText)) killDirUnusable = true;
       }
     }
     if (!serverDead) {
@@ -1120,7 +1190,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           killSpawnFailed
             ? ' (this process could not spawn tmux at all — fd exhaustion, ' +
               'not a wedged server)'
-            : ''
+            : killDirUnusable
+              ? ' (tmux refused before reaching the socket directory — its ' +
+                'permissions or type, not the server)'
+              : ''
         }; the private tmux server ${server} may still be running ` +
           `(tmux -L ${server} kill-server to reap it by hand).`,
       );
@@ -1594,6 +1667,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     ansPath,
     pngPath: png,
     evidence: png ? 'png' : 'ans-only',
+    // Stamped AFTER the writes: this is what a later run compares against
+    // before it dares unlink anything at these names.
+    artifacts: {
+      ans: idOf(stampOf(ansPath)),
+      png: png ? idOf(stampOf(pngPath)) : null,
+    },
     ...(degradedBecause ? { degradedBecause } : {}),
     settledBy,
   };

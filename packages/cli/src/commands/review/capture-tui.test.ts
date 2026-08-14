@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import {
   captureTuiCommand,
   freezeRender,
+  hostStateFor,
   MATCH_BUDGET_MS,
   holderInit,
   probeBudget,
@@ -118,7 +119,31 @@ function staleManifest(outBase: string, evidence = 'png'): string {
     pngPath: evidence === 'png' ? `${outBase}.png` : null,
     evidence,
     settledBy: 'fixed-delay',
+    // The identities of the files seeded beside it — a manifest only has
+    // authority over the artifacts it actually produced, so a fixture that
+    // omits these is a manifest describing files that are not there.
+    artifacts: {
+      ans: idOfPath(`${outBase}.ans`),
+      png: evidence === 'png' ? idOfPath(`${outBase}.png`) : null,
+    },
   });
+}
+
+/** Identity of a seeded fixture file, as the command records its own. A
+ * fixture that seeds no file at that name gets an identity nothing can
+ * match, which is the honest reading: the manifest describes an artifact
+ * that is not there, so it has no authority over that name. */
+function idOfPath(path: string): {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+} {
+  try {
+    const st = statSync(path);
+    return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
+  } catch {
+    return { ino: -1, size: -1, mtimeMs: -1 };
+  }
 }
 
 // `<out>.holder-ready` is no longer the sentinel — it lives per-pid under
@@ -130,6 +155,29 @@ function leakedSentinels(): string[] {
     f.startsWith(`qwen-capture-ready-${process.pid}-`),
   );
 }
+
+describe('hostStateFor', () => {
+  // Three of these four arms were asserted nowhere: reaching them through
+  // the real syscalls needs a fault injector, so deleting any one shipped
+  // green while the refusal blamed the caller's --out for the host.
+  it.each([
+    ['EMFILE', 'out of file descriptors'],
+    ['ENFILE', 'out of file descriptors'],
+    ['ENOSPC', 'filesystem is full'],
+    ['EDQUOT', 'disk quota is exhausted'],
+    ['EROFS', 'filesystem is read-only'],
+  ])('names the host state for %s', (code, expected) => {
+    expect(hostStateFor(code)).toContain(expected);
+  });
+
+  it('says nothing for a code that IS about the argument', () => {
+    // ENOENT/EACCES/EISDIR are answers about --out itself, and must keep
+    // the '--out is not writable' wording rather than blaming the host.
+    for (const code of ['ENOENT', 'EACCES', 'EISDIR', undefined]) {
+      expect(hostStateFor(code)).toBeNull();
+    }
+  });
+});
 
 describe('capture-tui without tmux (probe seam)', () => {
   const realTmux = probes.tmux;
@@ -208,7 +256,7 @@ describe('capture-tui without tmux (probe seam)', () => {
       process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
       const realTmp = process.env['TMPDIR'];
       process.env['TMPDIR'] = join(dir, 'no-such-temp-dir');
-      const started = Date.now();
+      const started = performance.now();
       try {
         const { stderr } = await withStdio(() =>
           runCaptureTui({
@@ -228,7 +276,7 @@ describe('capture-tui without tmux (probe seam)', () => {
         expect(process.exitCode).toBe(3);
         expect(stderr).toContain('temporary directory is not usable');
         expect(stderr).toContain('TMPDIR');
-        expect(Date.now() - started).toBeLessThan(10_000);
+        expect(performance.now() - started).toBeLessThan(10_000);
         // Nothing started...
         const calls = existsSync(callLog) ? readFileSync(callLog, 'utf8') : '';
         expect(calls).not.toContain('new-session');
@@ -1562,6 +1610,56 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } as never);
   }
 
+  it('refuses an OVERSIZE <out>.json without reading it into memory', async () => {
+    // The cap exists because a 479MB dense JSON at this path killed the
+    // process on the heap limit before any refusal could print. fstat
+    // measured the file, but the read then went to the LIVE end of the
+    // pinned inode; the read is bounded now, so a file that is already
+    // over the cap — the same shape without a racing appender — is
+    // unverifiable, and unverifiable is never permission to delete.
+    writeFileSync(join(dir, 'cap.ans'), 'user file');
+    writeFileSync(join(dir, 'cap.png'), 'user file');
+    writeFileSync(join(dir, 'cap.json'), 'x'.repeat(1024 * 1024 + 10));
+    const { stderr } = await withStdio(() => run());
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('collides with a file this capture did not');
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('user file');
+    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
+  });
+
+  it('a GENUINE manifest does not authorize clearing a REPLACED artifact', async () => {
+    // The signature authenticates the manifest, not the files beside it: a
+    // real previous run's manifest was enough to unlink whatever now holds
+    // the .ans name — the user's own file, put there after that run. The
+    // manifest records what it actually wrote, so a replaced artifact is
+    // simply not the one it describes.
+    writeFileSync(join(dir, 'cap.png'), 'old run');
+    writeFileSync(join(dir, 'cap.ans'), 'old run');
+    const genuine = staleManifest(join(dir, 'cap'));
+    // ...and NOW the .ans is replaced by something the manifest never saw.
+    writeFileSync(join(dir, 'cap.ans'), 'a user file that took the name');
+    writeFileSync(join(dir, 'cap.json'), genuine);
+    const { stderr } = await withStdio(() =>
+      runCaptureTui({
+        command: 'printf hi',
+        cwd: dir,
+        cols: 80,
+        rows: 24,
+        settleMs: 0,
+        until: undefined,
+        keys: undefined,
+        out: join(dir, 'cap'),
+        timeoutMs: 1000,
+      } as never),
+    );
+    expect(process.exitCode).toBe(3);
+    expect(stderr).toContain('collides with a file this capture did not');
+    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
+      'a user file that took the name',
+    );
+    expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+  });
+
   it('refuses a FIFO at <out>.json instead of hanging on it', async () => {
     // The manifest checks and the read used to resolve the path twice, so a
     // racer could swap a verified regular file for a FIFO and hang the
@@ -1569,7 +1667,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // interrupt it. One descriptor decides both now, opened non-blocking.
     // A FIFO standing there from the start is the same shape without the
     // race, and it must not stall the run.
-    const started = Date.now();
+    const started = performance.now();
     const { stderr } = await withStdio(() =>
       run({
         command: `mkfifo cap.json 2>/dev/null || mknod cap.json p; printf 'MARK\\n'; sleep 20`,
@@ -1577,7 +1675,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       }),
     );
     expect(process.exitCode).toBe(3);
-    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(performance.now() - started).toBeLessThan(30_000);
     expect(stderr).toContain('claimed during the capture window');
     // Not ours, so still there.
     expect(existsSync(join(dir, 'cap.json'))).toBe(true);
@@ -1711,6 +1809,14 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
         ansPath: join(dir, 'cap.ans'),
         pngPath: join(dir, 'cap.png'),
         settledBy: 'fixed-delay',
+        // A genuine ans-only run records `png: null`; this fixture's whole
+        // point is a manifest that is internally inconsistent while still
+        // authentic, so it names both — and the .ans identity has to match
+        // or the clear phase never gets far enough to ask about the png.
+        artifacts: {
+          ans: idOfPath(join(dir, 'cap.ans')),
+          png: idOfPath(join(dir, 'cap.png')),
+        },
       }),
     );
     const { stderr } = await withStdio(() => run());
@@ -3555,29 +3661,34 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // session dies with the server. The detached arm is the limit: it
       // setsids into its own session, its parent is init before the reap
       // even runs, and nothing portable reaches it.
-      // Scoped to THIS run by a pid-bearing tag carried in the child's own
-      // argv. It rides as a second, trivial command — `sleep N; : <tag>` —
-      // for two reasons: as an argument `sleep 42 <tag>` is not a valid
-      // call, and with a SINGLE command sh execs it and the argv (tag and
-      // all) is replaced by the sleep's own, leaving nothing to match. Keyed
-      // to a bare `sleep 41`, a concurrent run of this suite on a shared
-      // host satisfied the match and the pkill in the finally reached into
-      // other runs; every other shared-host resource in this file already
-      // carries the pid.
+      // The tag has to ride on the LONG-LIVED process itself. Two earlier
+      // shapes did not: a bare `sleep 41` matched any concurrent run of
+      // this suite on a shared host (and its pkill reached into them), and
+      // `sh -c 'sleep N; : <tag>'` tagged only the WRAPPER — sh forks an
+      // untagged sleep and waits, so pgrep found the wrapper, pkill killed
+      // it, and the sleep survived reparented to init: an orphan per run,
+      // from the test that exists to pin orphans. A per-run symlink to the
+      // real sleep puts the tag in argv[0] of the process that actually
+      // lives.
       const tag = (arm: string): string =>
         `capture-tui-orphan-${process.pid}-${arm}`;
+      const sleeper = (arm: string): string => {
+        const link = join(dir, tag(arm));
+        symlinkSync('/bin/sleep', link);
+        return link;
+      };
       const arms: Array<[string, string, boolean]> = [
         // A child in the pane's session: dies with the server. The guarantee.
         [
           'attached',
-          `sh -c 'sleep 41; : ${tag('attached')}' & printf 'MARK\\n'; sleep 20`,
+          `${sleeper('attached')} 41 & printf 'MARK\\n'; sleep 20`,
           false,
         ],
         // setsid'd into its own session, parent already init before the reap
         // runs: nothing portable reaches it. The documented limit.
         [
           'detached',
-          `node -e "require('child_process').spawn('sh',['-c','sleep 42; : ${tag('detached')}'],{detached:true,stdio:'ignore'}).unref()"; printf 'MARK\\n'; sleep 20`,
+          `node -e "require('child_process').spawn('${sleeper('detached')}',['42'],{detached:true,stdio:'ignore'}).unref()"; printf 'MARK\\n'; sleep 20`,
           true,
         ],
       ];

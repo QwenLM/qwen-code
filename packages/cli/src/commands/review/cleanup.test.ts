@@ -415,10 +415,20 @@ describe('runCleanup', () => {
         mocks.rmSync.mockImplementation(() => {
           throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
         });
-        expect(() => runCleanup('local')).not.toThrow();
-        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
-          `Reaped orphaned capture server: ${orphan}`,
-        );
+        try {
+          expect(() => runCleanup('local')).not.toThrow();
+          expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+            `Reaped orphaned capture server: ${orphan}`,
+          );
+        } finally {
+          // RESET, not clear: the suite's beforeEach uses
+          // vi.clearAllMocks(), which drops call history and keeps
+          // implementations — so without this the throwing rmSync leaks
+          // into every later test in this file, and the six orphan-reap
+          // tests after it would silently exercise this catch instead of
+          // the success path they present themselves as pinning.
+          mocks.rmSync.mockReset();
+        }
       });
 
       it('leaves a socket alone when the pid probe answers EPERM', () => {
