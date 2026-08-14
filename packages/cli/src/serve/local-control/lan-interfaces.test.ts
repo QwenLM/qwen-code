@@ -51,4 +51,21 @@ describe('listLanCandidates', () => {
       { interfaceName: 'wlan0', address: '10.0.0.10' },
     ]);
   });
+
+  it('keeps physical LAN bridges and only rejects virtual bridge shapes', () => {
+    // `br0` (libvirt bridged-LAN host) and Windows "Network Bridge" are
+    // physical bridges holding the machine's real LAN address; Docker's
+    // `br-<hex>` and macOS `bridge<N>` are the virtual shapes to reject.
+    expect(
+      listLanCandidates({
+        br0: [ipv4('192.168.2.50')],
+        'Network Bridge': [ipv4('192.168.4.50')],
+        'br-123abc': [ipv4('172.18.0.1')],
+        bridge0: [ipv4('169.254.1.1')],
+      }),
+    ).toEqual([
+      { interfaceName: 'Network Bridge', address: '192.168.4.50' },
+      { interfaceName: 'br0', address: '192.168.2.50' },
+    ]);
+  });
 });

@@ -34,9 +34,19 @@ async function withUiData(status: LocalControlStatus) {
       default: typeof import('qrcode-terminal');
     };
     qrcode.setErrorLevel('Q');
-    qrcode.generate(status.url, { small: true }, (code) => {
-      qrText = code.trimEnd();
-    });
+    // QR rendering is best-effort and must never fail the request. The pairing
+    // URL is caller-influenced (`target` deep-links), so an over-capacity URL
+    // can exceed the QR encoder's limit; if that threw, enable/status would 500
+    // while the LAN listener is already live and stays live — a wedged card
+    // with no way to disable. The Web Shell still shows the raw URL text, so
+    // pairing remains possible without the QR block.
+    try {
+      qrcode.generate(status.url, { small: true }, (code) => {
+        qrText = code.trimEnd();
+      });
+    } catch {
+      qrText = undefined;
+    }
   }
   return { ...status, qrText, interfaces: listLanCandidates() };
 }

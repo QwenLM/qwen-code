@@ -111,4 +111,28 @@ describe('Local Control routes', () => {
     expect(response.status).toBe(400);
     expect(response.body.code).toBe('invalid_local_control_target');
   });
+
+  it('keeps serving status when the pairing URL exceeds the QR capacity', async () => {
+    // The pairing URL is caller-influenced (`target` deep-links) and can grow
+    // past the QR encoder's limit. The QR block is best-effort: the request
+    // must stay 200 with the raw URL intact instead of 500ing for as long as
+    // Local Control is active (which would wedge the card with no way to
+    // disable).
+    const oversizedUrl = `http://192.168.1.10:4170/?t=${'a'.repeat(2000)}`;
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: true, url: oversizedUrl })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).get('/workspace/local-control');
+
+    expect(response.status).toBe(200);
+    expect(response.body.active).toBe(true);
+    expect(response.body.url).toBe(oversizedUrl);
+    expect(response.body.qrText).toBeUndefined();
+  });
 });
