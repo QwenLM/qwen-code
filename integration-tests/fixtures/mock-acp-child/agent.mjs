@@ -24,6 +24,11 @@ import {
   PROTOCOL_VERSION,
   RequestError,
 } from '@agentclientprotocol/sdk';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import { Writable, Readable } from 'node:stream';
 
 // Protect the stdout NDJSON pipe — any console method that writes to
@@ -40,6 +45,14 @@ const delayMs = parseInt(process.env.MOCK_ACP_PROMPT_DELAY_MS || '100', 10);
 const emitChunks = parseInt(process.env.MOCK_ACP_EMIT_CHUNKS || '3', 10);
 let sessionCounter = 0;
 
+// Mirror the real child (acpAgent.ts): `qwen serve` requires the guard ack
+// in the initialize response, and the marker is consumed + deleted before
+// anything else can inherit it.
+const externalToolGuardMarker = process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+const externalToolGuardRequired =
+  externalToolGuardMarker === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
+
 new AgentSideConnection(
   (connection) => ({
     async initialize() {
@@ -48,6 +61,14 @@ new AgentSideConnection(
         agentInfo: { name: 'mock-acp', version: '0.0.1' },
         authMethods: [],
         agentCapabilities: {},
+        ...(externalToolGuardRequired
+          ? {
+              _meta: {
+                [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+                  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+              },
+            }
+          : {}),
       };
     },
 
