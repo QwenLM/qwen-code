@@ -163,6 +163,14 @@ env:
   # tripping engages the brake.
   # TUNABLE WITHOUT A CODE CHANGE like the scan budgets above; a malformed
   # value falls back to its default at the read site.
+  # Staged-rollout switch for the verification gate's deny-by-default
+  # footprint check: a round touching AREAS (declared workspace, else
+  # top-level dir, else root file) outside the PR's own footprint is
+  # surfaced as a gate advisory by default; setting the repo variable to
+  # 'reject' turns expansions into a retryable rejection once advisory
+  # observation shows an acceptable false-positive rate. The class gate's
+  # enumerated protections reject regardless of this switch.
+  FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
   GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
   GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'
   # Non-convergence handoff: once the growth brake has been over budget for
@@ -4993,8 +5001,8 @@ jobs:
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
-                | select(((.body // "") | contains("win=" + $key + " -->"))
-                    or ($key == "none" and (((.body // "") | contains("win=")) | not)))
+                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                    | ($wins | length) > 0 and any($wins[]; . == $key))
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
@@ -5950,8 +5958,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and any($wins[]; . == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
               if [[ -z "${WIN_HEADS}" ]]; then
@@ -6423,8 +6431,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and any($wins[]; . == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do

@@ -606,6 +606,61 @@ not_merge_freight() {
     git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null || printf '%s\0' "${f}"
   done
 }
+# --- Deny-by-default footprint areas ----------------------------------------
+# The class gate above protects an ENUMERATED surface, and enumeration is
+# never complete (a denylist is not a boundary). This check inverts the
+# default: every file a round touches is mapped to an AREA — its declared
+# workspace, else its top-level directory, else the root file itself — and
+# any area outside the PR's own footprint is surfaced. Consequence is
+# staged via QWEN_AUTOFIX_FOOTPRINT_ENFORCE: 'advisory' (default) writes a
+# gate-authored report section; 'reject' turns expansions into a retryable
+# rejection. Merge freight is excluded from the round side; deleted
+# workspaces degrade to their top-level segment (conservative: mismatch
+# surfaces rather than hides).
+list_areas() {
+  local wss f matched w
+  wss="$(tr '\0' '\n' < "${1}" | bash "${RUNNER_TEMP}/resolve-owning-packages.sh" 2> /dev/null || true)"
+  while IFS= read -r -d '' f; do
+    [[ -n "${f}" ]] || continue
+    matched=''
+    while IFS= read -r w; do
+      [[ -n "${w}" && "${f}" == "${w}"/* ]] && { matched="${w}"; break; }
+    done <<< "${wss}"
+    if [[ -n "${matched}" ]]; then
+      echo "${matched}"
+    elif [[ "${f}" == */* ]]; then
+      echo "${f%%/*}"
+    else
+      echo "/${f}"
+    fi
+  done < "${1}" | sort -u
+}
+FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"
+[[ "${FOOTPRINT_ENFORCE}" == 'reject' ]] || FOOTPRINT_ENFORCE='advisory'
+ROUND_FILES_Z="$(mktemp)"
+PR_FILES_Z="$(mktemp)"
+git diff --name-only -z --no-renames "${ROUND_RANGE}" 2> /dev/null | not_merge_freight > "${ROUND_FILES_Z}" || true
+git diff --name-only -z --no-renames "${PR_RANGE}" 2> /dev/null > "${PR_FILES_Z}" || true
+OUT_AREAS="$(comm -23 <(list_areas "${ROUND_FILES_Z}") <(list_areas "${PR_FILES_Z}"))" || OUT_AREAS=''
+rm -f "${ROUND_FILES_Z}" "${PR_FILES_Z}"
+if [[ -n "${OUT_AREAS}" ]]; then
+  if [[ "${FOOTPRINT_ENFORCE}" == 'reject' ]]; then
+    {
+      echo 'This round modified areas entirely outside the PR footprint:'
+      printf '%s\n' "${OUT_AREAS//[^A-Za-z0-9._\/ -]/?}"
+      echo 'Footprint enforcement is set to reject: revert these files, or escalate the feedback that requires them to a maintainer as an open question.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round expands into areas outside the PR footprint'
+  else
+    {
+      echo '🧭 **Gate advisory — this round modified areas outside the PR footprint** (machine-measured, not agent-authored):'
+      printf -- '- %s\n' "${OUT_AREAS//[^A-Za-z0-9._\/ -]/?}"
+      echo 'Review the expansion deliberately; the footprint gate is in advisory mode. · 本轮改动了 PR 足迹之外的区域（门自动测量，非 agent 文本），当前足迹门为 advisory 模式，请有意识地审阅该扩张。'
+    } >> "${WORKDIR}/gate-advisories.md"
+    echo "🧭 footprint expansion (advisory): $(tr '\n' ' ' <<< "${OUT_AREAS}")" | tee -a "${GATE_LOG}"
+  fi
+fi
+
 # Test-deletion advisory: deleting or shrinking tests is sometimes right
 # (the pinned behavior was wrong, or coverage is duplicated) and the agent
 # is required to justify it in its summary — but the SURFACING must not be
@@ -781,15 +836,18 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
     | ($ids | split("\n")
         | map(sub("^rc:"; "") | sub("\r$"; "")
           | select(test("^[0-9]+$")) | tonumber)) as $resolved
-    | def critical($c):
+    | def cr_attached($x):
+        (($x.pull_request_review_id // null) as $review
+          | $review != null
+          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+      def critical($c):
         (($c.body // "") | contains("**[Critical]**"))
         or (($c.in_reply_to_id // null) as $root
           | $root != null
           and any($comments[];
-            .id == $root and ((.body // "") | contains("**[Critical]**"))))
-        or (($c.pull_request_review_id // null) as $review
-          | $review != null
-          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")));
+            .id == $root
+            and (((.body // "") | contains("**[Critical]**")) or cr_attached(.))))
+        or cr_attached($c);
     any($comments[]; (.id as $id | $resolved | index($id) != null) and critical(.))' \
     "${WORKDIR}/rc.json" 2> /dev/null)" || BITE_ENFORCE='false'
   [[ "${BITE_ENFORCE}" == 'true' ]] || BITE_ENFORCE='false'

@@ -5358,6 +5358,23 @@ exit 1
       }
     };
     const K = '2026-07-29T03:00:00Z';
+    // Attribution is POSITIONAL over the comment's own scan-parsed eval
+    // markers: a neutralized marker QUOTED in a handoff excerpt carries the
+    // raw substring `win=<key> -->` but must not attribute the comment to
+    // the window (whole-body contains() did).
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-07-29T05:00:00Z',
+            body: `${PUSH_HEADLINE}\nquoted: <!\\-\\- autofix-eval ts=x acted=true round=9 win=${K} -->`,
+          },
+        ],
+        K,
+      ),
+    ).toBe('1');
     // A push RESETS the narrowing (the breaker stays cumulative — this
     // census feeds only the prompt): timeout, push, timeout → 1.
     expect(
@@ -9757,6 +9774,14 @@ exit 1
     git('add', '-A');
     git('commit', '-qm', 'pr', '--allow-empty');
     git('update-ref', 'refs/remotes/origin/feat', 'feat');
+    if (build.afterPr) {
+      git('checkout', '-q', 'main');
+      build.afterPr({ git, write, dir });
+      git('add', '-A');
+      git('commit', '-qm', 'main-advances', '--allow-empty');
+      git('update-ref', 'refs/remotes/origin/main', 'main');
+      git('checkout', '-q', 'feat');
+    }
     build.round({ git, write, dir });
     git('add', '-A');
     git('commit', '-qm', 'round', '--allow-empty');
@@ -9911,6 +9936,24 @@ exit 1
           write('x.yml', 'on: push\n');
           git('add', '-A');
         },
+      }),
+    ).toContain('REJECT:round expands into CI/verification machinery');
+    // Footprint content compares anchor at the MERGE BASE: main drifting a
+    // manifest's scripts after the branch point must not mint a grant.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('package.json', '{"scripts":{"lint":"eslint ."},"x":1}\n');
+          write('src/a.ts', 'a\n');
+        },
+        pr: ({ write }) => {
+          write('package.json', '{"scripts":{"lint":"eslint ."},"x":2}\n');
+          write('src/a.ts', 'b\n');
+        },
+        afterPr: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"biome ."},"x":1}\n'),
+        round: ({ write }) =>
+          write('package.json', '{"scripts":{"lint":"true"},"x":2}\n'),
       }),
     ).toContain('REJECT:round expands into CI/verification machinery');
     // The gate's transitive executable surface: repo scripts are a class,
@@ -10143,6 +10186,104 @@ exit 1
     expect(forged).not.toContain('`](x)');
   });
 
+  it('surfaces deny-by-default footprint expansions, rejecting only when enforcement says so', () => {
+    const block = reviewVerificationRunner.match(
+      /(list_areas\(\) \{[\s\S]*?footprint expansion \(advisory\)[^\n]*\n {2}fi\nfi)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const run = (build, { enforce = 'advisory' } = {}) => {
+      const { dir } = validityFixture(build);
+      const tools = mkdtempSync(join(tmpdir(), 'autofix-area-'));
+      writeFileSync(
+        join(tools, 'resolve-owning-packages.sh'),
+        'while read f; do case "$f" in packages/*/*) d="${f#packages/}"; echo "packages/${d%%/*}";; esac; done | sort -u\n',
+      );
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'cd "$1"',
+            'BRANCH=feat',
+            'WORKDIR="$2"',
+            'RUNNER_TEMP="$2"',
+            'GATE_LOG="$2/gate.log"',
+            ': > "$GATE_LOG"',
+            'ROUND_RANGE="origin/feat...feat"',
+            'PR_RANGE="origin/main...origin/feat"',
+            `FOOTPRINT_ENFORCE='${enforce}'`,
+            freightHelper(),
+            'reject_fix() { echo "REJECT:${1}"; exit 1; }',
+            block,
+            'echo SURVIVED',
+          ].join('\n'),
+          'bash',
+          dir,
+          tools,
+        ],
+        { encoding: 'utf8', env: isolatedGitEnv },
+      );
+      expect(res.error).toBeUndefined();
+      const advisoryPath = join(tools, 'gate-advisories.md');
+      const advisory = existsSync(advisoryPath)
+        ? readFileSync(advisoryPath, 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(tools, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, advisory };
+    };
+    const crossWorkspace = {
+      base: ({ write }) => {
+        write('packages/cli/src/a.ts', 'a\n');
+        write('packages/core/src/b.ts', 'b\n');
+      },
+      pr: ({ write }) => write('packages/cli/src/a.ts', 'a2\n'),
+      round: ({ write }) => write('packages/core/src/b.ts', 'b2\n'),
+    };
+    // Default: an out-of-footprint area is SURFACED, never rejected.
+    const advisory = run(crossWorkspace);
+    expect(advisory.out).toContain('SURVIVED');
+    expect(advisory.out).not.toContain('REJECT:');
+    expect(advisory.advisory).toContain('outside the PR footprint');
+    expect(advisory.advisory).toContain('packages/core');
+    // The repo variable stages the consequence up to rejection.
+    const rejected = run(crossWorkspace, { enforce: 'reject' });
+    expect(rejected.out).toContain(
+      'REJECT:round expands into areas outside the PR footprint',
+    );
+    // Inside the footprint (same workspace, or same top-level dir for
+    // unowned paths) nothing fires.
+    expect(
+      run({
+        base: ({ write }) => {
+          write('packages/cli/src/a.ts', 'a\n');
+          write('docs/x.md', 'x\n');
+        },
+        pr: ({ write }) => {
+          write('packages/cli/src/a.ts', 'a2\n');
+          write('docs/y.md', 'y\n');
+        },
+        round: ({ write }) => {
+          write('packages/cli/src/z.ts', 'z\n');
+          write('docs/z.md', 'z\n');
+        },
+      }).advisory,
+    ).toBe('');
+    // Root files are each their own area.
+    expect(
+      run({
+        base: ({ write }) => write('src/a.ts', 'a\n'),
+        pr: ({ write }) => write('src/a.ts', 'b\n'),
+        round: ({ write }) => write('README.md', 'r\n'),
+      }).advisory,
+    ).toContain('/README.md');
+    // A garbage enforcement value degrades to advisory, never reject.
+    const fuzz = run(crossWorkspace, { enforce: 'terminate' });
+    expect(fuzz.out).toContain('SURVIVED');
+    expect(fuzz.advisory).toContain('outside the PR footprint');
+  });
+
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
     const block = reviewVerificationRunner.match(
       /(# Bite check:[\s\S]*?)\nassert_verification_tree\necho "verified_head/,
@@ -10150,7 +10291,7 @@ exit 1
     expect(block).toBeTruthy();
     const run = (
       build,
-      { runnerExit, runnerScript, resolverLines, workdir },
+      { runnerExit, runnerScript, resolverLines, workdir, prelude = '' },
     ) => {
       const { dir, git } = validityFixture(build);
       const tools = mkdtempSync(join(tmpdir(), 'autofix-validity-tools-'));
@@ -10186,6 +10327,7 @@ exit 1
             ': > "$GATE_LOG"',
             'ROUND_RANGE="origin/feat...feat"',
             freightHelper(),
+            prelude,
             'BITE_RUNNER="$2/bite-runner"',
             'reject_fix() { echo "REJECT:${1}"; exit 1; }',
             block,
@@ -10204,6 +10346,10 @@ exit 1
       const advisory = existsSync(advisoryPath)
         ? readFileSync(advisoryPath, 'utf8')
         : '';
+      const rejectionPath = join(tools, 'gate-rejection.md');
+      const rejection = existsSync(rejectionPath)
+        ? readFileSync(rejectionPath, 'utf8')
+        : '';
       rmSync(dir, { recursive: true, force: true });
       rmSync(tools, { recursive: true, force: true });
       return {
@@ -10211,6 +10357,7 @@ exit 1
         status,
         head,
         advisory,
+        rejection,
       };
     };
     const srcAndTest = {
@@ -10475,6 +10622,62 @@ exit 1
     expect(coverageOnly.out).toContain('SURVIVED');
     expect(coverageOnly.out).not.toContain('REJECT:');
     expect(coverageOnly.advisory).toContain('test-only changes');
+
+    // Restore-failure crash contract: when the tree cannot come back to
+    // the branch, the gate crashes VERDICT-LESS — rejection document
+    // written, exit 1, and reject_fix (which would advance the watermark)
+    // never runs.
+    const crash = run(srcAndTest, {
+      runnerScript: [
+        '#!/usr/bin/env bash',
+        'git update-ref -d refs/heads/feat',
+        'exit 0',
+      ].join('\n'),
+      resolverLines: ['packages/cli'],
+      workdir: criticalClaim,
+    });
+    expect(crash.out).toContain(
+      'could not restore the verification tree after the bite check',
+    );
+    expect(crash.out).toContain('[spawn status=1]');
+    expect(crash.out).not.toContain('REJECT:');
+    expect(crash.rejection).toContain('could not restore');
+
+    // Append order: a shrink advisory (truncating write) followed by the
+    // bite advisory (append) must leave BOTH in the report file.
+    const advisoryBlock2 = reviewVerificationRunner.match(
+      /(TEST_PATHSPEC=\(':\(glob\)[\s\S]*?advisory written for the report' \| tee -a "\$\{GATE_LOG\}"\nfi)/,
+    )?.[1];
+    expect(advisoryBlock2).toBeTruthy();
+    const combined = run(
+      {
+        base: ({ write }) => {
+          write(
+            'packages/cli/package.json',
+            '{"name":"@fixture/cli","scripts":{"test":"vitest run"}}\n',
+          );
+          write('packages/cli/src/a.ts', 'a\n');
+          write('packages/cli/src/a.test.ts', 't\n');
+          write(
+            'packages/cli/src/big.test.ts',
+            `${Array.from({ length: 40 }, (_, i) => `b${i}`).join('\n')}\n`,
+          );
+        },
+        pr: ({ write }) => write('packages/cli/src/a.ts', 'b\n'),
+        round: ({ write, dir }) => {
+          write('packages/cli/src/a.ts', 'c\n');
+          write('packages/cli/src/a.test.ts', 't2\n');
+          rmSync(join(dir, 'packages/cli/src/big.test.ts'));
+        },
+      },
+      {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        prelude: advisoryBlock2,
+      },
+    );
+    expect(combined.advisory).toContain('test coverage shrank');
+    expect(combined.advisory).toContain('pass on the pre-round tree');
 
     // Contract pins: the rejection is non-retryable (a repair pass cannot
     // make a nonexistent defect reproduce), and the report step embeds the
@@ -11462,7 +11665,7 @@ exit 1
             return {
               user: { login: 'qwen-code-dev-bot' },
               created_at: `2026-01-01T00:${String(i).padStart(2, '0')}:00Z`,
-              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=z${win ? ` win=${win}` : ''} -->`,
+              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=1${win ? ` win=${win}` : ''} -->`,
             };
           }),
         ),
