@@ -1663,6 +1663,27 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'mcp_server_removed',
   'user_shell_command',
   'user_shell_result',
+  // Workspace-level fan-out (workspace service, git watcher, memory /
+  // agent CRUD, device-flow registry) reaches every session bus via
+  // `publishWorkspaceEvent` while idle. The `auth_device_flow_*` members
+  // mirror the closed `DeviceFlowEventEmission` union — audit that union
+  // when it grows.
+  'tool_toggled',
+  'workspace_initialized',
+  'mcp_server_restarted',
+  'mcp_server_restart_refused',
+  'settings_reloaded',
+  'trust_change_requested',
+  'memory_changed',
+  'agent_changed',
+  'git_status_changed',
+  'git_branch_changed',
+  'github_setup_completed',
+  'auth_device_flow_started',
+  'auth_device_flow_throttled',
+  'auth_device_flow_authorized',
+  'auth_device_flow_failed',
+  'auth_device_flow_cancelled',
 ]);
 
 /**

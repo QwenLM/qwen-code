@@ -4641,6 +4641,22 @@ describe('createAcpSessionBridge', () => {
     'approval_mode_changed',
     'model_switched',
     'prompt_cancelled',
+    'tool_toggled',
+    'workspace_initialized',
+    'mcp_server_restarted',
+    'mcp_server_restart_refused',
+    'settings_reloaded',
+    'trust_change_requested',
+    'memory_changed',
+    'agent_changed',
+    'git_status_changed',
+    'git_branch_changed',
+    'github_setup_completed',
+    'auth_device_flow_started',
+    'auth_device_flow_throttled',
+    'auth_device_flow_authorized',
+    'auth_device_flow_failed',
+    'auth_device_flow_cancelled',
   ] as const)(
     'keeps the turn error on refresh when %s bookkeeping lands after it',
     async (bookkeepingType) => {
@@ -4819,6 +4835,27 @@ describe('createAcpSessionBridge', () => {
         });
       } else if (bookkeepingType === 'session_cwd_changed') {
         await bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+      } else if (
+        bookkeepingType.startsWith('auth_device_flow_') ||
+        bookkeepingType === 'tool_toggled' ||
+        bookkeepingType === 'workspace_initialized' ||
+        bookkeepingType === 'mcp_server_restarted' ||
+        bookkeepingType === 'mcp_server_restart_refused' ||
+        bookkeepingType === 'settings_reloaded' ||
+        bookkeepingType === 'trust_change_requested' ||
+        bookkeepingType === 'memory_changed' ||
+        bookkeepingType === 'agent_changed' ||
+        bookkeepingType === 'git_status_changed' ||
+        bookkeepingType === 'git_branch_changed' ||
+        bookkeepingType === 'github_setup_completed'
+      ) {
+        // The workspace service, git watcher, memory / agent CRUD, and the
+        // device-flow registry publish these through the workspace fan-out,
+        // not a session-scoped bridge method.
+        bridge.publishWorkspaceEvent({
+          type: bookkeepingType,
+          data: { workspaceId: 'loop-bookkeeping-workspace' },
+        });
       } else {
         await bridge.addSessionArtifact(
           session.sessionId,
