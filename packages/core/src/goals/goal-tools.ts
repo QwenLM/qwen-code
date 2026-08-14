@@ -21,6 +21,7 @@ import {
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
+  type GoalRecord,
   type GoalSnapshotV2,
   type GoalTerminalProposal,
   type GoalTurnPermit,
@@ -61,6 +62,7 @@ class GetGoalInvocation extends BaseToolInvocation<
     params: GetGoalToolParams,
     private readonly runtime: GetGoalRuntime | undefined,
     private readonly permit: GoalTurnPermit | undefined,
+    private readonly lastGoal: GoalRecord | undefined,
   ) {
     super(params);
   }
@@ -71,11 +73,7 @@ class GetGoalInvocation extends BaseToolInvocation<
 
   async execute(signal: AbortSignal): Promise<GoalToolResult> {
     if (!this.runtime || !this.permit) {
-      const message = 'No active Goal is available for this turn.';
-      return {
-        llmContent: JSON.stringify({ active: false }),
-        returnDisplay: message,
-      };
+      return unpermittedGoalResult(this.lastGoal);
     }
 
     const view = await workerViewForPermit(this.runtime, this.permit, signal);
@@ -105,7 +103,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
+      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (status, turnCount, activeTimeMs, lastReason) of the session\'s most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
       Kind.Read,
       {
         type: 'object',
@@ -121,8 +119,60 @@ export class GetGoalTool extends BaseDeclarativeTool<
     const contextPermit = goalTurnContext.getStore();
     const permit = contextPermit ? structuredClone(contextPermit) : undefined;
     const runtime = permit ? this.config.getGoalRuntime() : undefined;
-    return new GetGoalInvocation(params, runtime, permit);
+    return new GetGoalInvocation(
+      params,
+      runtime,
+      permit,
+      permit ? undefined : this.lastGoal(),
+    );
   }
+
+  /**
+   * The session's most recent Goal, for a turn that holds no Goal permit.
+   *
+   * A Goal that reached a terminal status stops issuing permits, so every
+   * later `get_goal` answered `{ active: false }` — the run's own turn count,
+   * elapsed time and stop reason became unreadable at exactly the moment
+   * someone wanted them. The runtime still holds that record and reading it
+   * needs no permit, so report it. Scalars only: the objective and the
+   * evidence checkpoint stay behind the permit.
+   */
+  private lastGoal(): GoalRecord | undefined {
+    let runtime: GoalRuntime;
+    try {
+      runtime = this.config.getGoalRuntime();
+    } catch {
+      // A session with no reachable Goal persistence has no Goal to summarise.
+      return undefined;
+    }
+    if (typeof runtime?.getSnapshot !== 'function') return undefined;
+    return runtime.getSnapshot().goal ?? undefined;
+  }
+}
+
+function unpermittedGoalResult(lastGoal: GoalRecord | undefined) {
+  if (!lastGoal) {
+    return {
+      llmContent: JSON.stringify({ active: false }),
+      returnDisplay: 'No active Goal is available for this turn.',
+    };
+  }
+  return {
+    llmContent: JSON.stringify({
+      active: false,
+      lastGoal: {
+        goalId: lastGoal.goalId,
+        revision: lastGoal.revision,
+        status: lastGoal.status,
+        turnCount: lastGoal.turnCount,
+        activeTimeMs: lastGoal.activeTimeMs,
+        ...(lastGoal.lastReason === undefined
+          ? {}
+          : { lastReason: lastGoal.lastReason }),
+      },
+    }),
+    returnDisplay: `No Goal turn is permitted · last Goal ${lastGoal.status} after ${lastGoal.turnCount} turns`,
+  };
 }
 
 class UpdateGoalInvocation extends BaseToolInvocation<
