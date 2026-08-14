@@ -1284,11 +1284,13 @@ describe('createChannelWorkerManager', () => {
     // must strip too, or raw API clients couple to an internal stop-
     // capture input the SDK's DaemonChannelWorkerSnapshot does not
     // declare. The capture reads the group snapshots directly and must
-    // stay untouched (#8975).
+    // stay untouched (#8975). lastRequestedChannels (the dead-name
+    // computation's input, R9-6) strips alongside it.
     const leaked = workerSnapshot({
       channels: ['telegram'],
       requestedChannels: ['telegram'],
       lastConnectedChannels: ['telegram'],
+      lastRequestedChannels: ['telegram'],
     });
     const group = fakeGroup({
       snapshots: vi.fn(() => [leaked]),
@@ -1300,16 +1302,24 @@ describe('createChannelWorkerManager', () => {
     expect(test.manager.primarySnapshot()).not.toHaveProperty(
       'lastConnectedChannels',
     );
+    expect(test.manager.primarySnapshot()).not.toHaveProperty(
+      'lastRequestedChannels',
+    );
     expect(test.manager.snapshots()[0]).not.toHaveProperty(
       'lastConnectedChannels',
     );
+    expect(test.manager.snapshots()[0]).not.toHaveProperty(
+      'lastRequestedChannels',
+    );
     const reloaded = await test.manager.reload();
     expect(reloaded).not.toHaveProperty('lastConnectedChannels');
+    expect(reloaded).not.toHaveProperty('lastRequestedChannels');
     const reloadedWorkspace = await test.manager.reloadWorkspace(
       PRIMARY,
       'telegram',
     );
     expect(reloadedWorkspace).not.toHaveProperty('lastConnectedChannels');
+    expect(reloadedWorkspace).not.toHaveProperty('lastRequestedChannels');
     // The capture's input is intact.
     expect(group.snapshots()[0]).toHaveProperty('lastConnectedChannels', [
       'telegram',
@@ -1333,6 +1343,9 @@ describe('createChannelWorkerManager', () => {
         requestedChannels: undefined,
         adapters: undefined,
         lastConnectedChannels: ['telegram'],
+        // The ready-committed attempted set survives on the terminal
+        // snapshot for the dead-name computation (R9-6).
+        lastRequestedChannels: ['telegram'],
         error: 'Channel worker restart budget exhausted.',
       }),
     ]);
@@ -1365,6 +1378,7 @@ describe('createChannelWorkerManager', () => {
         channels: ['telegram'],
         requestedChannels: undefined,
         adapters: undefined,
+        lastRequestedChannels: ['telegram'],
         error: 'Channel worker restart budget exhausted.',
       }),
     ]);
@@ -1380,6 +1394,58 @@ describe('createChannelWorkerManager', () => {
     expect(group.reconcile).toHaveBeenCalledTimes(1);
   });
 
+  it('relaunches a never-connected channel on a terminal-failed mode-names worker (R9-6)', async () => {
+    // The dead-name computation must consume the FULL attempted set
+    // (lastRequestedChannels), not just the last ready's connected subset
+    // in `channels`: feishu's connect failed before the crash, so it is
+    // absent from `channels`. Without the attempted set feishu stays
+    // "committed" on the dead worker and its own start throws
+    // channel_runtime_owner_mismatch (assertCommittedOwner finds no
+    // owning worker) instead of relaunching — the channel is
+    // unrecoverable through its own start command (R9-6).
+    const group = fakeGroup({ isHealthy: vi.fn(() => false) });
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['telegram'],
+        requestedChannels: undefined,
+        adapters: undefined,
+        lastConnectedChannels: ['telegram'],
+        lastRequestedChannels: ['telegram', 'feishu'],
+        error: 'Channel worker restart budget exhausted.',
+      }),
+    ]);
+
+    // BOTH names are dead on the terminal worker — feishu included.
+    expect(test.manager.committedChannelNames()).toEqual([]);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'feishu', workspaceCwd: PRIMARY },
+      true,
+    );
+
+    expect(result).toMatchObject({ changed: true });
+    expect(test.resolveGroups).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['feishu'] },
+      'set',
+    );
+    expect(group.reconcile).toHaveBeenCalledTimes(1);
+
+    // The disable direction degrades to a no-op instead of the 409
+    // owner-mismatch: stopping a channel that is not running is a valid
+    // no-op, and the disable of a dead channel must not throw.
+    const disable = await test.manager.setChannelEnabled(
+      { name: 'feishu', workspaceCwd: PRIMARY },
+      false,
+    );
+    expect(disable).toMatchObject({ changed: false });
+  });
+
   it('records only the connected channels from a budget-exhausted mode-names worker (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
@@ -1389,16 +1455,20 @@ describe('createChannelWorkerManager', () => {
     });
     // Budget-exhausted TERMINAL snapshot: the supervisor drops
     // requestedChannels/adapters (an explicit start must not see the dead
-    // worker as enabled) but keeps lastConnectedChannels for this capture;
-    // `channels` is the last launch's attempted set. Intersecting with the
-    // attempted set would record a never-connected channel as explicitly
-    // stopped, skipping it on every later `--channel all` start (#8975).
+    // worker as enabled) but keeps lastConnectedChannels for this capture
+    // and lastRequestedChannels for the dead-name computation (R9-6);
+    // `channels` is the last ready's connected subset. Intersecting with
+    // the attempted set would record a never-connected channel as
+    // explicitly stopped, skipping it on every later `--channel all`
+    // start — the capture must ignore lastRequestedChannels and record
+    // only the connected set (#8975).
     vi.mocked(group.snapshots).mockReturnValue([
       workerSnapshot({
         state: 'failed',
-        channels: ['telegram', 'feishu'],
+        channels: ['telegram'],
         requestedChannels: undefined,
         lastConnectedChannels: ['telegram'],
+        lastRequestedChannels: ['telegram', 'feishu'],
         error: 'Channel worker restart budget exhausted.',
       }),
     ]);
@@ -1418,12 +1488,16 @@ describe('createChannelWorkerManager', () => {
     // and requestedChannels is gone — without the carried connected set
     // the capture would record NOTHING and lose the explicit
     // whole-selection stop entirely (every channel resurrects) (#8975).
+    // The ready-committed attempted set rides lastRequestedChannels for
+    // the dead-name computation (R9-6); the capture must still record
+    // exactly the connected set.
     vi.mocked(group.snapshots).mockReturnValue([
       workerSnapshot({
         state: 'failed',
         channels: ['all'],
         requestedChannels: undefined,
         lastConnectedChannels: ['telegram', 'feishu'],
+        lastRequestedChannels: ['telegram', 'feishu'],
         error: 'Channel worker restart budget exhausted.',
       }),
     ]);
@@ -1443,14 +1517,18 @@ describe('createChannelWorkerManager', () => {
       names: ['telegram', 'feishu'],
     });
     // Budget exhausted before any ready report ever committed: nothing
-    // actually connected, so there is no carried set and nothing to
-    // record — the attempted set must not be pinned as stopped (#8975).
+    // actually connected, so there is no carried connected set and
+    // nothing to record — the attempted set must not be pinned as
+    // stopped. The attempted set IS carried on lastRequestedChannels
+    // (launch derives it from the selection) for the dead-name
+    // computation (R9-6); the capture must ignore it here (#8975).
     vi.mocked(group.snapshots).mockReturnValue([
       workerSnapshot({
         state: 'failed',
         channels: ['telegram', 'feishu'],
         requestedChannels: undefined,
         lastConnectedChannels: undefined,
+        lastRequestedChannels: ['telegram', 'feishu'],
         error: 'Channel worker restart budget exhausted.',
       }),
     ]);

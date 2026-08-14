@@ -264,6 +264,7 @@ export function createChannelManagementService(
         (worker) =>
           worker.adapters?.some((adapter) => adapter.name === name) ||
           worker.requestedChannels?.includes(name) ||
+          worker.lastRequestedChannels?.includes(name) ||
           worker.channels.includes(name),
       );
     return matches;
@@ -312,6 +313,24 @@ export function createChannelManagementService(
       );
   };
 
+  // A crash-dead worker in this workspace (restart budget exhausted, no
+  // restart scheduled) is excluded from committedChannelNames() so a
+  // per-channel start relaunches it (#8975 R8-18) — but its channels must
+  // not REPORT as a clean user stop: the async crash never populates
+  // diagnostics, and the budget error on the worker is the only trace of
+  // what happened (R9-5). Match on the terminal carried sets too: a
+  // never-connected channel is absent from `channels` on the terminal
+  // snapshot, and `requestedChannels` is dropped there (R9-6).
+  const terminalFailedWorkerFor = (name: string) => {
+    const target = canonicalForGuard(opts.workspaceCwd);
+    return workerFor(name).find(
+      (worker) =>
+        canonicalForGuard(worker.workspaceCwd) === target &&
+        worker.state === 'failed' &&
+        worker.nextRestartAt === undefined,
+    );
+  };
+
   const assertOwnedRuntime = (name: string): void => {
     if (!workspaceCommittedNames().includes(name)) return;
     const workers = workerFor(name).filter(
@@ -329,6 +348,18 @@ export function createChannelManagementService(
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
     if (!workspaceCommittedNames().includes(name)) {
+      // A crash-dead (budget-exhausted) worker's channel is not committed,
+      // but reporting it as a bare `stopped` hides the crash: surface the
+      // worker's budget/failure diagnostic instead (R9-5).
+      const deadWorker = terminalFailedWorkerFor(name);
+      if (deadWorker) {
+        return {
+          state: 'error',
+          ...(deadWorker.error
+            ? { lastError: diagnostic(deadWorker.error) }
+            : {}),
+        };
+      }
       return { state: 'stopped' };
     }
     const state = opts.manager.state();
@@ -651,7 +682,25 @@ export function createChannelManagementService(
           // sibling stoppedChannels branch: the same disk condition that
           // broke startup can also fail this write, and the 502 body must
           // carry the loss or the client has no retry handle (#8975).
+          //
+          // `rolledBack` is aggregate across workspaces: with a
+          // multi-workspace reconcile it is false when ANY workspace's
+          // restore fails — even when THIS workspace's entry was restored
+          // and its channel is relaunching. Persisting `stopped` then
+          // records a stop for a live channel, which the next `--channel
+          // all` skips. Re-check via the per-workspace restore report:
+          // record the stop only when this workspace's entry was NOT
+          // restored (R9-4). A reconcile that failed before any rollback
+          // ran (replacement stop failure, daemon shutting down) carries
+          // no restored set — there the stopped entry stays dead and the
+          // record is correct.
+          const restoredHere = (error.restoredWorkspaces ?? []).some(
+            (workspaceCwd) =>
+              canonicalForGuard(workspaceCwd) ===
+              canonicalForGuard(opts.workspaceCwd),
+          );
           if (
+            !restoredHere &&
             !new ChannelStateStore(
               daemonChannelRuntimeStatePath(
                 canonicalForGuard(opts.workspaceCwd),
@@ -709,7 +758,16 @@ export function createChannelManagementService(
         );
       }
       assertWorkspaceConfig(persisted.channels[name]!);
-      if (!workspaceCommittedNames().includes(name)) {
+      // A crash-dead (budget-exhausted) worker's channel is not committed,
+      // but restart is its natural recovery route: reloadWorkspace
+      // reconciles the workspace, replacing the dead entry and resetting
+      // the budget. Rejecting with channel_worker_not_enabled here would
+      // leave start() as the only way back while the status claims a
+      // clean stop (R9-5).
+      if (
+        !workspaceCommittedNames().includes(name) &&
+        !terminalFailedWorkerFor(name)
+      ) {
         throw new ChannelManagementError(
           'channel_worker_not_enabled',
           `Channel "${name}" is not running.`,

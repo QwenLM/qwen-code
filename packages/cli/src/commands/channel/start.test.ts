@@ -91,11 +91,16 @@ const mockChannelRuntimeStatePath = vi.hoisted(() =>
   // derivation (one call for the assertion, another for the store) would
   // coincide by accident and ship green — the two real derivations are
   // DIFFERENT files (`channels/channel-state.json` vs
-  // `channels/standalone/<hash>/channel-state.json`) (#8975).
+  // `channels/standalone/<hash>/channel-state.json`) (#8975). The return
+  // is derived FROM the argument (not collapsed to one constant for every
+  // defined argument): the real helper hashes the workspace, so two
+  // DIFFERENT defined arguments are two different files — a
+  // defined-vs-defined split (store derived from another directory than
+  // stop.ts addresses) must fail the constructor-path pin (R9-15).
   vi.fn((cwd?: string) =>
     cwd === undefined
       ? '/tmp/qwen-home/channels/channel-state.json'
-      : '/tmp/qwen-home/channels/standalone/ws/channel-state.json',
+      : `/tmp/qwen-home/channels/standalone/${cwd}/channel-state.json`,
   ),
 );
 const mockAdoptLegacyChannelState = vi.hoisted(() => vi.fn());
@@ -1694,6 +1699,13 @@ describe('startCommand.handler', () => {
       expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         '[Channel] "feishu" skipped (stopped before restart)',
       );
+      // One-sided warning pin: the prune-fallback warning is pinned on the
+      // failure path above; a prune-success startup must NOT emit it —
+      // emitting it on every normal startup drowns the genuine warning
+      // the test above says must stay traceable (R9-14).
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
       // prune receives every configured name, including the skipped one: a
       // post-selection list would wipe the skipped channel's stopped record
       // and resurrect it on the next start (#8975).
@@ -1744,14 +1756,13 @@ describe('startCommand.handler', () => {
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
         expect.stringContaining('Failed to connect "feishu"'),
       );
-      // The restore filter reads the STATE file, not the pidfile: pin the
-      // write side completely — exactly one batched write of the connected
-      // set, and no write recording the connect-failed channel (#8975).
-      expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(1);
-      expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
-        ['telegram'],
-        'active',
-      );
+      // The restore filter reads the STATE file, not the pidfile: the
+      // pidfile pins the connected set above; startAll itself performs no
+      // state write for the connected names (the file already holds
+      // active-or-nothing for every selected name — R9-19), and a write
+      // recording the connect-failed channel would skip it on every later
+      // `--channel all` start (#8975).
+      expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
       expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
       expect(mockWriteServiceInfo).toHaveBeenCalledWith(
         ['telegram'],
@@ -1793,17 +1804,15 @@ describe('startCommand.handler', () => {
         '[Channel] No channels connected. Exiting.',
       );
       expect(mockBridgeStop).toHaveBeenCalled();
-      // Nothing connected: the batched write degenerates to the empty set
-      // (the real store no-ops it) and no pidfile is written (#8975).
-      expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(1);
-      expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith([], 'active');
+      // Nothing connected: no state write at all (R9-19) and no pidfile
+      // is written (#8975).
+      expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
       expect(mockWriteServiceInfo).not.toHaveBeenCalled();
     });
 
-    it('records connected channels as active in one batched write', async () => {
+    it('reads the workspace-scoped state file without rewriting it for the connected set (R9-19)', async () => {
       // Two channels on purpose: with a single channel, batched and
-      // per-channel writes are observationally identical, so moving the
-      // write into the connect loop would ship green (#8975).
+      // per-channel writes are observationally identical (#8975).
       mockLoadSettings.mockReturnValue({
         merged: {
           channels: {
@@ -1828,16 +1837,21 @@ describe('startCommand.handler', () => {
         exitSpy.mockRestore();
       }
 
-      // The connect loop batches into a single setMany; the store is scoped
-      // to the workspace the service starts from (#8975).
+      // The connect loop must not write the state file: every connected
+      // name was selected by selectActiveChannels, which excludes exactly
+      // the `stopped` entries — the file already holds active-or-nothing
+      // for each of them and no reader distinguishes those, so the old
+      // batched `active` write (and its false skip-consequence warning)
+      // was pure noise on the startup critical path (R9-19).
       expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
       expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
       // ...and the store is constructed with the path the helper returns
       // for THAT argument — a split here reads/writes a different file
-      // than stop.ts addresses. The path mock is argument-sensitive, so
-      // this fails unless both derivations use the workspace form.
+      // than stop.ts addresses. The path mock derives its return from the
+      // argument, so this fails unless both derivations use the same
+      // workspace form (R9-15).
       expect(mockChannelStateStore).toHaveBeenCalledWith(
-        '/tmp/qwen-home/channels/standalone/ws/channel-state.json',
+        `/tmp/qwen-home/channels/standalone/${process.cwd()}/channel-state.json`,
       );
       // prune receives the FULL configured set: a partial list would wipe
       // the stopped records of exactly the skipped channels (#8975).
@@ -1850,59 +1864,19 @@ describe('startCommand.handler', () => {
       expect(
         mockAdoptLegacyChannelState.mock.invocationCallOrder[0],
       ).toBeLessThan(mockChannelStateStorePrune.mock.invocationCallOrder[0]!);
-      // One batched write of BOTH connected channels — a per-channel write
-      // inside the connect loop adds N fsync'd read-modify-write cycles to
-      // the startup critical path and N interleaving windows against a
-      // concurrent stop write (#8975).
-      expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(1);
-      expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
-        ['telegram', 'feishu'],
-        'active',
-      );
+      // No write after the read: the restore filter is the only consumer
+      // of the file on this path (R9-19).
+      expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
       expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+      // One-sided warning pin: the removed batched write's warning must
+      // not fire on a successful startup — a false data-loss alarm on
+      // every normal start (R9-18).
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+      );
       expect(mockWriteServiceInfo).toHaveBeenCalledWith(
         ['telegram', 'feishu'],
         process.cwd(),
-      );
-    });
-
-    it('still finishes startup when state persistence fails during connect (#8975)', async () => {
-      mockLoadSettings.mockReturnValue({
-        merged: { channels: { telegram: { type: 'telegram' } } },
-      });
-      mockChannelConnect.mockResolvedValue(undefined);
-      mockChannelStateStoreSetMany.mockImplementationOnce(() => {
-        throw new Error('disk full');
-      });
-      const err = new Error('EEXIST') as NodeJS.ErrnoException;
-      err.code = 'EEXIST';
-      mockWriteServiceInfo.mockImplementationOnce(() => {
-        throw err;
-      });
-      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
-        throw new Error(`process.exit: ${String(code)}`);
-      });
-
-      try {
-        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
-      } finally {
-        exitSpy.mockRestore();
-      }
-
-      // The connected channel is reported and the service write is reached;
-      // the persistence failure must not abort startup.
-      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-        '[Channel] "telegram" connected.',
-      );
-      expect(mockWriteServiceInfo).toHaveBeenCalledWith(
-        ['telegram'],
-        process.cwd(),
-      );
-      // The loss must still be surfaced like the stop direction does: a
-      // stale `stopped` record would re-skip the explicitly restarted
-      // channel on the next `--channel all` restore (#8975).
-      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
       );
     });
   });
@@ -1971,16 +1945,23 @@ describe('startCommand.handler', () => {
     // the any-call assertion above still matches (#8975).
     expect(mockChannelStateStoreSet).toHaveBeenCalledTimes(1);
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // One-sided warning pin: the persistence-failure warning is pinned on
+    // the failure twin below; a successful named start must NOT fire it —
+    // a false data-loss alarm on every successful restart-by-name (R9-18).
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
     // The named path adopts legacy stops too, and BEFORE the first
     // workspace-scoped write: once the workspace file exists, adoption's
     // existsSync guard never runs again (#8975).
     expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
     // The store is constructed with the workspace-scoped path the helper
-    // returns for THAT argument (the mock is argument-sensitive) — a split
-    // derivation here writes to a different file than stop.ts addresses.
+    // returns for THAT argument — the mock derives its return from the
+    // argument, so a split derivation here writes to a different file
+    // than stop.ts addresses (R9-16).
     expect(mockChannelStateStore).toHaveBeenCalledWith(
-      '/tmp/qwen-home/channels/standalone/ws/channel-state.json',
+      `/tmp/qwen-home/channels/standalone/${process.cwd()}/channel-state.json`,
     );
     expect(
       mockAdoptLegacyChannelState.mock.invocationCallOrder[0],

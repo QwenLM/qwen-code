@@ -415,10 +415,11 @@ describePosix(
 // start skips it — runs on ALL platforms: stop persists the record BEFORE
 // signalling the service (ordering pinned by stop.test.ts), and the read
 // side uses no POSIX facility. Only the graceful-SIGTERM exit-code
-// assertions are POSIX-gated. A writer/reader path-derivation split (the
-// standalone store hashes the raw workspace path) is realistically
-// triggered only on Windows, so gating the whole suite POSIX-only would
-// leave the one platform that needs it uncovered (#8975).
+// assertions are POSIX-gated. A writer/reader path-derivation split (both
+// sides canonicalize the workspace before hashing it, R9-2) is
+// realistically triggered only on Windows, so gating the whole suite
+// POSIX-only would leave the one platform that needs it uncovered
+// (#8975).
 describe('qwen channel stop → start round trip (#8975)', () => {
   // The PR's second core promise — explicit stops are remembered across
   // restarts — has no cross-process coverage in the unit suite: every
@@ -543,15 +544,22 @@ describe('qwen channel stop → start round trip (#8975)', () => {
     expect(child.exitCode).toBeNull();
     expect(child.signalCode).toBeNull();
 
+    // Terminate on BOTH platforms: on Windows kill('SIGTERM')
+    // force-terminates (Node cannot deliver a catchable SIGTERM there), so
+    // only the graceful exit-code assertions are POSIX-gated. Skipping the
+    // kill itself on Windows would leak the zero-channel service — kept
+    // alive forever by its ref'd keep-alive interval — as an immortal
+    // process, because the `child = undefined` below defeats the
+    // afterEach SIGKILL sweep (R9-1).
+    const exited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const { code, signal } = await exited;
     if (isPosix) {
-      const exited = new Promise<{
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      }>((resolve) => {
-        child!.once('exit', (code, signal) => resolve({ code, signal }));
-      });
-      child.kill('SIGTERM');
-      const { code, signal } = await exited;
       expect(signal).toBeNull();
       expect(code).toBe(0);
     }
@@ -559,217 +567,225 @@ describe('qwen channel stop → start round trip (#8975)', () => {
   }, 120000);
 });
 
-describePosix(
-  'qwen serve --channel all stop → restart round trip (#8975)',
-  () => {
-    // The daemon half of the stop-write → restore-read handoff: every unit
-    // test mocks at least one side of the path derivation (daemon-worker
-    // tests mock daemonChannelRuntimeStatePath as a constant; route tests
-    // mock the manager snapshots). Run a REAL `qwen serve --channel all`
-    // with a real (mock-plugin) channel, stop it through the real
-    // DELETE /workspace/channel route, restart serve, and require the
-    // restored worker to run without the stopped channel — a divergence
-    // between the route's write path and the daemon worker's read path
-    // ships green through the whole unit suite and surfaces only as
-    // explicitly stopped channels silently resurrecting (#8975).
-    it('DELETE /workspace/channel keeps the channel stopped across a serve restart', async () => {
-      testRoot = realpathSync(
-        mkdtempSync(path.join(tmpdir(), 'qwen-channel-daemon-roundtrip-')),
-      );
-      const qwenHome = path.join(testRoot, 'qwen-home');
-      const runtimeDir = path.join(testRoot, 'runtime');
-      const workspace = path.join(testRoot, 'workspace');
-      mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
-      mkdirSync(runtimeDir);
-      mkdirSync(qwenHome, { recursive: true });
-      mockServer = await createMockServer({ httpPort: 0, wsPort: 0 });
+// Runs on ALL platforms — the writer/reader path-derivation split this
+// round trip pins (both halves hash the workspace via
+// hashDaemonWorkspace) realistically triggers only on Windows
+// (case-preserving cwd on a case-insensitive FS), where the POSIX-gated
+// siblings cannot even collect. Only the graceful-SIGTERM exit-code
+// assertions stay POSIX-gated: on Windows kill('SIGTERM') force-
+// terminates and the shutdown handler never runs (R9-8).
+describe('qwen serve --channel all stop → restart round trip (#8975)', () => {
+  // The daemon half of the stop-write → restore-read handoff: every unit
+  // test mocks at least one side of the path derivation (daemon-worker
+  // tests mock daemonChannelRuntimeStatePath as a constant; route tests
+  // mock the manager snapshots). Run a REAL `qwen serve --channel all`
+  // with a real (mock-plugin) channel, stop it through the real
+  // DELETE /workspace/channel route, restart serve, and require the
+  // restored worker to run without the stopped channel — a divergence
+  // between the route's write path and the daemon worker's read path
+  // ships green through the whole unit suite and surfaces only as
+  // explicitly stopped channels silently resurrecting (#8975).
+  it('DELETE /workspace/channel keeps the channel stopped across a serve restart', async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-channel-daemon-roundtrip-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const workspace = path.join(testRoot, 'workspace');
+    mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    mkdirSync(runtimeDir);
+    mkdirSync(qwenHome, { recursive: true });
+    mockServer = await createMockServer({ httpPort: 0, wsPort: 0 });
 
-      const extensionDir = path.join(qwenHome, 'extensions');
-      mkdirSync(extensionDir, { recursive: true });
-      symlinkSync(
-        path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
-        path.join(extensionDir, 'qwen-channel-plugin-example'),
-        'dir',
-      );
+    const extensionDir = path.join(qwenHome, 'extensions');
+    mkdirSync(extensionDir, { recursive: true });
+    symlinkSync(
+      path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
+      path.join(extensionDir, 'qwen-channel-plugin-example'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
 
-      writeFileSync(
-        path.join(qwenHome, 'settings.json'),
-        JSON.stringify({ security: { folderTrust: { enabled: true } } }),
-        'utf-8',
-      );
-      const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
-      writeFileSync(
-        trustedFoldersPath,
-        JSON.stringify({ [workspace]: 'TRUST_FOLDER' }),
-        'utf-8',
-      );
-      writeFileSync(
-        path.join(workspace, '.qwen', 'settings.json'),
-        JSON.stringify({
-          channels: {
-            mockbot: {
-              type: 'plugin-example',
-              serverWsUrl: mockServer.wsUrl,
-              senderPolicy: 'open',
-              sessionScope: 'user',
-              cwd: workspace,
-            },
-          },
-        }),
-        'utf-8',
-      );
-      const env = {
-        // Strip any inherited bearer token, then set a known one: the
-        // DELETE route is a strict mutation that refuses without a token
-        // even on loopback, and a token exported on the dev machine or CI
-        // runner would otherwise flip auth on with an unknown value
-        // (#8975).
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([k]) => k !== 'QWEN_SERVER_TOKEN',
-          ),
-        ),
-        QWEN_HOME: qwenHome,
-        QWEN_RUNTIME_DIR: runtimeDir,
-        QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
-        QWEN_SERVER_TOKEN: 'integration-token-8975',
-        OPENAI_API_KEY: 'fake-key',
-        OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
-        OPENAI_MODEL: 'fake-model',
-        QWEN_MODEL: 'fake-model',
-      };
-      // A token is configured, so EVERY route — reads included — requires
-      // the bearer header (#8975).
-      const authFetch = (url: string, init?: RequestInit) =>
-        fetch(url, {
-          ...init,
-          headers: {
-            ...(init?.headers ?? {}),
-            authorization: 'Bearer integration-token-8975',
-          },
-        });
-      // pollHttp uses bare fetch; mirror its loop with the auth header.
-      const pollAuthHttp = async (
-        url: string,
-        accept: (status: number, body: unknown) => boolean,
-        timeoutMs = 30000,
-      ): Promise<unknown> => {
-        const deadline = Date.now() + timeoutMs;
-        let lastError: unknown;
-        while (Date.now() < deadline) {
-          try {
-            const res = await authFetch(url);
-            const text = await res.text();
-            let body: unknown = text;
-            try {
-              body = JSON.parse(text);
-            } catch {
-              // Not JSON; keep the raw text for the accept predicate.
-            }
-            if (accept(res.status, body)) return body;
-            lastError = new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-          } catch (error) {
-            lastError = error;
-          }
-          await sleep(250);
-        }
-        throw new Error(
-          `Timed out polling ${url}: ${
-            lastError instanceof Error ? lastError.message : String(lastError)
-          }`,
-        );
-      };
-      const spawnServe = () =>
-        spawn(
-          process.execPath,
-          [CLI_BIN, 'serve', '--channel', 'all', '--port', '0'],
-          {
+    writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      'utf-8',
+    );
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({ [workspace]: 'TRUST_FOLDER' }),
+      'utf-8',
+    );
+    writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: {
+          mockbot: {
+            type: 'plugin-example',
+            serverWsUrl: mockServer.wsUrl,
+            senderPolicy: 'open',
+            sessionScope: 'user',
             cwd: workspace,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env,
           },
-        );
-
-      interface ControlState {
-        enabled?: boolean;
-        transition?: string;
-        workers?: Array<{ state?: string; channels?: string[] }>;
+        },
+      }),
+      'utf-8',
+    );
+    const env = {
+      // Strip any inherited bearer token, then set a known one: the
+      // DELETE route is a strict mutation that refuses without a token
+      // even on loopback, and a token exported on the dev machine or CI
+      // runner would otherwise flip auth on with an unknown value
+      // (#8975).
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([k]) => k !== 'QWEN_SERVER_TOKEN'),
+      ),
+      QWEN_HOME: qwenHome,
+      QWEN_RUNTIME_DIR: runtimeDir,
+      QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+      QWEN_SERVER_TOKEN: 'integration-token-8975',
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    };
+    // A token is configured, so EVERY route — reads included — requires
+    // the bearer header (#8975).
+    const authFetch = (url: string, init?: RequestInit) =>
+      fetch(url, {
+        ...init,
+        headers: {
+          ...(init?.headers ?? {}),
+          authorization: 'Bearer integration-token-8975',
+        },
+      });
+    // pollHttp uses bare fetch; mirror its loop with the auth header.
+    const pollAuthHttp = async (
+      url: string,
+      accept: (status: number, body: unknown) => boolean,
+      timeoutMs = 30000,
+    ): Promise<unknown> => {
+      const deadline = Date.now() + timeoutMs;
+      let lastError: unknown;
+      while (Date.now() < deadline) {
+        try {
+          const res = await authFetch(url);
+          const text = await res.text();
+          let body: unknown = text;
+          try {
+            body = JSON.parse(text);
+          } catch {
+            // Not JSON; keep the raw text for the accept predicate.
+          }
+          if (accept(res.status, body)) return body;
+          lastError = new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+        } catch (error) {
+          lastError = error;
+        }
+        await sleep(250);
       }
+      throw new Error(
+        `Timed out polling ${url}: ${
+          lastError instanceof Error ? lastError.message : String(lastError)
+        }`,
+      );
+    };
+    const spawnServe = () =>
+      spawn(
+        process.execPath,
+        [CLI_BIN, 'serve', '--channel', 'all', '--port', '0'],
+        {
+          cwd: workspace,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env,
+        },
+      );
 
-      // Phase 1: serve boots with `--channel all` and the channel really
-      // connects — the worker reports the committed name.
-      child = spawnServe();
-      let baseUrl = await waitForListeningUrl(child);
-      await pollAuthHttp(`${baseUrl}/health`, (status) => status === 200);
-      await pollAuthHttp(`${baseUrl}/workspace/channel`, (_status, body) => {
+    interface ControlState {
+      enabled?: boolean;
+      transition?: string;
+      workers?: Array<{ state?: string; channels?: string[] }>;
+    }
+
+    // Phase 1: serve boots with `--channel all` and the channel really
+    // connects — the worker reports the committed name.
+    child = spawnServe();
+    let baseUrl = await waitForListeningUrl(child);
+    await pollAuthHttp(`${baseUrl}/health`, (status) => status === 200);
+    await pollAuthHttp(`${baseUrl}/workspace/channel`, (_status, body) => {
+      const state = body as ControlState;
+      return (
+        state.enabled === true &&
+        state.transition === 'idle' &&
+        Array.isArray(state.workers) &&
+        state.workers.length > 0 &&
+        state.workers[0]!.state === 'running' &&
+        (state.workers[0]!.channels ?? []).includes('mockbot')
+      );
+    });
+
+    // Phase 2: the real DELETE route tears the worker down and persists
+    // the stopped record through the daemon path derivation.
+    const deleteRes = await authFetch(`${baseUrl}/workspace/channel`, {
+      method: 'DELETE',
+    });
+    expect(deleteRes.status).toBe(200);
+    await pollAuthHttp(
+      `${baseUrl}/workspace/channel`,
+      (_status, body) => (body as ControlState).enabled === false,
+    );
+
+    const exited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const shutdown = await exited;
+    // Graceful-exit semantics are POSIX-only: on Windows the kill
+    // force-terminates (R9-8).
+    if (isPosix) {
+      expect(shutdown.signal).toBeNull();
+      expect(shutdown.code).toBe(0);
+    }
+    child = undefined;
+
+    // Phase 3: the restarted serve reads the state file the DELETE route
+    // wrote; the stopped channel is skipped, so the restored worker runs
+    // with zero channels instead of resurrecting it.
+    child = spawnServe();
+    baseUrl = await waitForListeningUrl(child);
+    await pollAuthHttp(`${baseUrl}/health`, (status) => status === 200);
+    const restored = (await pollAuthHttp(
+      `${baseUrl}/workspace/channel`,
+      (_status, body) => {
         const state = body as ControlState;
         return (
           state.enabled === true &&
           state.transition === 'idle' &&
           Array.isArray(state.workers) &&
           state.workers.length > 0 &&
-          state.workers[0]!.state === 'running' &&
-          (state.workers[0]!.channels ?? []).includes('mockbot')
+          state.workers[0]!.state === 'running'
         );
-      });
+      },
+    )) as ControlState;
+    expect(restored.workers?.[0]?.channels).toEqual([]);
+    expect(child.exitCode).toBeNull();
+    expect(child.signalCode).toBeNull();
 
-      // Phase 2: the real DELETE route tears the worker down and persists
-      // the stopped record through the daemon path derivation.
-      const deleteRes = await authFetch(`${baseUrl}/workspace/channel`, {
-        method: 'DELETE',
-      });
-      expect(deleteRes.status).toBe(200);
-      await pollAuthHttp(
-        `${baseUrl}/workspace/channel`,
-        (_status, body) => (body as ControlState).enabled === false,
-      );
-
-      const exited = new Promise<{
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      }>((resolve) => {
-        child!.once('exit', (code, signal) => resolve({ code, signal }));
-      });
-      child.kill('SIGTERM');
-      const shutdown = await exited;
-      expect(shutdown.signal).toBeNull();
-      expect(shutdown.code).toBe(0);
-      child = undefined;
-
-      // Phase 3: the restarted serve reads the state file the DELETE route
-      // wrote; the stopped channel is skipped, so the restored worker runs
-      // with zero channels instead of resurrecting it.
-      child = spawnServe();
-      baseUrl = await waitForListeningUrl(child);
-      await pollAuthHttp(`${baseUrl}/health`, (status) => status === 200);
-      const restored = (await pollAuthHttp(
-        `${baseUrl}/workspace/channel`,
-        (_status, body) => {
-          const state = body as ControlState;
-          return (
-            state.enabled === true &&
-            state.transition === 'idle' &&
-            Array.isArray(state.workers) &&
-            state.workers.length > 0 &&
-            state.workers[0]!.state === 'running'
-          );
-        },
-      )) as ControlState;
-      expect(restored.workers?.[0]?.channels).toEqual([]);
-      expect(child.exitCode).toBeNull();
-      expect(child.signalCode).toBeNull();
-
-      const restartedExited = new Promise<{
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      }>((resolve) => {
-        child!.once('exit', (code, signal) => resolve({ code, signal }));
-      });
-      child.kill('SIGTERM');
-      const restartedShutdown = await restartedExited;
+    const restartedExited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const restartedShutdown = await restartedExited;
+    if (isPosix) {
       expect(restartedShutdown.signal).toBeNull();
       expect(restartedShutdown.code).toBe(0);
-      child = undefined;
-    }, 180000);
-  },
-);
+    }
+    child = undefined;
+  }, 180000);
+});

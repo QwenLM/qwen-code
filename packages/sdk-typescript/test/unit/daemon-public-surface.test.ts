@@ -248,7 +248,16 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelSetResult>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupFailure>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().not.toBeNever();
-    expectTypeOf<DaemonChannelStopResult>().not.toBeNever();
+    // #8975: pin the whole-selection stop result's SHAPE too — like its
+    // per-channel sibling below, `not.toBeNever()` stays green if the
+    // type degrades to the plain mutation result and the `statePersisted`
+    // durability signal disappears from the typed surface. Compiled under
+    // tsconfig.typetest.json, which the CI typecheck step runs (R9-29).
+    expectTypeOf<DaemonChannelStopResult>().toEqualTypeOf<{
+      changed: boolean;
+      state: DaemonChannelControlState;
+      statePersisted?: boolean;
+    }>();
     // #8975: pin the per-channel stop result's SHAPE, not just its
     // existence — `not.toBeNever()` stays green if the type degrades to
     // the plain mutation result and the `statePersisted` durability

@@ -134,6 +134,19 @@ export interface ChannelWorkerSnapshot {
    * the channels that were connected before the crash (#8975).
    */
   lastConnectedChannels?: string[];
+  /**
+   * The attempted set a budget-exhausted worker carried when it went
+   * terminal. `requestedChannels`/`adapters` are dropped there (they would
+   * report every channel as `starting` forever), but the manager's
+   * mode-names dead-name computation needs the FULL attempted set — not
+   * just the last ready's connected subset in `channels` — or a channel
+   * whose connect failed before the crash stays "committed" on the dead
+   * worker and its own start/stop/remove throws
+   * channel_runtime_owner_mismatch instead of relaunching it (R9-6).
+   * Internal input of that computation only; stripped from every public
+   * snapshot surface like lastConnectedChannels.
+   */
+  lastRequestedChannels?: string[];
   pid?: number;
   startedAt?: string;
   exitCode?: number | null;
@@ -546,6 +559,9 @@ export function createChannelWorkerSupervisor(
     ...(snapshot.lastConnectedChannels
       ? { lastConnectedChannels: [...snapshot.lastConnectedChannels] }
       : {}),
+    ...(snapshot.lastRequestedChannels
+      ? { lastRequestedChannels: [...snapshot.lastRequestedChannels] }
+      : {}),
     ...(snapshot.startupFailures
       ? {
           startupFailures: snapshot.startupFailures.map((failure) => ({
@@ -747,6 +763,21 @@ export function createChannelWorkerSupervisor(
       // dropping it degrades a budget-exhausted stop to the launch
       // placeholder/attempted set, recording never-connected channels
       // (mode-names) or nothing at all (mode-all) as stopped (#8975).
+      // Carry the attempted set into `lastRequestedChannels` BEFORE the
+      // delete: the manager's mode-names dead-name computation falls back
+      // to `channels` (the last ready's CONNECTED subset) without it,
+      // leaving a channel whose connect failed before the crash
+      // "committed" on the dead worker — its own start/stop/remove then
+      // throws channel_runtime_owner_mismatch instead of relaunching
+      // (R9-6). The stop capture deliberately ignores this field, so a
+      // never-connected channel is still not recorded as explicitly
+      // stopped (#8975).
+      if (snapshot.requestedChannels) {
+        snapshot = {
+          ...snapshot,
+          lastRequestedChannels: [...snapshot.requestedChannels],
+        };
+      }
       delete snapshot.requestedChannels;
       delete snapshot.adapters;
       // Keep the enable path honest on a dead worker: the manager's

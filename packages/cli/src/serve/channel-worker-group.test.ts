@@ -1424,6 +1424,12 @@ describe('createChannelWorkerGroup', () => {
     ).rejects.toMatchObject({
       rolledBack: false,
       rollbackError: 'primary restore failed',
+      // `rolledBack` is aggregate: it is false because PRIMARY's restore
+      // failed, but SECONDARY's entry WAS restored. Callers deciding
+      // whether a specific workspace's channel is confirmed dead need
+      // the per-workspace report, or they record a stop for a channel
+      // that is relaunching (R9-4).
+      restoredWorkspaces: [SECONDARY],
     });
     expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(2);
     expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(2);

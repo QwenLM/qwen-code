@@ -30,8 +30,10 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', async (importOriginal) => {
 
 const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
 const mockChannelStateStoreTrySetMany = vi.hoisted(() => vi.fn());
-const mockChannelStateStore = vi.hoisted(() =>
-  vi.fn(() => ({
+const defaultChannelStateStoreFactory = vi.hoisted(() =>
+  // The constructor path is load-bearing input (R9-25): declare it so
+  // per-instance implementations can read which file they serve.
+  (_filePath: string) => ({
     readAll: vi.fn(() => ({})),
     set: mockChannelStateStoreSet,
     setMany: vi.fn(),
@@ -47,7 +49,10 @@ const mockChannelStateStore = vi.hoisted(() =>
       }
     },
     trySetMany: mockChannelStateStoreTrySetMany,
-  })),
+  }),
+);
+const mockChannelStateStore = vi.hoisted(() =>
+  vi.fn(defaultChannelStateStoreFactory),
 );
 
 vi.mock('../commands/channel/channel-state-store.js', () => ({
@@ -63,6 +68,10 @@ import { ChannelWorkerControlError } from './channel-worker-manager.js';
 
 beforeEach(() => {
   mockChannelStateStore.mockClear();
+  // Tests may install per-instance implementations (R9-25); mockClear
+  // keeps the implementation, so reset it to the default factory or the
+  // override leaks into every later test.
+  mockChannelStateStore.mockImplementation(defaultChannelStateStoreFactory);
   mockChannelStateStoreSet.mockClear();
   mockChannelStateStoreTrySetMany.mockClear();
   mockChannelStateStoreTrySetMany.mockReturnValue(true);
@@ -699,6 +708,28 @@ describe('createChannelManagementService', () => {
         { workspaceCwd: '/ws/other', names: ['aux'] },
       ],
     });
+    // Per-instance capture: the shared trySetMany mock cannot correlate a
+    // path with the names written through it, so a cross-group swap
+    // (aux's names on the primary path or vice versa — exactly the bug
+    // that resurrects a channel in the wrong workspace) ships green
+    // against membership assertions. Record each store instance's writes
+    // keyed by its constructor path (R9-25).
+    const writesByPath = new Map<string, string[][]>();
+    mockChannelStateStore.mockImplementation((filePath: string) => ({
+      readAll: vi.fn(() => ({})),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: vi.fn(() => true),
+      trySetMany: vi.fn((names: string[], state: 'active' | 'stopped') => {
+        if (state === 'stopped') {
+          writesByPath.set(filePath, [
+            ...(writesByPath.get(filePath) ?? []),
+            [...names],
+          ]);
+        }
+        return mockChannelStateStoreTrySetMany(names, state);
+      }),
+    }));
 
     const result = await service.stop('bot');
 
@@ -719,6 +750,13 @@ describe('createChannelManagementService', () => {
       ['aux'],
       'stopped',
     );
+    // Each workspace's names land behind ITS workspace-derived path.
+    expect(writesByPath.get(daemonChannelRuntimeStatePath(WORKSPACE))).toEqual([
+      ['bot'],
+    ]);
+    expect(
+      writesByPath.get(daemonChannelRuntimeStatePath('/ws/other')),
+    ).toEqual([['aux']]);
     // The group writes replace the single-name write, and every group
     // persisted, so the happy-path shape stays unchanged.
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
@@ -995,6 +1033,187 @@ describe('createChannelManagementService', () => {
 
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
     expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
+  it('does not persist the stop when the failed disable restored THIS workspace (R9-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // `rolledBack` is aggregate across workspaces: a multi-workspace
+    // reconcile reports it false when ANY workspace's rollback restart
+    // fails — even when THIS workspace's entry was restored and its
+    // channel is relaunching. The per-workspace restore report
+    // (restoredWorkspaces) is the load-bearing signal: keying on the
+    // aggregate flag records a stop for a live channel, which the next
+    // `--channel all` start then skips (R9-4).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+        restoredWorkspaces: [WORKSPACE, '/ws/other'],
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
+  it('persists the stop when the failed disable restored only another workspace (R9-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // The guard must be per-workspace, not blanket: when the aggregate
+    // rolledBack is false because ANOTHER workspace's restore failed,
+    // THIS workspace's entry was NOT restored and the channel stays
+    // dead — the stop must still be recorded, or it resurrects on the
+    // next `--channel all` start. A regression skipping every persist on
+    // rolledBack:false (or matching the restored set loosely) turns this
+    // red (R9-4).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+        restoredWorkspaces: ['/ws/other'],
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+  });
+
+  it('persists the stop when the failed disable ran no rollback at all (R9-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // A reconcile that failed BEFORE any rollback ran (the replacement
+    // workers failed to stop, or the daemon is shutting down) carries no
+    // restored set: the stopped entry stays dead and the record is
+    // correct — the absence of restoredWorkspaces must not be read as
+    // "restored" (R9-4).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+      }),
+    );
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+    });
+
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+  });
+
+  it('reports a crash-dead worker channel as error, not stopped (R9-5)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // A worker that crash-looped until its restart budget exhausted is
+    // excluded from committedChannelNames() (so a per-channel start
+    // relaunches it), but its channels must not REPORT as a clean user
+    // stop: the async crash never populates diagnostics, and the budget
+    // error on the worker is the only trace. runtimeFor must surface it
+    // as an error with that diagnostic (R9-5).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          lastConnectedChannels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    const result = await service.list();
+
+    expect(result.instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'Channel worker restart budget exhausted.',
+    });
+  });
+
+  it('restarts a crash-dead worker channel instead of rejecting it (R9-5)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // Same shape as the report test: restart is the natural recovery
+    // route (reloadWorkspace replaces the dead entry and resets the
+    // budget). The committed-names gate must let the terminal-failed
+    // owner through, or start() is the only way back while the status
+    // claims a clean stop (R9-5).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await service.restart('bot');
+
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+  });
+
+  it('still rejects a restart when no worker owns the channel at all (R9-5)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // The recovery gate is scoped to terminal-failed OWNERS: a channel
+    // with no worker at all (never started) keeps the 409, or the gate
+    // would silently route every uncommitted channel through
+    // reloadWorkspace (R9-5).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: false,
+      selection: null,
+      transition: 'idle',
+      workers: [],
+    });
+
+    await expect(service.restart('bot')).rejects.toMatchObject({
+      code: 'channel_worker_not_enabled',
+    });
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('records a confirmed stop during a starting window (R9-27)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // The starting-window guard only rejects an UNCONFIRMABLE stop
+    // (changed: false); a CONFIRMED stop (changed: true) resolves and
+    // persists even mid-window — the changed:true shape on a starting
+    // mode-all worker has no test otherwise, and a regression folding
+    // the two shapes together (409 on any starting-window stop) would
+    // strand a successfully stopped channel with no record (R9-27).
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: true });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    const result = await service.stop('bot');
+
+    expect(result.instance.name).toBe('bot');
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
+    expect(result).not.toHaveProperty('statePersisted');
   });
 
   it('does not persist from a stop-phase failure without a torn-down set (#8975)', async () => {

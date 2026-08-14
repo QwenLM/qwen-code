@@ -43,11 +43,15 @@ const mockChannelRuntimeStatePath = vi.hoisted(() =>
   // mock, a split derivation (one call for the assertion, another for the
   // store) would coincide by accident and ship green — the two real
   // derivations are DIFFERENT files (`channels/channel-state.json` vs
-  // `channels/standalone/<hash>/channel-state.json`) (#8975).
+  // `channels/standalone/<hash>/channel-state.json`) (#8975). The return
+  // is derived FROM the argument (not collapsed to one constant for every
+  // defined argument): the real helper hashes the workspace, so two
+  // DIFFERENT defined arguments are two different files — a
+  // defined-vs-defined split must fail the constructor-path pin (R9-17).
   vi.fn((cwd?: string) =>
     cwd === undefined
       ? '/tmp/qwen-home/channels/channel-state.json'
-      : '/tmp/qwen-home/channels/standalone/ws/channel-state.json',
+      : `/tmp/qwen-home/channels/standalone/${cwd}/channel-state.json`,
   ),
 );
 
@@ -239,6 +243,27 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+
+    // The realistic mixed-version rollout shape the gate comment names:
+    // an error WITH a body object that LACKS statePersisted (a pre-#8975
+    // daemon returns a structured error body without the field). This
+    // passes the typeof object gate, so only the strict
+    // `body['statePersisted'] === false` comparison keeps it quiet —
+    // relaxing the gate to `statePersisted !== true` would print the
+    // false warning on every failing stop against an older daemon
+    // (R9-20).
+    mockStopChannelWorker.mockRejectedValueOnce(
+      Object.assign(new Error('stop failed'), {
+        status: 500,
+        body: { error: 'Stop failed' },
+      }),
+    );
+
+    await invokeStop({ 'daemon-url': 'http://daemon:9' });
+
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
   });
 
   it('reports remote stop failures without falling through to standalone mode', async () => {
@@ -283,6 +308,21 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+    // A semantically successful stop must exit 0: callers running `qwen
+    // channel stop` under `set -e` or in && chains (CI teardown scripts)
+    // abort on a non-zero exit exactly where the stop succeeded (R9-21).
+    expect(process.exit).toHaveBeenCalledWith(0);
+    // The no-op exit mock lets execution continue past process.exit, so it
+    // cannot pin ordering by itself: the final message must be emitted
+    // BEFORE the exit — relocating the write below process.exit ships
+    // green here while the message is silently dead in production, where
+    // the process terminates first (R9-23).
+    const finalMessageCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('stay stopped'),
+    );
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[finalMessageCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('persists the stopped record before signalling the service (#8975)', async () => {
@@ -328,10 +368,12 @@ describe('stopCommand', () => {
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith('/workspace/a');
     // And the store is constructed with the path the helper returns for
     // the workspace form — a split here writes the stop to a different
-    // file than start reads (#8975).
+    // file than start reads (#8975). The mock derives its return from the
+    // argument, so a defined-vs-defined split fails this pin (R9-17).
     expect(mockChannelStateStore).toHaveBeenCalledWith(
-      '/tmp/qwen-home/channels/standalone/ws/channel-state.json',
+      '/tmp/qwen-home/channels/standalone//workspace/a/channel-state.json',
     );
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('persists the crashed service channels from a stale pidfile (#8975)', async () => {
@@ -359,9 +401,10 @@ describe('stopCommand', () => {
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith('/workspace/a');
     // And the store is constructed with the path the helper returns for
     // the workspace form — a split here writes the stop to a different
-    // file than start reads (#8975).
+    // file than start reads (#8975). The mock derives its return from the
+    // argument, so a defined-vs-defined split fails this pin (R9-17).
     expect(mockChannelStateStore).toHaveBeenCalledWith(
-      '/tmp/qwen-home/channels/standalone/ws/channel-state.json',
+      '/tmp/qwen-home/channels/standalone//workspace/a/channel-state.json',
     );
     expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
       ['telegram', 'feishu'],
@@ -373,6 +416,16 @@ describe('stopCommand', () => {
         'Recorded the crashed service channels as stopped',
       ),
     );
+    // Mirror-pin the ternary's other half (R9-22): a refactor emitting
+    // BOTH messages when the record persisted must fail here, like its
+    // failure-path twin below.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
+    );
+    // The crashed-service stop is semantically successful (the record was
+    // persisted): exit 0 so `set -e` / && teardown chains do not abort
+    // (R9-21).
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('reports when the crashed service stop record fails to persist (#8975)', async () => {
@@ -401,6 +454,10 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('Recorded the crashed service channels'),
     );
+    // A lost record still exits 0: the service IS dead and the loss was
+    // warned about — failing the exit aborts `set -e` teardown exactly
+    // where the user was told what happened (R9-21).
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('does not persist for a crashed serve-owned or empty pidfile (#8975)', async () => {
@@ -419,11 +476,13 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'No channel service is running.',
     );
+    expect(process.exit).toHaveBeenCalledWith(0);
 
     mockPeekServiceInfo.mockReturnValue(null);
     await invokeStop();
 
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('does not record a crashed zero-channel service as stopped (#8975)', async () => {
@@ -447,6 +506,7 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'No channel service is running.',
     );
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('falls back to the legacy global file for crashed older pidfiles (#8975)', async () => {
@@ -474,6 +534,7 @@ describe('stopCommand', () => {
       ['telegram'],
       'stopped',
     );
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('falls back to the legacy global state file for older pidfiles (#8975)', async () => {
@@ -495,6 +556,7 @@ describe('stopCommand', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       '/tmp/qwen-home/channels/channel-state.json',
     );
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('still stops the service when state persistence fails', async () => {
@@ -527,6 +589,16 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('stay stopped'),
     );
+    // A lost record still exits 0 (the service IS stopped and the loss
+    // was warned about) — and the warning must precede the exit (R9-21,
+    // R9-23).
+    expect(process.exit).toHaveBeenCalledWith(0);
+    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('could not persist the stopped record'),
+    );
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('escalates to SIGKILL when the service ignores SIGTERM (#8975)', async () => {
@@ -547,11 +619,17 @@ describe('stopCommand', () => {
 
     await invokeStop();
 
-    expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
-    expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGKILL');
-    // First wait is the 5s SIGTERM window, second the 2s SIGKILL window.
-    expect(mockWaitForExit).toHaveBeenCalledWith(1234, 5000);
-    expect(mockWaitForExit).toHaveBeenCalledWith(1234, 2000);
+    // Sequence pins, not membership: TERM must precede KILL and the 5s
+    // graceful window must precede the 2s kill window — swapping either
+    // pair (e.g. silently halving the graceful window) keeps a
+    // membership-only assertion green while production hard-kills a
+    // service that would have exited cleanly on SIGTERM, losing in-flight
+    // channel state. Every other ordering in this file is pinned via
+    // invocationCallOrder/NthCalledWith (R9-24).
+    expect(mockSignalService).toHaveBeenNthCalledWith(1, 1234, 'SIGTERM');
+    expect(mockSignalService).toHaveBeenNthCalledWith(2, 1234, 'SIGKILL');
+    expect(mockWaitForExit).toHaveBeenNthCalledWith(1, 1234, 5000);
+    expect(mockWaitForExit).toHaveBeenNthCalledWith(2, 1234, 2000);
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service killed.');
     expect(mockRemoveServiceInfo).toHaveBeenCalled();
     // The record persisted, so the conditional tail takes the durable half
@@ -563,6 +641,13 @@ describe('stopCommand', () => {
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
+    // The final message must be emitted BEFORE the exit (R9-23).
+    const finalMessageCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('stay stopped'),
+    );
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[finalMessageCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('surfaces a lost stop record on the SIGKILL branch (#8975)', async () => {
@@ -591,6 +676,13 @@ describe('stopCommand', () => {
       expect.stringContaining('stay stopped'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
+    // The warning must precede the exit (R9-23).
+    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('could not persist the stopped record'),
+    );
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('surfaces a lost stop record when the service died before the signal (#8975)', async () => {

@@ -40,7 +40,19 @@ const mockDaemonChannelStateDir = vi.hoisted(() =>
   ),
 );
 const mockDaemonChannelRuntimeStatePath = vi.hoisted(() =>
-  vi.fn(() => '/tmp/qwen/channels/daemon/workspace-hash/channel-state.json'),
+  // Argument-derived on purpose (mirrors the instanceDir mock above): the
+  // real helper hashes the workspace, so two different arguments are two
+  // different files. A constant mock would let a split derivation (one
+  // call for the assertion, another for the store, or the store built
+  // from a different workspace than this worker's) coincide by accident
+  // and ship green — resurrecting explicitly stopped channels (R9-26).
+  vi.fn((workspace?: string) =>
+    workspace === undefined
+      ? '/tmp/qwen/channels/daemon/legacy/channel-state.json'
+      : `/tmp/qwen/channels/daemon/${
+          workspace === '/workspace' ? 'workspace-hash' : 'other-hash'
+        }/channel-state.json`,
+  ),
 );
 const mockChannelStateStoreReadAll = vi.hoisted(() => vi.fn(() => ({})));
 const mockChannelStateStoreSet = vi.hoisted(() => vi.fn());
@@ -1447,12 +1459,21 @@ describe('runChannelDaemonWorker', () => {
     // State file wiring: the helper receives this worker's workspace and
     // the store is constructed with the path it returns — a split here
     // reads state from a different file than the stop writes target,
-    // resurrecting explicitly stopped channels (#8975).
+    // resurrecting explicitly stopped channels (#8975). The path mock is
+    // argument-derived, and the store is pinned to the value returned for
+    // THIS workspace's call, so a split fails (R9-26).
     expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledWith(
       '/workspace',
     );
     expect(mockChannelStateStore).toHaveBeenCalledWith(
-      '/tmp/qwen/channels/daemon/workspace-hash/channel-state.json',
+      mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
+    );
+    // One-sided warning pin: the prune-fallback warning is pinned on the
+    // failure path below; a prune-success restore must NOT emit it —
+    // emitting it on every normal restore drowns the genuine warning
+    // (R9-12).
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
     );
     // prune receives the FULL configured set: a post-selection or partial
     // list would wipe the stopped records of exactly the skipped channels.
@@ -1527,6 +1548,22 @@ describe('runChannelDaemonWorker', () => {
       ['telegram', 'feishu'],
       'active',
     );
+    // One-sided warning pin: the persistence-failure warning is pinned on
+    // the failure twin below; a successful batched write must NOT emit it
+    // — a false data-loss alarm on every normal restore (R9-13).
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    // The store reads and writes the SAME workspace-derived file (the
+    // path mock is argument-derived; the store is pinned to the value
+    // returned for this workspace's call) — a split here resurrects
+    // explicitly stopped channels (R9-26).
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
+    );
     expect(ready).toHaveBeenCalledWith({
       channels: ['telegram', 'feishu'],
       requestedChannels: ['telegram', 'feishu'],
@@ -1570,6 +1607,17 @@ describe('runChannelDaemonWorker', () => {
     // explicitly requested channel out of a names selection (#8975).
     expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
     expect(mockChannelStateStoreReadAll).not.toHaveBeenCalled();
+    // The forced-start write lands in the SAME workspace-derived file the
+    // restore filter reads (argument-derived path mock; the store is
+    // pinned to the value returned for this workspace's call) — the
+    // cleared `stopped` record must be visible to the next `--channel
+    // all`, or the forced channel is re-skipped (R9-26).
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
+    );
     await handle.close();
   });
 

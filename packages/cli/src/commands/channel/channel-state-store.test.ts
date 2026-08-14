@@ -6,6 +6,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -84,6 +85,43 @@ describe('channelRuntimeStatePath', () => {
       channelRuntimeStatePath('/workspace/b'),
     );
   });
+
+  it('collapses spelling variants of a nonexistent directory before hashing (R9-2)', () => {
+    // Resolve-level spellings: trailing separators, dot segments and
+    // redundant separators must canonicalize identically, matching the
+    // daemon-side identity contract (daemon-worker canonicalizes the
+    // workspace before deriving its state path). A raw-string hash would
+    // silently lose recorded stops when the user re-enters the same
+    // directory under another spelling (#8975).
+    expect(channelRuntimeStatePath('/workspace/a/')).toBe(
+      channelRuntimeStatePath('/workspace/a'),
+    );
+    expect(channelRuntimeStatePath('/workspace/./a')).toBe(
+      channelRuntimeStatePath('/workspace/a'),
+    );
+    expect(channelRuntimeStatePath('/workspace/b/../a')).toBe(
+      channelRuntimeStatePath('/workspace/a'),
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'collapses symlinked spellings of the same directory (R9-2)',
+    () => {
+      // realpath-level spellings: a symlinked entry and its target are
+      // one workspace (the macOS /tmp vs /private/tmp shape). win32 skip:
+      // dir symlinks need elevated rights there (repo convention: skipIf).
+      const root = mkdtempSync(join(tmpdir(), 'qwen-canonical-'));
+      testDirs.push(root);
+      const realDir = join(root, 'real');
+      const linkDir = join(root, 'link');
+      mkdirSync(realDir);
+      symlinkSync(realDir, linkDir, 'dir');
+
+      expect(channelRuntimeStatePath(linkDir)).toBe(
+        channelRuntimeStatePath(realDir),
+      );
+    },
+  );
 });
 
 describe('adoptLegacyChannelState (#8975)', () => {
@@ -109,7 +147,16 @@ describe('adoptLegacyChannelState (#8975)', () => {
 
     adoptLegacyChannelState(workspace);
 
-    expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
+    // The seed records the adopted legacy map as its snapshot: a later
+    // start diffs the legacy file against it and merges only the entries
+    // that changed since, so post-adoption legacy stops are honored
+    // without the stale adopted ones ever overriding an explicit restart
+    // (R9-3).
+    expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'stopped' },
+      adoptedLegacy: { telegram: 'stopped' },
+    });
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
     });
@@ -118,6 +165,30 @@ describe('adoptLegacyChannelState (#8975)', () => {
     // later-starting workspace and resurrect the channels they explicitly
     // stopped (#8975).
     expect(existsSync(legacyPath)).toBe(true);
+  });
+
+  it('does not warn on a clean adoption (R9-10)', () => {
+    // One-sided warning pin: the adoption failure warning is asserted on
+    // the ENOTDIR failure path; a clean adoption must NOT fire it — a
+    // false alarm on every clean startup about the exact resurrection
+    // #8975 settles.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      adoptLegacyChannelState(workspace);
+      expect(writeSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('could not adopt legacy channel state'),
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
   });
 
   it('lets every later-starting workspace adopt the same legacy stops (#8975)', () => {
@@ -164,16 +235,30 @@ describe('adoptLegacyChannelState (#8975)', () => {
       // default umask, and adoption exists to normalize it (#8975).
       expect(statSync(workspacePath).mode & 0o777).toBe(0o600);
       expect(statSync(dirname(workspacePath)).mode & 0o777).toBe(0o700);
+      // Adoption creates the intermediate `standalone` dir AND the leaf
+      // hash dir via the recursive mkdirSync: BOTH must land restrictive,
+      // not just the leaf — a split mkdir applying the mode only to the
+      // leaf would leave ~/.qwen/channels/standalone/ world-enumerable
+      // (every workspace hash directory) with the pins above green
+      // (R9-9).
+      expect(statSync(dirname(dirname(workspacePath))).mode & 0o777).toBe(
+        0o700,
+      );
     },
   );
 
-  it('keeps an existing workspace file untouched', () => {
+  it('baselines a snapshot-less workspace file without merging the already-adopted legacy map (R9-3)', () => {
+    // A workspace file with no adoptedLegacy snapshot predates snapshot
+    // recording (or was created directly by a stop). Its legacy entries
+    // cannot be diffed against the snapshot, so they are baselined, NOT
+    // merged: merging would re-apply the already-adopted (possibly stale)
+    // legacy stops over explicit restarts recorded since (R9-3).
     writeFileSync(
       legacyPath,
       JSON.stringify({ version: 1, channels: { feishu: 'stopped' } }),
       'utf-8',
     );
-    mkdirSync(join(workspacePath, '..'), { recursive: true });
+    mkdirSync(dirname(workspacePath), { recursive: true });
     writeFileSync(
       workspacePath,
       JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
@@ -185,8 +270,84 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
     });
-    // The legacy file is left alone once the workspace file exists.
+    expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'stopped' },
+      adoptedLegacy: { feishu: 'stopped' },
+    });
     expect(existsSync(legacyPath)).toBe(true);
+
+    // From the baseline onward, entries that CHANGE in the legacy file
+    // are merged on the next start.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        version: 1,
+        channels: { feishu: 'stopped', slack: 'stopped' },
+      }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+      slack: 'stopped',
+    });
+  });
+
+  it('merges stops written to the legacy file AFTER the workspace file existed (R9-3)', () => {
+    // Mixed-version machine sharing ~/.qwen: the new-release start creates
+    // the workspace file; an older-release service later runs (downgrade /
+    // parallel install) producing an old-format pidfile; the next `qwen
+    // channel stop` writes `stopped` to the legacy global file (stop.ts
+    // legacy fallback). The one-shot existsSync guard used to drop that
+    // stop silently, resurrecting the explicitly stopped channel on the
+    // next `--channel all` (R9-3).
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { slack: 'stopped' } }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded in the workspace file after adoption.
+    new ChannelStateStore(workspacePath).set('slack', 'active');
+    // A later no-workspace stop records a NEW channel to the legacy file.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        version: 1,
+        channels: { slack: 'stopped', telegram: 'stopped' },
+      }),
+      'utf-8',
+    );
+
+    adoptLegacyChannelState(workspace);
+
+    // The post-adoption telegram stop is merged; the already-adopted
+    // slack stop is NOT re-applied over the explicit restart — the
+    // legacy file is kept forever, so a blind re-merge would keep
+    // stopping channels the user restarted (R9-3).
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      slack: 'active',
+      telegram: 'stopped',
+    });
+  });
+
+  it('does not rewrite an unchanged workspace file on every start (R9-3)', () => {
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    const beforeInode = statSync(workspacePath).ino;
+
+    adoptLegacyChannelState(workspace);
+
+    // Nothing changed in the legacy file: no fsync'd rewrite of an
+    // unchanged file on the startup critical path. Byte equality cannot
+    // observe a rewrite (the serialization is deterministic), so pin the
+    // inode — atomicWriteFileSync replaces via temp+rename.
+    expect(statSync(workspacePath).ino).toBe(beforeInode);
   });
 
   it('does nothing when no legacy file exists', () => {
@@ -245,7 +406,11 @@ describe('adoptLegacyChannelState (#8975)', () => {
     });
     writeFileSync(legacyPath, legacyBody, 'utf-8');
     adoptLegacyChannelState(workspace);
-    expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
+    expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'stopped' },
+      adoptedLegacy: { telegram: 'stopped' },
+    });
     // Kept for later-starting workspaces (#8975).
     expect(existsSync(legacyPath)).toBe(true);
   });
@@ -275,9 +440,35 @@ describe('adoptLegacyChannelState (#8975)', () => {
 
     // Once the disk recovers, the retry adopts the legacy stops.
     adoptLegacyChannelState(workspace);
-    expect(readFileSync(workspacePath, 'utf-8')).toBe(legacyBody);
+    expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'stopped' },
+      adoptedLegacy: { telegram: 'stopped' },
+    });
     // Kept for later-starting workspaces (#8975).
     expect(existsSync(legacyPath)).toBe(true);
+  });
+
+  it('reseeds a corrupt workspace file from the legacy map (R9-3)', () => {
+    // A corrupt target is treated as empty by the store's design
+    // contract; adoption then reseeds it from the whole legacy map and
+    // records a fresh snapshot, restoring both the records and the
+    // diff baseline in one atomic write.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    writeFileSync(workspacePath, '{not json', 'utf-8');
+
+    adoptLegacyChannelState(workspace);
+
+    expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'stopped' },
+      adoptedLegacy: { telegram: 'stopped' },
+    });
   });
 });
 
@@ -453,7 +644,8 @@ describe('ChannelStateStore', () => {
       // regression breaking success-path persistence (dropped or misrouted
       // delegation, warn-only conversion) must not ship green — so the
       // success path reads the file back through a fresh store.
-      const store = new ChannelStateStore(filePath, { onWarning: vi.fn() });
+      const onWarning = vi.fn();
+      const store = new ChannelStateStore(filePath, { onWarning });
 
       expect(store.trySet('telegram', 'stopped')).toBe(true);
       expect(store.trySetMany(['feishu', 'slack'], 'active')).toBe(true);
@@ -463,6 +655,11 @@ describe('ChannelStateStore', () => {
         feishu: 'active',
         slack: 'active',
       });
+      // One-sided warning pin: the write-failure warning is pinned on the
+      // failure path above; a successful write must NOT fire it — a false
+      // 'failed to persist channel state' on every successful stop/start
+      // (R9-11).
+      expect(onWarning).not.toHaveBeenCalled();
     });
   });
 

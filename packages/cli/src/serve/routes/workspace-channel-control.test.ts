@@ -293,6 +293,12 @@ describe('DELETE /workspace/channel', () => {
 
     expect(response.status).toBe(200);
     expect(mockChannelStateStoreInstances).toHaveLength(0);
+    // The flag appears ONLY on persistence loss: no write was attempted
+    // here (nothing was running), so the response must stay the clean
+    // 200 shape — a regression defaulting statePersisted or setting it
+    // on the no-op path would make every idle-stop client warn about a
+    // loss that never happened (R9-28).
+    expect(response.body.statePersisted).toBeUndefined();
   });
 
   it('keeps serving the stop result even when state persistence fails (#8975)', async () => {

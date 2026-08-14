@@ -5,7 +5,10 @@ import {
   hashDaemonWorkspace,
   Storage,
 } from '@qwen-code/qwen-code-core';
-import { sanitizeLogText } from '@qwen-code/channel-base';
+import {
+  canonicalizeWorkspacePath,
+  sanitizeLogText,
+} from '@qwen-code/channel-base';
 import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 
 /**
@@ -20,6 +23,15 @@ const STORE_VERSION = 1;
 interface ChannelStateFile {
   version: typeof STORE_VERSION;
   channels: Record<string, ChannelRuntimeState>;
+  /**
+   * The legacy global map at the last adoption sync (#8975): lets a later
+   * start tell legacy entries written AFTER this workspace adopted (a
+   * mixed-version machine where an old-format pidfile routes a stop to the
+   * legacy global file) apart from entries already adopted — only the
+   * changed ones are merged, so old legacy stops can never override an
+   * explicit restart recorded in this workspace's own map.
+   */
+  adoptedLegacy?: Record<string, ChannelRuntimeState>;
 }
 
 /**
@@ -42,54 +54,168 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
     Storage.getGlobalQwenDir(),
     'channels',
     'standalone',
-    hashDaemonWorkspace(workspaceCwd),
+    // Canonicalize before hashing: spelling variants of the same directory
+    // (Windows case-insensitivity, symlinks, trailing separators) must map
+    // to ONE state file, or a stop recorded under one spelling is silently
+    // lost when the user re-enters as another and the next `--channel all`
+    // resurrects the explicitly stopped channels. The daemon side derives
+    // its state path from a canonicalized workspace (daemon-worker
+    // canonicalizeWorkspace); canonicalizeWorkspacePath is the ENOENT/
+    // error-tolerant mirror for this never-fails store (#8975). The
+    // feature and its files are new, so the identity change migrates
+    // nothing.
+    hashDaemonWorkspace(canonicalizeWorkspacePath(workspaceCwd)),
     'channel-state.json',
   );
 }
 
 /**
- * Migration for stops recorded by an older release, which wrote the legacy
- * global file when the pidfile carried no workspace. The standalone read
- * path is always workspace-scoped, so without this seed the recorded stops
- * would be silently lost on upgrade and the channels resurrected by the
- * next `--channel all` start (#8975). Runs only when the workspace file
- * does not exist yet; best-effort — any failure just drops the legacy
- * record for this workspace. The legacy file carries no workspace
- * attribution, so it is deliberately KEPT after an adoption: deleting it
- * after the first workspace adopts it would silently lose the recorded
- * stops of every later-starting workspace and resurrect the channels they
- * explicitly stopped. Each adopting workspace copies the whole file;
- * entries for channels it does not configure are dropped by `prune` on
- * start anyway (#8975).
+ * Migration for stops recorded to the legacy global file, which a stop
+ * uses when the pidfile carries no workspace (an older release's service,
+ * or a downgrade/parallel install on a mixed-version machine sharing
+ * ~/.qwen). The standalone read path is always workspace-scoped, so
+ * without adoption the recorded stops would be silently lost and the
+ * channels resurrected by the next `--channel all` start (#8975).
+ *
+ * First adoption seeds the workspace file from the legacy map and records
+ * it as the `adoptedLegacy` snapshot; every later start diffs the current
+ * legacy map against that snapshot and merges only the entries that
+ * changed since — stops written to the legacy file AFTER the workspace
+ * file already exists (the one-shot existsSync guard used to drop them
+ * silently, resurrecting explicitly stopped channels). Entries already in
+ * the snapshot are NOT re-applied: the legacy file is deliberately kept
+ * forever (a later-starting workspace adopts the same stops), so blindly
+ * re-merging it would override an explicit restart recorded in this
+ * workspace's own map with the stale old stop. Entries that disappeared
+ * from the legacy file are likewise never propagated: it carries no
+ * workspace attribution, so its loss or rewrite must not destroy this
+ * workspace's records. Best-effort — any failure only loses this sync and
+ * warns, matching the store's never-fails contract (#8975).
  */
 export function adoptLegacyChannelState(workspaceCwd: string): void {
   const targetPath = channelRuntimeStatePath(workspaceCwd);
-  if (existsSync(targetPath)) return;
   const legacyPath = channelRuntimeStatePath();
   if (!existsSync(legacyPath)) return;
+  let legacyChannels: Record<string, ChannelRuntimeState>;
+  try {
+    legacyChannels =
+      parseStateFile(readFileSync(legacyPath, 'utf-8'))?.channels ??
+      Object.create(null);
+  } catch {
+    return;
+  }
+
+  let target: ParsedStateFile | undefined;
+  let targetExisted = false;
+  if (existsSync(targetPath)) {
+    targetExisted = true;
+    try {
+      target = parseStateFile(readFileSync(targetPath, 'utf-8'));
+    } catch {
+      target = undefined;
+    }
+  }
+
+  const channels: Record<string, ChannelRuntimeState> =
+    target?.channels ?? Object.create(null);
+  const snapshot = target?.adoptedLegacy;
+  const merged: string[] = [];
+  // A corrupt/unreadable target is treated as empty by design, so reseed
+  // it from the whole legacy map; a valid target without a snapshot
+  // predates snapshot recording and cannot be diffed — baseline it
+  // without merging, or the already-adopted (stale) legacy stops would
+  // override explicit restarts made since.
+  if (!targetExisted || target === undefined || snapshot !== undefined) {
+    for (const [name, state] of Object.entries(legacyChannels)) {
+      if (snapshot?.[name] !== state) {
+        channels[name] = state;
+        merged.push(name);
+      }
+    }
+  }
+  // Nothing new and the snapshot is already recorded: skip the write so a
+  // normal start does not pay an fsync'd rewrite of an unchanged file.
+  if (targetExisted && target !== undefined && snapshot !== undefined) {
+    if (merged.length === 0) return;
+  }
   try {
     mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
-    // Copy via the atomic write (temp + fsync + rename): a failure can
-    // never leave a partial (corrupt) target behind, which the existsSync
-    // guard above would otherwise treat as a completed adoption — skipping
-    // adoption forever and orphaning the recoverable legacy stops.
-    atomicWriteFileSync(targetPath, readFileSync(legacyPath), {
+    // Write via the atomic path (temp + fsync + rename): a failure can
+    // never leave a partial (corrupt) target behind, which would be
+    // treated as empty on the next start and lose both this workspace's
+    // records and its adoption snapshot (#8975).
+    const data: ChannelStateFile = {
+      version: STORE_VERSION,
+      channels,
+      adoptedLegacy: legacyChannels,
+    };
+    atomicWriteFileSync(targetPath, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',
       mode: 0o600,
       forceMode: true,
       noFollow: true,
     });
   } catch {
-    // Best-effort migration; a failure only loses the one-time legacy stops,
-    // but surface it so a later resurrection of those channels has a
-    // traceable cause — once any write creates the workspace file, the
-    // existsSync guard above locks adoption out permanently (#8975).
+    // Best-effort migration; surface a failure so a later resurrection of
+    // the unadopted stops has a traceable cause (#8975).
     writeStoreWarning(
       `[Channel] Warning: could not adopt legacy channel state from ${legacyPath}; recorded stops may not be honored.`,
     );
   }
   // The legacy file is intentionally kept: later-starting workspaces must
   // be able to adopt the same recorded stops (see the function doc).
+}
+
+interface ParsedStateFile {
+  channels: Record<string, ChannelRuntimeState>;
+  adoptedLegacy?: Record<string, ChannelRuntimeState>;
+}
+
+/** Tolerant state-file parse: any deviation yields `undefined`. */
+function parseStateFile(raw: string): ParsedStateFile | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const file = parsed as Partial<ChannelStateFile>;
+  if (
+    typeof file.channels !== 'object' ||
+    file.channels === null ||
+    Array.isArray(file.channels)
+  ) {
+    return undefined;
+  }
+  const result: ParsedStateFile = {
+    channels: filterChannelStates(file.channels),
+  };
+  if (
+    typeof file.adoptedLegacy === 'object' &&
+    file.adoptedLegacy !== null &&
+    !Array.isArray(file.adoptedLegacy)
+  ) {
+    result.adoptedLegacy = filterChannelStates(file.adoptedLegacy);
+  }
+  return result;
+}
+
+function filterChannelStates(
+  channels: Record<string, unknown>,
+): Record<string, ChannelRuntimeState> {
+  // Null-prototype map: channel names are user-controlled settings keys,
+  // so a channel literally named `__proto__` must round-trip like any
+  // other instead of routing through the Object.prototype setter.
+  const states: Record<string, ChannelRuntimeState> = Object.create(null);
+  for (const [name, state] of Object.entries(channels)) {
+    if (name.length > 0 && isChannelRuntimeState(state)) {
+      states[name] = state;
+    }
+  }
+  return states;
 }
 
 function isChannelRuntimeState(value: unknown): value is ChannelRuntimeState {
@@ -131,42 +257,33 @@ export class ChannelStateStore {
     this.warn = opts.onWarning ?? writeStoreWarning;
   }
 
-  readAll(): Record<string, ChannelRuntimeState> {
-    if (!existsSync(this.filePath)) return Object.create(null);
-    let parsed: unknown;
+  /**
+   * Read + tolerantly parse the whole state file. A missing or corrupt
+   * file behaves like an empty state map (never fails channel startup);
+   * a CORRUPT file additionally warns, since the discarded records are the
+   * only thing a later resurrection can be traced to (#8975). Returns the
+   * full parsed file (channels + adoption snapshot) so writers can
+   * preserve fields they do not own.
+   */
+  private readFileFull(): ParsedStateFile | undefined {
+    if (!existsSync(this.filePath)) return undefined;
+    let raw: string;
     try {
-      parsed = JSON.parse(readFileSync(this.filePath, 'utf-8'));
+      raw = readFileSync(this.filePath, 'utf-8');
     } catch {
       this.warnDiscardedFile();
-      return Object.create(null);
+      return undefined;
     }
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
+    const parsed = parseStateFile(raw);
+    if (!parsed) {
       this.warnDiscardedFile();
-      return Object.create(null);
+      return undefined;
     }
-    const channels = (parsed as Partial<ChannelStateFile>).channels;
-    if (
-      typeof channels !== 'object' ||
-      channels === null ||
-      Array.isArray(channels)
-    ) {
-      this.warnDiscardedFile();
-      return Object.create(null);
-    }
-    // Null-prototype map: channel names are user-controlled settings keys,
-    // so a channel literally named `__proto__` must round-trip like any
-    // other instead of routing through the Object.prototype setter.
-    const states: Record<string, ChannelRuntimeState> = Object.create(null);
-    for (const [name, state] of Object.entries(channels)) {
-      if (name.length > 0 && isChannelRuntimeState(state)) {
-        states[name] = state;
-      }
-    }
-    return states;
+    return parsed;
+  }
+
+  readAll(): Record<string, ChannelRuntimeState> {
+    return this.readFileFull()?.channels ?? Object.create(null);
   }
 
   set(name: string, state: ChannelRuntimeState): void {
@@ -242,7 +359,15 @@ export class ChannelStateStore {
   private applyChange(
     mutate: (channels: Record<string, ChannelRuntimeState>) => void,
   ): void {
-    const channels = this.readAll();
+    // Read via the full-file reader: the adoptedLegacy snapshot must
+    // survive every production write, or the next adoption sync loses its
+    // diff baseline — silently dropping post-adoption legacy stops (they
+    // can no longer be told apart from the already-adopted ones), or a
+    // later re-adoption re-applying stale legacy stops over explicit
+    // restarts (R9-3). A corrupt file is treated as empty by design, so
+    // its snapshot is dropped with it.
+    const full = this.readFileFull();
+    const channels = full?.channels ?? Object.create(null);
     mutate(channels);
     const dir = path.dirname(this.filePath);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -254,6 +379,7 @@ export class ChannelStateStore {
     const data: ChannelStateFile = {
       version: STORE_VERSION,
       channels,
+      ...(full?.adoptedLegacy ? { adoptedLegacy: full.adoptedLegacy } : {}),
     };
     atomicWriteFileSync(this.filePath, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',

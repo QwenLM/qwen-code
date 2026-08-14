@@ -1303,11 +1303,17 @@ describe('createChannelWorkerSupervisor', () => {
     // production reader is the manager's stop capture, which needs it to
     // record exactly the channels that ran on this terminal snapshot —
     // dropping it would degrade a budget-exhausted stop to the attempted
-    // set (recording never-connected channels) or nothing (#8975).
+    // set (recording never-connected channels) or nothing (#8975). The
+    // attempted set ALSO survives in lastRequestedChannels: the manager's
+    // mode-names dead-name computation needs the FULL attempted set —
+    // `channels` alone is the last ready's connected subset, which would
+    // leave a never-connected channel "committed" on the dead worker
+    // (R9-6).
     const terminal = supervisor.snapshot();
     expect(terminal.requestedChannels).toBeUndefined();
     expect(terminal.adapters).toBeUndefined();
     expect(terminal.lastConnectedChannels).toEqual(['telegram']);
+    expect(terminal.lastRequestedChannels).toEqual(['telegram']);
   });
 
   it('resets restart budget after an intentional stop and start', async () => {

@@ -96,6 +96,15 @@ export class ChannelWorkerControlError extends Error {
    * persistence is attempted.
    */
   statePersisted?: boolean;
+  /**
+   * Workspaces whose old worker entry the failed reconcile's rollback
+   * restored: their channels are relaunching even though the aggregate
+   * `rolledBack` is `false` (another workspace's restore failed). A
+   * caller persisting `stopped` for one workspace must skip the ones
+   * listed here, or it records a stop for a channel that is coming back
+   * (R9-4).
+   */
+  readonly restoredWorkspaces?: string[];
 
   constructor(
     code: ChannelWorkerControlError['code'],
@@ -109,6 +118,7 @@ export class ChannelWorkerControlError extends Error {
         workspaceCwd: string;
         names: readonly string[];
       }>;
+      restoredWorkspaces?: readonly string[];
     } = {},
   ) {
     super(message);
@@ -124,6 +134,9 @@ export class ChannelWorkerControlError extends Error {
       workspaceCwd: entry.workspaceCwd,
       names: [...entry.names],
     }));
+    this.restoredWorkspaces = details.restoredWorkspaces
+      ? [...details.restoredWorkspaces]
+      : undefined;
   }
 }
 
@@ -330,14 +343,19 @@ function stoppedChannelsByWorkspace(
  * The control state rides HTTP responses verbatim (GET/PUT/DELETE
  * /workspace/channel, GET /daemon/status, POST /workspace/channel/reload):
  * strip `lastConnectedChannels`, an internal input of the stop capture
- * that the SDK's `DaemonChannelWorkerSnapshot` does not declare. The
- * capture reads the group snapshots directly, so stripping in these public
- * accessors does not narrow what a stop records (#8975).
+ * that the SDK's `DaemonChannelWorkerSnapshot` does not declare, and
+ * `lastRequestedChannels`, the internal input of the mode-names
+ * dead-name computation on terminal snapshots (R9-6). The capture and
+ * the computation read the group snapshots directly, so stripping in
+ * these public accessors does not narrow what they see (#8975).
  */
 function publicWorkerSnapshot<T extends ChannelWorkerSnapshot>(worker: T): T {
-  if (!worker.lastConnectedChannels) return worker;
+  if (!worker.lastConnectedChannels && !worker.lastRequestedChannels) {
+    return worker;
+  }
   const publicSnapshot = { ...worker };
   delete publicSnapshot.lastConnectedChannels;
+  delete publicSnapshot.lastRequestedChannels;
   return publicSnapshot;
 }
 
@@ -457,6 +475,9 @@ export function createChannelWorkerManager(
           rolledBack: error.rolledBack,
           ...(error.rollbackError
             ? { rollbackError: error.rollbackError }
+            : {}),
+          ...(error.restoredWorkspaces
+            ? { restoredWorkspaces: error.restoredWorkspaces }
             : {}),
           ...startupFailureDetails(error),
           ...extraDetails,
@@ -608,7 +629,15 @@ export function createChannelWorkerManager(
       const deadNames = new Set<string>();
       for (const worker of group?.snapshots() ?? []) {
         if (!isTerminalFailedWorker(worker)) continue;
-        for (const name of worker.requestedChannels ?? worker.channels) {
+        // The terminal snapshot drops `requestedChannels`; its full
+        // attempted set rides in `lastRequestedChannels` (R9-6). Falling
+        // back to `channels` alone degrades to the last ready's CONNECTED
+        // subset, leaving a never-connected channel "committed" on the
+        // dead worker — its own start/stop/remove then throws
+        // channel_runtime_owner_mismatch instead of relaunching it.
+        for (const name of worker.requestedChannels ??
+          worker.lastRequestedChannels ??
+          worker.channels) {
           deadNames.add(name);
         }
       }

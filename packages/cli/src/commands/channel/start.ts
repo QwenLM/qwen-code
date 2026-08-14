@@ -625,17 +625,13 @@ async function startAll(
       );
     }
   }
-  // One batched best-effort write after the loop instead of a fsync'd
-  // read-modify-write per channel on the startup critical path. A failed
-  // write leaves stale `stopped` records: the channels ARE running, so
-  // warn instead of failing the start — but surface the loss like the stop
-  // direction does, or the next `--channel all` restore skips explicitly
-  // restarted channels (#8975).
-  if (!stateStore.trySetMany([...connectedChannels.keys()], 'active')) {
-    writeStdoutLine(
-      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
-    );
-  }
+  // No batched `active` write here: every connected name was selected by
+  // selectActiveChannels, which excludes exactly the `stopped` entries —
+  // the file already holds active-or-nothing for each of them and no
+  // reader distinguishes those, so the write (and a warning claiming a
+  // skip consequence its loss cannot produce) was pure noise on the
+  // startup critical path (R9-19). startSingle's recordChannelActive is
+  // different: a restart-by-name clears a prior `stopped` record.
   const connectedCount = connectedChannels.size;
 
   if (connectedCount === 0) {

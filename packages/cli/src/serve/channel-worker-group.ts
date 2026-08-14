@@ -42,6 +42,15 @@ export class ChannelWorkerReconcileError extends Error {
   readonly stopFailed: boolean;
   readonly startupFailures?: ChannelStartupAttemptFailure[];
   readonly startupFailuresTruncated?: boolean;
+  /**
+   * Workspaces whose old entry WAS successfully restored by the rollback.
+   * `rolledBack` is aggregate: with a multi-workspace reconcile it is
+   * `false` when ANY workspace's restore fails — even though the other
+   * workspaces' channels are relaunching. Callers deciding whether a
+   * specific workspace's channel is confirmed dead must consult this
+   * instead of the aggregate flag (R9-4).
+   */
+  readonly restoredWorkspaces?: string[];
 
   constructor(
     message: string,
@@ -51,6 +60,7 @@ export class ChannelWorkerReconcileError extends Error {
       stopFailed?: boolean;
       startupFailures?: readonly ChannelStartupAttemptFailure[];
       startupFailuresTruncated?: boolean;
+      restoredWorkspaces?: readonly string[];
     },
   ) {
     super(message);
@@ -62,6 +72,9 @@ export class ChannelWorkerReconcileError extends Error {
       ...failure,
     }));
     this.startupFailuresTruncated = options.startupFailuresTruncated;
+    this.restoredWorkspaces = options.restoredWorkspaces
+      ? [...options.restoredWorkspaces]
+      : undefined;
   }
 }
 
@@ -456,18 +469,24 @@ export function createChannelWorkerGroup(
 
   const restoreEntries = async (
     entriesToRestore: readonly ChannelWorkerGroupEntry[],
-  ): Promise<{ rolledBack: boolean; rollbackError?: string }> => {
+  ): Promise<{
+    rolledBack: boolean;
+    rollbackError?: string;
+    restoredWorkspaces: string[];
+  }> => {
     let firstError: string | undefined;
+    const restoredWorkspaces: string[] = [];
     for (const entry of entriesToRestore) {
       try {
         await entry.supervisor.start();
+        restoredWorkspaces.push(entry.workspaceCwd);
       } catch (error) {
         firstError ??= errorMessage(error);
       }
     }
     return firstError
-      ? { rolledBack: false, rollbackError: firstError }
-      : { rolledBack: true };
+      ? { rolledBack: false, rollbackError: firstError, restoredWorkspaces }
+      : { rolledBack: true, restoredWorkspaces };
   };
 
   const routeEntry = (
