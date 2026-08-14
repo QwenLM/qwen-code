@@ -64,6 +64,9 @@ const verdict = {
   downgraded: true,
   downgradedFrom: 'Request changes',
   remediation: ['Run verification again.'],
+  // Non-zero on purpose: the copy test then proves passthrough, not just
+  // the validator's absent-means-zero default.
+  deferredCount: 2,
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
 };
@@ -278,6 +281,21 @@ describe('saveReviewArtifact', () => {
       }),
     ).toThrow(/verdictLine/);
     expect(existsSync(paths.out)).toBe(false);
+  });
+
+  it('reads an absent deferredCount as zero — a pre-posture composed file must still save', () => {
+    const paths = fixture();
+    const { deferredCount: _absent, ...prePosture } = verdict;
+    writeJson(paths.composed, prePosture);
+
+    saveReviewArtifact({
+      ...paths,
+      target: 'local',
+      effort: 'medium',
+    });
+    expect(
+      JSON.parse(readFileSync(paths.out, 'utf8')).verdict.deferredCount,
+    ).toBe(0);
   });
 
   it.each(['findings', 'composed', 'report'] as const)(
