@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { getMcpAppDisplay, resolveMcpAppSandboxUrl } from './McpApp';
+import {
+  applySandboxCspQuery,
+  getMcpAppDisplay,
+  resolveMcpAppSandboxUrl,
+} from './McpApp';
 
 describe('MCP App host helpers', () => {
   it('recognizes a complete app display', () => {
@@ -27,15 +31,35 @@ describe('MCP App host helpers', () => {
     );
   });
 
-  it('swaps [::1] onto 127.0.0.1 when the sandbox would share the host origin', () => {
+  it('swaps [::1] onto localhost so IPv6-only binds stay reachable', () => {
     expect(
       resolveMcpAppSandboxUrl(
         'http://[::1]:4170',
         'http://[::1]:4170/session/demo',
       ),
     ).toBe(
-      'http://127.0.0.1:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2F%5B%3A%3A1%5D%3A4170',
+      'http://localhost:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2F%5B%3A%3A1%5D%3A4170',
     );
+  });
+
+  it('keeps a localhost sandbox on localhost instead of guessing 127.0.0.1', () => {
+    expect(
+      resolveMcpAppSandboxUrl(
+        'http://localhost:4170',
+        'http://localhost:4170/session/demo',
+      ),
+    ).toBe(
+      'http://localhost:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2Flocalhost%3A4170',
+    );
+  });
+
+  it('omits CSP from the sandbox URL when it would overflow the request line', () => {
+    const sandboxUrl =
+      'http://localhost:4170/mcp-app-sandbox?hostOrigin=http%3A%2F%2F127.0.0.1%3A4170';
+    expect(applySandboxCspQuery(sandboxUrl, '{"connectDomains":[]}')).toContain(
+      'csp=',
+    );
+    expect(applySandboxCspQuery(sandboxUrl, 'x'.repeat(8193))).toBe(sandboxUrl);
   });
 
   it('rejects non-loopback hosts', () => {

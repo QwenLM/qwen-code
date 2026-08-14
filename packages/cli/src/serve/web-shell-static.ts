@@ -47,11 +47,10 @@ export function loopbackSandboxOrigins(
 ): string[] {
   const port = portFromHostHeader(hostHeader);
   const suffix = port ? `:${port}` : '';
-  return [
-    `http://localhost${suffix}`,
-    `http://127.0.0.1${suffix}`,
-    `http://[::1]${suffix}`,
-  ];
+  const hosts = ['localhost', '127.0.0.1', '[::1]'] as const;
+  return (['http', 'https'] as const).flatMap((scheme) =>
+    hosts.map((host) => `${scheme}://${host}${suffix}`),
+  );
 }
 
 export function portFromHostHeader(

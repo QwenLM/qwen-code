@@ -357,6 +357,10 @@ function createMcpClient(name: string): Client {
     { name, version: '0.0.1' },
     {
       versionNegotiation: { mode: 'auto' },
+      // Default 64 throws ListPaginationExceeded and discoverTools
+      // swallows that into []. 0 disables the cap; the SDK still
+      // stops on a repeating cursor.
+      listMaxPages: 0,
       capabilities: {
         extensions: {
           [MCP_APPS_EXTENSION_ID]: {

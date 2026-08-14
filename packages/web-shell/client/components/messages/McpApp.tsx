@@ -42,6 +42,21 @@ export function getMcpAppDisplay(value: unknown): McpAppDisplay | undefined {
   return value as unknown as McpAppDisplay;
 }
 
+// Matches packages/cli/src/serve/mcp-app-sandbox.ts MAX_CSP_QUERY_LENGTH.
+// Must stay under Node's default 16 KiB HTTP request-line limit.
+const MAX_SANDBOX_CSP_QUERY_LENGTH = 8192;
+
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+  );
+}
+
+function loopbackCrossOriginHostname(hostname: string): string | undefined {
+  if (hostname === '127.0.0.1' || hostname === '[::1]') return 'localhost';
+  return undefined;
+}
+
 export function resolveMcpAppSandboxUrl(
   daemonBaseUrl: string,
   hostUrl: string,
@@ -50,19 +65,14 @@ export function resolveMcpAppSandboxUrl(
     const host = new URL(hostUrl);
     const sandbox = new URL(daemonBaseUrl, host);
     if (
-      !['localhost', '127.0.0.1', '[::1]'].includes(host.hostname) ||
-      !['localhost', '127.0.0.1', '[::1]'].includes(sandbox.hostname)
+      !isLoopbackHostname(host.hostname) ||
+      !isLoopbackHostname(sandbox.hostname)
     ) {
       return undefined;
     }
     if (sandbox.origin === host.origin) {
-      if (sandbox.hostname === 'localhost' || sandbox.hostname === '[::1]') {
-        sandbox.hostname = '127.0.0.1';
-      } else if (sandbox.hostname === '127.0.0.1') {
-        sandbox.hostname = 'localhost';
-      } else {
-        return undefined;
-      }
+      const alias = loopbackCrossOriginHostname(sandbox.hostname);
+      if (alias) sandbox.hostname = alias;
     }
     sandbox.pathname = '/mcp-app-sandbox';
     sandbox.search = '';
@@ -72,6 +82,18 @@ export function resolveMcpAppSandboxUrl(
   } catch {
     return undefined;
   }
+}
+
+export function applySandboxCspQuery(
+  sandboxUrl: string,
+  cspJson: string,
+): string {
+  if (!cspJson || cspJson.length > MAX_SANDBOX_CSP_QUERY_LENGTH) {
+    return sandboxUrl;
+  }
+  const url = new URL(sandboxUrl);
+  url.searchParams.set('csp', cspJson);
+  return url.toString();
 }
 
 function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
@@ -108,9 +130,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       window.location.href,
     );
     if (!resolved) return undefined;
-    const url = new URL(resolved);
-    if (cspKey) url.searchParams.set('csp', cspKey);
-    return url.toString();
+    return applySandboxCspQuery(resolved, cspKey);
   }, [daemonBaseUrl, cspKey]);
 
   useEffect(() => {
@@ -125,7 +145,9 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
       {
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
-          ...(current.permissions ? { permissions: current.permissions } : {}),
+          ...(current.permissions?.clipboardWrite !== undefined
+            ? { permissions: { clipboardWrite: {} } }
+            : {}),
         },
       },
       { hostContext: mcpAppHostContext(themeRef.current) },
@@ -221,6 +243,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
         sandbox="allow-scripts allow-same-origin allow-forms"
         allow={buildAllowAttribute(display.permissions)}
         referrerPolicy="origin"
+        onError={() => setError('sandbox-load-failed')}
       />
     </div>
   );

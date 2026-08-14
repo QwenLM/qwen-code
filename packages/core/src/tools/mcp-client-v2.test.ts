@@ -175,6 +175,68 @@ describe('configured MCP SDK v2 negotiation', () => {
     }
   });
 
+  it('lists every page of a modern tools/list instead of dropping the catalog', async () => {
+    const pageCount = 65;
+    const send = vi.fn(async (_serverName: string, message: JSONRPCMessage) => {
+      const request = message as RequestMessage;
+      switch (request.method) {
+        case 'server/discover':
+          return response(request, {
+            supportedVersions: ['2026-07-28'],
+            capabilities: { tools: {} },
+          });
+        case 'tools/list': {
+          const cursor = Number(
+            (request.params as { cursor?: string } | undefined)?.cursor ?? '0',
+          );
+          return response(request, {
+            resultType: 'complete',
+            tools: [
+              {
+                name: `tool-${cursor}`,
+                inputSchema: { type: 'object' },
+              },
+            ],
+            ttlMs: 60_000,
+            cacheScope: 'private',
+            ...(cursor + 1 < pageCount
+              ? { nextCursor: String(cursor + 1) }
+              : {}),
+          });
+        }
+        default:
+          throw new Error(`Unexpected modern MCP method: ${request.method}`);
+      }
+    });
+
+    const client = await connectToMcpServer(
+      'paged',
+      { type: 'sdk' } as MCPServerConfig,
+      false,
+      workspaceContext(),
+      send,
+    );
+
+    try {
+      const listed = await client.listTools();
+      expect(listed.tools.map((tool) => tool.name)).toEqual(
+        Array.from({ length: pageCount }, (_, index) => `tool-${index}`),
+      );
+      const tools = await discoverTools(
+        'paged',
+        { type: 'sdk' } as MCPServerConfig,
+        client,
+        {} as Config,
+        { applyConfigFilters: false },
+      );
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(
+        Array.from({ length: pageCount }, (_, index) => `tool-${index}`),
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
   it('sends the modern protocol headers over HTTP', async () => {
     const http = await import('node:http');
     const requests: Array<{

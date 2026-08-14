@@ -12,6 +12,7 @@ const appBridgeMocks = vi.hoisted(() => ({
     onsandboxready?: () => void;
     oninitialized?: () => void;
   } | null,
+  lastCapabilities: undefined as unknown,
   setHostContext: vi.fn(),
   connect: vi.fn(() => Promise.resolve()),
   close: vi.fn(() => Promise.resolve()),
@@ -32,9 +33,10 @@ vi.mock('@modelcontextprotocol/ext-apps/app-bridge', () => ({
     sendToolInput = appBridgeMocks.sendToolInput;
     sendToolResult = appBridgeMocks.sendToolResult;
     teardownResource = appBridgeMocks.teardownResource;
-    constructor() {
+    constructor(_app: unknown, _info: unknown, capabilities?: unknown) {
       appBridgeMocks.constructed += 1;
       appBridgeMocks.last = this;
+      appBridgeMocks.lastCapabilities = capabilities;
     }
   },
 }));
@@ -57,6 +59,7 @@ afterEach(() => {
 beforeEach(() => {
   appBridgeMocks.constructed = 0;
   appBridgeMocks.last = null;
+  appBridgeMocks.lastCapabilities = undefined;
   appBridgeMocks.setHostContext.mockClear();
   appBridgeMocks.connect.mockClear();
   appBridgeMocks.close.mockClear();
@@ -180,5 +183,35 @@ describe('McpApp host lifetime', () => {
       arguments: {},
     });
     expect(appBridgeMocks.sendToolResult).toHaveBeenCalledWith({ content: [] });
+  });
+
+  it('advertises only clipboardWrite as a host-granted sandbox permission', async () => {
+    renderApp(
+      appDisplay({
+        permissions: {
+          clipboardWrite: {},
+          camera: {},
+        } as McpAppDisplay['permissions'],
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(appBridgeMocks.lastCapabilities).toEqual({
+      sandbox: { permissions: { clipboardWrite: {} } },
+    });
+    expect(appBridgeMocks.last?.onsandboxready).toEqual(expect.any(Function));
+
+    await act(async () => {
+      appBridgeMocks.last?.onsandboxready?.();
+      await Promise.resolve();
+    });
+
+    expect(appBridgeMocks.sendSandboxResourceReady).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permissions: { clipboardWrite: {}, camera: {} },
+      }),
+    );
   });
 });
