@@ -106,6 +106,7 @@ export default {
     '上位スコープ設定によってロックされています（ここでは切替不可）：',
   'Hidden locked skills: {{count}} · type to search':
     '非表示のロック済みスキル: {{count}} · 入力して検索',
+  '(+{{count}} locked)': '（+{{count}} 件ロック中）',
   'higher scope': '上位スコープ',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [ロック中：{{scope}}]',

@@ -353,6 +353,7 @@ export default {
     '被更高范围设置锁定（此处无法切换）：',
   'Hidden locked skills: {{count}} · type to search':
     '已隐藏 {{count}} 个锁定技能 · 输入以搜索',
+  '(+{{count}} locked)': '（+{{count}} 个已锁定）',
   'higher scope': '更高范围',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已锁定：{{scope}}]',

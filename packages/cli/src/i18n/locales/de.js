@@ -124,6 +124,7 @@ export default {
     'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
   'Hidden locked skills: {{count}} · type to search':
     'Ausgeblendete gesperrte Skills: {{count}} · zum Suchen tippen',
+  '(+{{count}} locked)': '(+{{count}} gesperrt)',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',

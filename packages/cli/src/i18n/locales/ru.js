@@ -144,6 +144,7 @@ export default {
     'Заблокированы настройками более высокого уровня (здесь переключить нельзя):',
   'Hidden locked skills: {{count}} · type to search':
     'Скрытые заблокированные навыки: {{count}} · введите текст для поиска',
+  '(+{{count}} locked)': '(+{{count}} заблокировано)',
   'higher scope': 'более высокий уровень',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [заблокировано: {{scope}}]',

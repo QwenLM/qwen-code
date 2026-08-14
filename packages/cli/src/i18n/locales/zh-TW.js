@@ -339,6 +339,7 @@ export default {
     '被更高範圍設定鎖定（此處無法切換）：',
   'Hidden locked skills: {{count}} · type to search':
     '已隱藏 {{count}} 個鎖定技能 · 輸入以搜尋',
+  '(+{{count}} locked)': '（+{{count}} 個已鎖定）',
   'higher scope': '更高範圍',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已鎖定：{{scope}}]',

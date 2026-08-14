@@ -144,6 +144,7 @@ export default {
     "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
   'Hidden locked skills: {{count}} · type to search':
     'Habilitats bloquejades ocultes: {{count}} · escriu per cercar',
+  '(+{{count}} locked)': '(+{{count}} bloquejat(s))',
   'higher scope': 'àmbit superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloquejada: {{scope}}]',

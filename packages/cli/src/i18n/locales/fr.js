@@ -143,6 +143,7 @@ export default {
     'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
   'Hidden locked skills: {{count}} · type to search':
     'Compétences verrouillées masquées : {{count}} · saisissez pour rechercher',
+  '(+{{count}} locked)': '(+{{count}} verrouillé(s))',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [verrouillée : {{scope}}]',

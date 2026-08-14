@@ -137,6 +137,7 @@ export default {
     'Bloqueado por configurações de escopo superior (não é possível alternar aqui):',
   'Hidden locked skills: {{count}} · type to search':
     'Habilidades bloqueadas ocultas: {{count}} · digite para pesquisar',
+  '(+{{count}} locked)': '(+{{count}} bloqueado(s))',
   'higher scope': 'escopo superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloqueado: {{scope}}]',

@@ -709,7 +709,7 @@ export function SkillsManagerDialog({
         {!showsLockedSearchResults &&
         hiddenLockedCount > 0 &&
         lockedRowBudget === 0
-          ? `(+${hiddenLockedCount} locked) `
+          ? t('(+{{count}} locked)', { count: String(hiddenLockedCount) }) + ' '
           : ''}
         {t(
           'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope',
