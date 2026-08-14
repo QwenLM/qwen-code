@@ -3087,6 +3087,57 @@ describe('runBuildTest', () => {
       ).toThrow(/without\n?\s*--resume first|Run build-test without/);
     });
 
+    it('distinguishes "no suite ever ran" from "every suite ran"', () => {
+      // Both reach the nothing-to-do branch, and they are opposite facts. A
+      // run that ended before its test phase — a failed install, the
+      // disk-space gate, a budget spent during the build, a --build-only
+      // probe — carries no scope for a continuation to read, and telling its
+      // reader every suite was reached is prose contradicting the evidence
+      // beside it.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core'],
+          widenedWith: [],
+          install: {
+            command: 'npm ci --no-audit --no-fund',
+            exitCode: 1,
+            seconds: 3,
+            timedOut: false,
+            output: 'ENOSPC',
+          },
+          build: [],
+          test: [],
+          ok: false,
+          timedOut: [],
+          note: 'the install failed',
+        }),
+      );
+
+      const calls: string[] = [];
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          calls.push(command);
+          return okResult(command);
+        },
+      });
+
+      expect(calls).toEqual([]);
+      expect(rep.note).toContain('ended before its test phase');
+      expect(rep.note).toContain('no suite ran');
+      expect(rep.note).not.toContain('reached every suite');
+    });
+
     it('says so when the run it continues had already finished', () => {
       threePackages();
       const outPath = join(root, 'report.json');

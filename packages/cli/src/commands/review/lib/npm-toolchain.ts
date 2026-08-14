@@ -154,9 +154,22 @@ function resumeNpmToolchain(
     ...pendingDirs.map((dir) => ({ command: testCommand(dir), dir })),
   ];
   if (work.length === 0) {
+    // "Every suite ran" and "no suite ever ran" both reach here with nothing
+    // to do, and they are opposite facts. A run that ended before its test
+    // phase — a failed install, the disk-space gate, a budget spent during the
+    // build, or a deliberate --build-only probe — carries neither a test scope
+    // nor any test result, and a continuation cannot manufacture one: the
+    // scope it would run is computed by the phase that never happened. Saying
+    // it reached every suite would be this PR's own Chinese-placeholder defect
+    // in English — prose asserting the opposite of the evidence beside it.
+    const neverTested = previous.test.length === 0 && !previous.testScope;
     return withNote(
-      'Nothing to resume: the run being continued reached every suite in ' +
-        'scope.',
+      neverTested
+        ? 'Nothing to resume: the run being continued ended before its test ' +
+            'phase, so it left no scope to continue — no suite ran. Re-run ' +
+            'build-test without --resume.'
+        : 'Nothing to resume: the run being continued reached every suite in ' +
+            'scope.',
     );
   }
 
