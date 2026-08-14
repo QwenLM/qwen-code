@@ -22515,6 +22515,9 @@ describe('Session', () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')
         .mockImplementation(() => {});
+      const boundarySpy = vi
+        .spyOn(core, 'observeToolResultBoundary')
+        .mockReturnValue(false);
       const messageBus = {
         request: vi
           .fn()
@@ -22533,9 +22536,18 @@ describe('Session', () => {
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const artifacts = [
+        {
+          kind: 'link' as const,
+          title: 'Completed report',
+          url: 'https://example.com/report',
+        },
+      ];
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'completed',
         returnDisplay: 'completed',
+        artifacts,
+        persistedOutputFiles: ['/private/post-stop-output.txt'],
       });
       mockToolRegistry.getTool.mockReturnValue(
         mockAllowedTool('post_stop_tool', execute),
@@ -22566,8 +22578,28 @@ describe('Session', () => {
           status: 'error',
           executionStatus: 'success',
           errorType: core.ToolErrorType.EXECUTION_DENIED,
+          resultDisplay: undefined,
+          artifacts,
+          persistedOutputFiles: ['/private/post-stop-output.txt'],
         }),
       );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            toolCallId: 'post_stop_call',
+            _meta: expect.objectContaining({ artifacts }),
+          }),
+        }),
+      );
+      const producerObservations = boundarySpy.mock.calls.filter(
+        ([observation]) =>
+          observation.stage === 'producer' &&
+          observation.toolCallId === 'post_stop_call',
+      );
+      expect(producerObservations).toHaveLength(1);
+      expect(producerObservations[0][0].artifacts).toEqual([
+        { state: 'reusable', kinds: ['file', 'link'] },
+      ]);
     });
 
     it('records postprocessing failure after successful execution', async () => {
@@ -23041,9 +23073,18 @@ describe('Session', () => {
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const artifacts = [
+        {
+          kind: 'file' as const,
+          title: 'Cancelled report',
+          workspacePath: 'reports/cancelled.txt',
+        },
+      ];
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'completed',
         returnDisplay: 'completed',
+        artifacts,
+        persistedOutputFiles: ['/private/post-cancel-output.txt'],
       });
       mockToolRegistry.getTool.mockReturnValue(
         mockAllowedTool('post_hook_tool', execute),
@@ -23082,6 +23123,17 @@ describe('Session', () => {
           executionStatus: 'success',
           error: undefined,
           errorType: undefined,
+          resultDisplay: undefined,
+          artifacts,
+          persistedOutputFiles: ['/private/post-cancel-output.txt'],
+        }),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            toolCallId: 'post_hook_cancel_call',
+            _meta: expect.objectContaining({ artifacts }),
+          }),
         }),
       );
     });

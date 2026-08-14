@@ -11,6 +11,7 @@ import type {
   AnyDeclarativeTool,
   ChatRecordingService,
   Config,
+  FileDiff,
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
   ToolConfirmationPayload,
@@ -10711,6 +10712,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    shouldObserveProducer?: (callId: string) => boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -10792,6 +10794,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       config: mockConfig,
       onAllToolCallsComplete,
       onToolCallsUpdate,
+      shouldObserveProducer: options.shouldObserveProducer,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
     });
@@ -10821,6 +10824,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       providerCallId?: string;
       tools?: AnyDeclarativeTool[];
       toolName?: string;
+      shouldObserveProducer?: (callId: string) => boolean;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -11390,6 +11394,7 @@ describe('CoreToolScheduler telemetry spans', () => {
             hookSpecificOutput: {
               artifacts: [
                 {
+                  kind: 'link',
                   title: 'Hook report',
                   workspacePath: 'reports/hook.html',
                 },
@@ -11407,6 +11412,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         returnDisplay: 'ok',
         artifacts: [
           {
+            kind: 'file',
             title: 'Tool report',
             workspacePath: 'reports/tool.html',
           },
@@ -11419,14 +11425,27 @@ describe('CoreToolScheduler telemetry spans', () => {
     if (completedCall.status === 'success') {
       expect(completedCall.response.artifacts).toEqual([
         {
+          kind: 'file',
           title: 'Tool report',
           workspacePath: 'reports/tool.html',
         },
         {
+          kind: 'link',
           title: 'Hook report',
           workspacePath: 'reports/hook.html',
         },
       ]);
+    }
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    for (const observation of producerObservations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
     }
   });
 
@@ -11557,6 +11576,26 @@ describe('CoreToolScheduler telemetry spans', () => {
       'Tool execution failed with exception',
       'tool_exception',
     );
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage === 'producer');
+    expect(producerObservations).toHaveLength(1);
+    expect(producerObservations[0].artifacts).toEqual([
+      { state: 'none', kinds: [] },
+    ]);
+  });
+
+  it('lets an outer owner suppress a scheduler producer observation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('externally owned')),
+      shouldObserveProducer: () => false,
+    });
+
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
   });
 
   it('observes a settled producer when post-processing throws', async () => {
@@ -11629,6 +11668,86 @@ describe('CoreToolScheduler telemetry spans', () => {
           ? observation.mutated()
           : observation.mutated,
       ).toBe(false);
+    }
+  });
+
+  it('does not treat a supported function response as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            functionResponse: {
+              id: 'span-call',
+              name: 'mockTool',
+              response: { output: 'complete' },
+            },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('treats dropped structured parts as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            functionCall: { name: 'nested_call', args: { value: 1 } },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
+  });
+
+  it('treats structured display compaction as a producer mutation', async () => {
+    const oversized = 'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS + 100);
+    const returnDisplay: FileDiff = {
+      fileName: 'large.txt',
+      fileDiff: oversized,
+      originalContent: oversized,
+      newContent: oversized,
+    };
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'updated',
+        returnDisplay,
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
     }
   });
 

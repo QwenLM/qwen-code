@@ -56,6 +56,34 @@ const debugLogger = createDebugLogger('SPECULATION');
 const MAX_SPECULATION_TURNS = 20;
 const MAX_SPECULATION_MESSAGES = 100;
 
+function observeSpeculationProducer(params: {
+  config: Config;
+  callId: string;
+  toolName: string;
+  persistedOutputFiles?: string[];
+  artifacts?: ReadonlyArray<{ kind?: unknown }>;
+  knownNone?: boolean;
+  values: () => ReturnType<typeof toolResultPartDiagnosticValues>;
+}): void {
+  try {
+    observeToolResultBoundary({
+      stage: 'producer',
+      sessionId: params.config.getSessionId?.(),
+      toolCallId: params.callId,
+      toolName: params.toolName,
+      artifacts: [
+        toolResultBoundaryArtifact(
+          params.knownNone ? [] : params.persistedOutputFiles,
+          params.artifacts,
+        ),
+      ],
+      values: params.values,
+    });
+  } catch {
+    // Diagnostics must not affect speculative execution.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -299,6 +327,22 @@ async function runSpeculativeLoop(
         const args = (fc.args ?? {}) as Record<string, unknown>;
         const persistenceCallId =
           id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
+        let producerObserved = false;
+        const observeProducer = (
+          params: Omit<
+            Parameters<typeof observeSpeculationProducer>[0],
+            'config' | 'callId' | 'toolName'
+          >,
+        ) => {
+          if (producerObserved) return;
+          producerObserved = true;
+          observeSpeculationProducer({
+            ...params,
+            config,
+            callId: persistenceCallId,
+            toolName: name,
+          });
+        };
         const gate = await evaluateToolCall(
           name,
           args,
@@ -335,6 +379,10 @@ async function runSpeculativeLoop(
                 response: { error: `Tool '${name}' not found` },
               },
             };
+            observeProducer({
+              knownNone: true,
+              values: () => toolResultPartDiagnosticValues(responsePart),
+            });
             functionResponses.push(responsePart);
             responseEntries.push({
               callId: persistenceCallId,
@@ -375,33 +423,21 @@ async function runSpeculativeLoop(
           );
           state.toolUseCount++;
 
-          try {
-            observeToolResultBoundary({
-              stage: 'producer',
-              sessionId: config.getSessionId?.(),
-              toolCallId: persistenceCallId,
-              toolName: name,
-              artifacts: [
-                toolResultBoundaryArtifact(
-                  result.persistedOutputFiles,
-                  result.artifacts,
-                ),
-              ],
-              values: () => [
-                ...toolResultPartDiagnosticValues(result.llmContent),
-                ...(typeof result.returnDisplay === 'string'
-                  ? [
-                      {
-                        representation: 'display' as const,
-                        value: result.returnDisplay,
-                      },
-                    ]
-                  : []),
-              ],
-            });
-          } catch {
-            // Diagnostics must not affect speculative execution.
-          }
+          observeProducer({
+            persistedOutputFiles: result.persistedOutputFiles,
+            artifacts: result.artifacts,
+            values: () => [
+              ...toolResultPartDiagnosticValues(result.llmContent),
+              ...(typeof result.returnDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: result.returnDisplay,
+                    },
+                  ]
+                : []),
+            ],
+          });
 
           const convertedResponseParts = result.error
             ? convertToFunctionErrorResponse(
@@ -445,6 +481,10 @@ async function runSpeculativeLoop(
               },
             },
           };
+          observeProducer({
+            knownNone: true,
+            values: () => toolResultPartDiagnosticValues(responsePart),
+          });
           functionResponses.push(responsePart);
           responseEntries.push({
             callId: persistenceCallId,
