@@ -1615,6 +1615,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   {
                     workspaceCwd: effectWorkspaceCwd,
                     timeoutMs: restoreRequestTimeoutMs,
+                    ...(restoreMethod === DaemonSessionClient.load &&
+                    subagentTranscriptModeRef.current === 'summary'
+                      ? { liveReplayMode: 'summary' as const }
+                      : {}),
                     ...(historyPaginationSupported &&
                     restoreMode === 'load' &&
                     attemptedLoad?.replaySource !== 'memory' &&
@@ -1631,6 +1635,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     {
                       workspaceCwd: effectWorkspaceCwd,
                       timeoutMs: restoreRequestTimeoutMs,
+                      ...(subagentTranscriptModeRef.current === 'summary'
+                        ? { liveReplayMode: 'summary' as const }
+                        : {}),
                       ...(historyPaginationSupported &&
                       historyPageSizeRef.current !== undefined
                         ? { historyPageSize: historyPageSizeRef.current }
@@ -3969,6 +3976,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       {
         workspaceCwd: intent.workspaceCwd,
         timeoutMs,
+        ...(intent.mode === 'load' &&
+        subagentTranscriptModeRef.current === 'summary'
+          ? { liveReplayMode: 'summary' as const }
+          : {}),
         ...(intent.effectiveHistoryPageSize !== undefined
           ? { historyPageSize: intent.effectiveHistoryPageSize }
           : {}),

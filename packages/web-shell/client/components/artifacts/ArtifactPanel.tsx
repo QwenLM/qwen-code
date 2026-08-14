@@ -32,18 +32,12 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
-import {
-  isDesktopShell,
-  isExternalOpenUrl,
-  openExternalUrl,
-} from '../../utils/externalOpen';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
-import { requestToast } from '../ToastHost';
 import { DialogShell } from '../dialogs/DialogShell';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
@@ -2344,26 +2338,9 @@ function ArtifactDetail({
   previewContent?: string;
 }) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const location = getArtifactLocation(artifact);
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
-  const isExternalUrl = isExternalOpenUrl(safeUrl);
-  const openExternal = () => {
-    if (!safeUrl || !isExternalUrl) return;
-    openExternalUrl(safeUrl).catch((error: unknown) => {
-      requestToast(
-        'error',
-        t('common.openFailed', { message: extractErrorDetail(error) }),
-      );
-    });
-  };
-  // The desktop webview's implicit `target="_blank"` handling silently drops
-  // failed new-window requests, so route external opens through the shell's
-  // explicit opener there; plain browsers keep native anchor behavior.
-  const handleLocationClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
-    if (!isExternalUrl || !isDesktopShell()) return;
-    event.preventDefault();
-    openExternal();
-  };
   const isAutomationSnapshot =
     artifact.metadata?.['artifactType'] === 'automation_snapshot';
   const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
@@ -2462,7 +2439,7 @@ function ArtifactDetail({
                 href={safeUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                onClick={handleLocationClick}
+                onClick={(event) => openExternalLink(event, safeUrl)}
               >
                 {safeUrl}
               </a>
@@ -2471,7 +2448,7 @@ function ArtifactDetail({
                 href={safeUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                onClick={handleLocationClick}
+                onClick={(event) => openExternalLink(event, safeUrl)}
               >
                 {t('artifact.openLink')}
               </a>
