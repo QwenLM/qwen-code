@@ -91,6 +91,20 @@ export class DaemonPool {
   /** sessionId -> owning workspace key (`defaultWorkspaceCwd` for sessions
    * created on the default daemon). */
   private readonly ownerOf = new Map<string, string>();
+  /**
+   * Count of in-flight `createOrAttachSession` calls per workspace key
+   * (never touched for the default workspace). Marked SYNCHRONOUSLY at
+   * the very start of `createOrAttachSession`, before any `await` —
+   * including before `getOrSpawn`, whose own first `await` already yields
+   * a microtask even when its body resolves synchronously (an existing
+   * entry's fast path). An entry can look idle (`sessions.size === 0`)
+   * for the entire duration of a create's network round-trip; without
+   * marking the key pending up front, a concurrent `getOrSpawn`'s cap
+   * eviction could reclaim the entry mid-registration — stopping the
+   * daemon while this call still returns what looks like a successful
+   * `DaemonSession` whose backend is already dead.
+   */
+  private readonly pendingCreates = new Map<string, number>();
   private readonly now: () => number;
   private readonly maxDaemons: number;
   private readonly idleReapMs: number;
@@ -148,14 +162,34 @@ export class DaemonPool {
     return p;
   }
 
-  /** Evict the least-recently-used IDLE (zero-session) workspace entry to
-   * make room under the cap. Throws `WorkspacePoolFullError` if every
-   * entry currently has live sessions. */
+  /** An entry is idle only when it has no live sessions AND no in-flight
+   * `createOrAttachSession` registering a new one on `key` — both
+   * `reapIdle` and `evictLruIdle` must agree on this so a mid-create entry
+   * is never reclaimed out from under its caller. */
+  private isIdle(key: string, entry: Entry): boolean {
+    return entry.sessions.size === 0 && !this.pendingCreates.has(key);
+  }
+
+  /** Stop the daemon, drop its entry, and scrub any of its session ids out
+   * of `ownerOf` (defensive — under the current invariants an idle entry's
+   * `sessions` set is already empty, but this keeps `ownerOf` from ever
+   * accumulating a stale mapping if that invariant is ever violated). */
+  private discardEntry(key: string, entry: Entry): void {
+    for (const id of entry.sessions) {
+      this.ownerOf.delete(id);
+    }
+    entry.stop().catch(() => {});
+    this.byWorkspace.delete(key);
+  }
+
+  /** Evict the least-recently-used IDLE workspace entry to make room under
+   * the cap. Throws `WorkspacePoolFullError` if every entry currently has
+   * live sessions or an in-flight registration. */
   private evictLruIdle(): void {
     let lruKey: string | undefined;
     let lruEntry: Entry | undefined;
     for (const [key, entry] of this.byWorkspace) {
-      if (entry.sessions.size === 0) {
+      if (this.isIdle(key, entry)) {
         if (!lruEntry || entry.lastUsed < lruEntry.lastUsed) {
           lruKey = key;
           lruEntry = entry;
@@ -165,22 +199,20 @@ export class DaemonPool {
     if (!lruKey || !lruEntry) {
       throw new WorkspacePoolFullError(this.maxDaemons);
     }
-    lruEntry.stop().catch(() => {});
-    this.byWorkspace.delete(lruKey);
+    this.discardEntry(lruKey, lruEntry);
   }
 
-  /** Reap every non-default entry that has no live sessions and has been
+  /** Reap every non-default entry that is idle (see `isIdle`) and has been
    * idle longer than `idleReapMs`. Safe to call directly (tests inject a
    * clock via `now`); also driven from a background timer. */
   reapIdle(): void {
     const cutoff = this.now();
     for (const [key, entry] of this.byWorkspace) {
       if (
-        entry.sessions.size === 0 &&
+        this.isIdle(key, entry) &&
         cutoff - entry.lastUsed > this.idleReapMs
       ) {
-        entry.stop().catch(() => {});
-        this.byWorkspace.delete(key);
+        this.discardEntry(key, entry);
       }
     }
   }
@@ -216,27 +248,84 @@ export class DaemonPool {
 
   /** Resolve (spawn if needed) the daemon for `req.workspaceCwd`, create or
    * attach the session there, and record which daemon owns the returned
-   * session id so later session-keyed calls route correctly. */
+   * session id so later session-keyed calls route correctly.
+   *
+   * `key` is marked pending in `pendingCreates` SYNCHRONOUSLY, before the
+   * `getOrSpawn` await — not after it resolves. Even when `getOrSpawn`
+   * resolves an already-spawned entry (no internal await needed), `await
+   * this.getOrSpawn(...)` still defers the rest of this function to a
+   * later microtask; marking pending only after that await would leave a
+   * window where a concurrent `getOrSpawn`'s cap eviction can see this
+   * entry as idle (`sessions.size === 0`) and reclaim it mid-registration
+   * — stopping the daemon while this call still returns what looks like a
+   * successful `DaemonSession`. */
   async createOrAttachSession(
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
-    const client = await this.getOrSpawn(req.workspaceCwd);
-    const session = await client.createOrAttachSession(req, clientId);
     const key = this.isDefault(req.workspaceCwd)
       ? this.opts.defaultWorkspaceCwd
       : req.workspaceCwd!;
-    this.ownerOf.set(session.sessionId, key);
-    this.byWorkspace.get(key)?.sessions.add(session.sessionId);
-    return session;
+    const tracksPending = key !== this.opts.defaultWorkspaceCwd;
+    if (tracksPending) {
+      this.pendingCreates.set(key, (this.pendingCreates.get(key) ?? 0) + 1);
+    }
+    try {
+      const client = await this.getOrSpawn(req.workspaceCwd);
+      const session = await client.createOrAttachSession(req, clientId);
+      this.ownerOf.set(session.sessionId, key);
+      this.byWorkspace.get(key)?.sessions.add(session.sessionId);
+      return session;
+    } finally {
+      if (tracksPending) {
+        const n = (this.pendingCreates.get(key) ?? 1) - 1;
+        if (n <= 0) this.pendingCreates.delete(key);
+        else this.pendingCreates.set(key, n);
+      }
+    }
   }
 
+  /**
+   * `session_died` and `session_closed` are the SDK's own definition of a
+   * session-lifecycle terminal — see `isSessionLifecycleTerminal` in
+   * `@qwen-code/sdk`'s `daemon/events.ts` (`type === 'session_died' ||
+   * type === 'session_closed'`) — so both reliably mean the daemon session
+   * itself ended; pruning on them lets the entry become reapable.
+   *
+   * `client_evicted` is included too, but it is NOT one of those terminals:
+   * `daemon/events.ts`'s own doc on `DaemonSessionViewState.alive` says
+   * plainly "For client_evicted and stream_error this only describes the
+   * current stream, not the remote daemon session's lifetime." Pruning on
+   * it is a known-imprecise trade-off, kept only because the pool has no
+   * other lifecycle hook for a session it isn't actively watching: without
+   * *something* here, a crashed/unreachable session's id can stay in
+   * `sessions` forever and wedge the pool at `WorkspacePoolFullError`
+   * (`reapIdle`/`evictLruIdle` gate on `sessions.size === 0`). The
+   * documented risk of keeping `client_evicted` here: a slow SSE consumer
+   * gets evicted from ITS OWN stream while the session is still alive on
+   * the daemon; this prunes the id anyway, so the client's reconnect gets
+   * `UnknownSessionError` (404) instead of resuming, and — worse — the
+   * entry can look idle and later get reaped, stopping a still-live
+   * daemon session out from under any other attached client. Recommend
+   * dropping `client_evicted` from this condition (handle `session_died` /
+   * `session_closed` only) unless a client is expected to treat eviction
+   * as terminal anyway.
+   */
   async *subscribeEvents(
     sessionId: string,
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     const client = this.daemonForSession(sessionId);
-    yield* client.subscribeEvents(sessionId, opts);
+    for await (const event of client.subscribeEvents(sessionId, opts)) {
+      if (
+        event.type === 'session_died' ||
+        event.type === 'session_closed' ||
+        event.type === 'client_evicted'
+      ) {
+        this.removeSession(sessionId);
+      }
+      yield event;
+    }
   }
 
   async prompt(

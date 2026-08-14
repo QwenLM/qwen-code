@@ -10,12 +10,25 @@ import {
   UnknownSessionError,
   WorkspacePoolFullError,
 } from './daemonPool.js';
-import type { DaemonClient } from '@qwen-code/sdk';
+import type { DaemonClient, DaemonEvent } from '@qwen-code/sdk';
 
-function fakeClient(tag: string, sid?: string) {
+/** Default no-op event stream: yields nothing. */
+async function* noEvents(): AsyncGenerator<DaemonEvent> {
+  /* empty */
+}
+
+function fakeClient(
+  tag: string,
+  sid?: string,
+  events: () => AsyncGenerator<DaemonEvent> = noEvents,
+  /** When set, `createOrAttachSession` awaits this before resolving —
+   * lets tests hold a create call open mid-flight to reproduce races. */
+  createGate?: Promise<void>,
+) {
   return {
     tag,
     async createOrAttachSession() {
+      if (createGate) await createGate;
       return {
         sessionId: sid ?? `${tag}-s`,
         workspaceCwd: tag,
@@ -55,6 +68,7 @@ function fakeClient(tag: string, sid?: string) {
     async listWorkspaceSessions() {
       return [{ calledOn: tag }];
     },
+    subscribeEvents: events,
   } as unknown as DaemonClient;
 }
 
@@ -327,5 +341,168 @@ describe('DaemonPool', () => {
     await expect(pool.getOrSpawn('/proj/d')).rejects.toBeInstanceOf(
       WorkspacePoolFullError,
     );
+  });
+
+  it('prunes a session on a session_died frame observed via subscribeEvents, letting the entry become reapable', async () => {
+    let t = 0;
+    const stopped: string[] = [];
+    async function* diedEvents(): AsyncGenerator<DaemonEvent> {
+      yield {
+        v: 1,
+        type: 'session_died',
+        data: { sessionId: 'ignored-by-pool', reason: 'crashed' },
+      } as DaemonEvent;
+    }
+    const pool = new DaemonPool({
+      now: () => t,
+      idleReapMs: 1000,
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: fakeClient(cwd, `${cwd}-s`, diedEvents),
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    expect(pool.size()).toBe(1);
+
+    // Drain the wrapped subscription; the session_died frame passing
+    // through should prune the session from the entry's live-sessions set.
+    const seenTypes: string[] = [];
+    for await (const ev of pool.subscribeEvents(s.sessionId)) {
+      seenTypes.push(ev.type);
+    }
+    expect(seenTypes).toEqual(['session_died']);
+
+    // Entry still exists (only idle-timeout reaps it), but is now idle.
+    expect(pool.size()).toBe(1);
+    expect(stopped).toEqual([]);
+    t = 5000;
+    pool.reapIdle();
+    expect(pool.size()).toBe(0);
+    expect(stopped).toEqual(['/proj/a']);
+
+    // The pruned id no longer resolves at all -- confirms it's out of
+    // `ownerOf`, not just out of the (now-deleted) entry's `sessions`.
+    await expect(pool.sessionContext(s.sessionId)).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+  });
+
+  it('prunes on a session_closed frame (the other SDK-defined session-lifecycle terminal)', async () => {
+    let t = 0;
+    const stopped: string[] = [];
+    async function* closedEvents(): AsyncGenerator<DaemonEvent> {
+      yield {
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 'ignored-by-pool', reason: 'client_close' },
+      } as DaemonEvent;
+    }
+    const pool = new DaemonPool({
+      now: () => t,
+      idleReapMs: 1000,
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: fakeClient(cwd, `${cwd}-s`, closedEvents),
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    for await (const _ev of pool.subscribeEvents(s.sessionId)) {
+      /* drain */
+    }
+    t = 5000;
+    pool.reapIdle();
+    expect(pool.size()).toBe(0);
+    expect(stopped).toEqual(['/proj/a']);
+    await expect(pool.sessionContext(s.sessionId)).rejects.toBeInstanceOf(
+      UnknownSessionError,
+    );
+  });
+
+  it('also prunes on a client_evicted frame (best-effort terminal signal)', async () => {
+    let t = 0;
+    async function* evictedEvents(): AsyncGenerator<DaemonEvent> {
+      yield {
+        v: 1,
+        type: 'client_evicted',
+        data: { reason: 'slow_client' },
+      } as DaemonEvent;
+    }
+    const pool = new DaemonPool({
+      now: () => t,
+      idleReapMs: 1000,
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: fakeClient(cwd, `${cwd}-s`, evictedEvents),
+        stop: async () => {},
+        workspaceCwd: cwd,
+      }),
+    });
+    const s = await pool.createOrAttachSession({ workspaceCwd: '/proj/a' });
+    for await (const _ev of pool.subscribeEvents(s.sessionId)) {
+      /* drain */
+    }
+    t = 5000;
+    pool.reapIdle();
+    expect(pool.size()).toBe(0);
+  });
+
+  it('does not evict an entry mid-createOrAttachSession; the pending reservation protects it from a concurrent cap eviction', async () => {
+    const t = 0;
+    const stopped: string[] = [];
+    let releaseCreate: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const pool = new DaemonPool({
+      now: () => t,
+      maxDaemons: 1,
+      idleReapMs: 999_999_999,
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: fakeClient(
+          cwd,
+          `${cwd}-s`,
+          noEvents,
+          cwd === '/proj/a' ? gate : undefined,
+        ),
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+
+    await pool.getOrSpawn('/proj/a'); // spawns an idle entry (sessions.size === 0)
+    // Kick off a create against /proj/a; its client.createOrAttachSession
+    // hangs on `gate`, so this call is stuck mid-registration.
+    const createPromise = pool.createOrAttachSession({
+      workspaceCwd: '/proj/a',
+    });
+
+    // At cap (maxDaemons=1). /proj/a still LOOKS idle by session count
+    // alone, but it's mid-create (pending > 0) -- must be treated as busy
+    // and NOT evicted to make room for a new workspace.
+    await expect(pool.getOrSpawn('/proj/b')).rejects.toBeInstanceOf(
+      WorkspacePoolFullError,
+    );
+    expect(stopped).toEqual([]); // never stopped
+    expect(pool.workspaces()).toEqual(['/proj/a']); // still present
+
+    releaseCreate!();
+    const session = await createPromise;
+    expect(session.sessionId).toBe('/proj/a-s');
+    expect(pool.workspaces()).toEqual(['/proj/a']); // untouched throughout
   });
 });
