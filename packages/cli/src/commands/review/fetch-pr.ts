@@ -81,8 +81,12 @@ interface FetchPrArgs {
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
   effort?: ReviewEffort;
-  /** The incremental anchor — the head the last clean round reviewed. */
-  since?: string;
+  /**
+   * The incremental anchor — the head the last clean round reviewed. Typed
+   * as possibly-repeated because yargs collapses a repeated flag into an
+   * array and the recovery flow can produce one; `runFetchPr` normalizes.
+   */
+  since?: string | string[];
 }
 
 type FetchPrResult = PlanReport & {
@@ -167,10 +171,13 @@ type FetchPrResult = PlanReport & {
    * `effective: false` carries the reason the anchor was refused — a rebase
    * or force-push (`not-an-ancestor`), a sha this history has never seen
    * (`unknown-commit`), an anchor older than the merge base that would
-   * scope WIDER than the PR's diff (`behind-merge-base`), a merge base too
-   * stale to rule that clamp on (`base-untrusted`), or a delta capture or
-   * partition that failed (`capture-failed`) — and in every one of those
-   * the diff and plan are the full range. **`full-range-unavailable` is the
+   * scope WIDER than the PR's diff (`behind-merge-base`), a delta carrying
+   * hunks the PR's own diff does not contain (`hunks-outside-pr-diff` — an
+   * "undo per feedback" revert makes an in-range anchor produce them), a
+   * merge base too stale to rule the clamp on (`base-untrusted`), a delta
+   * capture that failed (`capture-failed`), or a delta the partitioner
+   * refused to tile (`partition-failed`) — and in every one of those the
+   * diff and plan are the full range. **`full-range-unavailable` is the
    * single exception and the single planless reason**: it is stamped over
    * whatever refused the anchor whenever the run ends with no captured diff
    * at all, so a reader can key the degraded flow on the reason alone
@@ -188,8 +195,10 @@ export interface IncrementalDecision {
     | 'unknown-commit'
     | 'not-an-ancestor'
     | 'behind-merge-base'
+    | 'hunks-outside-pr-diff'
     | 'base-untrusted'
     | 'capture-failed'
+    | 'partition-failed'
     | 'full-range-unavailable';
   /**
    * The scoped range's left side as a FULL sha, present exactly when the
@@ -272,7 +281,11 @@ export function resolveIncrementalAnchor(
       diffBase: null,
     };
   }
-  if (mergeBase?.fetchFailed) {
+  // Only when a base was actually resolved: with `sha: null` there is no
+  // clamp to rule, stale or otherwise, and the docstring's "a null `sha`
+  // skips the clamp" holds — the delta range needs no base at all, so a
+  // deleted or renamed base branch must not cost a valid anchor its scope.
+  if (mergeBase?.fetchFailed && mergeBase.sha != null) {
     return {
       incremental: { since, effective: false, reason: 'base-untrusted' },
       diffBase: null,
@@ -301,9 +314,54 @@ function fileLineCount(ref: string, path: string): number {
   }
 }
 
-/** A commit's tree object, or null when git cannot name it. */
-function treeOf(sha: string): string | null {
-  return gitOpt('rev-parse', `${sha}^{tree}`);
+/**
+ * Every hunk of `inner` falls inside a hunk of `outer`, per file, on the NEW
+ * side — both diffs end at the same head commit, so their post-image line
+ * numbers are directly comparable.
+ *
+ * This is the containment an ancestry clamp cannot give. An anchor can be a
+ * proper ancestor of the head and still produce a delta whose hunks are
+ * absent from the PR's own diff: an "undo per feedback" commit reverts some
+ * of the previous round's lines back to base content, so those lines are
+ * changed in `anchor..head` and unchanged in `base..head`. A comment
+ * anchored on such a hunk 422s the whole Create Review call.
+ */
+export function hunksContainedIn(inner: string, outer: string): boolean {
+  const outerRanges = newSideHunks(outer);
+  for (const [file, ranges] of newSideHunks(inner)) {
+    const covering = outerRanges.get(file);
+    if (!covering) return false;
+    for (const [start, end] of ranges) {
+      if (!covering.some(([s, e]) => s <= start && end <= e)) return false;
+    }
+  }
+  return true;
+}
+
+/** `path -> [start, end]` post-image line ranges, one entry per hunk. */
+function newSideHunks(diffText: string): Map<string, Array<[number, number]>> {
+  const out = new Map<string, Array<[number, number]>>();
+  let file: string | null = null;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('+++ ')) {
+      // `+++ b/path`, or `+++ /dev/null` for a deletion (no new side).
+      const p = line.slice(4).trim();
+      file = p === '/dev/null' ? null : p.replace(/^b\//, '');
+      continue;
+    }
+    if (!line.startsWith('@@') || file === null) continue;
+    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!m) continue;
+    const start = Number(m[1]);
+    const count = m[2] === undefined ? 1 : Number(m[2]);
+    // A pure deletion hunk has count 0 and sits BETWEEN two post-image
+    // lines; give it the zero-width range at its position so it can still
+    // be matched against a covering hunk.
+    const ranges = out.get(file) ?? [];
+    ranges.push([start, start + Math.max(count, 1) - 1]);
+    out.set(file, ranges);
+  }
+  return out;
 }
 
 /** The real git surface `resolveMergeBase` runs against. */
@@ -434,26 +492,30 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // producer that published on every success leaked an empty delta's path
   // into the full-range judgment and recommended a live PR for closure on
   // an infrastructure state.
-  const captureRange = (left: string): string | null => {
+  const readRange = (left: string): string | null => {
     try {
-      const buf = gitRaw(
+      return gitRaw(
         ...PINNED_DIFF_CONFIG,
         'diff',
         ...PINNED_DIFF_FLAGS,
         `${left}..${fetchedSha}`,
-      );
-      writeFileSync(diffRel, buf);
-      diffSha256 = createHash('sha256').update(buf).digest('hex');
-      return buf.toString('utf8');
+      ).toString('utf8');
     } catch (err) {
       writeStderrLine(`Failed to capture diff: ${(err as Error).message}`);
       return null;
     }
   };
-  const acceptCapture = (text: string): void => {
+  /** Publish a range as THE reviewed diff — the file write and both paths. */
+  const publish = (text: string): void => {
     diffText = text;
+    writeFileSync(diffRel, text);
     diffPath = diffRel;
     diffPathAbsolute = resolve(diffRel);
+    // Digest of what was WRITTEN, not of what was captured. The capture is
+    // read-only now and a round may read two ranges before publishing one, so
+    // hashing at capture time would report a digest for bytes no reader ever
+    // sees.
+    diffSha256 = createHash('sha256').update(text, 'utf8').digest('hex');
   };
 
   // The incremental anchor rules first: an effective anchor scopes the diff
@@ -467,9 +529,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     incremental: IncrementalDecision;
     diffBase: string | null;
   } | null = null;
-  if (args.since !== undefined) {
+  // yargs collapses a REPEATED flag into an array, and the recovery flow
+  // that appends a second `--since` to a command that already carries one
+  // is exactly how that happens. Left unnormalized, the array stringifies
+  // to `"shaA,shaB"`, the comma fails the hex allowlist, and a valid
+  // in-history anchor is refused as `unknown-commit` with no git probe run
+  // at all. The LAST value wins — a repeated flag means "use this one".
+  const sinceArg = Array.isArray(args.since)
+    ? (args.since as string[])[args.since.length - 1]
+    : args.since;
+  if (sinceArg !== undefined) {
     anchor = resolveIncrementalAnchor(
-      args.since,
+      sinceArg,
       fetchedSha,
       {
         commitExists: (sha) =>
@@ -490,21 +561,45 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       reason,
     };
   };
-  /** True when the FINAL captured diff is the incremental delta. */
+  // The FULL range is read once, up front, whenever a base exists — even on
+  // an incremental round. It is not a redundant capture: it is the fallback
+  // every refusal lands on, the quantity `emptyDiff`/`collapsedFromUpstream`
+  // are defined against (both compare the PR's whole diff, never a delta),
+  // and the containment oracle the clamp cannot be. Reading it costs one
+  // `git diff`; the savings incremental review exists for are agent time.
+  const fullText = mergeBaseSha === null ? null : readRange(mergeBaseSha);
+  if (mergeBaseSha === null) {
+    writeStderrLine(
+      `Could not resolve merge-base of ${meta.baseRefName} and ${ref}; ` +
+        `agents will have to fall back to running \`git diff\` themselves.`,
+    );
+  }
+  /** True when the FINAL published diff is the incremental delta. */
   let scopedDelta = false;
   if (anchor?.diffBase) {
-    const delta = captureRange(anchor.diffBase);
+    const delta = readRange(anchor.diffBase);
     if (delta === null) {
       // Infrastructure, not anchor validity — but the report must not claim
       // an incremental scope the capture never produced.
       demote('capture-failed');
     } else if (delta.trim() === '') {
       // Commits since the anchor change no bytes: nothing new to review.
-      // Same outcome as anchor-at-head, and the full range is captured below
-      // for the flows that continue anyway (a model change, --comment).
+      // Same outcome as anchor-at-head, and the full range is published
+      // below for the flows that continue anyway (a model change,
+      // --comment).
       anchor.incremental.upToDate = true;
+    } else if (fullText !== null && !hunksContainedIn(delta, fullText)) {
+      // Ancestry containment is not HUNK containment. An ordinary "undo per
+      // feedback" commit reverts some of the anchor round's lines back to
+      // base content: the delta then carries hunks the PR's own diff does
+      // NOT contain, agents review them, and one comment anchored there
+      // 422s the entire Create Review call — all-or-nothing, taking every
+      // other finding with it. The clamp cannot see this (it compares
+      // history, not content), so the delta is checked against the PR's
+      // diff before it is allowed to be the review's scope.
+      demote('hunks-outside-pr-diff');
     } else {
-      acceptCapture(delta);
+      publish(delta);
       scopedDelta = true;
       // The scoped range's left side, full-sha, for downstream consumers
       // that recompute their own diffs (Agent 7's test-efficacy probe welds
@@ -514,15 +609,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     }
   }
   if (!scopedDelta) {
-    if (mergeBaseSha) {
-      const full = captureRange(mergeBaseSha);
-      if (full !== null) acceptCapture(full);
-    } else {
-      writeStderrLine(
-        `Could not resolve merge-base of ${meta.baseRefName} and ${ref}; ` +
-          `agents will have to fall back to running \`git diff\` themselves.`,
-      );
-    }
+    if (fullText !== null) publish(fullText);
     // `upToDate` promises the report carries the FULL-range diff and plan
     // (the flows that continue past it — a model change, --comment — run
     // full). A full-range capture that failed or never ran breaks that
@@ -551,15 +638,29 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPathAbsolute = null;
     diffSha256 = null;
     plan = buildDiffPlan('', args.maxChunkLines);
-    // A partition failure on a delta-scoped capture must demote the ruling
-    // too: the report is about to publish a diff-less, zero-chunk plan, and
-    // an `incremental: {effective: true}` over it would send Agent 7 to a
-    // delta base while every other reader falls back to the merge base —
-    // one round, two scopes.
-    // `scopedDelta` stays true: the text that failed to partition IS the
-    // delta, and re-enabling the full-range flags over it would fire the
-    // collapse ratio against GitHub's full-PR stat.
-    if (scopedDelta) demote('capture-failed');
+    // A partition failure on a delta must not end the round diff-less while
+    // the FULL range — already in hand — might tile fine: the delta is the
+    // optimization, the full range is the review. Retry it, and demote under
+    // the reason that names what actually happened (the capture succeeded;
+    // the partitioner did not).
+    if (scopedDelta && fullText !== null && fullText.trim() !== '') {
+      try {
+        plan = buildDiffPlan(fullText, args.maxChunkLines);
+        publish(fullText);
+        scopedDelta = false;
+        writeStderrLine(
+          'Retried the partition over the full range, which tiled; the ' +
+            'round is a full review.',
+        );
+      } catch {
+        // Both ranges refuse to tile — keep the diff-less report.
+      }
+    }
+    // Whether or not the retry rescued the plan, the ruling cannot stand:
+    // an `incremental: {effective: true}` over a full-range (or diff-less)
+    // plan would send Agent 7 to a delta base while every other reader uses
+    // the merge base — one round, two scopes.
+    if (anchor?.incremental.effective) demote('partition-failed');
   }
   // Every refusal that ends with NO diff at all reports the planless reason,
   // whatever refused the anchor first. The contract downstream reads is "one
@@ -673,23 +774,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // then "resolved from a possibly stale local ref" (the warning above says
     // so), and a stale base ref that already contains the head commits diffs
     // to empty — the same wrong recommendation, one cause further out.
-    // A delta round judges emptiness by TREE, not by its own diff text: the
-    // PR can collapse to empty between rounds (a revert, or the work landing
-    // in the base another way) while `anchor..head` stays non-empty, and the
-    // full-range text this flag normally reads was never captured. The
-    // ancestry clamp does not catch it — it compares history, not trees. Left
-    // unflagged, the skill never recommends close-as-superseded and the round
-    // reviews hunks GitHub's (empty) PR diff does not contain, where one
-    // anchored comment 422s the whole review. Same fail-closed guard as the
-    // text path: a base resolved from a possibly stale local ref cannot rule.
-    ...((
-      scopedDelta
-        ? !baseFetchFailed &&
-          mergeBaseSha !== null &&
-          treeOf(mergeBaseSha) !== null &&
-          treeOf(mergeBaseSha) === treeOf(fetchedSha)
-        : isEmptyDiff({ diffPath, baseFetchFailed, diffText })
-    )
+    // Both flags are facts about the PR's WHOLE diff, never about a round's
+    // scope, so both read `fullText` — the range this command now always
+    // reads when a base exists. Keying them on the published diff made a
+    // delta round judge the wrong quantity twice: the collapse ratio fired
+    // against GitHub's full-PR stat on every incremental round, and an
+    // emptied PR went unflagged because its own delta was not empty.
+    ...(isEmptyDiff({
+      diffPath: fullText === null ? null : diffRel,
+      baseFetchFailed,
+      diffText: fullText ?? '',
+    })
       ? { emptyDiff: true }
       : {}),
     // Collapse detection compares recomputed reality against GitHub's
@@ -711,9 +806,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // one side only. An incremental delta is always far smaller than the
     // advertised stat, so the collapse ratio would fire on every incremental
     // review — both flags are full-range facts and are skipped on a delta.
-    ...(!scopedDelta &&
-    isCollapsedFromUpstream({
-      diffText,
+    ...(isCollapsedFromUpstream({
+      diffText: fullText ?? '',
       baseFetchFailed,
       additions: meta.additions,
       deletions: meta.deletions,

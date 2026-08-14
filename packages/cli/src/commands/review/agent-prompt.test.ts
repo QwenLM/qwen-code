@@ -2424,6 +2424,12 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
           since: 'a'.repeat(40),
           effective: true,
           upToDate: true,
+          // Carried deliberately: without it this case cannot pin the
+          // `upToDate !== true` conjunct — a mutant deleting it survives,
+          // since both sub-cases still land on their expected base. The
+          // producer never co-publishes the two today; the conjunct exists
+          // for the day that invariant moves.
+          diffBase: 'de17aba5e',
         },
       },
       '7',

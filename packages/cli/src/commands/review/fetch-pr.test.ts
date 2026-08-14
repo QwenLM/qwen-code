@@ -357,8 +357,10 @@ describe('fetch-pr report assembly', () => {
       maxChunkLines: 400,
       ...extraArgs,
     } as unknown as Parameters<typeof handler>[0]);
-    const call = producerMocks.writeFileSync.mock.calls.find(
-      ([path]) => path === '/tmp/fetch-report.json',
+    // findLast, not find: a test that drives two rounds must read the report
+    // the SECOND one wrote, or it asserts against the first round's state.
+    const call = producerMocks.writeFileSync.mock.calls.findLast(
+      ([path]: unknown[]) => path === '/tmp/fetch-report.json',
     );
     if (!call) throw new Error('report was not written');
     return JSON.parse(String(call[1]));
@@ -444,6 +446,34 @@ describe('fetch-pr report assembly', () => {
     ' line2',
     '',
   ].join('\n');
+  /**
+   * The PR's whole diff, of which DELTA_DIFF's hunk is a proper part — the
+   * ordinary shape of an incremental round. The containment check refuses a
+   * delta whose hunks this does NOT cover, so a fixture that means "a valid
+   * incremental round" has to supply it.
+   */
+  const FULL_DIFF = [
+    'diff --git a/a.ts b/a.ts',
+    '--- a/a.ts',
+    '+++ b/a.ts',
+    '@@ -1,60 +1,260 @@',
+    ' line',
+    '+added',
+    ' line2',
+    ...Array.from({ length: 200 }, (_, i) => `+bulk ${i}`),
+    ' tail',
+    '',
+  ].join('\n');
+  /** Serve the delta for `ANCHOR..head` and the full range for `BASE..head`. */
+  function servesBothRanges(full = FULL_DIFF, delta = DELTA_DIFF) {
+    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
+      args.includes(`${ANCHOR}..f00df00df00d`)
+        ? Buffer.from(delta)
+        : args.includes(`${BASE}..f00df00df00d`)
+          ? Buffer.from(full)
+          : Buffer.from(''),
+    );
+  }
 
   /**
    * gitOpt that vouches for ANCHOR as a commit behind the head, with the PR
@@ -469,11 +499,7 @@ describe('fetch-pr report assembly', () => {
       sha: BASE,
       baseFetchFailed: false,
     });
-    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
-      args.includes(`${ANCHOR}..f00df00df00d`)
-        ? Buffer.from(DELTA_DIFF)
-        : Buffer.from(''),
-    );
+    servesBothRanges();
     // Advertised stat large enough that an ungated collapse ratio WOULD fire
     // on the tiny delta: the flag's absence below is what kills the mutant
     // that drops the !scopedDelta gate.
@@ -521,6 +547,106 @@ describe('fetch-pr report assembly', () => {
       BASE,
       ANCHOR,
     ]);
+  });
+
+  it('still flags an emptied PR on a delta round — the full range rules it', async () => {
+    // The PR collapses between rounds (a revert, or the work landing in the
+    // base another way): the full range is empty while `anchor..head` is
+    // not. Both guards fire, and both matter — the delta's hunks are not in
+    // the PR's diff (so the anchor is refused rather than scoped), and the
+    // published full range is empty (so the skill stops and recommends
+    // close-as-superseded instead of reviewing hunks GitHub's empty PR diff
+    // does not contain, where one anchored comment 422s the whole review).
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges('');
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.emptyDiff).toBe(true);
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'hunks-outside-pr-diff',
+    });
+    // A base resolved from a possibly stale local ref cannot rule it — the
+    // same fail-closed conjunct the text path has always had.
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: true,
+    });
+    expect((await reportFor({ since: ANCHOR })).emptyDiff).toBeUndefined();
+  });
+
+  it('refuses a delta carrying hunks the PR diff does not contain', async () => {
+    // An "undo per feedback" commit reverts some of the previous round's
+    // lines back to base content: those lines are changed in `anchor..head`
+    // and unchanged in `base..head`. Ancestry cannot see it — the anchor is
+    // a perfectly good ancestor — so containment is checked on the hunks,
+    // because a comment anchored on such a hunk 422s the entire review.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    const REVERT_DELTA = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -400,2 +400,2 @@',
+      '-experiment',
+      '+original',
+      '',
+    ].join('\n');
+    servesBothRanges(FULL_DIFF, REVERT_DELTA);
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'hunks-outside-pr-diff',
+    });
+    // Refused, so the round reviews the PR's own diff instead.
+    expect(report.diffPath).not.toBeNull();
+    expect(report.diffLines).toBeGreaterThan(0);
+  });
+
+  it('refuses the anchor end to end when the base fetch failed', async () => {
+    // The handler wiring of `{sha, fetchFailed}`, which the unit-level
+    // describe cannot pin: a call site passing `fetchFailed: false` (or
+    // dropping the argument) silences the clamp with no red test.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: true,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'base-untrusted',
+    });
+    expect(report.diffPath).not.toBeNull();
+  });
+
+  it('scopes a valid anchor when NO base resolved, stale or not', async () => {
+    // `base-untrusted` is about a base that cannot be trusted, not about a
+    // base that does not exist: the delta range needs no base at all, so a
+    // deleted or renamed base branch must not cost a valid anchor its scope.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: true,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
+    expect(report.diffPath).not.toBeNull();
   });
 
   it('refuses a rebased-away anchor end to end, on a full-range plan', async () => {
@@ -580,16 +706,54 @@ describe('fetch-pr report assembly', () => {
     expect(report.diffPath).not.toBeNull();
   });
 
-  it('demotes a delta whose partition failed — no incremental claim over a planless report', async () => {
+  it('retries the FULL range when the delta will not tile, and demotes', async () => {
+    // A delta the partitioner refuses must not end the round diff-less
+    // while the PR's own range — already read — might tile fine: the delta
+    // is the optimization, the full range is the review.
     anchorIsValid();
     producerMocks.resolveMergeBase.mockReturnValue({
       sha: BASE,
       baseFetchFailed: false,
     });
-    producerMocks.gitRaw.mockImplementation((...args: string[]) =>
-      args.includes(`${ANCHOR}..f00df00df00d`)
-        ? Buffer.from(DELTA_DIFF)
-        : Buffer.from(''),
+    servesBothRanges();
+    producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
+      if (text === DELTA_DIFF) throw new Error('chunks do not tile the diff');
+      return producerMocks.actualBuildDiffPlan(text, 400);
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.diffPath).not.toBeNull();
+    expect(report.diffLines).toBeGreaterThan(0);
+    // The anchor cannot stay effective over a full-range plan — one round,
+    // two scopes is what that would mean for Agent 7's welded --base — and
+    // the reason names what actually happened, not a capture that worked.
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'partition-failed',
+    });
+  });
+
+  it('ends planless only when BOTH ranges refuse to tile', async () => {
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    // A large advertised stat, so the collapse ratio WOULD fire if the
+    // demoted state resurrected the full-range flags over the delta text —
+    // without it this assertion cannot discriminate.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 400,
+        deletions: 100,
+        changedFiles: 9,
+        isCrossRepository: false,
+        body: '',
+      }),
     );
     producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
       if (typeof text === 'string' && text.trim() !== '') {
@@ -606,8 +770,6 @@ describe('fetch-pr report assembly', () => {
       effective: false,
       reason: 'full-range-unavailable',
     });
-    // The demoted state must not resurrect the full-range flags over the
-    // delta text either.
     expect(report.collapsedFromUpstream).toBeUndefined();
   });
 
@@ -862,6 +1024,34 @@ describe('resolveIncrementalAnchor', () => {
     expect(r.diffBase).toBeNull();
   });
 
+  it('rules upToDate even when the base fetch failed — the empty delta needs no base', () => {
+    // Check ORDER is load-bearing: moving the fetchFailed refusal above the
+    // head comparison turns "nothing new to review" into a refused anchor
+    // and misdirects the SKILL's recovery, with no other test red.
+    const r = resolveIncrementalAnchor(HEAD, HEAD, probe(), {
+      sha: 'c'.repeat(40),
+      fetchFailed: true,
+    });
+    expect(r.incremental).toEqual({
+      since: HEAD,
+      effective: true,
+      upToDate: true,
+    });
+    expect(r.diffBase).toBeNull();
+  });
+
+  it('scopes a valid anchor when the base fetch failed but resolved NO base', () => {
+    // `base-untrusted` is about an untrustworthy clamp, not a missing one:
+    // with no base there is nothing to clamp, and the delta range needs
+    // none — a deleted or renamed base branch must not cost the scope.
+    const r = resolveIncrementalAnchor(ANCHOR, HEAD, probe(), {
+      sha: null,
+      fetchFailed: true,
+    });
+    expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
+    expect(r.diffBase).toBe(ANCHOR);
+  });
+
   it('clamps an anchor older than the merge base — wider than the PR is not incremental', () => {
     const MERGE_BASE = 'c'.repeat(40);
     // The anchor is behind the head, but the merge base is NOT behind the
@@ -919,7 +1109,14 @@ describe('resolveIncrementalAnchor', () => {
       ...probe(),
       resolveCommit: () => null,
     });
-    expect(r.incremental.effective).toBe(false);
+    // The whole decision, not just `effective`: the SKILL keys its recovery
+    // bullets on `reason`, so a drifted reason hands the flow a wrong
+    // diagnosis with no red test.
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'unknown-commit',
+    });
     expect(r.diffBase).toBeNull();
   });
 });
