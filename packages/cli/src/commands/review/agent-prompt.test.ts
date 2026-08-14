@@ -2360,10 +2360,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(resumeBlock).toHaveLength(1);
     // The continuation runs the same command, so the block must carry the same
     // plan and out paths — an agent that has to re-derive them gets them wrong.
+    // Paths are built the way the rest of this block builds them — `join` and
+    // `resolve` — not spelled as POSIX literals: on Windows the prompt carries
+    // `C:\\abs\\tmp\\plan.json`, and a hardcoded expectation fails there for a
+    // reason that has nothing to do with the continuation block.
     expect(resumeBlock[0]).toContain('review build-test');
-    expect(resumeBlock[0]).toContain('--plan /abs/tmp/plan.json');
+    expect(resumeBlock[0]).toContain(`--plan ${resolve('/abs/tmp/plan.json')}`);
     expect(resumeBlock[0]).toContain(
-      '--out /abs/tmp/qwen-review-pr-6766-build-test.json',
+      `--out ${join(resolve('/abs/tmp'), 'qwen-review-pr-6766-build-test.json')}`,
     );
   });
 

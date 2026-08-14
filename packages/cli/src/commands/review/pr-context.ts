@@ -691,10 +691,24 @@ export function latestLedger(
     const foreign = !login || author !== login;
     const at = r.submitted_at ?? '';
     const id = typeof r.id === 'number' ? r.id : 0;
+    // ROUND FIRST, timestamp second. Recovery now crosses accounts, and the
+    // round counter is an id space: `compose-review` stamps this round's
+    // findings `R<recovered + 1>-<n>`, so a recovered round that goes BACKWARD
+    // re-issues ids the pull request already carries, against different
+    // findings, until the counter climbs back. The trigger is ordinary in the
+    // flow this recovery exists for: a bot whose own recovery failed
+    // transiently posts its Round 1 marker after the maintainer's Round 7, and
+    // "latest by timestamp" hands the next round a counter of 2.
+    //
+    // A legitimate later round always carries a HIGHER number — the counter
+    // only ever advances — so preferring the highest cannot lose a newer work
+    // list, and it makes the id space monotonic whoever posts into it.
     const newer =
       !best ||
-      at > best.at ||
-      (at === best.at && (id > best.id || (id === best.id && !foreign)));
+      ledger.round > best.ledger.round ||
+      (ledger.round === best.ledger.round &&
+        (at > best.at ||
+          (at === best.at && (id > best.id || (id === best.id && !foreign)))));
     if (newer) best = { at, id, ledger, foreign, author };
   }
   if (!best) return null;

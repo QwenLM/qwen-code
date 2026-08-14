@@ -400,7 +400,20 @@ function previousReport(out: string | undefined): BuildTestReport {
     test?: unknown;
     build?: unknown;
     timedOut?: unknown;
+    testScope?: { workspaces?: unknown; notRun?: unknown };
   };
+  // `testScope` is optional — a build-only or single-root report carries none —
+  // but a PRESENT one is walked for both of its lists, so a truthy non-object
+  // (or a scope whose lists are not lists) has to be refused here rather than
+  // becoming a `.filter of undefined` inside the merge.
+  const scopeOk =
+    shape.testScope === undefined ||
+    (typeof shape.testScope === 'object' &&
+      shape.testScope !== null &&
+      !Array.isArray(shape.testScope) &&
+      Array.isArray(shape.testScope.workspaces) &&
+      (shape.testScope.notRun === undefined ||
+        Array.isArray(shape.testScope.notRun)));
   // Every array the continuation walks, not just the one that names the work.
   // A report carrying `test` alone cleared the old gate and then died on a raw
   // `Cannot read properties of undefined (reading 'filter')` deep inside the
@@ -412,7 +425,8 @@ function previousReport(out: string | undefined): BuildTestReport {
     Array.isArray(parsed) ||
     !Array.isArray(shape.test) ||
     !Array.isArray(shape.build) ||
-    !Array.isArray(shape.timedOut)
+    !Array.isArray(shape.timedOut) ||
+    !scopeOk
   ) {
     throw new Error(
       `build-test: --resume expected a build-test report at ${out}, and that ` +
@@ -458,6 +472,21 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     toolchainAdapters,
   );
   if (!adapter) {
+    // A continuation must never answer with a FRESH report. The handler writes
+    // whatever this returns to `--out`, which for a resume is the very file
+    // the run was asked to continue — so a wrong or pruned `--worktree` would
+    // replace an in-flight report (its install record, its passed suites, its
+    // clamped entries) with `{"toolchain":"unsupported"}`, and the chain is
+    // dead even after the path is fixed. Throwing reaches the handler's catch,
+    // which writes nothing. The adapter's own refusals already preserve the
+    // input by spreading it; these returns predate `--resume` and do not.
+    if (previous) {
+      throw new Error(
+        `build-test: --resume cannot continue the run recorded at ` +
+          `${args.out}: no supported toolchain applies at ${root}. The report ` +
+          `is left untouched — check --worktree, then resume again.`,
+      );
+    }
     if (applicable.length > 1) {
       // Unreachable with one registered adapter, and deliberately kept: the
       // selection contract is "exactly one, or nothing", and the second

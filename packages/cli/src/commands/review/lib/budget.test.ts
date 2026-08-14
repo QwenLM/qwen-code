@@ -400,6 +400,51 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('keeps every evasion two live review rounds found', () => {
+    // Round 2 of the review on this change walked through the span-based
+    // clause four different ways. The closed vocabulary answers all of them
+    // structurally: a sentence carrying a gap is built from pieces the clause
+    // does not contain, so it cannot match at all.
+    for (const line of [
+      // Inability modifiers the one-character lookbehind could not see.
+      'Budget gap: 无 — 所有检查未能完成',
+      'Budget gap: 无 — 所有检查没法完成',
+      'Budget gap: 无 — 所有检查不能完成',
+      'Budget gap: 无 — 所有检查难以完成',
+      'Budget gap: 无 — 所有检查不曾完成',
+      // A negation separated from the completion word by an adverbial.
+      'Budget gap: 无 — 所有检查均未按时完成',
+      // A hedged completion.
+      'Budget gap: 无 — 所有检查基本完成',
+      // The span sliding past a negated completion to a later affirmed one.
+      'Budget gap: 无 — 集成测试未完成，单元测试完成',
+      // A gap clause the span swallowed on either side of the completion word.
+      'Budget gap: 无 — 3 项未运行，其余完成',
+      'Budget gap: 无 — 安全检查完成，渗透测试未进行',
+      'Budget gap: 无 — 所有单元测试完成，但集成测试没有运行',
+      // A real gap that merely opens with the token's characters.
+      'Budget gap: 无法验证 Windows 矩阵的集成测试',
+      'Budget gap: 无障碍检查未运行',
+    ]) {
+      expect(budgetGapDisclosures(line)).toHaveLength(1);
+    }
+  });
+
+  it('still drops the real-world no-answer it was built for', () => {
+    // The live sentence from PR #9094, plus the shapes a model actually
+    // writes around it. These are the ONLY thing the clause may swallow.
+    for (const line of [
+      'Budget gap: 无 — 所有检查均完成，未触及工具预算上限。',
+      'Budget gap: 无 —— 所有计划内的检查均已完成',
+      'Budget gap: 无：全部检查均已完成',
+      'Budget gap: 无，上述工作均已完成',
+      'Budget gap: 暂无缺口',
+      'Budget gap: 没有跳过的检查',
+    ]) {
+      expect(budgetGapDisclosures(line)).toEqual([]);
+    }
+  });
+
   it('keeps a REAL Chinese gap — 无法 is a prefix of the token, not the token', () => {
     // Chinese has no word boundary, so a token is only a token when
     // punctuation, whitespace or end-of-text follows it. `无法验证…`

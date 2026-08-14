@@ -1303,7 +1303,11 @@ export function buildRoleBrief(
           'at 106s and `packages/cli` at 401s, before the rest). Work is left when ' +
           '`testScope.notRun` is non-empty, or when any `test[]` entry has ' +
           '`"clamped": true` — a suite the budget started too late and killed, which ' +
-          'says nothing about the suite. A resumed call skips install and build and ' +
+          'says nothing about the suite. A third shape carries no field at all: a ' +
+          'single-package repo whose budget ran out before its one suite has an ' +
+          'empty `test[]` and no `testScope`, and only its `note` says so — read ' +
+          'the note before calling the dimension finished, and report it as ' +
+          'unfinished when no suite ran. A resumed call skips install and build and ' +
           'runs only what is left, merging into the SAME report file. Same ' +
           `\`timeout: ${SHELL_TOOL_MAX_TIMEOUT_MS}\`, and at most ` +
           `${MAX_RESUME_CALLS} continuations — then report what the run has:`,

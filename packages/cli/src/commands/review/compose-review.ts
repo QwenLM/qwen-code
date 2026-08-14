@@ -254,6 +254,35 @@ export interface ComposeReviewResult {
    * `undefined` as "proven".
    */
   scopeUnproven?: boolean;
+  /**
+   * True when every `unreviewedDimensions` entry names the one dimension that
+   * reads no diff (build-and-test), so none of them is a claim about which
+   * lines were reviewed. Vacuously true when there are no entries.
+   *
+   * The anchor reads this beside `scopeUnproven`: a dimension nobody could run
+   * says nothing about lines, but a whiffed lens says exactly that, and only
+   * the orchestrator's prose ever reports it.
+   */
+  dimensionGapsAreDepthOnly?: boolean;
+}
+
+/**
+ * Does this `unreviewedDimensions` entry name a dimension that reads no diff?
+ *
+ * Entries are prose the orchestrator writes, in the shape the skill documents:
+ * a dimension name, optionally followed by its own reason after an em-dash
+ * (`build-and-test — the integration suite never ran`). Only the head is
+ * matched, and only against the ONE dimension whose brief sets
+ * `readsDiff: false`.
+ */
+export function isNonDiffDimensionGap(entry: string): boolean {
+  const head = entry
+    .split(/[—–-]{1,2}\s/)[0]
+    .trim()
+    .toLowerCase();
+  return /^(?:the\s+)?build[-\s]?(?:and|&)[-\s]?test(?:\s+check|\s+verification)?$/.test(
+    head,
+  );
 }
 
 /**
@@ -516,6 +545,7 @@ export function composeReview(
     input,
     result.cappedBy,
     result.scopeUnproven ?? true,
+    result.dimensionGapsAreDepthOnly ?? false,
   );
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
@@ -529,6 +559,7 @@ function ledgerMarkerFor(
   input: ComposeReviewInput,
   cappedBy: string[],
   scopeUnproven: boolean,
+  dimensionGapsAreDepthOnly: boolean,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -569,7 +600,11 @@ function ledgerMarkerFor(
     // certify a range.
     //
     // `unreviewed-dimension` is the ONE cap that does not withhold on its own,
-    // and the exception is measured, not theoretical. That cap fires for the
+    // and even then only when every entry names the build-and-test dimension
+    // (`dimensionGapsAreDepthOnly` — the single role that reads no diff). A
+    // whiffed lens is recorded in the same field and IS a claim about lines
+    // that no machine detector can see, so it withholds like any other doubt.
+    // The exception is measured, not theoretical. That cap fires for the
     // orchestrator's `unreviewedDimensions` prose — on this repo, "the
     // integration suite CI skipped did not run locally", which is true of
     // every round because `build-test`'s whole-call budget cannot fit the
@@ -586,6 +621,7 @@ function ledgerMarkerFor(
     const failClosed =
       (input.cannotTellCriticals?.length ?? 0) > 0 ||
       scopeUnproven ||
+      !dimensionGapsAreDepthOnly ||
       cappedBy.some((cap) => cap !== 'unreviewed-dimension');
     const sha =
       !failClosed && typeof plan.fetchedSha === 'string'
@@ -1157,6 +1193,24 @@ function composeReviewBody(
     contextUnavailable ||
     coverageEntries.some((entry) => entry !== budgetEntry);
 
+  // Is every dimension gap the orchestrator disclosed about DEPTH rather than
+  // about which lines were read?
+  //
+  // Only one dimension can answer yes, and it is not a judgement call: Agent 7
+  // is the single role whose brief declares `readsDiff: false` (agent-briefs).
+  // Its gap — "the integration suite CI skipped did not run locally" — says
+  // nothing about the diff, because that agent never reads the diff.
+  //
+  // Every OTHER entry is a line-coverage claim wearing dimension prose, and
+  // the machine cannot see it: a whole-diff lens that made tool calls, opened
+  // files and returned a bare "No issues found" twice is a whiff, the
+  // orchestrator's entry is the ONLY detector, and `coverageFromTranscripts`
+  // (idle / blind / never-opened) reports nothing. Exempting those from the
+  // anchor would let a twice-whiffed Security lens advance the range past the
+  // lines it never reviewed — the harm the skill's own paragraph warns about,
+  // and the reason the first cut of this exemption was wrong.
+  const dimensionGapsAreDepthOnly = unreviewed.every(isNonDiffDimensionGap);
+
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
   // The caps that reach a Request changes — because they remove the premise
@@ -1635,6 +1689,7 @@ function composeReviewBody(
       remediation,
       lowSignal,
       scopeUnproven,
+      dimensionGapsAreDepthOnly,
     };
   }
 
@@ -1669,6 +1724,7 @@ function composeReviewBody(
       remediation,
       lowSignal,
       scopeUnproven,
+      dimensionGapsAreDepthOnly,
     };
   }
 
@@ -1832,6 +1888,7 @@ function composeReviewBody(
     remediation,
     lowSignal,
     scopeUnproven,
+    dimensionGapsAreDepthOnly,
   };
 }
 

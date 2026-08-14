@@ -1083,6 +1083,39 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.findings).toHaveLength(1);
   });
 
+  it('never lets the recovered round run BACKWARD across accounts', () => {
+    // The round counter is an id space: compose stamps this round's findings
+    // `R<recovered + 1>-<n>`. Recovering a LOWER round re-issues ids the pull
+    // request already carries against different findings. The trigger is
+    // ordinary now that recovery crosses accounts — a bot whose own recovery
+    // failed transiently posts its Round 1 marker after the maintainer's
+    // Round 7 — and "latest by timestamp" would hand the next round a 2.
+    const found = latestLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', marker(7)),
+        review('ci-bot', '2026-01-09T00:00:00Z', marker(1)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(7);
+    expect(found?.foreign).toBe(false);
+  });
+
+  it('still takes the newer round when it is the higher one', () => {
+    // The counter only ever advances, so preferring the highest round cannot
+    // lose a newer work list — it just makes the id space monotonic whoever
+    // posts into it.
+    const found = latestLedger(
+      [
+        review('maintainer', '2026-01-01T00:00:00Z', marker(2)),
+        review('ci-bot', '2026-01-09T00:00:00Z', marker(3)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(3);
+    expect(found?.foreign).toBe(true);
+  });
+
   it('breaks a submitted_at tie on the review id, not on array order', () => {
     // Two rounds posted in the same second (or with the timestamp missing) are
     // ordered only by id. Keeping the earlier one hands the next round the

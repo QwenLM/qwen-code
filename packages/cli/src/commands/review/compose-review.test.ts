@@ -4384,6 +4384,12 @@ describe('the ledger marker reaches the POSTED body', () => {
     // raw check and only this case fails (measured — a mutant keeping only
     // `cappedBy.length > 0` survived every other test in the suite).
     for (const failClosed of [
+      // Restored after a live review of this change (#9175, R2-12) named what
+      // deleting it cost: a whiffed lens is recorded in `unreviewedDimensions`
+      // and NOTHING else sees it — `coverageFromTranscripts` reports only idle,
+      // blind and never-opened agents — so exempting the whole field let a
+      // twice-whiffed Security pass advance the range past lines it never read.
+      { unreviewedDimensions: ['security — the agent whiffed twice'] },
       { cannotTellCriticals: ['a.ts:3 — could not fetch the full body'] },
       { uncoverableChunks: ['chunk 5 (src/big.min.js)'] },
       { contextUnavailable: true },
@@ -4447,7 +4453,41 @@ describe('the ledger marker reaches the POSTED body', () => {
 
     expect(r.cappedBy).toEqual(['unreviewed-dimension']);
     expect(r.scopeUnproven).toBe(false);
+    expect(r.dimensionGapsAreDepthOnly).toBe(true);
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('withholds the anchor when a dimension gap is about LINES, not depth', () => {
+    // The distinction the exemption turns on, and the one a live review of
+    // this change had to restore: Agent 7 is the only role whose brief sets
+    // `readsDiff: false`, so only its gap says nothing about which lines were
+    // read. Any other dimension in that field is a whiffed lens — a claim
+    // about lines that no machine detector produces.
+    const withLensGap = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [
+        'build-and-test — the integration suite never ran',
+        'security — the agent whiffed twice',
+      ],
+    });
+
+    expect(withLensGap.cappedBy).toEqual(['unreviewed-dimension']);
+    expect(withLensGap.scopeUnproven).toBe(false);
+    expect(withLensGap.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(withLensGap.body)?.sha).toBeUndefined();
+    // The findings still ride: a fail-closed round's work list is still a work
+    // list, it just cannot certify a range.
+    expect(parseLedger(withLensGap.body)?.findings).toHaveLength(1);
   });
 
   it('withholds it again as soon as the COVERAGE evidence is short', () => {

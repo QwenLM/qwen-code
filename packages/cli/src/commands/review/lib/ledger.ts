@@ -97,6 +97,15 @@ const SHA_RE = /^[0-9a-f]{7,64}$/;
 export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
 export const LEDGER_MAX_FILE = 200;
+/**
+ * The id, capped like every other field it travels with.
+ *
+ * It was the one field with no bound, which was survivable while only this
+ * account's own markers were ever parsed. Recovery now crosses accounts, so
+ * the read path takes text any GitHub user can post: an id is a short label
+ * (`R2-1`), and anything longer is not one.
+ */
+export const LEDGER_MAX_ID = 24;
 
 /**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
@@ -132,6 +141,7 @@ const CLOSE = ' -->';
 export function serializeLedger(ledger: Ledger): string {
   const capped = ledger.findings.slice(0, LEDGER_MAX_FINDINGS).map((f) => ({
     ...f,
+    id: f.id.slice(0, LEDGER_MAX_ID),
     title: f.title.slice(0, LEDGER_MAX_TITLE),
     file: f.file.slice(0, LEDGER_MAX_FILE),
   }));
@@ -201,6 +211,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       // hand-edited marker is not bound by it.
       .map((f) => ({
         ...f,
+        id: f.id.slice(0, LEDGER_MAX_ID),
         title: f.title.slice(0, LEDGER_MAX_TITLE),
         file: f.file.slice(0, LEDGER_MAX_FILE),
       }));

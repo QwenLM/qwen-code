@@ -435,59 +435,56 @@ const COMPLETION_TAIL = `(?:\\s+${BUDGET_QUALIFIED})?`;
  * published `Not explored to full depth (tool budget reached)` quoting that
  * very sentence — the disclosure asserted the opposite of its own evidence.
  *
- * Shapes are the English branch's, narrowed the same way — and the narrowing
- * is the whole of it, because the two errors are not symmetric here either:
- * dropping a REAL Chinese gap certifies depth nobody reached, while keeping a
+ * **The completion clause is a CLOSED VOCABULARY, not a span with exclusions.**
+ * That is the whole design, and it is the second attempt: the first cut spelled
+ * the clause as bounded `.{0,40}` spans that merely refused to cross `但`/`除`,
+ * and two rounds of live review walked straight through it — a negation the
+ * one-character lookbehind could not see (`还没有完成`, `未能完成`, `难以完成`),
+ * a gap clause the span swallowed before the completion word
+ * (`3 项未运行，其余完成`) or after it (`安全检查完成，渗透测试未进行`), and a
+ * span that slid past a NEGATED completion to a later affirmed one. Every one
+ * of those is the unsafe direction: this module's header states the asymmetry —
+ * dropping a REAL gap certifies work that never happened, keeping a
  * placeholder only over-discloses.
+ *
+ * A closed vocabulary cannot be walked through, because there is nothing to
+ * walk: the clause matches only if the ENTIRE text after the token is built
+ * from these pieces, so any sentence carrying an actual gap simply fails to
+ * match and is kept. Adding a phrase is a deliberate edit to this list, not a
+ * side effect of loosening a quantifier.
+ *
+ * Shapes:
  *
  *  - a bare token (`无`, `没有`, `不适用`), optionally with the noun the brief
  *    uses (`无缺口`, `没有跳过的检查`);
- *  - a token, a dash or comma, an ALL-DONE head (`所有`/`全部`/`一切`/`均`),
- *    then a completion word the text ENDS with (`无 — 所有检查均完成`),
- *    tolerating one trailing budget adverbial (`未触及工具预算上限`).
+ *  - a token, one separator, then the closed completion clause
+ *    (`无 — 所有检查均完成`), optionally with one budget adverbial
+ *    (`，未触及工具预算上限`).
  *
- * The first cut of this branch had none of that structure, and a live review
- * of this very change probed eight real disclosures it swallowed. Each rule
- * below answers one of them:
- *
- *  - **The all-done head.** Without it the span before the completion word
- *    swallows a gap clause: `无 — 3 项未运行，其余完成` and `无 — 渗透测试失败，
- *    单元测试完成` both read as "nothing to disclose". The English branch has
- *    required this head from the start; the copy that claimed to mirror it did
- *    not.
- *  - **`没有` in the negation lookbehind.** The lookbehinds see one character,
- *    so `还没有完成` passed them — the char before `完成` is `有`. A sentence
- *    saying a check is NOT done was classified as saying every check was.
- *  - **The tail is the budget adverbial, not forty free characters.** A span
- *    that accepts anything after the completion word swallows the clause that
- *    carries the gap: `无 — 安全检查完成，渗透测试未进行`. The English side ends
- *    at the completion word and allows only a budget phrase after it; so does
- *    this one now.
- *
- * The token needs an explicit boundary — Chinese has no `\b`. `无` is a
- * prefix of `无法…` ("unable to…"), which is a REAL gap and must survive, so
- * a token is only a token when what follows it is punctuation, whitespace,
- * or the end of the text. And as on the English side, neither span may cross
- * an exception (`但`, `除`).
+ * The token needs an explicit boundary — Chinese has no `\b`. `无` is a prefix
+ * of `无法…` ("unable to…"), which is a REAL gap and must survive, so a token
+ * is only a token when what follows it is punctuation, whitespace, a
+ * separator, or the end of the text.
  */
 const ZH_TOKEN = '(?:无|没有|不适用|暂无)(?:缺口|跳过的?检查|检查)?';
-const ZH_EXCEPTION = '但|除|除了|例外';
-const ZH_COMPLETION = '(?:完成|完毕|结束)';
-/** "every check", the head the completion clause must open with. */
-const ZH_ALL_DONE = '(?:所有|全部|一切|均|全都|统统)';
-/** The one thing allowed after the completion word: a budget adverbial. */
+/** One separator, in the forms a model actually writes (double em-dash too). */
+const ZH_SEPARATOR = '[-—–]{1,2}|[、,，:：]';
+/** "every planned check", spelled out — no free characters anywhere. */
+const ZH_ALL = '(?:所有|全部|一切|全都|统统)';
+const ZH_PLANNED = '(?:计划(?:内|中)?的?|预定的?|上述|以上|本轮)';
+const ZH_CHECKS = '(?:检查|检查项|项检查|测试|审查|工作)';
+const ZH_DONE = '(?:均|都|皆)?(?:已|均已|都已)?(?:完成|完毕|结束|做完)';
+/** The one adverbial allowed after the completion word. */
 const ZH_BUDGET_TAIL =
-  '(?:[，,、]?\\s*(?:未触及|未达到|未超出|在|不超过)[^，,。．.!！…;；]{0,20}预算[^，,。．.!！…;；]{0,10})?';
+  '(?:[，,、]?\\s*(?:未触及|未达到|未超出|未用尽|没有触及|在|不超过)' +
+  '(?:工具)?(?:调用)?预算(?:上限|限制|范围内)?)?';
 const ZH_TAIL = '[。．.!！…,，;；:：\\s]*$';
-// The pre-completion span is BOUNDED, unlike the English branch's `.*`: this
-// classifier runs on every agent return before the length cap applies, and two
-// unbounded quantifiers separated by a literal is the shape that backtracks.
-// A real "nothing to disclose" sentence fits in far less than 40 characters.
+const ZH_COMPLETION_CLAUSE =
+  `${ZH_ALL}?\\s*${ZH_PLANNED}?\\s*${ZH_CHECKS}?\\s*${ZH_DONE}` +
+  `${ZH_BUDGET_TAIL}`;
 const ZH_PLACEHOLDER =
   `${ZH_TOKEN}(?:${ZH_TAIL}` +
-  `|\\s*[-—–、,，]\\s*${ZH_ALL_DONE}(?:(?!${ZH_EXCEPTION}).){0,40}` +
-  `(?<!未)(?<!没)(?<!没有)(?<!无法)(?<!尚未)${ZH_COMPLETION}` +
-  `${ZH_BUDGET_TAIL}${ZH_TAIL})`;
+  `|\\s*(?:${ZH_SEPARATOR})\\s*${ZH_COMPLETION_CLAUSE}${ZH_TAIL})`;
 
 const PLACEHOLDER_GAP_RE = new RegExp(
   '^(?:<[^>]*>$' +
