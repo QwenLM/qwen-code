@@ -1132,6 +1132,33 @@ describe('createChannelWorkerManager', () => {
     expect(test.manager.state()).toMatchObject({ enabled: false });
   });
 
+  it('reports the carried requestedChannels as committed during a mode-all crash-restart window (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    // The CRASH-restart counterpart of the initial-window test above:
+    // the supervisor carries the last committed names across the
+    // relaunch (`requestedChannels` defined) while `channels` is still
+    // the `['all']` launch placeholder. committedChannelNames() must
+    // read the carried set — flipping the precedence to `channels ??
+    // requestedChannels` ships green without this pin: the placeholder
+    // filters out, the relaunching worker's channels read as uncommitted
+    // and a per-channel start/stop reconciles a replacement selection
+    // against the mid-relaunch worker (R11-v5).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'starting',
+        channels: ['all'],
+        requestedChannels: ['telegram', 'feishu'],
+      }),
+    ]);
+
+    expect(test.manager.committedChannelNames()).toEqual([
+      'telegram',
+      'feishu',
+    ]);
+  });
+
   it('filters the phantom all placeholder out of a carried connected set (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
@@ -1253,21 +1280,24 @@ describe('createChannelWorkerManager', () => {
     // on the next `--channel all` — the exact regression this PR fixes.
     // The group must be re-read once stop() settles and both captures
     // unioned.
-    // `feishu` is contributed by the PRE-stop capture only (its
-    // lastConnectedChannels carries it; postStop's does not) — deleting
-    // the pre-stop capture turns the expectation red, pinning both halves
-    // of the union instead of the post-stop superset alone (R10-21).
+    // The fixture is asymmetric in BOTH directions: `feishu` is
+    // contributed by the PRE-stop capture only (connected before the
+    // stop, gone from the post-stop snapshot) and `whatsapp` by the
+    // POST-stop capture only (requested but still unconnected pre-stop,
+    // committed during the tear-down) — deleting EITHER capture turns
+    // the expectation red, pinning both halves of the union instead of
+    // just one superset (R10-21, R11-v3).
     const preStop = workerSnapshot({
       state: 'starting',
       channels: ['all'],
-      requestedChannels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu', 'whatsapp'],
       lastConnectedChannels: ['telegram', 'feishu'],
     });
     const postStop = workerSnapshot({
       state: 'running',
-      channels: ['telegram'],
-      requestedChannels: ['telegram'],
-      lastConnectedChannels: ['telegram'],
+      channels: ['telegram', 'whatsapp'],
+      requestedChannels: ['telegram', 'whatsapp'],
+      lastConnectedChannels: ['telegram', 'whatsapp'],
     });
     let stopped = false;
     vi.mocked(group.stop).mockImplementation(async () => {
@@ -1280,7 +1310,7 @@ describe('createChannelWorkerManager', () => {
     const result = await test.manager.stopSelection();
 
     expect(result.stoppedChannels).toEqual([
-      { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
+      { workspaceCwd: PRIMARY, names: ['telegram', 'feishu', 'whatsapp'] },
     ]);
   });
 
@@ -1291,21 +1321,24 @@ describe('createChannelWorkerManager', () => {
     // crash-restart ready committing during a REJECTING multi-workspace
     // stop carries only the pre-stop capture — the channel that committed
     // in the window (already written `active` by the worker) gets no
-    // `stopped` record and resurrects on the next `--channel all` (R10-21).
+    // `stopped` record and resurrects on the next `--channel all`
+    // (R10-21). The fixture is asymmetric in BOTH directions (see the
+    // resolve-path twin), so dropping the `finally` push turns this red
+    // too (R11-v3).
     const group = fakeGroup();
     const test = setup(group);
     await test.manager.setSelection({ mode: 'all' });
     const preStop = workerSnapshot({
       state: 'starting',
       channels: ['all'],
-      requestedChannels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu', 'whatsapp'],
       lastConnectedChannels: ['telegram', 'feishu'],
     });
     const postStop = workerSnapshot({
       state: 'running',
-      channels: ['telegram'],
-      requestedChannels: ['telegram'],
-      lastConnectedChannels: ['telegram'],
+      channels: ['telegram', 'whatsapp'],
+      requestedChannels: ['telegram', 'whatsapp'],
+      lastConnectedChannels: ['telegram', 'whatsapp'],
     });
     let stopped = false;
     vi.mocked(group.stop).mockImplementation(async () => {
@@ -1319,7 +1352,7 @@ describe('createChannelWorkerManager', () => {
     await expect(test.manager.stopSelection()).rejects.toMatchObject({
       code: 'channel_worker_stop_failed',
       stoppedChannels: [
-        { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
+        { workspaceCwd: PRIMARY, names: ['telegram', 'feishu', 'whatsapp'] },
       ],
     });
   });

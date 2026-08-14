@@ -1404,6 +1404,43 @@ describe('createChannelManagementService', () => {
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
+  it('rejects an unconfirmable stop while a failed worker still has a restart scheduled (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // The non-terminal side of the guard's failure clause: a crashed
+    // worker with restart budget remaining (`state: 'failed'` but
+    // `nextRestartAt` DEFINED) relaunches after the delay window and can
+    // reconnect the channel — an unconfirmable stop recorded now would
+    // be overwritten by it. Only the budget-exhausted terminal shape
+    // (nextRestartAt undefined, pinned by the permanently-failed test
+    // below) may record stops; collapsing the predicate to treat every
+    // failed worker as terminal ships green without this pin and turns
+    // the scheduled-restart window into a false 200 (R11-v4).
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['all'],
+          nextRestartAt: new Date(Date.now() + 5000).toISOString(),
+          error: 'Channel worker crashed; restarting.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_worker_starting',
+    });
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+  });
+
   it('does not block a stop during a healthy mode-names starting window (#8975)', async () => {
     const { service, manager } = setup({ committedNames: [] });
     // A mode-names worker defines `requestedChannels` at launch and its

@@ -513,6 +513,51 @@ describe('adoptLegacyChannelState (#8975)', () => {
     });
   });
 
+  it('skips the sync on a transient target read failure instead of reseeding (#8975)', () => {
+    // The target-read twin of the store's fail-closed read contract: a
+    // readFileSync failure on the EXISTING workspace file (EISDIR here;
+    // realistically EBUSY/EPERM/EIO) means its content is UNKNOWN, not
+    // corrupt — reseeding from the legacy map would rebuild it from an
+    // empty view and permanently destroy this workspace's recorded stops
+    // and adoption snapshot. Abort this sync with a trace; adoption runs
+    // on every start, so the next one retries (R11-v7).
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    mkdirSync(workspacePath, { recursive: true });
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+    // The mock's call history spans the whole file; isolate this test.
+    mockAtomicWriteFileSync.mockClear();
+
+    try {
+      expect(() => adoptLegacyChannelState(workspace)).not.toThrow();
+
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining('legacy adoption skipped for this start'),
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+    // No write was attempted: the obstacle stands untouched (pin via the
+    // mock, since the directory survives an atomic-write failure too).
+    expect(mockAtomicWriteFileSync).not.toHaveBeenCalled();
+
+    // Once the condition clears, adoption proceeds normally.
+    rmSync(workspacePath, { recursive: true, force: true });
+    adoptLegacyChannelState(workspace);
+    expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'stopped' },
+      adoptedLegacy: { telegram: 'stopped' },
+      adoptedLegacyMtime: expect.any(Number),
+    });
+  });
+
   it('warns when the legacy file reads but no longer parses (R10-24)', () => {
     // A legacy file that readFileSync reads successfully but parses to
     // undefined is coerced to an empty map: the stops it carried are
@@ -592,8 +637,9 @@ describe('adoptLegacyChannelState (#8975)', () => {
   });
 
   it('honors a byte-identical legacy re-stop the content diff cannot see (R10-5)', () => {
-    // An older release re-stopping an already-stopped channel rewrites
-    // the SAME map: the snapshot matches, so the content diff drops the
+    // The no-workspace stop fallback echoes the WHOLE stored map on
+    // every stop, so re-stopping an already-stopped channel rewrites
+    // the SAME bytes: the snapshot matches, the content diff drops the
     // re-stop and the explicitly stopped channel resurrects. The moved
     // mtime beside unchanged content is the rewrite signal (#8975).
     writeFileSync(
@@ -905,6 +951,92 @@ describe('ChannelStateStore', () => {
     expect(onWarning).toHaveBeenCalledWith(
       expect.stringContaining('could not read channel state file'),
     );
+  });
+
+  it('fails closed on a transient read failure instead of rebuilding from empty (#8975)', () => {
+    // The WRITE half of the read-failure contract (twin above pins the
+    // tolerant READ half). A transient read failure on an existing,
+    // still-WRITABLE state file means the content is UNKNOWN, not empty:
+    // rebuilding the file from an empty map in applyChange would
+    // permanently destroy every recorded stop. trySet must report the
+    // persist failure and leave the records intact (R11-v7). The seam
+    // fails ONLY the read (not the write): a path obstacle like EISDIR
+    // fails the atomic write too, so it cannot distinguish the fixed
+    // fail-closed path from the old rebuild-from-empty one.
+    writeFileSync(
+      filePath,
+      JSON.stringify({ version: 1, channels: { slack: 'stopped' } }),
+      'utf-8',
+    );
+    const onWarning = vi.fn();
+    const readError = new Error('EBUSY') as NodeJS.ErrnoException;
+    readError.code = 'EBUSY';
+    let failRead = true;
+    const store = new ChannelStateStore(filePath, {
+      onWarning,
+      _testReadFileSync: (p) => {
+        if (failRead) throw readError;
+        return readFileSync(p, 'utf-8');
+      },
+    });
+
+    expect(store.trySet('telegram', 'stopped')).toBe(false);
+    expect(store.trySetMany(['telegram', 'feishu'], 'stopped')).toBe(false);
+    expect(onWarning).toHaveBeenCalledWith(
+      expect.stringContaining('failed to persist channel state'),
+    );
+
+    // The records survived the transient condition verbatim — a
+    // rebuild-from-empty write would have replaced them while the file
+    // was still writable.
+    expect(readFileSync(filePath, 'utf-8')).toBe(
+      JSON.stringify({ version: 1, channels: { slack: 'stopped' } }),
+    );
+    // Once the read recovers, writes resume and merge with the intact
+    // records.
+    failRead = false;
+    expect(store.trySet('telegram', 'stopped')).toBe(true);
+    expect(new ChannelStateStore(filePath).readAll()).toEqual({
+      slack: 'stopped',
+      telegram: 'stopped',
+    });
+  });
+
+  it('preserves the adoption snapshot across a transient read failure (#8975)', () => {
+    // Same hazard through the snapshot-preserving path: a store whose
+    // file carries adoptedLegacy must not lose the diff baseline when a
+    // transient read failure hits the next write — the rebuild would
+    // drop it, silently turning every later legacy stop invisible (R11-v7).
+    const before = JSON.stringify({
+      version: 1,
+      channels: { telegram: 'stopped' },
+      adoptedLegacy: { telegram: 'stopped' },
+      adoptedLegacyMtime: 1234,
+    });
+    writeFileSync(filePath, before, 'utf-8');
+    const readError = new Error('EBUSY') as NodeJS.ErrnoException;
+    readError.code = 'EBUSY';
+    let failRead = true;
+    const store = new ChannelStateStore(filePath, {
+      _testReadFileSync: (p) => {
+        if (failRead) throw readError;
+        return readFileSync(p, 'utf-8');
+      },
+    });
+
+    expect(store.trySet('telegram', 'active')).toBe(false);
+
+    // Failed write changed nothing: the snapshot and its watermark
+    // survive verbatim, and the retry merges with them.
+    expect(readFileSync(filePath, 'utf-8')).toBe(before);
+    failRead = false;
+    expect(store.trySet('telegram', 'active')).toBe(true);
+    expect(JSON.parse(readFileSync(filePath, 'utf-8'))).toEqual({
+      version: 1,
+      channels: { telegram: 'active' },
+      adoptedLegacy: { telegram: 'stopped' },
+      adoptedLegacyMtime: 1234,
+    });
   });
 
   it.each([

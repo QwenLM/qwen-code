@@ -42,18 +42,21 @@ interface ChannelStateFile {
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
   /**
    * The legacy file's mtime at the last adoption sync. A content diff
-   * alone cannot see a re-stop written BYTE-IDENTICALLY by an older
-   * release (re-stopping an already-stopped channel rewrites the same
-   * map): the snapshot matches, so the merge loop would drop it and the
-   * explicitly re-stopped channel resurrects on `--channel all`. When the
-   * mtime moved AND the content still equals the snapshot, the rewrite
-   * itself is a new stop signal re-asserting the whole map, so
-   * snapshot-identical entries are re-applied too. (A rewrite that
-   * CHANGES the content stays on the plain content diff — the unchanged
-   * entries were not re-asserted, and re-applying them would override an
-   * explicit restart, the R9-3 hazard.) Absent on files written before
-   * mtime recording; adoption then keeps the content-only diff for that
-   * one sync and starts recording (#8975).
+   * alone cannot see a re-stop written BYTE-IDENTICALLY: the only legacy
+   * writer is this PR's own no-workspace stop fallback (the file is
+   * introduced by this PR, so older releases never write it), and it
+   * echoes the WHOLE stored map on every stop — re-stopping an
+   * already-stopped channel rewrites the same bytes. The snapshot
+   * matches, so the merge loop would drop the re-stop and the explicitly
+   * re-stopped channel resurrects on `--channel all`. When the mtime
+   * moved AND the content still equals the snapshot, the rewrite itself
+   * is a new stop signal re-asserting the whole map, so snapshot-
+   * identical entries are re-applied too. (A rewrite that CHANGES the
+   * content stays on the plain content diff — the unchanged entries were
+   * not re-asserted, and re-applying them would override an explicit
+   * restart, the R9-3 hazard.) Absent on files written before mtime
+   * recording; adoption then keeps the content-only diff for that one
+   * sync and starts recording (#8975).
    */
   adoptedLegacyMtime?: number;
 }
@@ -111,11 +114,12 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
  * forever (a later-starting workspace adopts the same stops), so blindly
  * re-merging it would override an explicit restart recorded in this
  * workspace's own map with the stale old stop. Exception: a rewrite of
- * the legacy file that leaves an entry byte-identical (an older release
- * re-stopping an already-stopped channel) is invisible to the content
- * diff, so the sync also records the legacy mtime; when it moved since
- * the snapshot was recorded, the rewrite itself is a new stop signal and
- * snapshot-identical entries are re-applied (#8975). Entries that
+ * the legacy file that leaves an entry byte-identical (the no-workspace
+ * stop fallback echoing the whole stored map when re-stopping an
+ * already-stopped channel) is invisible to the content diff, so the sync
+ * also records the legacy mtime; when it moved since the snapshot was
+ * recorded, the rewrite itself is a new stop signal and snapshot-
+ * identical entries are re-applied (#8975). Entries that
  * disappeared from the legacy file are likewise never propagated: it
  * carries no workspace attribution, so its loss or rewrite must not
  * destroy this workspace's records. Best-effort — any failure only loses
@@ -179,7 +183,21 @@ export function adoptLegacyChannelState(
     targetExisted = true;
     try {
       target = parseStateFile(readFileSync(targetPath, 'utf-8'));
-    } catch {
+    } catch (error) {
+      // ENOENT can still race the existsSync above — the file vanished,
+      // so proceed as a first adoption. Any other read failure means the
+      // content is UNKNOWN, not corrupt: reseeding from the legacy map
+      // below would rebuild the file from an empty view and permanently
+      // destroy this workspace's recorded stops and adoption snapshot.
+      // Abort this sync with a trace; adoption runs on every start, so
+      // the next one retries once the condition clears (#8975).
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        writeStoreWarning(
+          `[Channel] Warning: could not read channel state file ${targetPath}; legacy adoption skipped for this start.`,
+        );
+        return;
+      }
+      targetExisted = false;
       target = undefined;
     }
   }
@@ -219,11 +237,19 @@ export function adoptLegacyChannelState(
         channels[name] = state;
         merged.push(name);
       } else if (legacyRewritten && channels[name] !== state) {
-        // Byte-identical re-stop by an older release (see the function
+        // Byte-identical rewrite since the snapshot (see the function
         // doc): content cannot distinguish it from 'unchanged since
-        // adoption', but the moved mtime proves a rewrite, and a rewrite
-        // carrying this entry is a stop event — re-apply it over an
-        // explicit restart recorded since (#8975).
+        // adoption', but the moved mtime proves a rewrite, and the only
+        // legacy writer — this PR's own no-workspace stop fallback —
+        // echoes the WHOLE stored map on every stop, so the rewrite
+        // re-asserts every entry. Treat the re-assertion as a stop
+        // event over an explicit restart recorded since (R10-5).
+        // Accepted trade-off: the echo cannot say WHICH entry the stop
+        // touched, so a no-op re-stop of one already-stopped channel
+        // also re-stops explicitly restarted siblings in every adopted
+        // workspace — the fail-safe direction (an under-start is one
+        // explicit start away; a resurrected explicitly stopped channel
+        // is the #8975 regression) (#8975).
         channels[name] = state;
         merged.push(name);
       }
@@ -365,30 +391,55 @@ function writeStoreWarning(message: string): void {
  */
 export class ChannelStateStore {
   private readonly warn: (message: string) => void;
+  private readonly readImpl: (filePath: string) => string;
 
   constructor(
     private readonly filePath: string,
-    opts: { onWarning?: (message: string) => void } = {},
+    opts: {
+      onWarning?: (message: string) => void;
+      /**
+       * Internal test seam — defaults to `fs.readFileSync` (utf-8),
+       * which vitest cannot intercept across module boundaries (ESM
+       * exports of `node:fs` are non-configurable; see
+       * atomicWriteFileSync's `_testFs`). Lets a test fail the read on
+       * an existing, still-writable file — the transient shape a
+       * path-level obstacle (EISDIR) cannot model (#8975).
+       */
+      _testReadFileSync?: (filePath: string) => string;
+    } = {},
   ) {
     this.warn = opts.onWarning ?? writeStoreWarning;
+    this.readImpl = opts._testReadFileSync ?? ((p) => readFileSync(p, 'utf-8'));
   }
 
   /**
    * Read + tolerantly parse the whole state file. A missing or corrupt
    * file behaves like an empty state map (never fails channel startup);
    * a CORRUPT file additionally warns, since the discarded records are the
-   * only thing a later resurrection can be traced to (#8975). Returns the
-   * full parsed file (channels + adoption snapshot) so writers can
-   * preserve fields they do not own.
+   * only thing a later resurrection can be traced to (#8975). A transient
+   * READ failure on an existing file (anything but ENOENT — EBUSY/EPERM/
+   * EIO, e.g. AV interference on a freshly renamed file, documented at
+   * renameWithRetrySync) is neither: the content is UNKNOWN, not empty,
+   * so the read throws and writers fail closed instead of rebuilding the
+   * file from an empty view — permanently destroying every recorded stop
+   * and the adoption snapshot (#8975). Returns the full parsed file
+   * (channels + adoption snapshot) so writers can preserve fields they
+   * do not own.
    */
   private readFileFull(): ParsedStateFile | undefined {
     if (!existsSync(this.filePath)) return undefined;
     let raw: string;
     try {
-      raw = readFileSync(this.filePath, 'utf-8');
-    } catch {
-      this.warnDiscardedFile();
-      return undefined;
+      raw = this.readImpl(this.filePath);
+    } catch (error) {
+      // ENOENT can still race the existsSync above — the file is gone,
+      // i.e. the missing-file case. Every other error is the unknown-
+      // content case documented above; let it reach the writer's
+      // fail-closed boundary (trySet*/set*) (#8975).
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
     }
     const parsed = parseStateFile(raw);
     if (!parsed) {
@@ -399,7 +450,17 @@ export class ChannelStateStore {
   }
 
   readAll(): Record<string, ChannelRuntimeState> {
-    return this.readFileFull()?.channels ?? Object.create(null);
+    try {
+      return this.readFileFull()?.channels ?? Object.create(null);
+    } catch {
+      // The READ path stays tolerant: channel startup must never fail on
+      // a transiently unreadable state file (the class contract). Only
+      // writers fail closed, so nothing rebuilds the file from this
+      // empty view and the records survive the transient condition
+      // (#8975).
+      this.warnDiscardedFile();
+      return Object.create(null);
+    }
   }
 
   set(name: string, state: ChannelRuntimeState): void {
