@@ -38,6 +38,41 @@ import { useDialogFrameKeys } from './dialogs-shared.js';
 
 export const MAX_MODEL_ITEMS_TO_SHOW = 10;
 
+/**
+ * Height-cap parity of the ink ModelDialog: non-list chrome to reserve when
+ * capping the visible model rows — outer border (2) + title/gap (2) + the
+ * highlighted-entry detail panel (divider + up to 4 rows + margin, ~7) +
+ * footer hint (2) + error-box rows when present. Mirrors
+ * `MODEL_DIALOG_FIXED_ROWS` in ui/components/ModelDialog.tsx.
+ */
+export const MODEL_DIALOG_FIXED_ROWS = 14;
+export const MODEL_OPTION_ROW_HEIGHT = 1;
+export const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
+
+/** Parity of the ink dialog's `maxModelItemsToShow` computation. */
+export function computeModelDialogMaxItems(
+  availableTerminalHeight: number | undefined,
+  hasDescriptions: boolean,
+  errorMessageRows: number,
+): number {
+  if (availableTerminalHeight === undefined) {
+    return MAX_MODEL_ITEMS_TO_SHOW;
+  }
+  const rowHeight = hasDescriptions
+    ? MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION
+    : MODEL_OPTION_ROW_HEIGHT;
+  return Math.max(
+    1,
+    Math.min(
+      MAX_MODEL_ITEMS_TO_SHOW,
+      Math.floor(
+        (availableTerminalHeight - MODEL_DIALOG_FIXED_ROWS - errorMessageRows) /
+          rowHeight,
+      ),
+    ),
+  );
+}
+
 export type ModelDialogMode =
   | 'primary'
   | 'fast'
@@ -214,6 +249,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
     errorMessage,
     onSelect,
     onClose,
+    availableTerminalHeight,
   } = props;
 
   const isAuxMode = mode !== 'primary';
@@ -226,13 +262,28 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
       )
     : 0;
 
+  // Height-capped list window (ink parity): on short terminals the detail
+  // panel and footer stay visible instead of being pushed off-screen.
+  const errorMessageRows = errorMessage
+    ? 2 + errorMessage.split('\n').length
+    : 0;
+  const maxItemsToShow = computeModelDialogMaxItems(
+    availableTerminalHeight,
+    entries.some(
+      (entry) =>
+        typeof entry.description === 'string' &&
+        entry.description.trim().length > 0,
+    ),
+    errorMessageRows,
+  );
+
   const list = useDialogSelect({
     items: entries,
     initialIndex,
     focused: true,
     numbers: true,
     // The original intentionally omits the ▲/▼ arrows; window only.
-    maxItemsToShow: MAX_MODEL_ITEMS_TO_SHOW,
+    maxItemsToShow,
     onSelect: (key) => onSelect(key),
     onHighlight: (key) => setHighlightedKey(key),
   });
@@ -275,7 +326,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
             items={entries}
             activeIndex={list.activeIndex}
             scrollOffset={list.scrollOffset}
-            maxItemsToShow={MAX_MODEL_ITEMS_TO_SHOW}
+            maxItemsToShow={maxItemsToShow}
             showNumbers={true}
             focused={true}
             onHover={list.setActiveIndex}

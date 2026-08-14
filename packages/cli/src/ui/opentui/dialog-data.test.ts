@@ -33,6 +33,7 @@ import {
   buildMcpServers,
   buildModelEntries,
   buildPermissionsData,
+  computeModelDialogInitialKey,
   deletePermissionRule,
   getMcpServerTools,
 } from './dialog-data.js';
@@ -954,5 +955,119 @@ describe('mcp and extension feeds', () => {
       { key: 'ext-one', label: 'ext-one', meta: '/x/ext-one', enabled: true },
       { key: 'ext-two', label: 'ext-two', meta: '/x/ext-two', enabled: false },
     ]);
+  });
+});
+
+describe('computeModelDialogInitialKey (/model opens on the current model)', () => {
+  function entry(overrides: Partial<OpenTuiModelEntry>): OpenTuiModelEntry {
+    return {
+      key: overrides.key ?? 'key',
+      value: overrides.key ?? 'key',
+      authType: 'api_key',
+      label: overrides.label ?? 'Model',
+      modelId: overrides.modelId ?? overrides.model?.id ?? 'model',
+      ...overrides,
+    } as OpenTuiModelEntry;
+  }
+
+  const baseEntries = [
+    entry({
+      key: buildModelSelectionKey(
+        AuthType.USE_OPENAI,
+        'm1',
+        'https://provider.example',
+      ),
+      authType: AuthType.USE_OPENAI,
+      modelId: 'm1',
+    }),
+    entry({
+      key: buildModelSelectionKey(AuthType.USE_OPENAI, 'm2'),
+      authType: AuthType.USE_OPENAI,
+      modelId: 'm2',
+    }),
+  ];
+
+  it('highlights the exact current auth/model/baseUrl row in primary mode', () => {
+    const { settings } = createFakeSettings();
+    const key = computeModelDialogInitialKey({
+      config: stubConfig({
+        getModel: () => 'm1',
+        getAuthType: () => AuthType.USE_OPENAI,
+        getContentGeneratorConfig: (() => ({
+          baseUrl: 'https://provider.example',
+        })) as Config['getContentGeneratorConfig'],
+      } as Partial<Config>),
+      settings,
+      entries: baseEntries,
+      mode: 'primary',
+    });
+    expect(key).toBe(baseEntries[0].key);
+  });
+
+  it('falls back to the same-id row when the baseUrl drifted', () => {
+    const { settings } = createFakeSettings();
+    const key = computeModelDialogInitialKey({
+      config: stubConfig({
+        getModel: () => 'm2',
+        getAuthType: () => AuthType.USE_OPENAI,
+        getContentGeneratorConfig: (() => ({
+          baseUrl: 'https://moved.example',
+        })) as Config['getContentGeneratorConfig'],
+      } as Partial<Config>),
+      settings,
+      entries: baseEntries,
+      mode: 'primary',
+    });
+    expect(key).toBe(baseEntries[1].key);
+  });
+
+  it('prefers the active runtime snapshot id when present', () => {
+    const { settings } = createFakeSettings();
+    const snapshotEntry = entry({ key: '$runtime|api_key|m1', modelId: 'm1' });
+    const key = computeModelDialogInitialKey({
+      config: stubConfig({
+        getModel: () => 'm2',
+        getAuthType: () => AuthType.USE_OPENAI,
+        getActiveRuntimeModelSnapshot: (() => ({
+          id: '$runtime|api_key|m1',
+        })) as Config['getActiveRuntimeModelSnapshot'],
+      } as Partial<Config>),
+      settings,
+      entries: [...baseEntries, snapshotEntry],
+      mode: 'primary',
+    });
+    expect(key).toBe('$runtime|api_key|m1');
+  });
+
+  it('highlights the entry owning the persisted aux selector', () => {
+    const settings = {
+      merged: { fastModel: `${AuthType.USE_OPENAI}:m1` },
+    } as unknown as LoadedSettings;
+    const key = computeModelDialogInitialKey({
+      config: stubConfig({}),
+      settings,
+      entries: baseEntries,
+      mode: 'fast',
+    });
+    expect(key).toBe(baseEntries[0].key);
+  });
+
+  it('returns undefined without a current model (dialog starts on row 1)', () => {
+    const { settings } = createFakeSettings();
+    const key = computeModelDialogInitialKey({
+      config: stubConfig({ getModel: () => 'unknown-model' }),
+      settings,
+      entries: baseEntries,
+      mode: 'primary',
+    });
+    expect(key).toBeUndefined();
+    expect(
+      computeModelDialogInitialKey({
+        config: stubConfig({}),
+        settings,
+        entries: [],
+        mode: 'primary',
+      }),
+    ).toBeUndefined();
   });
 });

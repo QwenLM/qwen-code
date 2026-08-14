@@ -9,9 +9,16 @@
  *  4. flicker-free rendering (cell diff + DEC 2026, handled by the renderer)
  */
 import { MouseButton } from '@opentui/core';
-import { C, SYNTAX, applyThemeMode } from './theme.js';
+import { C, SYNTAX, applyThemeMode, applyOpenTuiTheme } from './theme.js';
 import { detectInitialThemeMode } from './theme-auto.js';
-import { selectionProps } from './messages.js';
+import { getActiveOpenTuiTheme } from './theme-parity.js';
+import { AUTO_THEME_NAME, themeManager } from '../themes/theme-manager.js';
+import {
+  selectionProps,
+  toolCardDescription,
+  toolCardName,
+  toolCardSummarySuffix,
+} from './messages.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import {
   useKeyboard,
@@ -103,6 +110,15 @@ const argsPreview = (args: string) => {
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 };
 
+/**
+ * Original status-line `formatPercent` parity: one decimal place, no
+ * trailing `.0` (so `5%`, not `5.0%`).
+ */
+const formatPercentUsed = (pct: number): string => {
+  const rounded = Math.round(pct * 10) / 10;
+  return Number.isInteger(rounded) ? rounded.toFixed(0) : String(rounded);
+};
+
 const IMAGE_MIME: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -124,39 +140,6 @@ function readImagePart(p: string): Part | null {
     };
   } catch {
     return null;
-  }
-}
-
-const toolDisplayName = (name: string) =>
-  name
-    .split(/[_-]/)
-    .filter(Boolean)
-    .map((s) => s[0].toUpperCase() + s.slice(1))
-    .join('');
-
-function toolDescription(name: string, args: string): string {
-  let a: Record<string, unknown> = {};
-  try {
-    a = JSON.parse(args);
-  } catch {
-    return '';
-  }
-  const path = (a['file_path'] ?? a['path'] ?? a['filePath']) as
-    | string
-    | undefined;
-  const cmd = (a['command'] ?? a['cmd']) as string | undefined;
-  const base = (p?: string) => (p ? nodePath.basename(p) : '');
-  switch (name) {
-    case 'write_file':
-      return path ? `Writing to ${base(path)}` : '';
-    case 'read_file':
-      return path ? `Reading ${base(path)}` : '';
-    case 'list_directory':
-      return path ? `Listing ${path}` : 'Listing .';
-    case 'run_shell_command':
-      return cmd ? argsPreview(cmd) : '';
-    default:
-      return '';
   }
 }
 
@@ -218,13 +201,32 @@ function ToolCard(props: {
     : item.success
       ? C.green
       : C.red;
-  const suffix = item.done && item.summary ? ` · ${item.summary}` : '';
+  const suffix = toolCardSummarySuffix(item.done, item.summary);
   const confirmLabel =
     item.confirm === 'pending'
       ? ' · awaiting approval…'
       : item.confirm === 'rejected'
         ? ' · rejected'
         : '';
+  // Original tool-card parity: `{glyph} {DisplayName} {description}` — the
+  // display name comes from the shared map (`run_shell_command` → `Shell`)
+  // and the description from the invocation args (`echo X (Echo X)`). Live
+  // events carry no description string, so scripted/demo titles fall back.
+  const displayName = toolCardName(item.tool);
+  const argsDescription = toolCardDescription(item.tool, item.args);
+  let fallbackDescription =
+    item.title && item.title !== item.tool && item.title !== displayName
+      ? item.title
+      : '';
+  // Scripted/demo titles embed the tool verb ("Read packages/…"); drop the
+  // leading name so the card does not read "Read Read packages/…".
+  for (const prefix of [`${displayName} `, `${item.tool} `]) {
+    if (fallbackDescription.startsWith(prefix)) {
+      fallbackDescription = fallbackDescription.slice(prefix.length);
+      break;
+    }
+  }
+  const description = `${argsDescription || fallbackDescription}${suffix}`;
   return (
     <box flexDirection="column">
       <box
@@ -242,11 +244,11 @@ function ToolCard(props: {
         <box flexDirection="row">
           <text fg={iconColor}>{icon} </text>
           <text fg={C.text} attributes={1}>
-            {toolDisplayName(item.title)}
+            {displayName}
           </text>
-          <text fg={C.dim}>
-            {` ${toolDescription(item.title, item.args ?? '')}${suffix}`}
-          </text>
+          {(description || confirmLabel) && (
+            <text fg={C.dim}>{` ${description}`}</text>
+          )}
           {confirmLabel && <text fg={C.yellow}>{confirmLabel}</text>}
         </box>
       </box>
@@ -521,7 +523,8 @@ function buildBanner(config: Config | undefined, width: number) {
   const authLine = authModelText + hint;
 
   // Responsive layout mirroring Header.tsx: two-column (ASCII logo + info
-  // panel) when wide, single-column info panel when narrow.
+  // panel) when wide, single-column info panel when narrow. The outer
+  // marginX=2 puts the border in the original's third column.
   const containerMarginX = 2;
   const logoGap = 2;
   const infoPanelChromeWidth = 2 + 1 * 2; // border(2) + paddingX(1*2)
@@ -556,7 +559,11 @@ function buildBanner(config: Config | undefined, width: number) {
 
   if (!showLogo) {
     return (
-      <box marginLeft={1} marginRight={1} flexShrink={0}>
+      <box
+        marginLeft={containerMarginX}
+        marginRight={containerMarginX}
+        flexShrink={0}
+      >
         {infoPanel}
       </box>
     );
@@ -565,8 +572,8 @@ function buildBanner(config: Config | undefined, width: number) {
     <box
       flexDirection="row"
       alignItems="center"
-      marginLeft={1}
-      marginRight={1}
+      marginLeft={containerMarginX}
+      marginRight={containerMarginX}
       flexShrink={0}
     >
       <GradientLogo />
@@ -674,28 +681,64 @@ function App({
     [settingsProp, config],
   );
 
-  // Live light/dark theme switching (OSC 10/11 + mode 2031 updates).
+  // Theme resolution — the settings `ui.theme` face (ink parity):
+  //  - QWEN_THEME=light|dark env override wins (opentui escape hatch for
+  //    terminals where OSC 10/11 detection fails);
+  //  - ui.theme = 'auto' → light/dark auto-adaptation (COLORFGBG → OSC 10/11
+  //    probe → macOS appearance → dark) plus live `theme_mode` switching;
+  //  - ui.theme = named/custom theme → that theme's mapped palette, fixed —
+  //    no probing, no live switching (the ink behavior);
+  //  - ui.theme unset → fixed dark (ink parity: the ThemeManager default is
+  //    Qwen Dark and never probes), not the adaptive light/dark chain.
+  const themeAutoRef = useRef(false);
+  const applyThemePreference = useCallback(
+    (themeName: string | undefined) => {
+      const envTheme = process.env['QWEN_THEME'];
+      if (envTheme === 'light' || envTheme === 'dark') {
+        themeAutoRef.current = false;
+        applyThemeMode(envTheme);
+        setThemeTick((t) => t + 1);
+        return;
+      }
+      if (themeName === AUTO_THEME_NAME) {
+        themeAutoRef.current = true;
+        void detectInitialThemeMode(renderer, 1000).then((mode) => {
+          // A named-theme selection may have landed while the probe ran.
+          if (!themeAutoRef.current) return;
+          applyThemeMode(mode);
+          setThemeTick((t) => t + 1);
+        });
+        return;
+      }
+      themeAutoRef.current = false;
+      if (settings.merged.ui?.customThemes) {
+        themeManager.loadCustomThemes(settings.merged.ui.customThemes);
+      }
+      // Unset and unknown names fall back to the manager's active theme —
+      // Qwen Dark before anything else has set it (the ink default).
+      if (themeName) {
+        themeManager.setActiveTheme(themeName);
+      }
+      applyOpenTuiTheme(getActiveOpenTuiTheme());
+      setThemeTick((t) => t + 1);
+    },
+    [renderer, settings],
+  );
+
+  // Live light/dark updates (OSC 10/11 + mode 2031) — only while the
+  // adaptive strategy is active.
   useEffect(() => {
     const onMode = (mode: 'dark' | 'light') => {
+      if (!themeAutoRef.current) return;
       applyThemeMode(mode);
       setThemeTick((t) => t + 1);
     };
     renderer.on('theme_mode', onMode);
-    // Env override wins (QWEN_THEME=light|dark) for terminals where OSC 10/11
-    // detection fails; otherwise initial detection.
-    const envTheme = process.env['QWEN_THEME'];
-    if (envTheme === 'light' || envTheme === 'dark') {
-      onMode(envTheme);
-    } else {
-      // Ink parity chain (COLORFGBG → OSC 10/11 probe → macOS appearance →
-      // dark) so terminals that never answer the OSC probe (Warp) still get
-      // the right palette instead of staying dark-on-light.
-      void detectInitialThemeMode(renderer, 1000).then(onMode);
-    }
+    applyThemePreference(settings.merged.ui?.theme);
     return () => {
       renderer.off('theme_mode', onMode);
     };
-  }, [renderer]);
+  }, [renderer, settings, applyThemePreference]);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const queueRef = useRef<OpenTuiStreamEvent[]>([]);
@@ -1580,16 +1623,24 @@ function App({
       getContentGeneratorConfig?: () => { contextWindowSize?: number };
     }
   )?.getContentGeneratorConfig?.()?.contextWindowSize;
+  // Original status-line parity: the context indicator only appears once
+  // tokens have been used (`… · 1.0m Context 4.5% used`), never bare.
   const contextPct =
     contextWindowSize && promptTokenCount > 0
-      ? ((promptTokenCount / contextWindowSize) * 100).toFixed(1)
+      ? Math.min(
+          100,
+          Math.round((promptTokenCount / contextWindowSize) * 1000) / 10,
+        )
       : null;
+  const contextLabel =
+    contextWindowSize && contextPct != null
+      ? ` · ${fmtTokens(contextWindowSize)} Context ${formatPercentUsed(contextPct)} used`
+      : '';
   const footerLine1 =
-    `→ ${footerProject}` +
+    `\u279c ${footerProject}` +
     (footerBranch ? ` · git:(${footerBranch})` : '') +
     (footerModel ? ` · ${footerModel}` : '') +
-    (contextWindowSize ? ` · ${fmtTokens(contextWindowSize)} Context` : '') +
-    (contextPct ? ` ${contextPct}% used` : '');
+    contextLabel;
   const modeName = approvalModeLabel(String(approvalMode ?? ''));
   const modeColor =
     modeName === 'YOLO'
@@ -1848,9 +1899,6 @@ function App({
               <text fg={C.dim}>{` · ⏳ ${queuedPrompts.length} queued`}</text>
             )}
           </box>
-          {contextPct != null && (
-            <text fg={C.dim}>{`${contextPct}% used`}</text>
-          )}
         </box>
       </scrollbox>
 
@@ -1863,6 +1911,7 @@ function App({
           commands={commands}
           onClose={() => setDialog(null)}
           onNavigate={setDialog}
+          onThemeChanged={applyThemePreference}
           notify={(text) => {
             applyEvent({ type: 'text', delta: text });
             applyEvent({ type: 'done' });

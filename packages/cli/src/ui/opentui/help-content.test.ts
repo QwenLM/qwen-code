@@ -16,13 +16,16 @@ import { CommandKind } from '../commands/types.js';
 import {
   HELP_COMMAND_LIST_VISIBLE_LINES,
   HELP_DOCS_URL,
+  HELP_KEY_COL_WIDTH,
   HELP_LAYOUT_FIXED_ROWS,
   HELP_LAYOUT_RESERVED_ROWS,
   buildHelpCommandsLines,
   computeHelpBodyRows,
+  computeHelpWidthLayout,
   formatHelpText,
   getHelpShortcuts,
   groupHelpCommands,
+  truncateHelpText,
 } from './help-content.js';
 
 function cmd(
@@ -176,5 +179,53 @@ describe('formatHelpText (full /help output)', () => {
     expect(text).toContain('/mycommand [User]');
     expect(text).toContain(`For more help: ${HELP_DOCS_URL}`);
     expect(text).toContain('Tab/Shift+Tab to switch tabs  ·  Esc to cancel');
+  });
+});
+
+describe('truncateHelpText', () => {
+  it('shortens long text with an ellipsis', () => {
+    expect(truncateHelpText('Clear the screen', 6)).toBe('Clear…');
+  });
+
+  it('leaves short text and degenerate widths untouched', () => {
+    expect(truncateHelpText('Short', 20)).toBe('Short');
+    expect(truncateHelpText('Anything', 1)).toBe('Anything');
+    expect(truncateHelpText('Anything', 0)).toBe('Anything');
+  });
+});
+
+describe('computeHelpWidthLayout (narrow-width /help parity)', () => {
+  it('derives fixed shortcut columns and a truncation budget', () => {
+    // At 80 cols the overlay previously overlapped its two shortcut columns
+    // ("Cleartthe screen"); the layout now sizes fixed columns like the ink
+    // dialog (colWidth = floor((safeWidth - 6 - 2) / 2)).
+    const layout = computeHelpWidthLayout(80);
+    expect(layout.safeWidth).toBe(80);
+    expect(layout.bodyWidth).toBe(74);
+    expect(layout.colWidth).toBe(36);
+    expect(layout.descWidth).toBe(36 - HELP_KEY_COL_WIDTH - 1);
+    expect(layout.singleColumn).toBe(false);
+  });
+
+  it('grows the columns with the terminal width', () => {
+    const narrow = computeHelpWidthLayout(80);
+    const wide = computeHelpWidthLayout(140);
+    expect(wide.colWidth).toBeGreaterThan(narrow.colWidth);
+    expect(wide.descWidth).toBeGreaterThan(narrow.descWidth);
+    expect(wide.singleColumn).toBe(false);
+  });
+
+  it('clamps to the ink minimum width of 72', () => {
+    const layout = computeHelpWidthLayout(40);
+    expect(layout.safeWidth).toBe(72);
+    expect(layout.colWidth).toBe(Math.floor((72 - 6 - 2) / 2));
+    expect(layout.singleColumn).toBe(false);
+  });
+
+  it('falls back to a single column only at unusable widths', () => {
+    // descWidth < 4 ⇒ single column. With the 72 clamp that needs a body
+    // narrower than the clamp allows, so normal terminals stay two-column.
+    expect(computeHelpWidthLayout(80).singleColumn).toBe(false);
+    expect(computeHelpWidthLayout(1).singleColumn).toBe(false);
   });
 });

@@ -22,6 +22,11 @@
  *  - wraps the tree in an ErrorBoundary that exits through the cleanup drain.
  */
 
+// MUST stay the first import: configures OTUI_ASSET_ROOT for bundled builds
+// before '@opentui/core' evaluates its module scope (the native-library path
+// is resolved once, at module load). See ../opentui/opentui-assets.ts.
+import '../opentui/opentui-assets.js';
+
 import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { App } from '../opentui/backend.js';

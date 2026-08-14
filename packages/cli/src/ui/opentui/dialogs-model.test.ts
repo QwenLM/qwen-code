@@ -22,12 +22,14 @@ vi.mock('@opentui/core', () => ({
 
 import {
   buildModelSelectionKey,
+  computeModelDialogMaxItems,
   formatContextWindow,
   formatModalities,
   formatModelOptionLabel,
   maskApiKey,
   modelDialogTitle,
   parseModelSelectionKey,
+  MAX_MODEL_ITEMS_TO_SHOW,
   type OpenTuiModelEntry,
 } from './dialogs-model.js';
 
@@ -141,5 +143,40 @@ describe('formatModelOptionLabel', () => {
     expect(
       formatModelOptionLabel({ ...base, isRuntime: true, isQwenOAuth: true }),
     ).toBe('[use-openai] GPT X (gpt-x) (Runtime)');
+  });
+});
+
+describe('computeModelDialogMaxItems (availableTerminalHeight parity)', () => {
+  it('uses the full window when no height is provided', () => {
+    expect(computeModelDialogMaxItems(undefined, false, 0)).toBe(
+      MAX_MODEL_ITEMS_TO_SHOW,
+    );
+  });
+
+  it('caps the list so the detail panel and footer stay visible', () => {
+    // 24-row terminal, no descriptions: (24 - 14 fixed) / 1 row = 10, but
+    // never more than MAX_MODEL_ITEMS_TO_SHOW.
+    expect(computeModelDialogMaxItems(24, false, 0)).toBeLessThanOrEqual(
+      MAX_MODEL_ITEMS_TO_SHOW,
+    );
+    // Short terminal shrinks the window below the default.
+    expect(computeModelDialogMaxItems(18, false, 0)).toBe(4);
+  });
+
+  it('counts two rows for entries with descriptions', () => {
+    expect(computeModelDialogMaxItems(24, true, 0)).toBe(
+      Math.floor((24 - 14) / 2),
+    );
+  });
+
+  it('reserves rows for a visible error box', () => {
+    expect(computeModelDialogMaxItems(24, false, 4)).toBe(
+      Math.floor((24 - 14 - 4) / 1),
+    );
+  });
+
+  it('never shows fewer than one row', () => {
+    expect(computeModelDialogMaxItems(5, false, 0)).toBe(1);
+    expect(computeModelDialogMaxItems(0, true, 10)).toBe(1);
   });
 });

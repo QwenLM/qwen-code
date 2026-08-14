@@ -300,6 +300,11 @@ function writeDistPackageJson(rootDir, distDir) {
       'examples',
       'bundled',
       'web-shell',
+      // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
+      // web-tree-sitter wasm, native render library) relocated by
+      // copy_bundle_assets.js; the bundled renderer sets OTUI_ASSET_ROOT to
+      // this directory for code-block syntax highlighting.
+      'opentui-assets',
     ],
     config: rootPackageJson.config,
     dependencies: {},

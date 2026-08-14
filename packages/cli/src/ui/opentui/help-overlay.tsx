@@ -30,31 +30,54 @@ import {
   HELP_TABS,
   buildHelpCommandsLines,
   buildHelpCustomCommandLines,
+  computeHelpWidthLayout,
   getHelpShortcuts,
+  truncateHelpText,
   type HelpLine,
   type HelpTab,
+  type HelpWidthLayout,
 } from './help-content.js';
 
 type SignatureLine = Extract<HelpLine, { type: 'signature' }>;
 
-function ShortcutRow(props: { shortcutKey: string; desc: string }) {
+function ShortcutRow(props: {
+  shortcutKey: string;
+  desc: string;
+  descWidth: number;
+}) {
   return (
     <box flexDirection="row">
       <box width={HELP_KEY_COL_WIDTH} flexShrink={0}>
         <text fg={C.accent}>{props.shortcutKey}</text>
       </box>
-      <text fg={C.text}>{props.desc}</text>
+      <text fg={C.text}>{truncateHelpText(props.desc, props.descWidth)}</text>
     </box>
   );
 }
 
-function GeneralHelp() {
+function GeneralHelp(props: { layout: HelpWidthLayout }) {
+  const { layout } = props;
   const shortcuts = getHelpShortcuts();
   const left = shortcuts.slice(0, Math.ceil(shortcuts.length / 2));
   const right = shortcuts.slice(Math.ceil(shortcuts.length / 2));
+  // Fixed-width columns (ink parity): flex-grow columns without truncation
+  // overlapped each other below ~100 terminal columns and wrapped rows out
+  // of the capped body window at 80.
+  const column = (rows: typeof left, width: number, descWidth: number) => (
+    <box flexDirection="column" width={width} flexShrink={0}>
+      {rows.map((s) => (
+        <ShortcutRow
+          key={s.key}
+          shortcutKey={s.key}
+          desc={s.description}
+          descWidth={descWidth}
+        />
+      ))}
+    </box>
+  );
   return (
     <box flexDirection="column">
-      <box marginBottom={1}>
+      <box marginBottom={1} width={layout.bodyWidth}>
         <text fg={C.text}>
           {t(
             'Qwen Code understands your codebase, makes edits with your permission, and executes commands right from your terminal.',
@@ -64,18 +87,20 @@ function GeneralHelp() {
       <text fg={C.text} attributes={1}>
         {t('Shortcuts')}
       </text>
-      <box flexDirection="row" gap={2}>
-        <box flexDirection="column" flexGrow={1}>
-          {left.map((s) => (
-            <ShortcutRow key={s.key} shortcutKey={s.key} desc={s.description} />
-          ))}
+      {layout.singleColumn ? (
+        <box flexDirection="column">
+          {column(
+            shortcuts,
+            layout.bodyWidth,
+            layout.bodyWidth - HELP_KEY_COL_WIDTH - 1,
+          )}
         </box>
-        <box flexDirection="column" flexGrow={1}>
-          {right.map((s) => (
-            <ShortcutRow key={s.key} shortcutKey={s.key} desc={s.description} />
-          ))}
+      ) : (
+        <box flexDirection="row" gap={2}>
+          {column(left, layout.colWidth, layout.descWidth)}
+          {column(right, layout.colWidth, layout.descWidth)}
         </box>
-      </box>
+      )}
     </box>
   );
 }
@@ -116,11 +141,12 @@ function CommandsHelp(props: {
   commands: readonly SlashCommand[];
   customOnly: boolean;
   scroll: number;
+  width: number;
 }) {
-  const { commands, customOnly, scroll } = props;
+  const { commands, customOnly, scroll, width } = props;
   const lines = customOnly
-    ? buildHelpCustomCommandLines(commands)
-    : buildHelpCommandsLines(commands);
+    ? buildHelpCustomCommandLines(commands, width)
+    : buildHelpCommandsLines(commands, width);
   if (lines.length === 0) {
     return (
       <text fg={C.dim}>
@@ -182,15 +208,22 @@ export function HelpOverlay(props: {
    * this height so the footer/hints below it always fit on screen.
    */
   bodyRows: number;
+  /**
+   * Available terminal width (the live main-area width in ink terms). Drives
+   * the border-box width and the two fixed-width shortcut columns so narrow
+   * terminals truncate with an ellipsis instead of overlapping.
+   */
+  width: number;
 }) {
   const { commands, tab, scroll, bodyRows } = props;
+  const layout = computeHelpWidthLayout(props.width);
   return (
     <box flexShrink={1} flexGrow={1} paddingLeft={1} paddingRight={1}>
       <box
         flexDirection="column"
         borderStyle="single"
         borderColor={C.accent}
-        flexGrow={1}
+        width={layout.safeWidth}
       >
         <box
           flexDirection="column"
@@ -223,12 +256,13 @@ export function HelpOverlay(props: {
             maxHeight={bodyRows}
             overflow="hidden"
           >
-            {tab === 'general' && <GeneralHelp />}
+            {tab === 'general' && <GeneralHelp layout={layout} />}
             {tab === 'commands' && (
               <CommandsHelp
                 commands={commands}
                 customOnly={false}
                 scroll={scroll}
+                width={layout.safeWidth}
               />
             )}
             {tab === 'custom-commands' && (
@@ -236,6 +270,7 @@ export function HelpOverlay(props: {
                 commands={commands}
                 customOnly={true}
                 scroll={scroll}
+                width={layout.safeWidth}
               />
             )}
           </box>

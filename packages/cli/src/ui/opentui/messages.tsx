@@ -28,6 +28,7 @@ import { MouseButton } from '@opentui/core';
 import { useRenderer } from '@opentui/react';
 import { useState } from 'react';
 import { C, SYNTAX } from './theme.js';
+import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
 import type { LiveHistoryItem, LiveToolItem } from './live-session-model.js';
 
 /** The original TOOL_STATUS glyphs (ui/constants.ts). */
@@ -63,6 +64,85 @@ export const selectionProps = () => ({
 
 /** TextAttributes bitmask (1 << 7) for the canceled strikethrough. */
 const STRIKETHROUGH_ATTR = 128;
+
+/**
+ * Tool-card naming/status parity with the original ToolMessage: a card line
+ * is `{glyph} {DisplayName} {description}`, where the display name comes
+ * from the shared internal-name → display-name map
+ * (`run_shell_command` → `Shell`, ui/utils/tool-display-map.ts) and the
+ * description reproduces the tool invocation's own `getDescription()` — a
+ * shell card renders `echo PARITY-OK (Echo PARITY-OK)`. The status glyph
+ * alone carries the outcome; the original appends no `· ok` / `· skipped`
+ * suffix, so generic summaries are suppressed (custom ones like a line
+ * count stay).
+ */
+export function toolCardName(rawName: string): string {
+  return TOOL_DISPLAY_BY_NAME[rawName] ?? rawName;
+}
+
+/** Tool summaries that carry no information beyond the status glyph. */
+export const GENERIC_TOOL_SUMMARIES: ReadonlySet<string> = new Set([
+  'ok',
+  'error',
+  'cancelled',
+  'canceled',
+  'interrupted',
+  'skipped',
+]);
+
+export function toolCardSummarySuffix(
+  done: boolean,
+  summary: string | undefined,
+): string {
+  if (!done || !summary || GENERIC_TOOL_SUMMARIES.has(summary)) return '';
+  return ` · ${summary}`;
+}
+
+/**
+ * Reconstructs the invocation description from the tool-call args (the live
+ * event stream carries args, not the core `getDescription()` string):
+ * parity of ShellToolInvocation.getDescription for the shell tool and of the
+ * path-based descriptions for the file tools.
+ */
+export function toolCardDescription(rawName: string, args?: string): string {
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = JSON.parse(args ?? '{}') as Record<string, unknown>;
+  } catch {
+    return '';
+  }
+  const str = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 ? v : undefined;
+  const oneLine = (v: string) => v.replace(/\s*\n\s*/g, ' ').trim();
+  switch (rawName) {
+    case 'run_shell_command': {
+      const cmd = str(parsed['command'] ?? parsed['cmd']);
+      if (!cmd) return '';
+      const desc = str(parsed['description']);
+      return desc ? `${oneLine(cmd)} (${oneLine(desc)})` : oneLine(cmd);
+    }
+    case 'read_file':
+    case 'write_file':
+    case 'edit':
+    case 'notebook_edit': {
+      const p = str(
+        parsed['file_path'] ?? parsed['path'] ?? parsed['filePath'],
+      );
+      return p ? oneLine(p) : '';
+    }
+    case 'list_directory':
+    case 'glob': {
+      const p = str(parsed['path'] ?? parsed['dir'] ?? parsed['pattern']);
+      return p ? oneLine(p) : '';
+    }
+    case 'grep_search': {
+      const pat = str(parsed['pattern']);
+      return pat ? oneLine(pat) : '';
+    }
+    default:
+      return '';
+  }
+}
 
 export function userMessageMeta(): { glyph: string; color: string } {
   // UserMessage → PrefixedTextMessage with theme.text.accent (purple).
@@ -210,14 +290,14 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
   const [hover, setHover] = useState(false);
   const renderer = useRenderer();
   const meta = toolStatusMeta(item);
-  const suffix = item.done && item.summary ? ` · ${item.summary}` : '';
+  const suffix = toolCardSummarySuffix(item.done, item.summary);
   const confirmLabel =
     item.confirm === 'pending'
       ? ' · awaiting approval…'
       : item.confirm === 'rejected'
         ? ' · rejected'
         : '';
-  const description = `${item.title}${suffix}${confirmLabel}`;
+  const description = `${toolCardDescription(item.tool, item.args)}${suffix}${confirmLabel}`;
 
   return (
     <box flexDirection="column">
@@ -243,7 +323,7 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
             attributes={1 | (meta.strikethrough ? STRIKETHROUGH_ATTR : 0)}
             {...selectionProps()}
           >
-            {item.tool}
+            {toolCardName(item.tool)}
           </text>
           <text fg={C.dim} {...selectionProps()}>
             {' '}
@@ -251,7 +331,7 @@ function ToolCard({ item, expanded, onToggle }: ToolCardProps) {
           </text>
         </box>
       </box>
-      {item.args && (
+      {item.args && expanded && (
         <box paddingLeft={STATUS_INDICATOR_WIDTH}>
           <text fg={C.dim} {...selectionProps()}>
             {argsPreview(item.args)}
@@ -382,6 +462,15 @@ export function MessageList({ items, expanded, onToggle }: MessageListProps) {
               </box>
             );
           case 'assistant':
+            // TODO(opentui parity — mermaid/image rendering): the ink
+            // renderer turns ```mermaid blocks and inline model images into
+            // terminal pictures (mermaidImageRenderer: kitty/sixel/ANSI via
+            // the capability probe). OpenTUI has no such pipeline yet — the
+            // renderer already probes the kitty graphics protocol at
+            // startup, but nothing consumes it — so mermaid output falls
+            // back to a plain code block and inline image parts are dropped
+            // upstream in the event adapter. Not implemented here by design;
+            // tracked as residual gap P2-6 in the display/render audit.
             return (
               <box key={item.id} flexDirection="row" marginTop={1}>
                 <box width={2} flexShrink={0}>

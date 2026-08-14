@@ -136,8 +136,54 @@ export function groupHelpCommands(
 }
 
 function truncateText(text: string, maxLength: number): string {
+  return truncateHelpText(text, maxLength);
+}
+
+/**
+ * Ellipsis truncation shared by the help overlay and its plain-text
+ * formatter (identical semantics to the ink Help dialog's `truncateText`).
+ */
+export function truncateHelpText(text: string, maxLength: number): string {
   if (maxLength <= 1 || text.length <= maxLength) return text;
   return `${text.slice(0, maxLength - 1)}…`;
+}
+
+/**
+ * Width layout for the help overlay (parity of the ink Help dialog, which
+ * receives the live main-area width and clamps it to at least 72):
+ *
+ *  - `safeWidth` is the outer border-box width;
+ *  - the General tab's shortcut grid draws two FIXED-width columns of
+ *    `colWidth` (ink: `Math.floor((bodyWidth - 2) / 2)`, bodyWidth =
+ *    safeWidth - 6 for borders + horizontal padding) instead of flex-grow
+ *    columns, which overlapped each other below ~100 columns;
+ *  - descriptions truncate with an ellipsis to `descWidth` exactly like
+ *    ink's ShortcutRow (`width - KEY_COL_WIDTH - 1`), so narrow terminals
+ *    stay clean instead of wrapping rows out of the capped body window.
+ */
+export interface HelpWidthLayout {
+  safeWidth: number;
+  bodyWidth: number;
+  colWidth: number;
+  descWidth: number;
+  /** Extremely narrow fallback: stack the shortcut grid in one column. */
+  singleColumn: boolean;
+}
+
+export function computeHelpWidthLayout(
+  availableWidth: number,
+): HelpWidthLayout {
+  const safeWidth = Math.max(72, availableWidth);
+  const bodyWidth = safeWidth - 6;
+  const colWidth = Math.floor((bodyWidth - 2) / 2);
+  const descWidth = colWidth - HELP_KEY_COL_WIDTH - 1;
+  return {
+    safeWidth,
+    bodyWidth,
+    colWidth,
+    descWidth,
+    singleColumn: descWidth < 4,
+  };
 }
 
 /** Same line model as the original CommandsHelp (signature/meta/desc/subs). */
