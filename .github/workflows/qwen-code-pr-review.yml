@@ -1500,6 +1500,12 @@ jobs:
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
+            # `--resume` is understood by the parser in this repository's own
+            # tree; the runner installs @qwen-code/qwen-code@latest, so between
+            # this landing and the next npm release the released parser will
+            # report `Unrecognized flag "--resume"; ignored.` and the retry runs
+            # from scratch — today's behaviour plus one warning line, and it
+            # self-heals on the first release that carries the flag.
             ATTEMPT_PROMPT="$PROMPT"
             if [ "$attempt" -gt 1 ]; then
               ATTEMPT_PROMPT="$PROMPT --resume"

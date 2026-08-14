@@ -18,6 +18,9 @@
 # Review local changes and apply the findings to your working tree
 /review --fix
 
+# Continue a review of the same PR that was interrupted, instead of starting over
+/review 123 --resume
+
 # Review a specific file
 /review src/utils/auth.ts
 
@@ -221,6 +224,18 @@ After the review, each finding is applied with the `edit` tool and then **accoun
 A finding is skipped when its fix would change intended behavior, would need changes well outside the reviewed diff, or turns out on a second look to be a false positive.
 
 **Every finding gets an outcome, and this is enforced rather than requested.** The ledger goes through `qwen review findings --outcomes`, which refuses a set that does not cover all of them — a fixer that applies six of nine findings and reports six has not lied about any one of them, it has silently shortened the list, and you would have no way to see the three that fell off.
+
+## Resuming an interrupted review (`--resume`)
+
+A long review that dies part-way — a dropped connection, a timeout, a killed terminal — leaves everything it had done on disk: the worktree, the captured diff, and the harness's own record of every agent that ran. `--resume` continues from there instead of starting over:
+
+```bash
+/review 123 --resume
+```
+
+It applies to **PR targets only** (a local review's diff comes from a live working tree, which has no stable interrupted state to continue), and it is safe to pass whenever you are unsure: the review rules on the on-disk state itself — the worktree still at the fetched commit and clean, the captured diff unchanged byte for byte, the PR head unmoved, the resume limit unspent — and silently starts fresh whenever anything no longer matches, telling you which check refused. A continuation reuses the earlier attempt's certified agent results, so the report says how many were recovered; it is disclosed, never a coverage gap.
+
+Two things to know. A continuation keeps the interrupted run's **effort**: passing a different `--effort` refuses the resume and runs fresh at the level you asked for, because different effort is different work. And if the PR head moved while the review was down, the resume refuses (`head-moved`) and the fresh run reviews the new commits — which is what you want, and it counts as this review's one restart.
 
 ## Findings as Data
 

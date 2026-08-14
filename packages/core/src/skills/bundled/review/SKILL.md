@@ -1,7 +1,7 @@
 ---
 name: review
-description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, `/review <pr-number> --comment` to post inline comments on the PR, or `/review --fix` to apply the findings to your working tree. Add `--effort low|medium|high` to trade depth for speed (defaults to high for PRs, medium for local changes).
-argument-hint: '[pr-number|file-path] [--effort low|medium|high] [--severity-floor critical|suggestion] [--comment] [--fix]'
+description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, `/review <pr-number> --comment` to post inline comments on the PR, `/review --fix` to apply the findings to your working tree, or `/review <pr-number> --resume` to continue an interrupted review of that PR instead of starting over. Add `--effort low|medium|high` to trade depth for speed (defaults to high for PRs, medium for local changes).
+argument-hint: '[pr-number|file-path] [--effort low|medium|high] [--severity-floor critical|suggestion] [--comment] [--fix] [--resume]'
 allowedTools:
   - task
   - run_shell_command
