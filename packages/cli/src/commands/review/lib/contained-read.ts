@@ -94,6 +94,20 @@ export interface ContainedFile {
   /** From `fstat` on the descriptor that produced `content`, not a later stat. */
   mtimeMs: number;
   size: number;
+  /**
+   * True when `minMtimeMs` was supplied and this file predates it: the
+   * descriptor was opened and validated, and the BYTES WERE NEVER READ.
+   *
+   * This is what keeps the membership fence cheap. A session-scoped transcript
+   * directory is never pruned, so it accumulates streams from earlier reviews
+   * in the same session, and a file whose last write predates the floor cannot
+   * hold an above-floor record. The caller used to skip those with a
+   * pathname `stat` and never open them — which is precisely the split this
+   * module exists to remove. Folding the test into the descriptor keeps both
+   * properties: one resolution of the name, and no bytes read for a file that
+   * cannot contribute a record.
+   */
+  stale?: boolean;
 }
 
 /**
@@ -127,6 +141,7 @@ export class ContainedReadError extends Error {
 export function readContainedFile(
   path: string,
   maxBytes: number,
+  opts: { minMtimeMs?: number } = {},
 ): ContainedFile {
   let fd: number;
   try {
@@ -154,6 +169,12 @@ export function readContainedFile(
         `${path} is not a regular file`,
         'not-regular',
       );
+    }
+    // Before the size ceiling and before the read: a stale file is skipped
+    // whatever its size, and skipping it costs one `fstat` on a descriptor
+    // that is about to be closed.
+    if (opts.minMtimeMs !== undefined && st.mtimeMs < opts.minMtimeMs) {
+      return { content: '', mtimeMs: st.mtimeMs, size: 0, stale: true };
     }
     if (st.size > maxBytes) {
       throw new ContainedReadError(
@@ -194,9 +215,10 @@ export function readContainedFile(
 export function readContainedFileOrNull(
   path: string,
   maxBytes: number,
+  opts: { minMtimeMs?: number } = {},
 ): ContainedFile | null {
   try {
-    return readContainedFile(path, maxBytes);
+    return readContainedFile(path, maxBytes, opts);
   } catch {
     return null;
   }

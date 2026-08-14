@@ -127,7 +127,16 @@ function readUsage(
   // check and then reopen it here to read: two resolutions of one name, with
   // a symlink or a swap free to land between them. Refusals throw, which
   // every caller already routes as "this stream is lost".
-  const opened = readContainedFile(file, MAX_STREAM_BYTES);
+  // `minMtimeMs`: a stream whose last write predates the floor cannot hold an
+  // above-floor record, so the descriptor is opened, `fstat`ed and closed
+  // without reading a byte. That restores the cheap skip the pathname `stat`
+  // used to provide, without reintroducing the second name resolution it cost.
+  const opened = readContainedFile(file, MAX_STREAM_BYTES, {
+    minMtimeMs: floorMs,
+  });
+  if (opened.stale === true) {
+    return { events: [], launch: '', mtimeMs: opened.mtimeMs };
+  }
   const raw = opened.content;
   const events: UsageEvent[] = [];
   let launch = '';

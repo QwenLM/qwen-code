@@ -105,6 +105,45 @@ describe('readContainedFile', () => {
     5000,
   );
 
+  it('skips a stale file without reading its bytes', () => {
+    const file = join(root, 'agent-old.jsonl');
+    writeFileSync(file, 'records from an earlier review in this session');
+    const old = new Date('2020-01-02T03:04:05Z');
+    utimesSync(file, old, old);
+
+    const opened = readContainedFile(file, MAX_LEDGER_BYTES, {
+      minMtimeMs: old.getTime() + 1,
+    });
+
+    // Metadata yes, bytes no: the membership fence is answered off the same
+    // descriptor, which is what keeps a never-pruned session directory cheap.
+    expect(opened.stale).toBe(true);
+    expect(opened.mtimeMs).toBe(old.getTime());
+    expect(opened.content).toBe('');
+    expect(opened.size).toBe(0);
+
+    // At the boundary the file is in scope and IS read: `<` not `<=`.
+    const fresh = readContainedFile(file, MAX_LEDGER_BYTES, {
+      minMtimeMs: old.getTime(),
+    });
+    expect(fresh.stale).toBeUndefined();
+    expect(fresh.content).toContain('earlier review');
+  });
+
+  it('skips a stale file even when it is over the byte ceiling', () => {
+    // Order matters: the staleness test comes first, so a huge stale file
+    // costs an fstat rather than a refusal the caller has to disclose.
+    const file = join(root, 'agent-huge.jsonl');
+    writeFileSync(file, 'x'.repeat(64));
+    const old = new Date('2020-01-02T03:04:05Z');
+    utimesSync(file, old, old);
+
+    const opened = readContainedFile(file, 8, {
+      minMtimeMs: old.getTime() + 1,
+    });
+    expect(opened.stale).toBe(true);
+  });
+
   it('refuses a directory', () => {
     const dir = join(root, 'subagents');
     mkdirSync(dir);
