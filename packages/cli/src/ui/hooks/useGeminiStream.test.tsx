@@ -13208,6 +13208,327 @@ describe('useGeminiStream', () => {
       expect(submissionInFlightRef.current).toBe(false);
     });
 
+    it.each([
+      'drain-first',
+      'continuation-first',
+      'admission-first',
+      'handler-first',
+    ] as const)(
+      'keeps the submission lease while a continuation starts during a deferred drain (%s)',
+      async (completionOrder) => {
+        const owner = {};
+        const submissionInFlightRef = { current: false };
+        let resolveConcurrentAdmission!: () => void;
+        const concurrentAdmission = new Promise<void>((resolve) => {
+          resolveConcurrentAdmission = resolve;
+        });
+        let resolveConcurrentHandler!: (value: boolean) => void;
+        const concurrentHandler = new Promise<boolean>((resolve) => {
+          resolveConcurrentHandler = resolve;
+        });
+        let reservationCount = 0;
+        const waitForReservationSettlement = vi.fn(() => {
+          reservationCount += 1;
+          return completionOrder === 'admission-first' && reservationCount === 2
+            ? concurrentAdmission
+            : Promise.resolve();
+        });
+        const goalQueueRef = {
+          current: {
+            peekNextUserBatchKey: () => undefined,
+            submissionInFlightRef,
+            waitForReservationSettlement,
+          },
+        };
+        mockGetActiveInteractionSpan.mockReturnValue(owner);
+
+        let resolveMainStream!: () => void;
+        const mainStream = new Promise<void>((resolve) => {
+          resolveMainStream = resolve;
+        });
+        let resolveConcurrentContinuation!: () => void;
+        const concurrentContinuation = new Promise<void>((resolve) => {
+          resolveConcurrentContinuation = resolve;
+        });
+        let streamCount = 0;
+        mockSendMessageStream.mockImplementation((query) => {
+          streamCount += 1;
+          if (streamCount === 1) {
+            return (async function* () {
+              await mainStream;
+              yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+            })();
+          }
+          if (JSON.stringify(query).includes('second-tool')) {
+            return (async function* () {
+              await concurrentContinuation;
+              yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+            })();
+          }
+          return (async function* () {
+            yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+          })();
+        });
+
+        let capturedOnComplete:
+          | ((completedTools: TrackedToolCall[]) => Promise<void>)
+          | undefined;
+        mockUseReactToolScheduler.mockImplementation((onComplete) => {
+          capturedOnComplete = onComplete;
+          return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+        });
+
+        const completedToolCall = (callId: string) =>
+          ({
+            request: {
+              callId,
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'main-prompt',
+            },
+            status: 'success',
+            response: {
+              callId,
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: callId,
+                    name: 'testTool',
+                    response: { output: 'done' },
+                  },
+                },
+              ],
+              errorType: undefined,
+            },
+            responseSubmittedToGemini: false,
+            tool: { displayName: 'mock tool' },
+            invocation: {
+              getDescription: () => 'Mock description',
+            } as unknown as AnyToolInvocation,
+          }) as TrackedCompletedToolCall;
+
+        let resolveFirstRefresh!: (value: boolean) => void;
+        mockRefreshMemoryAfterManagedWrite.mockReturnValueOnce(
+          new Promise<boolean>((resolve) => {
+            resolveFirstRefresh = resolve;
+          }),
+        );
+        if (completionOrder === 'handler-first') {
+          mockRefreshMemoryAfterManagedWrite.mockReturnValueOnce(
+            concurrentHandler,
+          );
+        }
+
+        const client = new MockedGeminiClientClass(mockConfig);
+        const { result } = renderHook(() =>
+          useGeminiStream(
+            client,
+            [],
+            mockAddItem,
+            mockConfig,
+            true,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            goalQueueRef,
+          ),
+        );
+
+        let mainRequest!: Promise<void>;
+        await act(async () => {
+          mainRequest = result.current.submitQuery(
+            'Main query',
+            SendMessageType.UserQuery,
+            'main-prompt',
+            { submittedPrompt: 'Main query' },
+          );
+        });
+        await waitFor(() =>
+          expect(result.current.streamingState).toBe(StreamingState.Responding),
+        );
+
+        await act(async () => {
+          await capturedOnComplete?.([completedToolCall('first-tool')]);
+        });
+        act(() => {
+          resolveMainStream();
+        });
+        await waitFor(() =>
+          expect(mockRefreshMemoryAfterManagedWrite).toHaveBeenCalledOnce(),
+        );
+
+        let concurrentCompletion!: Promise<void>;
+        act(() => {
+          concurrentCompletion =
+            capturedOnComplete?.([completedToolCall('second-tool')]) ??
+            Promise.resolve();
+        });
+        if (completionOrder === 'handler-first') {
+          await waitFor(() =>
+            expect(mockRefreshMemoryAfterManagedWrite).toHaveBeenCalledTimes(2),
+          );
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        } else if (completionOrder === 'admission-first') {
+          await waitFor(() =>
+            expect(waitForReservationSettlement).toHaveBeenCalledTimes(2),
+          );
+          expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        } else {
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+          );
+        }
+        if (completionOrder === 'continuation-first') {
+          act(() => {
+            resolveConcurrentContinuation();
+          });
+          await act(async () => {
+            await concurrentCompletion;
+          });
+        } else {
+          act(() => {
+            resolveFirstRefresh(false);
+          });
+          await act(async () => {
+            await mainRequest;
+          });
+        }
+
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(submissionInFlightRef.current).toBe(true);
+        const streamCountBeforeRejectedSubmit =
+          mockSendMessageStream.mock.calls.length;
+        await act(async () => {
+          await result.current.submitQuery(
+            'Too early',
+            SendMessageType.UserQuery,
+            'too-early-prompt',
+          );
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(
+          streamCountBeforeRejectedSubmit,
+        );
+
+        if (completionOrder === 'drain-first') {
+          act(() => {
+            resolveConcurrentContinuation();
+          });
+          await act(async () => {
+            await concurrentCompletion;
+          });
+        } else if (completionOrder === 'continuation-first') {
+          act(() => {
+            resolveFirstRefresh(false);
+          });
+          await act(async () => {
+            await mainRequest;
+          });
+        } else if (completionOrder === 'admission-first') {
+          act(() => {
+            resolveConcurrentAdmission();
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(
+              streamCountBeforeRejectedSubmit + 1,
+            ),
+          );
+          act(() => {
+            resolveConcurrentContinuation();
+          });
+          await act(async () => {
+            await concurrentCompletion;
+          });
+        } else {
+          act(() => {
+            resolveConcurrentHandler(false);
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(
+              streamCountBeforeRejectedSubmit + 1,
+            ),
+          );
+          act(() => {
+            resolveConcurrentContinuation();
+          });
+          await act(async () => {
+            await concurrentCompletion;
+          });
+        }
+        await waitFor(() =>
+          expect(result.current.streamingState).toBe(StreamingState.Idle),
+        );
+        expect(submissionInFlightRef.current).toBe(false);
+      },
+    );
+
+    it('does not re-arm a cancelled submission lease while the stream unwinds', async () => {
+      const onSubmissionSettled = vi.fn();
+      const submissionInFlightRef = { current: false };
+      const goalQueueRef = {
+        current: {
+          peekNextUserBatchKey: () => undefined,
+          submissionInFlightRef,
+          onSubmissionSettled,
+          waitForReservationSettlement: vi.fn().mockResolvedValue(undefined),
+        },
+      };
+      let resolveStream!: () => void;
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          await new Promise<void>((resolve) => {
+            resolveStream = resolve;
+          });
+          yield { type: ServerGeminiEventType.Finished, value: 'STOP' };
+        })(),
+      );
+
+      const client = new MockedGeminiClientClass(mockConfig);
+      const { result } = renderTestHook(
+        [],
+        client,
+        undefined,
+        () => {},
+        undefined,
+        goalQueueRef,
+      );
+
+      let request!: Promise<void>;
+      await act(async () => {
+        request = result.current.submitQuery('Main query');
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+      act(() => {
+        result.current.cancelOngoingRequest();
+        resolveStream();
+      });
+      await act(async () => {
+        await request;
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(submissionInFlightRef.current).toBe(false);
+      expect(onSubmissionSettled).toHaveBeenCalledOnce();
+    });
+
     it('should prevent concurrent submitQuery calls', async () => {
       let resolveFirstCall!: () => void;
       let resolveSecondCall!: () => void;

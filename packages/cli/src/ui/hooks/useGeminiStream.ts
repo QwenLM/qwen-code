@@ -690,6 +690,36 @@ export const useGeminiStream = (
   const [isResponding, setIsResponding] = useState<boolean>(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
+  // A continuation may be admitted while an earlier submission is finalizing.
+  const submissionActivitiesByGenerationRef = useRef(new Map<number, number>());
+  const retainSubmissionActivity = useCallback(
+    (generation: number) => {
+      submissionActivitiesByGenerationRef.current.set(
+        generation,
+        (submissionActivitiesByGenerationRef.current.get(generation) ?? 0) + 1,
+      );
+      return () => {
+        const remainingActivities = Math.max(
+          0,
+          (submissionActivitiesByGenerationRef.current.get(generation) ?? 1) -
+            1,
+        );
+        if (remainingActivities === 0) {
+          submissionActivitiesByGenerationRef.current.delete(generation);
+          if (generation === submissionLeaseGenerationRef.current) {
+            setIsResponding(false);
+            setSubmissionInFlight(false);
+          }
+        } else {
+          submissionActivitiesByGenerationRef.current.set(
+            generation,
+            remainingActivities,
+          );
+        }
+      };
+    },
+    [setSubmissionInFlight],
+  );
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   // Hold the latest history in a ref so handleCompletedTools can read it
   // without depending on `history` (which would recreate the tool scheduler
@@ -829,18 +859,25 @@ export const useGeminiStream = (
       async (completedToolCallsFromScheduler) => {
         // This onComplete is called when ALL scheduled tools for a given batch are done.
         if (completedToolCallsFromScheduler.length > 0) {
-          const projectRoot = config.getProjectRoot();
-          // Add the final state of these tools to the history for display.
-          const toolGroupDisplay = mapTrackedToolCallsToDisplay(
-            completedToolCallsFromScheduler as TrackedToolCall[],
-            projectRoot,
-          );
-          addItem(toolGroupDisplay, Date.now());
+          const releaseToolCompletionActivity = isSubmittingQueryRef.current
+            ? retainSubmissionActivity(submissionLeaseGenerationRef.current)
+            : undefined;
+          try {
+            const projectRoot = config.getProjectRoot();
+            // Add the final state of these tools to the history for display.
+            const toolGroupDisplay = mapTrackedToolCallsToDisplay(
+              completedToolCallsFromScheduler as TrackedToolCall[],
+              projectRoot,
+            );
+            addItem(toolGroupDisplay, Date.now());
 
-          // Handle tool response submission immediately when tools complete
-          await handleCompletedTools(
-            completedToolCallsFromScheduler as TrackedToolCall[],
-          );
+            // Handle tool response submission immediately when tools complete
+            await handleCompletedTools(
+              completedToolCallsFromScheduler as TrackedToolCall[],
+            );
+          } finally {
+            releaseToolCompletionActivity?.();
+          }
         }
       },
       config,
@@ -3194,6 +3231,7 @@ export const useGeminiStream = (
 
       // Set the flag to indicate we're now executing
       acquireSubmissionLease();
+      const submissionGeneration = submissionLeaseGenerationRef.current;
 
       // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
       // events), so it must reflect only this turn's state. Reset it
@@ -3343,7 +3381,9 @@ export const useGeminiStream = (
         }
       }
 
-      return promptIdContext.run(prompt_id, async () => {
+      const releaseSubmissionActivity =
+        retainSubmissionActivity(submissionGeneration);
+      const submission = promptIdContext.run(prompt_id, async () => {
         let queuedGoal = metadata?.goal;
         let preparedQuery: {
           queryToSend: PartListUnion | null;
@@ -3789,9 +3829,6 @@ export const useGeminiStream = (
           );
           const shouldDrainCompletedToolBatches =
             activeModelStreamsRef.current === 0;
-          if (shouldDrainCompletedToolBatches) {
-            setSubmissionInFlight(true);
-          }
           if (goalBinding) {
             let retainGoalBinding =
               keepGoalBinding && !goalBinding.controller.signal.aborted;
@@ -3823,30 +3860,24 @@ export const useGeminiStream = (
           ) {
             activeGoalAdmissionRef.current = null;
           }
-          try {
-            if (shouldDrainCompletedToolBatches) {
-              const pendingCompletedToolBatches =
-                pendingCompletedToolBatchesRef.current.splice(0);
-              const pendingCompletedTools = new Map<string, TrackedToolCall>();
-              for (const pendingBatch of pendingCompletedToolBatches) {
-                for (const toolCall of pendingBatch) {
-                  pendingCompletedTools.set(toolCall.request.callId, toolCall);
-                }
-              }
-              if (pendingCompletedTools.size > 0) {
-                await handleCompletedToolsRef.current([
-                  ...pendingCompletedTools.values(),
-                ]);
+          if (shouldDrainCompletedToolBatches) {
+            const pendingCompletedToolBatches =
+              pendingCompletedToolBatchesRef.current.splice(0);
+            const pendingCompletedTools = new Map<string, TrackedToolCall>();
+            for (const pendingBatch of pendingCompletedToolBatches) {
+              for (const toolCall of pendingBatch) {
+                pendingCompletedTools.set(toolCall.request.callId, toolCall);
               }
             }
-          } finally {
-            if (shouldDrainCompletedToolBatches) {
-              setIsResponding(false);
-              setSubmissionInFlight(false);
+            if (pendingCompletedTools.size > 0) {
+              await handleCompletedToolsRef.current([
+                ...pendingCompletedTools.values(),
+              ]);
             }
           }
         }
       });
+      return submission.finally(releaseSubmissionActivity);
     },
     [
       streamingState,
@@ -3878,6 +3909,7 @@ export const useGeminiStream = (
       bindGoalTurn,
       failClosedGoalTurn,
       releaseUndeliveredGoalTurn,
+      retainSubmissionActivity,
       setSubmissionInFlight,
     ],
   );
