@@ -34,7 +34,7 @@ Suggestions are generated when all of the following conditions are met:
 - There are no errors in the most recent response
 - No confirmation dialogs are pending (e.g., shell confirmation, permissions)
 - The approval mode is not set to `plan`
-- The feature is enabled (on by default — set `ui.enableFollowupSuggestions` to `false` to turn it off)
+- The feature is enabled. When `ui.enableFollowupSuggestions` is unset, suggestions are enabled except for loopback OpenAI-compatible providers, where they default off. Set it to `true` to enable suggestions for a local provider or `false` to disable them.
 
 Suggestions will not appear in non-interactive mode (e.g., headless/SDK mode).
 
@@ -74,12 +74,12 @@ Thinking/reasoning mode is automatically disabled for all background tasks (sugg
 
 These settings can be configured in `settings.json`:
 
-| Setting                        | Type    | Default | Description                                                        |
-| ------------------------------ | ------- | ------- | ------------------------------------------------------------------ |
-| `ui.enableFollowupSuggestions` | boolean | `true`  | Enable or disable followup suggestions                             |
-| `ui.enableCacheSharing`        | boolean | `true`  | Use cache-aware forked queries to reduce cost (experimental)       |
-| `ui.enableSpeculation`         | boolean | `false` | Speculatively execute suggestions before submission (experimental) |
-| `fastModel`                    | string  | `""`    | Model for prompt suggestions and speculative execution             |
+| Setting                        | Type    | Default    | Description                                                        |
+| ------------------------------ | ------- | ---------- | ------------------------------------------------------------------ |
+| `ui.enableFollowupSuggestions` | boolean | Contextual | Enable or disable followup suggestions                             |
+| `ui.enableCacheSharing`        | boolean | `true`     | Use cache-aware forked queries to reduce cost (experimental)       |
+| `ui.enableSpeculation`         | boolean | `false`    | Speculatively execute suggestions before submission (experimental) |
+| `fastModel`                    | string  | `""`       | Model for prompt suggestions and speculative execution             |
 
 ### Example
 
