@@ -44,7 +44,6 @@ import {
 } from '../utils/truncation.js';
 import {
   finalizeToolResponses,
-  toolResponseBudgetedTextLength,
   toolResponseTextLength,
 } from '../utils/tool-response-finalizer.js';
 import {
@@ -78,6 +77,7 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import {
+  isToolResultBoundaryDiagnosticsEnabled,
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
@@ -1322,10 +1322,10 @@ function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
 }
 
 function producerTextEqual(
-  input: PartListUnion,
+  input: PartListUnion | null | undefined,
   output: PartListUnion,
 ): boolean {
-  const diagnosticText = (value: PartListUnion) =>
+  const diagnosticText = (value: PartListUnion | null | undefined) =>
     toolResultPartDiagnosticValues(value)
       .map((slot) => slot.value)
       .join('\n');
@@ -5860,7 +5860,11 @@ export class CoreToolScheduler {
       }
       try {
         const batchBudget = this.config.getToolOutputBatchBudget?.();
-        if (batchBudget !== undefined && Number.isFinite(batchBudget)) {
+        if (
+          messageBus &&
+          batchBudget !== undefined &&
+          Number.isFinite(batchBudget)
+        ) {
           completedCalls = await this.applyBatchOutputBudget(completedCalls);
         }
 
@@ -6038,18 +6042,13 @@ export class CoreToolScheduler {
   ): Promise<CompletedToolCall[]> {
     const budget =
       this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
-    if (!Number.isFinite(budget) || budget <= 0) return completedCalls;
-    const exceedsBudget =
-      completedCalls.reduce(
-        (total, call) =>
-          total +
-          toolResponseBudgetedTextLength(
-            call.response.responseParts,
-            call.request.name,
-          ),
-        0,
-      ) > budget;
-
+    const observeFinalizerBoundary = isToolResultBoundaryDiagnosticsEnabled();
+    if (
+      (!Number.isFinite(budget) || budget <= 0) &&
+      !observeFinalizerBoundary
+    ) {
+      return completedCalls;
+    }
     const finalized = await finalizeToolResponses(
       this.config,
       completedCalls.map((call) => ({
@@ -6065,7 +6064,8 @@ export class CoreToolScheduler {
           call.request.prompt_id,
         ]),
       ),
-      exceedsBudget,
+      observeFinalizerBoundary,
+      observeFinalizerBoundary,
     );
 
     return completedCalls.map((call, index) => ({

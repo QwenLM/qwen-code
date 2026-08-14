@@ -68,6 +68,7 @@ function config(budget: number): Config {
 describe('tool response finalization', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    boundaryObserveMock.mockReset();
     persist.mockImplementation(async (callId, _toolName, content) => ({
       content,
       outputFile: `/tmp/${callId}.txt`,
@@ -170,6 +171,93 @@ describe('tool response finalization', () => {
     await finalizeToolResponses(config(100), entries, undefined, false);
 
     expect(boundaryObserveMock).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates an unchanged scheduler-owned entry in an outer batch', async () => {
+    boundaryObserveMock.mockReturnValue(true);
+    const owned = entry('owned', [
+      {
+        functionResponse: {
+          id: 'owned',
+          name: 'shell',
+          response: { output: 'a'.repeat(70_000) },
+        },
+      },
+    ]);
+    const promptIds = new Map([
+      ['owned', 'prompt-owned'],
+      ['synthetic', 'prompt-synthetic'],
+    ]);
+    const schedulerFinalized = await finalizeToolResponses(
+      config(200_000),
+      [owned],
+      promptIds,
+      true,
+      true,
+    );
+    boundaryObserveMock.mockClear();
+
+    await finalizeToolResponses(
+      config(200_000),
+      [
+        ...schedulerFinalized,
+        entry('synthetic', [
+          {
+            functionResponse: {
+              id: 'synthetic',
+              name: 'shell',
+              response: { output: 'synthetic error' },
+            },
+          },
+        ]),
+      ],
+      promptIds,
+    );
+
+    expect(
+      boundaryObserveMock.mock.calls.map(([observation]) => [
+        observation.toolCallId,
+        observation.stage,
+      ]),
+    ).toEqual([
+      ['synthetic', 'finalizer_input'],
+      ['synthetic', 'finalizer_output'],
+    ]);
+  });
+
+  it('observes an outer mutation of a scheduler-owned entry', async () => {
+    boundaryObserveMock.mockReturnValue(true);
+    const promptIds = new Map([['owned', 'prompt-owned']]);
+    const schedulerFinalized = await finalizeToolResponses(
+      config(200_000),
+      [
+        entry('owned', [
+          {
+            functionResponse: {
+              id: 'owned',
+              name: 'shell',
+              response: { output: 'a'.repeat(70_000) },
+            },
+          },
+        ]),
+      ],
+      promptIds,
+      true,
+      true,
+    );
+    boundaryObserveMock.mockClear();
+
+    await finalizeToolResponses(config(10_000), schedulerFinalized, promptIds);
+
+    expect(
+      boundaryObserveMock.mock.calls.map(([observation]) => [
+        observation.stage,
+        observation.mutated,
+      ]),
+    ).toEqual([
+      ['finalizer_input', true],
+      ['finalizer_output', true],
+    ]);
   });
 
   it.each([false, true])(

@@ -577,5 +577,11 @@ describe('tool-result boundary diagnostics', () => {
       { representation: 'model_text', value: 'plain' },
       { representation: 'model_text', value: 'top' },
     ]);
+    expect(toolResultPartDiagnosticValues(undefined)).toEqual([
+      { representation: 'model_text', value: '' },
+    ]);
+    expect(toolResultPartDiagnosticValues(null)).toEqual([
+      { representation: 'model_text', value: '' },
+    ]);
   });
 });

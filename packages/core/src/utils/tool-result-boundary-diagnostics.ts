@@ -167,10 +167,10 @@ export function toolResultBoundaryArtifact(
 }
 
 export function toolResultPartDiagnosticValues(
-  value: PartListUnion,
+  value: PartListUnion | null | undefined,
 ): ToolResultBoundaryValue[] {
   const values: ToolResultBoundaryValue[] = [];
-  const parts = Array.isArray(value) ? value : [value];
+  const parts = Array.isArray(value) ? value : [value ?? ''];
   for (const candidate of parts) {
     if (typeof candidate === 'string') {
       values.push({ representation: 'model_text', value: candidate });

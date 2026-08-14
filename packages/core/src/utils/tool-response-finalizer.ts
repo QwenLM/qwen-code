@@ -30,6 +30,31 @@ export interface ToolResponseBudgetEntry {
   artifacts?: ToolArtifact[];
 }
 
+const associatedFinalizerResponses = new WeakSet<Part[]>();
+
+function consumeAssociatedFinalizerEntries(
+  entries: ToolResponseBudgetEntry[],
+): Set<number> {
+  const associated = new Set<number>();
+  for (let index = 0; index < entries.length; index++) {
+    const responseParts = entries[index].responseParts;
+    if (associatedFinalizerResponses.has(responseParts)) {
+      associated.add(index);
+      associatedFinalizerResponses.delete(responseParts);
+    }
+  }
+  return associated;
+}
+
+function associateFinalizerEntries(
+  entries: ToolResponseBudgetEntry[],
+  indexes: ReadonlySet<number>,
+): void {
+  for (const index of indexes) {
+    associatedFinalizerResponses.add(entries[index].responseParts);
+  }
+}
+
 function observeFinalizerEntries(
   config: Config,
   stage: Extract<
@@ -39,8 +64,10 @@ function observeFinalizerEntries(
   entries: ToolResponseBudgetEntry[],
   mutatedEntryIndexes: ReadonlySet<number>,
   promptIds?: ReadonlyMap<string, string>,
+  entryIndexes?: ReadonlySet<number>,
 ): void {
   for (let index = 0; index < entries.length; index++) {
+    if (entryIndexes && !entryIndexes.has(index)) continue;
     const entry = entries[index];
     try {
       observeToolResultBoundary({
@@ -268,25 +295,10 @@ function replaceTextSlots(
 }
 
 export function toolResponseTextLength(parts: Part[]): number {
-  return toolResponseTextLengthForBudget(parts, false);
-}
-
-export function toolResponseBudgetedTextLength(
-  parts: Part[],
-  toolName: string,
-): number {
-  return toolResponseTextLengthForBudget(parts, true, toolName);
-}
-
-function toolResponseTextLengthForBudget(
-  parts: Part[],
-  excludeBudgetExemptOutput: boolean,
-  toolName = '',
-): number {
   return collectTextSlots(
-    [{ callId: '', toolName, responseParts: parts }],
+    [{ callId: '', toolName: '', responseParts: parts }],
     true,
-    excludeBudgetExemptOutput,
+    false,
   ).reduce((total, slot) => total + slot.text.length, 0);
 }
 
@@ -314,16 +326,31 @@ export async function finalizeToolResponses(
   entries: ToolResponseBudgetEntry[],
   promptIds?: ReadonlyMap<string, string>,
   observeBoundary = true,
+  associateBoundary = false,
 ): Promise<ToolResponseBudgetEntry[]> {
+  const shouldAssociateBoundary = observeBoundary && associateBoundary;
+  const associatedEntryIndexes = observeBoundary
+    ? consumeAssociatedFinalizerEntries(entries)
+    : new Set<number>();
+  const observationIndexes = (mutatedEntryIndexes: ReadonlySet<number>) =>
+    new Set(
+      entries.flatMap((_, index) =>
+        mutatedEntryIndexes.has(index) || !associatedEntryIndexes.has(index)
+          ? [index]
+          : [],
+      ),
+    );
   const observeUnchangedEntries = () => {
     if (!observeBoundary) return;
     const unchanged = new Set<number>();
+    const indexes = observationIndexes(unchanged);
     observeFinalizerEntries(
       config,
       'finalizer_input',
       entries,
       unchanged,
       promptIds,
+      indexes,
     );
     observeFinalizerEntries(
       config,
@@ -331,12 +358,15 @@ export async function finalizeToolResponses(
       entries,
       unchanged,
       promptIds,
+      indexes,
     );
   };
   const budget =
     config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
   if (!Number.isFinite(budget) || budget <= 0) {
     observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
     return entries;
   }
 
@@ -344,6 +374,8 @@ export async function finalizeToolResponses(
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
     observeUnchangedEntries();
+    if (shouldAssociateBoundary)
+      associateFinalizerEntries(entries, new Set(entries.keys()));
     return entries;
   }
 
@@ -358,6 +390,7 @@ export async function finalizeToolResponses(
     }
   }
 
+  const indexes = observationIndexes(entriesToPersist);
   if (observeBoundary)
     observeFinalizerEntries(
       config,
@@ -365,6 +398,7 @@ export async function finalizeToolResponses(
       entries,
       entriesToPersist,
       promptIds,
+      indexes,
     );
 
   const withPersistence = [...entries];
@@ -438,7 +472,11 @@ export async function finalizeToolResponses(
       finalized,
       entriesToPersist,
       promptIds,
+      indexes,
     );
+  if (shouldAssociateBoundary) {
+    associateFinalizerEntries(finalized, new Set(finalized.keys()));
+  }
   const finalizedTotal = collectTextSlots(finalized).reduce(
     (sum, slot) => sum + slot.text.length,
     0,
