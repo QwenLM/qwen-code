@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolve } from 'node:path';
 import type {
   DaemonClient,
   CreateSessionRequest,
@@ -169,23 +170,40 @@ export class DaemonPool implements SessionDaemon {
   private readonly maxDaemons: number;
   private readonly idleReapMs: number;
   private readonly reapTimer: ReturnType<typeof setInterval>;
+  /** The normalized (see `normalizeCwd`) default workspace cwd — computed
+   * once so every `isDefault`/key comparison compares like-for-like. */
+  private readonly defaultWorkspaceCwd: string;
+  /** Set at the top of `stopAll`; a spawn that resolves after shutdown must
+   * not register itself into the (already-cleared) pool. */
+  private stopped = false;
 
   constructor(private readonly opts: DaemonPoolOptions) {
     this.now = opts.now ?? Date.now;
     this.maxDaemons = opts.maxDaemons ?? DEFAULT_MAX_DAEMONS;
     this.idleReapMs = opts.idleReapMs ?? DEFAULT_IDLE_REAP_MS;
+    this.defaultWorkspaceCwd = this.normalizeCwd(opts.defaultWorkspaceCwd);
     this.reapTimer = setInterval(() => this.reapIdle(), this.idleReapMs / 3);
     this.reapTimer.unref?.();
   }
 
+  /** Canonicalize a workspace cwd into the pool's KEY form: `path.resolve`
+   * collapses `.`, `//`, and trailing slashes while keeping it absolute, so
+   * `/proj/a` and `/proj/a/` (or `/home/evan` and `/home/evan/`) always map
+   * to the exact same `byWorkspace` entry / `isDefault` comparand instead of
+   * spawning a duplicate daemon (or a stray non-default daemon bound to what
+   * is actually the boot workspace). */
+  private normalizeCwd(cwd: string): string {
+    return resolve(cwd);
+  }
+
   private isDefault(cwd?: string) {
-    return !cwd || cwd === this.opts.defaultWorkspaceCwd;
+    return !cwd || this.normalizeCwd(cwd) === this.defaultWorkspaceCwd;
   }
 
   /** Reachable daemon for `cwd` (spawn if new). Empty/undefined → default. */
   async getOrSpawn(cwd?: string): Promise<DaemonClient> {
     if (this.isDefault(cwd)) return this.opts.defaultDaemon;
-    const key = cwd!;
+    const key = this.normalizeCwd(cwd!);
     const existing = this.byWorkspace.get(key);
     if (existing) {
       existing.lastUsed = this.now();
@@ -194,9 +212,17 @@ export class DaemonPool implements SessionDaemon {
     const inflight = this.spawning.get(key);
     if (inflight) return inflight;
 
-    if (this.byWorkspace.size >= this.maxDaemons) {
+    // Count LIVE entries and IN-FLIGHT spawns together: a new entry only
+    // lands in `byWorkspace` once `spawn()` resolves, so counting
+    // `byWorkspace.size` alone lets N concurrent creates for N distinct new
+    // cwds all pass the check and all spawn, blowing past `maxDaemons`. At
+    // this point `key` is guaranteed absent from both maps (the `existing`/
+    // `inflight` checks above already returned), so this count never needs
+    // to exclude it.
+    const pooledCount = () => this.byWorkspace.size + this.spawning.size;
+    if (pooledCount() >= this.maxDaemons) {
       this.reapIdle();
-      if (this.byWorkspace.size >= this.maxDaemons) {
+      if (pooledCount() >= this.maxDaemons) {
         this.evictLruIdle();
       }
     }
@@ -204,6 +230,14 @@ export class DaemonPool implements SessionDaemon {
     const p = (async () => {
       try {
         const s = await this.opts.spawn(key);
+        if (this.stopped) {
+          // `stopAll()` ran while this spawn was in flight — the pool's
+          // maps are already cleared and the gateway is shutting down.
+          // Registering this entry now would leak a daemon (children are
+          // spawned `detached`) that nothing will ever stop again.
+          await s.stop().catch(() => {});
+          return s.client;
+        }
         this.byWorkspace.set(key, {
           client: s.client,
           stop: s.stop,
@@ -286,7 +320,7 @@ export class DaemonPool implements SessionDaemon {
   private daemonForSession(id: string): DaemonClient {
     const key = this.ownerOf.get(id);
     if (key === undefined) throw new UnknownSessionError(id);
-    if (key === this.opts.defaultWorkspaceCwd) return this.opts.defaultDaemon;
+    if (key === this.defaultWorkspaceCwd) return this.opts.defaultDaemon;
     const e = this.byWorkspace.get(key);
     if (!e) throw new UnknownSessionError(id); // daemon was reaped
     e.lastUsed = this.now();
@@ -297,7 +331,7 @@ export class DaemonPool implements SessionDaemon {
     const key = this.ownerOf.get(id);
     if (key === undefined) return;
     this.ownerOf.delete(id);
-    if (key === this.opts.defaultWorkspaceCwd) return; // never reaped
+    if (key === this.defaultWorkspaceCwd) return; // never reaped
     const entry = this.byWorkspace.get(key);
     if (!entry) return;
     entry.sessions.delete(id);
@@ -324,9 +358,9 @@ export class DaemonPool implements SessionDaemon {
     clientId?: string,
   ): Promise<DaemonSession> {
     const key = this.isDefault(req.workspaceCwd)
-      ? this.opts.defaultWorkspaceCwd
-      : req.workspaceCwd!;
-    const tracksPending = key !== this.opts.defaultWorkspaceCwd;
+      ? this.defaultWorkspaceCwd
+      : this.normalizeCwd(req.workspaceCwd!);
+    const tracksPending = key !== this.defaultWorkspaceCwd;
     if (tracksPending) {
       this.pendingCreates.set(key, (this.pendingCreates.get(key) ?? 0) + 1);
     }
@@ -495,8 +529,15 @@ export class DaemonPool implements SessionDaemon {
    * `stop()` rejecting (`Promise.allSettled`) — one stuck daemon must not
    * block the others from being asked to stop. Intended for shutdown; not
    * safe to call mid-lifetime (any in-flight session routing is dropped).
+   *
+   * Sets `stopped` FIRST, synchronously, before anything else: a spawn that
+   * was in flight when shutdown began resolves after this returns, and its
+   * `getOrSpawn` closure checks this flag to avoid registering a fresh
+   * entry into the (already-cleared) pool — which would otherwise leak a
+   * detached daemon process that nothing will ever stop.
    */
   async stopAll(): Promise<void> {
+    this.stopped = true;
     clearInterval(this.reapTimer);
     const entries = [...this.byWorkspace.values()];
     await Promise.allSettled(entries.map((e) => e.stop()));

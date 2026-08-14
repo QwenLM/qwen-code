@@ -102,6 +102,23 @@ describe('GET /rc/fs', () => {
     expect(body.parent).toBeNull();
   });
 
+  it('resolves a trailing-slash path to its canonical form (no trailing slash)', async () => {
+    tmp = await mkdtemp(join(tmpdir(), 'qwen-fsbrowse-'));
+    await mkdir(join(tmp, 'a'));
+
+    const url = await mountGateway();
+    const res = await fetch(
+      `${url}/rc/fs?path=${encodeURIComponent(`${tmp}/`)}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      path: string;
+      parent: string | null;
+    };
+    expect(body.path).toBe(tmp); // trailing slash stripped -- canonical
+    expect(body.parent).toBe(dirname(tmp));
+  });
+
   it('404s a path that does not exist', async () => {
     const url = await mountGateway();
     const res = await fetch(

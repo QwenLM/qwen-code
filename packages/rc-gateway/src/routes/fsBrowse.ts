@@ -23,7 +23,7 @@
 import type { RequestHandler } from 'express';
 import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 
 export interface FsBrowseRouteOptions {
   /** Path used when the `path` query param is absent. Defaults to `$HOME`. */
@@ -47,8 +47,16 @@ export function createFsBrowseRoute(
       return;
     }
 
+    // Normalize BEFORE stat/readdir (and before computing `parent`) so a
+    // trailing slash (or `.`/`//`) never causes a distinct-looking path to
+    // be returned to the client than what was actually browsed — the
+    // browse-derived `path`/`parent` must be canonical, matching what
+    // `DaemonPool.getOrSpawn`/`createOrAttachSession` will key on if this
+    // path is later handed back as a create's `cwd`.
+    const resolvedPath = resolve(targetPath);
+
     try {
-      const stats = await stat(targetPath);
+      const stats = await stat(resolvedPath);
       if (!stats.isDirectory()) {
         res
           .status(404)
@@ -56,15 +64,15 @@ export function createFsBrowseRoute(
         return;
       }
 
-      const dirents = await readdir(targetPath, { withFileTypes: true });
+      const dirents = await readdir(resolvedPath, { withFileTypes: true });
       const entries = dirents
         .filter((d) => d.isDirectory())
         .map((d) => ({ name: d.name, isDir: true }));
 
       const parent =
-        targetPath === dirname(targetPath) ? null : dirname(targetPath);
+        resolvedPath === dirname(resolvedPath) ? null : dirname(resolvedPath);
 
-      res.status(200).json({ path: targetPath, parent, entries });
+      res.status(200).json({ path: resolvedPath, parent, entries });
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT') {

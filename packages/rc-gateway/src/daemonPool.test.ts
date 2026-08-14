@@ -563,4 +563,107 @@ describe('DaemonPool', () => {
     expect(stopped).toEqual(['/proj/ok']);
     expect(pool.size()).toBe(0);
   });
+
+  it('normalizes the workspace cwd: /proj/a and /proj/a/ share one entry (no duplicate spawn)', async () => {
+    const log: string[] = [];
+    const pool = makePool(log);
+    const a1 = await pool.getOrSpawn('/proj/a');
+    const a2 = await pool.getOrSpawn('/proj/a/');
+    expect(a1).toBe(a2);
+    expect(log).toEqual(['/proj/a']); // spawned exactly once
+    expect(pool.size()).toBe(1);
+    expect(pool.workspaces()).toEqual(['/proj/a']);
+  });
+
+  it('routes a create with a trailing-slash default workspace cwd to the default daemon (no spawn)', async () => {
+    const log: string[] = [];
+    const pool = makePool(log); // defaultWorkspaceCwd: '/home/evan'
+    const session = await pool.createOrAttachSession({
+      workspaceCwd: '/home/evan/',
+    });
+    expect(log).toEqual([]); // never spawned -- routed straight to default
+    const ctx = (await pool.sessionContext(session.sessionId)) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('default');
+  });
+
+  it('counts in-flight spawns against the cap: concurrent distinct-cwd creates cannot exceed maxDaemons', async () => {
+    const gates = new Map<string, () => void>();
+    const spawnLog: string[] = [];
+    const pool = new DaemonPool({
+      maxDaemons: 2,
+      idleReapMs: 999_999_999,
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => {
+        spawnLog.push(cwd);
+        if (cwd === '/proj/new1' || cwd === '/proj/new2') {
+          // Hang this spawn open so it stays "in flight" long enough for
+          // the second concurrent getOrSpawn's cap check to observe it.
+          await new Promise<void>((resolve) => gates.set(cwd, resolve));
+        }
+        return {
+          client: fakeClient(cwd, `${cwd}-s`),
+          stop: async () => {},
+          workspaceCwd: cwd,
+        };
+      },
+    });
+
+    // Occupy one of the two cap slots with a BUSY entry (has a live
+    // session, so it can never be the LRU-idle eviction victim).
+    await pool.createOrAttachSession({ workspaceCwd: '/proj/busy' });
+    expect(pool.size()).toBe(1);
+
+    // Two concurrent getOrSpawn calls for two DISTINCT NEW cwds. Without
+    // counting in-flight spawns, byWorkspace.size() alone (1, still below
+    // maxDaemons=2) would let both pass the cap check and both spawn --
+    // landing 3 pooled daemons against a cap of 2.
+    const p1 = pool.getOrSpawn('/proj/new1');
+    await expect(pool.getOrSpawn('/proj/new2')).rejects.toBeInstanceOf(
+      WorkspacePoolFullError,
+    );
+    // The rejected call must never have reached spawn() for /proj/new2.
+    expect(spawnLog).toEqual(['/proj/busy', '/proj/new1']);
+
+    gates.get('/proj/new1')!();
+    const client1 = await p1;
+    expect((client1 as unknown as { tag: string }).tag).toBe('/proj/new1');
+    expect(pool.size()).toBe(2); // /proj/busy + /proj/new1 only
+  });
+
+  it('stopAll(): a spawn that resolves after stopAll() does not leak into the pool', async () => {
+    let releaseSpawn: (() => void) | undefined;
+    const stopped: string[] = [];
+    const gate = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    const pool = new DaemonPool({
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => {
+        await gate;
+        return {
+          client: fakeClient(cwd),
+          stop: async () => {
+            stopped.push(cwd);
+          },
+          workspaceCwd: cwd,
+        };
+      },
+    });
+
+    const spawnPromise = pool.getOrSpawn('/proj/late');
+    // Shut the pool down WHILE the spawn above is still in flight.
+    await pool.stopAll();
+    // Now let the spawn resolve, after shutdown already ran.
+    releaseSpawn!();
+    const client = await spawnPromise;
+
+    expect((client as unknown as { tag: string }).tag).toBe('/proj/late');
+    expect(stopped).toEqual(['/proj/late']); // stop() was invoked on it
+    expect(pool.size()).toBe(0); // never registered into the cleared pool
+    expect(pool.workspaces()).toEqual([]);
+  });
 });
