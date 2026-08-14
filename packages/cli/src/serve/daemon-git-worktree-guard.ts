@@ -89,6 +89,9 @@ const GIT_COMMAND_CONFIG_KEY_PATTERNS = [
   /^remote\..+\.(proxy|receivepack|uploadpack)$/,
   /^ssh\.variant$/,
   /^tar\..+\.command$/,
+  /^trailer\..+\.command$/,
+  /^man\..+\.cmd$/,
+  /^sendemail\.(sendmailcmd|tocmd|cccmd)$/,
   /^web\.browser$/,
   // Pulls in a config file the guard cannot read: it can carry a
   // `core.worktree` redirect or any command-executing key, so it is

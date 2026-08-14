@@ -474,6 +474,10 @@ it -C ${outsideRepo} reset --hard`,
     'git -c core.editor=evil-command commit',
     'git --config-env core.pager=evil-command log --follow',
     'git -c filter.evil.clean=evil-command add file',
+    // Command-executing config families git runs directly.
+    "git -c trailer.sign.command='evil-command' interpret-trailers",
+    "git -c man.foo.cmd='evil-command' help -m git",
+    "git -c sendemail.sendmailcmd='evil-command' send-email",
   ])(
     'denies mutating subcommands with command-valued -c config',
     async (command) => {
