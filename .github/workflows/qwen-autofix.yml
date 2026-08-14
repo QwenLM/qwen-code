@@ -2060,7 +2060,14 @@ jobs:
               # the unlabeled-path ack when the label sender is the bot.
               REL_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_INFO}")"
               REL_HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
-              if [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" && "${REL_HAS_SKIP}" == "true" ]]; then
+              if [[ "${REMOVED_OK}" != "true" ]]; then
+                # The DELETE did not land — the label is still on and the
+                # loop still manages this PR. A "released" ack (and its
+                # marker) would record a release that never happened: no
+                # unlabeled event fires, nothing retries, and no human
+                # re-issues the command. Own the failure and name the retry.
+                REL_BODY="$(printf '⚠️ Takeover release did not land: removing the `%s` label failed transiently, so it is still present and the autofix loop keeps managing this PR under the round cap. Comment `%s stop` to retry the release.\n\n<details>\n<summary>中文说明</summary>\n\n⚠️ 释放未生效：移除 `%s` 标签时瞬时失败，标签仍在，autofix 循环仍按轮次上限继续托管此 PR。评论 `%s stop` 可重试释放。\n\n</details>\n\n<!-- takeover-ack release-failed -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+              elif [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" && "${REL_HAS_SKIP}" == "true" ]]; then
                 REL_BODY="$(printf '👋 Takeover mode ended. This bot-authored PR also carries `%s`, which opts it out of standard bot management entirely — nothing will engage it until that label is removed.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束。本 bot 创建的 PR 同时带有 `%s`，已完全退出常规 bot 管理 —— 移除该标签前不会有任何介入。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${SKIP_LABEL}")"
               elif [[ "${REL_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
                 REL_BODY="$(printf '👋 Takeover mode ended: the raised round cap no longer applies. This is a bot-authored PR, so STANDARD bot management continues under the strict cap (apply `%s` to opt it out entirely). Re-apply `%s` (or comment `%s`) for the raised cap again.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束：提升的轮次上限不再适用。这是 bot 创建的 PR，常规 bot 管理仍将继续（严格上限；如需完全退出请打 `%s`）。重新打上 `%s` 标签（或评论 `%s`）可恢复提升上限。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
@@ -3028,9 +3035,13 @@ jobs:
                 add | [.[] | select((.user.login // "") == $ab)
                      | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
                      | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
-              gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null \
-                | jq -s 'add // []' > "${WORKDIR}/pr-events.json" \
-                || echo '[]' > "${WORKDIR}/pr-events.json"
+              PR_EVENTS_OK=''
+              if gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null \
+                | jq -s 'add // []' > "${WORKDIR}/pr-events.json"; then
+                PR_EVENTS_OK=true
+              else
+                echo '[]' > "${WORKDIR}/pr-events.json"
+              fi
               LAST_LABELED_TS="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
                 add | [.[] | select(.event == "labeled")
                      | select((.label.name // "") == $lb)
@@ -3270,9 +3281,22 @@ jobs:
               # re-escalate a completed release (R5-9). Fail closed: an
               # unreadable event history suppresses the re-label rather than
               # risk the ping-pong.
-              if ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > "${WORKDIR}/ev.json"; then
+              # A capped takeover candidate already paid for this paginated
+              # endpoint earlier in the same iteration (pr-events.json,
+              # gated by PR_EVENTS_OK) — reuse that fetch instead of paying
+              # it twice per capped takeover PR per scan. Non-takeover
+              # candidates keep the standalone fetch, and the fail-closed
+              # semantics ride the flag: the engage-side '[]' fallback must
+              # never read here as "no releases".
+              RELEASE_ACKED=''
+              if [[ "${HAS_TAKEOVER}" == "true" && "${PR_EVENTS_OK}" == "true" ]]; then
+                if ! cp "${WORKDIR}/pr-events.json" "${WORKDIR}/ev.json"; then
+                  RELEASE_ACKED='unreadable'
+                fi
+              elif ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > "${WORKDIR}/ev.json"; then
                 RELEASE_ACKED='unreadable'
-              else
+              fi
+              if [[ "${RELEASE_ACKED}" != 'unreadable' ]]; then
                 RELEASE_ACKED="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg rt "${NOTICE_RT}" '
                   [ .[] | select((.event // "") == "unlabeled")
                     | select((.label.name // "") == $tl)
@@ -3327,10 +3351,11 @@ jobs:
                   # The escalation label rides EVERY cap detection, noticed
                   # or not: the once-per-window dedup suppresses repeat
                   # comments, but the label is what makes a paused PR
-                  # filterable and what the shepherd's auto-release ages
-                  # from — and applying it unconditionally backfills the
-                  # already-paused fleet via the scan rotation after this
-                  # ships (idle backoff: expect hours, not the first scan).
+                  # filterable (the shepherd's auto-release ages from the
+                  # cap notice itself, not from the label) — and applying
+                  # it unconditionally backfills the already-paused fleet
+                  # via the scan rotation after this ships (idle backoff:
+                  # expect hours, not the first scan).
                   gh label create "${NEEDS_HUMAN_LABEL}" --repo "${REPO}" --color 'D93F0B' \
                     --description 'The autofix loop stopped on this PR — a human must re-arm, split, merge, or close it' \
                     2> /dev/null || true

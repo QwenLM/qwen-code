@@ -24,7 +24,10 @@ const workflow = readFileSync(
 // GNU `date -u -d` shim for the behavioral replays — on macOS hosts BSD date
 // lacks `-d`, so route it through node. Shared by every date-shim replay
 // (R7-4): a fix to the shim must land once, not diverge across copies.
-const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
+// Answers ONLY the +%s call shape it emulates (R9-9): any other format
+// falls through to the system date, so a format-string mutation cannot
+// hide behind the shim.
+const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
 
 describe('fleet shepherd workflow', () => {
   it('runs checkout-free — every read goes through the API', () => {
@@ -764,6 +767,7 @@ exit 1`;
       events = [],
       perm = 'write',
       permFail = false,
+      permError = 'HTTP 502',
       now = '2026-08-06T00:30:00Z',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'resume-'));
@@ -775,7 +779,7 @@ exit 1`;
           [
             '#!/bin/bash',
             'if [[ "$1" == "api" ]]; then',
-            `  if [[ "${permFail}" == "true" ]]; then echo "HTTP 502" >&2; exit 1; fi`,
+            `  if [[ "${permFail}" == "true" ]]; then echo "${permError}" >&2; exit 1; fi`,
             // Per-user permission: the collaborators path ($2) names the
             // user; `perm` is the default, `stranger` always reads `read`.
             `  case "$2" in *collaborators/stranger/*) printf '%s' "read" ;; *) printf '%s' "${perm}" ;; esac`,
@@ -903,6 +907,17 @@ exit 1`;
     });
     expect(permFailed.ts).toBe('');
     expect(permFailed.flag).toBe('true');
+    // R9-10: a 404 is GitHub's decisive "not a collaborator" answer — the
+    // command is classified read-only WITHOUT PERM_READ_FAILED: failing
+    // closed here would let any stranger renewably defer the release with
+    // one exact command comment per grace window, reported as an outage.
+    const notCollab = computeResume({
+      comments: [cmd('2026-08-06T00:00:00Z', 'stranger')],
+      permFail: true,
+      permError: 'HTTP 404: Not Found',
+    });
+    expect(notCollab.ts).toBe('');
+    expect(notCollab.flag).toBe('');
     // R8-4: budget exhaustion — with THREE distinct-author fresh commands
     // the 2-read budget runs out before the oldest is examined; that must
     // surface as PERM_READ_FAILED (defer), never as "no trusted command"
@@ -1483,8 +1498,10 @@ exit 1`;
         (m) => m[1],
       ),
     );
+    // release-failed is a release-side outcome ack (posted only when the
+    // release DELETE did NOT land), not a command-superseding refusal.
     const producerRefusals = [...producerAckVariants].filter(
-      (v) => v !== 'engaged' && v !== 'released',
+      (v) => v !== 'engaged' && v !== 'released' && v !== 'release-failed',
     );
     expect(producerRefusals.sort()).toEqual([
       'base-refused',
@@ -1740,9 +1757,15 @@ exit 1`;
       workflow.match(/command-permission read failed — release deferred/g)
         ?.length,
     ).toBe(2);
-    // R2-13: CLEANUPS increments only after the heal DELETE succeeded.
+    // R9-5: the cleanups budget counts ATTEMPTS like the release budget —
+    // incremented BEFORE the act() call in both arms, so a DELETE outage
+    // trips the cap instead of leaving it at 0 while every candidate burns
+    // a live read plus a failing DELETE each tick.
     expect(workflow).toMatch(
-      /clear stale \$\{NEEDS_HUMAN_LABEL\}[\s\S]{0,400}labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}" '\$l\|@uri'\)"; then\n\s+CLEANUPS=\$\(\( CLEANUPS \+ 1 \)\)/,
+      /CLEANUPS=\$\(\( CLEANUPS \+ 1 \)\)\n\s+if act "#\$\{PR\}: clear stale \$\{NEEDS_HUMAN_LABEL\} \(re-armed\)/,
+    );
+    expect(workflow).toMatch(
+      /CLEANUPS=\$\(\( CLEANUPS \+ 1 \)\)\n\s+if act "#\$\{PR\}: clear stale \$\{NEEDS_HUMAN_LABEL\} \(manual release/,
     );
     // R2-23: both shepherd DELETEs are URI-encoded (the encoded path is the
     // addressable route).
@@ -1856,6 +1879,13 @@ exit 1`;
       'HUMAN_IDS=",$(jq -r \'[.[].number | tostring] | join(",")\' /tmp/paused.json),"',
     );
     expect(workflow).toContain('if [[ "${HUMAN_IDS}" == *",${PR},"* ]]; then');
+    // R9-1/R9-13: loop 3 renders a both-label PR only when BOTH other
+    // owners are blind — not a paused member AND the takeover enumeration
+    // failed — so a paused-enum outage never duplicates the row and a
+    // takeover-enum outage never drops it.
+    expect(workflow).toContain(
+      '[[ "${HUMAN_IDS}" == *",${PR},"* || "${TK_OK}" == "true" ]] && continue',
+    );
     // R4-10: loop 1's row escapes STATE (the ci-red detailsUrl) as well as
     // NOTE — a `|` or `\c` in the URL must not break the printf '%b' table.
     expect(workflow).toContain('SAFE_STATE="${STATE//\\\\/\\\\\\\\}"');

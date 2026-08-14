@@ -447,7 +447,12 @@ jobs:
               # trusted" — that fails OPEN. Flag it so the release defers.
               [[ "${reads}" -ge 2 ]] && { PERM_READ_FAILED=true; break; }
               reads=$(( reads + 1 ))
-              if ! cperm="$(gh api "repos/${REPO}/collaborators/${cauthor}/permission" --jq '.permission // ""' 2> /dev/null)"; then
+              if ! cperm="$(gh api "repos/${REPO}/collaborators/${cauthor}/permission" --jq '.permission // ""' 2> /tmp/cperm-err)"; then
+                # 404 is GitHub's decisive "not a collaborator" answer —
+                # classify read-only instead of deferring: a defer here is
+                # renewable by any stranger's exact command each grace
+                # window, and it would pose a classification as an outage.
+                grep -q '404' /tmp/cperm-err && continue
                 PERM_READ_FAILED=true
                 continue
               fi
@@ -772,10 +777,14 @@ jobs:
 
               STATE='managed · idle'
               NOTE='—'
+              # Defer by paused-enumeration MEMBERSHIP, not by this
+              # snapshot's label state: a needs-human label landing between
+              # the two enumerations must not render the PR in both loops —
+              # loop 2 owns every paused member.
+              if [[ "${HUMAN_IDS}" == *",${PR},"* ]]; then
+                continue # loop 2 renders this paused PR
+              fi
               if [[ "${HAS_NH}" == "true" ]]; then
-                if [[ "${HUMAN_IDS}" == *",${PR},"* ]]; then
-                  continue # loop 2 renders this paused PR
-                fi
                 STATE='🛑 needs-human'
                 NOTE='pause evaluation unavailable this tick (truncated or unreadable paused enumeration)'
               elif [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
@@ -908,12 +917,16 @@ jobs:
                     NOTE='resumed; stale-label cleanup budget reached this tick'
                   elif live_skip "${PR}"; then
                     NOTE="$(skip_note cleanup)"
-                  elif act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (re-armed)" \
-                    gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
-                    CLEANUPS=$(( CLEANUPS + 1 ))
-                    NOTE='resumed — cleared stale escalation label'
                   else
-                    NOTE='stale-label cleanup failed — will retry next tick'
+                    # Count ATTEMPTS like the release arm: a success-only
+                    # counter never trips during a DELETE outage.
+                    CLEANUPS=$(( CLEANUPS + 1 ))
+                    if act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (re-armed)" \
+                      gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
+                      NOTE='resumed — cleared stale escalation label'
+                    else
+                      NOTE='stale-label cleanup failed — will retry next tick'
+                    fi
                   fi
                 elif [[ -z "${TERM_TS}" ]]; then
                   NOTE='pause timestamp unreadable — release deferred (fail closed)'
@@ -1026,10 +1039,16 @@ jobs:
               [[ -z "${ROW}" ]] && continue
               PR="$(jq -r '.number' <<< "${ROW}")"
               HAS_TK="$(jq -r --arg l "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${ROW}")"
-              # Both-label PRs render in loop 2 — but only when loop 2 ran;
-              # on a paused-enumeration outage they must still appear here
-              # (the heal's live takeover check vetoes any mutation, R5-8).
-              [[ "${HAS_TK}" == "true" && "${PAUSED_OK}" == "true" ]] && continue
+              # Both-label PRs render elsewhere: loop 2 owns the paused
+              # members, and loop 1 owns the rest while its enumeration ran
+              # (its note names the pause-evaluation gap — the accurate
+              # render on a paused-enumeration outage). Loop 3 is the render
+              # of LAST RESORT — both owners blind — so a both-label PR
+              # never renders twice nor vanishes (the heal's live takeover
+              # check vetoes any mutation, R5-8).
+              if [[ "${HAS_TK}" == "true" ]]; then
+                [[ "${HUMAN_IDS}" == *",${PR},"* || "${TK_OK}" == "true" ]] && continue
+              fi
               AUTHOR="$(jq -r '.author.login // "?"' <<< "${ROW}")"
               UPDATED="$(jq -r '.updatedAt // ""' <<< "${ROW}")"
               UPD_AGO='?'
@@ -1077,15 +1096,18 @@ jobs:
                     # snapshot and now — the PR is managed again, so nothing
                     # here is stale.
                     NOTE='takeover label re-applied since the snapshot — cleanup cancelled'
-                  elif act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (manual release by @${UNLABEL_ACTOR})" \
-                    gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
-                    CLEANUPS=$(( CLEANUPS + 1 ))
-                    # Both labels are gone now — the PR is fully released and
-                    # must drop out of the dashboard entirely.
-                    ROUTE='none'
-                    NOTE="cleared stale escalation label (released by @${UNLABEL_ACTOR})"
                   else
-                    NOTE='stale-label cleanup failed — will retry next tick'
+                    # Count ATTEMPTS, mirroring the release arm (twin above).
+                    CLEANUPS=$(( CLEANUPS + 1 ))
+                    if act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (manual release by @${UNLABEL_ACTOR})" \
+                      gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
+                      # Both labels are gone now — the PR is fully released and
+                      # must drop out of the dashboard entirely.
+                      ROUTE='none'
+                      NOTE="cleared stale escalation label (released by @${UNLABEL_ACTOR})"
+                    else
+                      NOTE='stale-label cleanup failed — will retry next tick'
+                    fi
                   fi
                 fi
               fi

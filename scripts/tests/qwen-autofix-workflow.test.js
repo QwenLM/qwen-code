@@ -2425,11 +2425,13 @@ describe('qwen-autofix workflow', () => {
     // variants, mirroring the ack job — a loud add next to a mute stop
     // would re-create the lost-event ambiguity on the release side), and
     // the scan-side first-pickup engage ack (fork label events carry no
-    // secrets, so the scan anchors the window itself).
+    // secrets, so the scan anchors the window itself), and the
+    // command-path release-failed ack (a failed release must say so — a
+    // 'released' marker would record a release that never happened).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(19);
+    expect(ackBodies).toHaveLength(20);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -3562,6 +3564,15 @@ describe('qwen-autofix workflow', () => {
         /gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}"/g,
       ) ?? [];
     expect(removals).toHaveLength(6);
+    // R9-16: the escalation POST rides the cap detection exactly ONCE — a
+    // duplicate outside the gate would re-add the label on every cap
+    // detection of a released human PR (the R3-1/R4-1 ping-pong with the
+    // shepherd's cleanup that this test cites).
+    expect(
+      workflow.match(
+        /gh api -X POST "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels" -f "labels\[\]=\$\{NEEDS_HUMAN_LABEL\}"/g,
+      ) ?? [],
+    ).toHaveLength(1);
     // R4-17: the scan-side first-pickup DELETE must live in the engage-ack
     // SUCCESS branch — moved to the ack-failure path it would clear
     // needs-human when no engagement happened.
@@ -4006,21 +4017,31 @@ describe('qwen-autofix workflow', () => {
     );
     expect(releaseRace.writes).toContain('takeover-ack released');
     expect(releaseRace.log).not.toContain('::warning::');
+    // R9-3: pin BOTH echo arms — a swap ships a lying log in either
+    // direction while the separate ::warning:: line keeps the old pins
+    // green.
+    expect(releaseRace.log).toContain('removed autofix/takeover');
+    expect(releaseRace.log).not.toContain('removal did not land');
     // R5-1: a 404 counts as landed, so the needs-human cleanup still runs…
     expect(releaseRace.writes).toContain('labels/autofix%2Fneeds-human');
-    // Any other DELETE failure must not drop the release ack either — a
-    // later `/takeover stop` retries the removal — but it MUST warn:
-    // masked, the ack reads "released" while the loop keeps managing the
-    // PR.
+    // Any other DELETE failure keeps the label ON — the ack must say the
+    // release did NOT land (a 'released' marker would record a release
+    // that never happened: no unlabeled event fires, nothing retries, no
+    // human re-issues the command) and the loud warning keeps the failure
+    // diagnosable in the log.
     const releaseFailed = runToggle({
       cmd: 'remove',
       labels: ['autofix/takeover'],
       deleteFails: 'HTTP 500',
     });
-    expect(releaseFailed.writes).toContain('takeover-ack released');
+    expect(releaseFailed.writes).toContain('takeover-ack release-failed');
+    expect(releaseFailed.writes).toContain('release did not land');
+    expect(releaseFailed.writes).not.toContain('takeover-ack released');
     expect(releaseFailed.log).toContain('::warning::');
     expect(releaseFailed.log).toContain('removal failed');
     expect(releaseFailed.log).toContain('HTTP 500');
+    expect(releaseFailed.log).toContain('removal did not land');
+    expect(releaseFailed.log).not.toContain('removed autofix/takeover from');
     // R5-1: …but a failed takeover release keeps needs-human — landed vs
     // not-landed is keyed on the DELETE's EXIT STATUS (404 counts as
     // landed; any other non-zero does not — R6-1's transport failures and
@@ -4037,7 +4058,12 @@ describe('qwen-autofix workflow', () => {
       labels: ['autofix/takeover'],
       deleteFails: 'gh: dial tcp 140.82.121.4:443: connect: connection refused',
     });
-    expect(releaseTransportFailed.writes).toContain('takeover-ack released');
+    expect(releaseTransportFailed.writes).toContain(
+      'takeover-ack release-failed',
+    );
+    expect(releaseTransportFailed.writes).not.toContain(
+      'takeover-ack released',
+    );
     expect(releaseTransportFailed.writes).not.toContain(
       'labels/autofix%2Fneeds-human',
     );
@@ -5501,7 +5527,10 @@ exit 1
               ? // R6-22: serve the payload only for the EXACT field list
                 // the ack job requests (--json labels,author) — a drifted
                 // field selection gets an empty object, like production.
-                `if [[ "$*" == *'--json labels,author'* ]]; then printf '%s' '${JSON.stringify({ labels, author: { login: 'wenshao' } })}'; else printf '%s' '{}'; fi; exit 0`
+                // R9-14: anchored at the END of the token (the field list
+                // is the final argument at the production call site), so a
+                // superset drift is served the empty object too.
+                `if [[ "$*" == *' --json labels,author' ]]; then printf '%s' '${JSON.stringify({ labels, author: { login: 'wenshao' } })}'; else printf '%s' '{}'; fi; exit 0`
               : 'exit 1'
           }; fi`,
           `if [[ "$1" == 'pr' && "$2" == 'comment' ]]; then printf '%s' "$7" > ${JSON.stringify(join(dir, 'comment.md'))}; exit 0; fi`,
@@ -11337,7 +11366,8 @@ exit 1
             // R6-12/R2-7: the gate matches the EXACT production field list;
             // a drifted `--json labels` (no author) must not be served the
             // author metadata production would omit.
-            '  if [[ "$*" == *"--json labels,author"* ]]; then',
+            // R9-15: end-anchored like its runAck twin (R9-14).
+            '  if [[ "$*" == *" --json labels,author" ]]; then',
             `    printf '%s' '{"labels":${labels},"author":{"login":"${prAuthor}"}}'`,
             '  else',
             `    printf '%s' '{"number":7354}'`,
