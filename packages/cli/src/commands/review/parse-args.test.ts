@@ -1422,9 +1422,30 @@ describe('--resume', () => {
     expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
   });
 
+  it('is ignored with a warning on a FILE target too', () => {
+    // The other member of the `!isPr` class, which SKILL.md names alongside
+    // local. A gate written as `target.type !== 'local'` reports the flag
+    // effective here — on a target shape with no `fetch-pr` call to consume
+    // it — and every local-target test stays green.
+    const r = parseReviewArgs('src/foo.ts --resume');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.warnings.some((w) => w.includes('`--resume`'))).toBe(true);
+  });
+
   it('is absent by default', () => {
     const r = parseReviewArgs('6711');
     expect(r.resume).toEqual({ requested: false, effective: false });
+  });
+
+  it('keeps an explicit effort untouched on the EFFECTIVE path', () => {
+    // The missing corner of the matrix: the other three cells are covered,
+    // and this is the one an effort-forcing mutation on the effective path
+    // would slip through — the shape the sibling `--comment` bug took when
+    // it shipped.
+    const r = parseReviewArgs('6711 --resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: true });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
   });
 
   it('does not change the effort resolution', () => {
