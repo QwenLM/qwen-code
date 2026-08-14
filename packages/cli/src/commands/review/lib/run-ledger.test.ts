@@ -12,6 +12,7 @@
 // an empty history.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
   mkdirSync,
@@ -538,6 +539,51 @@ describe('the properties the threat model rests on', () => {
     authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked prompt-record DIRECTORY',
+    () => {
+      // The leaf guard protects the wrong object here: `run-sessions.json`
+      // inside the linked directory is an ordinary regular file, so only the
+      // ancestor walk sees that both ledgers have been redirected at once.
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'elsewhere-')));
+      try {
+        writeFileSync(
+          join(elsewhere, 'run-sessions.json'),
+          JSON.stringify([
+            {
+              sessionId: 'FORGED',
+              atMs: Date.now(),
+              planMtimeMs: statSync(plan).mtimeMs,
+            },
+          ]),
+        );
+        symlinkSync(elsewhere, join(root, 'qwen-review-pr-7-fetch-prompts'));
+        authorize('S2');
+        expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not block on a FIFO planted at the ledger path',
+    () => {
+      // A real FIFO, not a symlink standing in for one: opening it for
+      // reading blocks until a writer arrives, so the guard has to refuse it
+      // by TYPE on a non-blocking descriptor. The test hanging is the
+      // failure mode this pins.
+      mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+        recursive: true,
+      });
+      execFileSync('mkfifo', [runSessionsPath(plan)]);
+      authorize('S2');
+      const started = Date.now();
+      expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+    5000,
+  );
 
   it('reads an over-budget ledger as empty, before parsing it', () => {
     // The byte bound: a planted multi-gigabyte file would otherwise be read

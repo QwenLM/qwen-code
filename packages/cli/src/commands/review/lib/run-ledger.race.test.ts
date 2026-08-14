@@ -66,7 +66,7 @@ describe('single-read ledger writers', () => {
     // transient fault to clear in. A reintroduced guard read turns this red
     // before any race does.
     appendRunSession(plan, envOf('S1'));
-    const spy = vi.spyOn(ledgerIoForTests, 'readFileSync');
+    const spy = vi.spyOn(ledgerIoForTests, 'readContainedFile');
     appendRunSession(plan, envOf('S2'));
     const ledgerReads = spy.mock.calls.filter(
       (c) => c[0] === runSessionsPath(plan),
@@ -78,7 +78,7 @@ describe('single-read ledger writers', () => {
   it('a transient fault on that one read refuses the append, never clobbers', () => {
     appendRunSession(plan, envOf('S1'));
     const before = readFileSync(runSessionsPath(plan), 'utf8');
-    vi.spyOn(ledgerIoForTests, 'readFileSync').mockImplementationOnce(() => {
+    vi.spyOn(ledgerIoForTests, 'readContainedFile').mockImplementationOnce(() => {
       throw transient('EMFILE');
     });
     appendRunSession(plan, envOf('S2'));
@@ -91,7 +91,7 @@ describe('single-read ledger writers', () => {
   it('a transient fault on the marker read refuses the record, never clobbers', () => {
     recordResume(plan, envOf('S1'));
     const before = readFileSync(resumeMarkerPath(plan), 'utf8');
-    vi.spyOn(ledgerIoForTests, 'readFileSync').mockImplementationOnce(() => {
+    vi.spyOn(ledgerIoForTests, 'readContainedFile').mockImplementationOnce(() => {
       throw transient('EPERM');
     });
     recordResume(plan, envOf('S2'));

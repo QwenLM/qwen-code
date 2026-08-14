@@ -335,6 +335,30 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
     );
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked chats DIRECTORY rather than billing through it',
+    () => {
+      // `O_NOFOLLOW` refuses a linked chat FILE, but `chats/` is a directory
+      // this process never created: one link there redirects every session's
+      // stream, and the leaf guard never sees it. Fatal, not skipped — the
+      // main loop's cost is not optional, and a silent agents-only total
+      // would read as the review's whole spend.
+      const { plan, env, project } = fixture();
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      dirs.push(elsewhere);
+      writeFileSync(
+        join(elsewhere, `${SESSION}.jsonl`),
+        event('2026-08-03T10:01:00Z', { input: 500, output: 50 }),
+      );
+      rmSync(join(project, 'chats'), { recursive: true, force: true });
+      symlinkSync(elsewhere, join(project, 'chats'));
+
+      expect(() => computeLedger(plan, env)).toThrow(
+        /could not read the chat transcript/,
+      );
+    },
+  );
+
   it('throws TranscriptsUnavailable through to the caller when the env is bare', () => {
     const { plan } = fixture();
     expect(() => computeLedger(plan, {} as NodeJS.ProcessEnv)).toThrow(

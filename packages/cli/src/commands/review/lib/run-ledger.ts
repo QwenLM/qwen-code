@@ -30,12 +30,19 @@
 // skill used to hold only in transcript memory: how many times this review has
 // resumed, and whether it already restarted once for head movement.
 
-import { lstatSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   atomicWriteFileSync,
   sanitizeFilenameComponent,
 } from '@qwen-code/qwen-code-core';
+import {
+  ContainedReadError,
+  MAX_LEDGER_BYTES,
+  containedDir,
+  parentDirOf,
+  readContainedFile,
+} from './contained-read.js';
 import { promptRecordDir, runEpochMs } from './prompt-record.js';
 
 const SESSIONS_FILE = 'run-sessions.json';
@@ -124,7 +131,7 @@ const PLAN_MTIME_TOLERANCE_MS = 1;
  * injected by mocking the module. Same idea as `contained-read`'s injectable
  * read seam; production code never reassigns these.
  */
-export const ledgerIoForTests = { readFileSync, statSync };
+export const ledgerIoForTests = { readContainedFile, statSync };
 
 function planMtimeMs(planPath: string): number | null {
   try {
@@ -152,13 +159,18 @@ export function runSessionsPath(planPath: string): string {
 }
 
 /**
- * Read one ledger file, refusing anything that is not a regular file.
+ * Read one ledger file, refusing anything that is not a contained regular file.
  *
  * The write side is hardened with `noFollow`; the read side must match, or a
  * planted symlink redirects the read and a planted FIFO blocks it forever —
  * a hang, not an error, in a command a review is waiting on.
+ *
+ * The prompt-record DIRECTORY is validated before the leaf, because a leaf
+ * guard alone protects the wrong object: `<plan>-prompts` is itself a path
+ * this process creates, and a link there redirects both ledgers at once. The
+ * plan's own directory is the root — the plan is the run's anchor, and this
+ * module never reads anything above it.
  */
-const MAX_LEDGER_BYTES = 256 * 1024;
 const MAX_LEDGER_ENTRIES = 64;
 
 /**
@@ -188,27 +200,51 @@ const MAX_LEDGER_ENTRIES = 64;
 type LedgerOccupant =
   | { kind: 'ok'; text: string }
   | { kind: 'absent' }
-  | { kind: 'plant'; shape: 'directory' | 'special' | 'oversize' }
+  | { kind: 'plant' }
   | { kind: 'refused' };
 
-function ledgerOccupant(path: string): LedgerOccupant {
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch {
-    return { kind: 'absent' };
+function ledgerOccupant(planPath: string, path: string): LedgerOccupant {
+  // Every component from the plan's directory down to `<plan>-prompts`, with
+  // no link on the way: a leaf guard alone protects the wrong object, since a
+  // link at `<plan>-prompts` redirects both ledgers at once. A missing record
+  // dir is the ordinary first-write state; an uncontained one is a refusal —
+  // writing through it would land outside the tree the run owns.
+  const dirVerdict = containedDir(
+    parentDirOf(planPath),
+    promptRecordDir(planPath),
+  );
+  if (!dirVerdict.ok) {
+    return dirVerdict.reason === 'missing'
+      ? { kind: 'absent' }
+      : { kind: 'refused' };
   }
-  if (st.isDirectory()) return { kind: 'plant', shape: 'directory' };
-  // A symlink would redirect the read and a FIFO would block it forever — a
-  // hang, not an error, in a command a review waits on.
-  if (!st.isFile()) return { kind: 'plant', shape: 'special' };
-  // Bounded before the read: these files are bookkeeping (a handful of
-  // small entries), and a planted multi-gigabyte one would otherwise stall
-  // or exhaust every command that touches them.
-  if (st.size > MAX_LEDGER_BYTES) return { kind: 'plant', shape: 'oversize' };
+  // ONE `O_NOFOLLOW` open, `fstat` on that descriptor, bytes off the same
+  // descriptor — the object validated is the object read, and the whole
+  // decision below is made from this single read.
   try {
-    return { kind: 'ok', text: ledgerIoForTests.readFileSync(path, 'utf8') };
-  } catch {
+    return {
+      kind: 'ok',
+      text: ledgerIoForTests.readContainedFile(path, MAX_LEDGER_BYTES).content,
+    };
+  } catch (err) {
+    if (err instanceof ContainedReadError) {
+      // Not a regular file (directory, FIFO, device — this module never
+      // writes one) or over the byte ceiling (a legitimate ledger is ≤64
+      // capped entries, a few KB): provably a plant, healable.
+      if (err.reason === 'not-regular' || err.reason === 'too-large') {
+        return { kind: 'plant' };
+      }
+      if (err.reason === 'open-failed') {
+        const code = (err.cause as { code?: unknown } | undefined)?.code;
+        if (code === 'ENOENT') return { kind: 'absent' };
+        // ELOOP is `O_NOFOLLOW` refusing a planted symlink — the noFollow
+        // atomic write replaces it, so it heals like the other plants.
+        if (code === 'ELOOP') return { kind: 'plant' };
+      }
+    }
+    // A present, plausible regular file whose read failed (EMFILE, an AV
+    // scanner's EPERM): it holds every previously recorded entry, and the
+    // writers must preserve it.
     return { kind: 'refused' };
   }
 }
@@ -219,13 +255,18 @@ function ledgerOccupant(path: string): LedgerOccupant {
  * survives it (EISDIR on every attempt), so only a directory needs removing.
  */
 function healPlant(path: string, occ: LedgerOccupant): void {
-  if (occ.kind === 'plant' && occ.shape === 'directory') {
-    rmSync(path, { recursive: true, force: true });
+  if (occ.kind !== 'plant') return;
+  try {
+    if (lstatSync(path).isDirectory()) {
+      rmSync(path, { recursive: true, force: true });
+    }
+  } catch {
+    // Gone already — the noFollow rename handles every other shape.
   }
 }
 
-function readLedgerFile(path: string): string | null {
-  const occ = ledgerOccupant(path);
+function readLedgerFile(planPath: string, path: string): string | null {
+  const occ = ledgerOccupant(planPath, path);
   return occ.kind === 'ok' ? occ.text : null;
 }
 
@@ -236,7 +277,7 @@ function readLedgerFile(path: string): string | null {
  */
 function readSessions(planPath: string): SessionEntry[] {
   return parseSessions(
-    readLedgerFile(runSessionsPath(planPath)),
+    readLedgerFile(planPath, runSessionsPath(planPath)),
     planPath,
     planMtimeMs(planPath),
   );
@@ -363,7 +404,7 @@ export function appendRunSession(
     // a SECOND read opened a race: a fault clearing between the two reads
     // made the guard see a healthy file while `entries` held the empty
     // fallback.
-    const occ = ledgerOccupant(path);
+    const occ = ledgerOccupant(planPath, path);
     if (occ.kind === 'refused') return;
     const entries = parseSessions(
       occ.kind === 'ok' ? occ.text : null,
@@ -583,7 +624,7 @@ export function resumeMarkerPath(planPath: string): string {
  */
 export function readResumeMarker(planPath: string): ResumeMarker {
   return parseMarker(
-    readLedgerFile(resumeMarkerPath(planPath)),
+    readLedgerFile(planPath, resumeMarkerPath(planPath)),
     planPath,
     planMtimeMs(planPath),
   );
@@ -709,7 +750,7 @@ export function recordResume(
   // empty fallback — which `writeMarker` would then commit, erasing every
   // recorded resume and restart.
   const markerPath = resumeMarkerPath(planPath);
-  const occ = ledgerOccupant(markerPath);
+  const occ = ledgerOccupant(planPath, markerPath);
   if (occ.kind === 'refused') return;
   const marker = parseMarker(
     occ.kind === 'ok' ? occ.text : null,
@@ -741,7 +782,7 @@ export function recordRestart(
   if (mtime === null) return;
   // Single-read decision; see `recordResume`.
   const markerPath = resumeMarkerPath(planPath);
-  const occ = ledgerOccupant(markerPath);
+  const occ = ledgerOccupant(planPath, markerPath);
   if (occ.kind === 'refused') return;
   const marker = parseMarker(
     occ.kind === 'ok' ? occ.text : null,

@@ -37,12 +37,21 @@
 // This module never takes a path from the model. The session id and project dir
 // come from the environment the CLI itself exported.
 
-import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import {
   ToolNames,
   sanitizeFilenameComponent,
 } from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
+import { readdirSync } from 'node:fs';
+import {
+  MAX_LEDGER_BYTES,
+  MAX_STREAM_BYTES,
+  UncontainedPathError,
+  containedDir,
+  containedRoot,
+  listContainedDir,
+  readContainedFileOrNull,
+} from './contained-read.js';
 import { priorSessionEntries } from './run-ledger.js';
 
 /** One subagent, as the harness recorded it. */
@@ -259,12 +268,14 @@ function rangeOf(args: Record<string, unknown>): [number, number] | null {
  * it and `diffToolCalls` is populated; omit it and the field stays 0.
  */
 function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
-  let raw: string;
-  try {
-    raw = readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
+  // One contained open for the bytes AND the mtime. The pair this replaced —
+  // `readFileSync` here, `statSync` at the end — resolved the pathname twice,
+  // so the record's membership stamp could come from a different object than
+  // its content. `O_NOFOLLOW` also refuses a leaf link outright: enumerating a
+  // contained directory says nothing about what its entries point at.
+  const opened = readContainedFileOrNull(file, MAX_STREAM_BYTES);
+  if (opened === null) return null;
+  const raw = opened.content;
   const lines = raw.split('\n').filter((l) => l.trim());
   if (lines.length === 0) return null;
 
@@ -407,12 +418,9 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   if (!agentId) return null;
   if (sessionConflict) return null;
 
-  let mtimeMs = 0;
-  try {
-    mtimeMs = statSync(file).mtimeMs;
-  } catch {
-    /* gone between readdir and stat */
-  }
+  // From the descriptor the content came off, so the membership fence and the
+  // evidence it fences are the same object by construction.
+  const mtimeMs = opened.mtimeMs;
 
   return {
     agentId,
@@ -447,11 +455,14 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
  */
 function diedPerSidecar(transcriptFile: string): boolean {
   const metaPath = transcriptFile.replace(/\.jsonl$/, '.meta.json');
+  // The same contained discipline as the transcript leaf beside it: a
+  // planted symlink or FIFO at the sidecar path must not redirect or hang
+  // this read. Unreadable stays "proves nothing" — content inference stands.
+  const meta = readContainedFileOrNull(metaPath, MAX_LEDGER_BYTES);
+  if (meta === null) return false;
   try {
-    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as {
-      status?: unknown;
-    };
-    return typeof meta.status === 'string' && meta.status !== 'completed';
+    const parsed = JSON.parse(meta.content) as { status?: unknown };
+    return typeof parsed.status === 'string' && parsed.status !== 'completed';
   } catch {
     return false;
   }
@@ -468,8 +479,33 @@ function diedPerSidecar(transcriptFile: string): boolean {
  * does with that (name the fault, or treat an absent dir as "no agents") is
  * its decision.
  */
-export function listAgentTranscriptFiles(dir: string): string[] {
-  return readdirSync(dir).filter((name) => name.endsWith('.jsonl'));
+export function listAgentTranscriptFiles(dir: string, root: string): string[] {
+  // Ancestors first: `subagents` sits between the project dir and this one,
+  // and a link there redirects every session's evidence at once. Refused as a
+  // FAULT, not as "no agents" — the callers already separate an absent
+  // directory (a run that launched nothing) from one that cannot be read, and
+  // a containment failure belongs on the loud side of that line.
+  const res = containedDir(root, dir);
+  if (!res.ok) {
+    // A directory that is simply not there yet keeps the errno contract this
+    // function has always had: `readdirSync` raises the real ENOENT, and the
+    // callers that legitimately absorb a pre-launch absence keep absorbing
+    // exactly that and nothing else.
+    if (res.reason === 'missing') {
+      // Raise the real errno rather than a synthetic one: `readdirSync` on an
+      // absent path throws the ENOENT the callers route on. If it somehow
+      // succeeds — created between the walk and this line — the listing was
+      // never validated, so nothing is returned from it.
+      readdirSync(dir);
+      return [];
+    }
+    throw new UncontainedPathError(
+      `${dir} is not a contained directory under ${root}`,
+    );
+  }
+  return listContainedDir(dir, res.identity).filter((name) =>
+    name.endsWith('.jsonl'),
+  );
 }
 
 /**
@@ -486,10 +522,13 @@ export function readTranscripts(
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
 ): AgentRecord[] {
-  const dir = transcriptDir(env);
+  const { projectDir, dir } = transcriptPaths(env);
   let names: string[];
   try {
-    names = listAgentTranscriptFiles(dir);
+    // Rooted at the harness's project dir: this session's own evidence gets
+    // the same ancestor walk a prior session's does. A guard that applies to
+    // recovered evidence but not to live evidence is how a threat model rots.
+    names = listAgentTranscriptFiles(dir, projectDir);
   } catch (err) {
     // No directory at all is an *infrastructure* fact, not a verdict about the
     // agents. Conflating the two would let a read-only HOME or a full disk read
@@ -580,7 +619,13 @@ export function priorSessionDirs(
 ): Array<{
   sessionId: string;
   dir: string;
-  chatFile: string;
+  /**
+   * The attempt's chat stream, or null when `chats/` is not a contained
+   * directory. Null means "do not read this session's chat", and callers must
+   * not rebuild the path themselves — a locally re-joined pathname is exactly
+   * the guard bypass this accessor exists to prevent.
+   */
+  chatFile: string | null;
   /** When the NEXT attempt began — this one's upper window. */
   endsAtMs: number | null;
 }> {
@@ -588,26 +633,35 @@ export function priorSessionDirs(
   const out: Array<{
     sessionId: string;
     dir: string;
-    chatFile: string;
+    chatFile: string | null;
     endsAtMs: number | null;
   }> = [];
+  // The harness tree's own root. A linked or absent project dir leaves nothing
+  // below it that can be called contained evidence.
+  const root = containedRoot(projectDir);
+  if (root === null) return out;
+  // `chats/` is validated once, not per session: it is the same directory for
+  // every entry, and the leaf open below still refuses a per-file link.
+  const chatsDir = join(root, 'chats');
+  const chatsOk = containedDir(root, chatsDir).ok;
   for (const { sessionId, endsAtMs } of priorSessionEntries(planPath, env)) {
+    // The harness writes the directory under the SANITIZED id, so the lookup
+    // applies the same mapping before the containment walk.
     const dir = join(
-      projectDir,
+      root,
       'subagents',
       sanitizeFilenameComponent(sessionId),
     );
-    try {
-      if (lstatSync(dir).isSymbolicLink()) continue;
-    } catch {
-      // Absent (the attempt died before launching any agent) or unstattable:
-      // either way there is nothing here this run may read.
-      continue;
-    }
+    // Every component from the project dir down — `subagents` included. The
+    // final-component check this replaced left the shared parent open: one
+    // link at `subagents` redirects every prior session at once, and each
+    // individual `subagents/<id>` under it stats as a perfectly ordinary
+    // directory.
+    if (!containedDir(root, dir).ok) continue;
     out.push({
       sessionId,
       dir,
-      chatFile: join(projectDir, 'chats', `${sessionId}.jsonl`),
+      chatFile: chatsOk ? join(chatsDir, `${sessionId}.jsonl`) : null,
       endsAtMs,
     });
   }
@@ -679,7 +733,10 @@ export function readRunTranscripts(
   for (const prior of priors) {
     let names: string[];
     try {
-      names = listAgentTranscriptFiles(prior.dir);
+      names = listAgentTranscriptFiles(
+        prior.dir,
+        transcriptPaths(env).projectDir,
+      );
     } catch {
       continue; // Earlier attempt's evidence invisible → its work is re-owed.
     }

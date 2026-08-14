@@ -476,6 +476,59 @@ describe('readRunTranscripts — the run across its sessions', () => {
     expect(recs.map((r) => r.agentId).sort()).toEqual(['a1', 'ap']);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked `subagents` ANCESTOR, not just the leaf directory',
+    () => {
+      // The gap a final-component check leaves: each `subagents/<id>` below
+      // the link stats as an ordinary directory, so the leaf guard passes
+      // while the whole evidence tree has been redirected out of the harness.
+      const plan = planWithLedger('S0', 'S1');
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      try {
+        mkdirSync(join(elsewhere, 'S0'), { recursive: true });
+        mkdirSync(join(elsewhere, 'S1'), { recursive: true });
+        writeFileSync(
+          join(elsewhere, 'S0', 'agent-a0.jsonl'),
+          transcript('a0'),
+        );
+        rmSync(join(dir, 'subagents'), { recursive: true, force: true });
+        symlinkSync(elsewhere, join(dir, 'subagents'));
+
+        expect(priorSessionDirs(plan, ENV)).toEqual([]);
+        // ...and the current session's own directory, reached the same way,
+        // is an infrastructure fault rather than "this run has no agents".
+        expect(() => readRunTranscripts(plan, undefined, ENV)).toThrow(
+          TranscriptsUnavailableError,
+        );
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked transcript LEAF inside a contained directory',
+    () => {
+      // The directory is genuinely the harness's; only the file is a link.
+      // Enumerating a contained directory says nothing about what its entries
+      // point at, so the leaf open has to refuse this on its own.
+      const plan = planWithLedger('S0', 'S1');
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      try {
+        const foreign = join(elsewhere, 'foreign.jsonl');
+        writeFileSync(foreign, transcript('forged'));
+        mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+        symlinkSync(foreign, join(dir, 'subagents', 'S0', 'agent-a0.jsonl'));
+        file('agent-a1.jsonl', transcript('a1'));
+
+        const recs = readRunTranscripts(plan, undefined, ENV);
+        expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('lists each prior session once, and only those that exist', () => {
     const plan = planWithLedger('S0', 'S0', 'S1');
     // A prior session that exists on disk: the accessor skips a ledgered id

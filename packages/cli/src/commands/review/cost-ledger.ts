@@ -29,7 +29,7 @@
 // not an exact API-call tally.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { parseLineTolerant } from '@qwen-code/qwen-code-core';
 import {
@@ -44,6 +44,12 @@ import {
   textOf,
 } from './lib/transcripts.js';
 import { labelFromIdentityLine } from './lib/agent-identity.js';
+import {
+  MAX_STREAM_BYTES,
+  containedDir,
+  containedRoot,
+  readContainedFile,
+} from './lib/contained-read.js';
 import { currentSessionEntry, priorSessionEntries } from './lib/run-ledger.js';
 
 interface CostLedgerArgs {
@@ -115,8 +121,14 @@ function readUsage(
   file: string,
   floorMs: number,
   ceilingMs?: number,
-): { events: UsageEvent[]; launch: string } {
-  const raw = readFileSync(file, 'utf8');
+): { events: UsageEvent[]; launch: string; mtimeMs: number } {
+  // One `O_NOFOLLOW` open, `fstat` on that descriptor, bytes from the same
+  // descriptor. The caller used to `statSync` the pathname for its membership
+  // check and then reopen it here to read: two resolutions of one name, with
+  // a symlink or a swap free to land between them. Refusals throw, which
+  // every caller already routes as "this stream is lost".
+  const opened = readContainedFile(file, MAX_STREAM_BYTES);
+  const raw = opened.content;
   const events: UsageEvent[] = [];
   let launch = '';
   for (const line of raw.split('\n')) {
@@ -184,7 +196,7 @@ function readUsage(
       });
     }
   }
-  return { events, launch };
+  return { events, launch, mtimeMs: opened.mtimeMs };
 }
 
 /**
@@ -295,8 +307,12 @@ function planFloorMs(planPath: string): number {
   let raw: string;
   let floorMs: number;
   try {
-    raw = readFileSync(planPath, 'utf8');
-    floorMs = statSync(planPath).mtimeMs;
+    // The billing floor and the bytes that prove this file IS a plan report,
+    // off one descriptor. Read separately, a swap between them would validate
+    // one file's shape and take another file's mtime as the floor.
+    const opened = readContainedFile(planPath, MAX_STREAM_BYTES);
+    raw = opened.content;
+    floorMs = opened.mtimeMs;
   } catch (err) {
     throw new Error(
       `could not read the plan report ${planPath}: ${(err as Error).message}`,
@@ -345,9 +361,24 @@ export function computeLedger(
   const own = currentSessionEntry(planPath, env);
   const floorMs = own === null ? planMs : Math.max(planMs, own.atMs);
 
-  const chatFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
+  // The current session's chat gets the same ancestor walk a prior session's
+  // does. `O_NOFOLLOW` in `readUsage` refuses a linked leaf, but `chats/`
+  // itself is a directory this process never created, and a link there
+  // redirects every session's stream at once — including this one's.
+  const root = containedRoot(projectDir);
+  const chatsDir = root === null ? null : join(root, 'chats');
+  const chatFile =
+    chatsDir !== null && containedDir(root as string, chatsDir).ok
+      ? join(chatsDir, `${sessionId}.jsonl`)
+      : null;
   let mainEvents: UsageEvent[];
   try {
+    if (chatFile === null) {
+      throw new Error(
+        `the harness chat directory under ${projectDir} is not a contained ` +
+          'directory',
+      );
+    }
     mainEvents = readUsage(chatFile, floorMs).events;
   } catch (err) {
     // The plan's existence proves the main loop ran: a missing or unreadable
@@ -355,13 +386,14 @@ export function computeLedger(
     // not a verdict that the loop made no calls. Agents-only totals would
     // read as the review's whole cost, so say the ledger cannot be computed.
     throw new Error(
-      `could not read the chat transcript ${chatFile}: ` +
+      `could not read the chat transcript ` +
+        `${chatFile ?? join(projectDir, 'chats', `${sessionId}.jsonl`)}: ` +
         `${(err as Error).message}`,
     );
   }
   let files: string[];
   try {
-    files = listAgentTranscriptFiles(dir);
+    files = listAgentTranscriptFiles(dir, projectDir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       // No subagent dir is a real state (a low-effort review runs no agents);
@@ -391,25 +423,22 @@ export function computeLedger(
     let streams = 0;
     for (const f of names) {
       const full = join(agentDir, f);
-      let mtimeMs: number;
-      try {
-        mtimeMs = statSync(full).mtimeMs;
-      } catch {
-        missingStreams++;
-        continue; // Gone between listing and stat.
-      }
-      // The transcript dir is session-scoped and never pruned: files from
-      // earlier reviews this session predate the floor, and a file whose last
-      // write predates it cannot hold an above-floor record — the same
-      // membership test `readTranscripts` applies. Skip it without opening.
-      if (mtimeMs < (streamFloorMs ?? floorMs)) continue;
-      let read: { events: UsageEvent[]; launch: string };
+      let read: { events: UsageEvent[]; launch: string; mtimeMs: number };
       try {
         read = readUsage(full, streamFloorMs ?? floorMs, ceilingMs);
       } catch {
         missingStreams++;
+        // Gone between listing and open, or not a contained regular file.
         continue; // This agent's record is lost; the rest still count.
       }
+      // The transcript dir is session-scoped and never pruned: files from
+      // earlier reviews this session predate the floor, and a file whose last
+      // write predates it cannot hold an above-floor record — the same
+      // membership test `readTranscripts` applies. The mtime comes off the
+      // descriptor the bytes came from, so this costs one open rather than
+      // the stat-then-open pair it replaced, and no swap can sit between the
+      // membership check and the content it admits.
+      if (read.mtimeMs < (streamFloorMs ?? floorMs)) continue;
       if (read.events.length === 0) continue;
       const id = f.replace(/^agent-/, '').replace(/\.jsonl$/, '');
       agents.push(foldEvents(id, labelOf(read.launch, id), read.events));
@@ -441,20 +470,27 @@ export function computeLedger(
     const paths = priorDirs.get(entry.sessionId);
     let contributed = 0;
     let events: UsageEvent[] = [];
-    try {
-      events = readUsage(
-        paths?.chatFile ??
-          join(projectDir, 'chats', `${entry.sessionId}.jsonl`),
-        // Floored at the moment THIS attempt began — the plan floor plus
-        // that session's own start. NOT the current attempt's floor, which is
-        // later and would erase the prior attempt entirely.
-        Math.max(planMs, entry.atMs),
-        entry.endsAtMs ?? undefined,
-      ).events;
-      priorMainEvents.push(...events);
-      contributed += events.length;
-    } catch {
-      // The prior attempt's chat is lost; its agents may still count.
+    // Only the path the shared accessor validated. The `?? join(...)` fallback
+    // this replaced rebuilt the pathname locally, which handed back exactly
+    // what the accessor exists to withhold: a session whose `chats/` failed
+    // containment got its guard bypassed by the very next expression, and a
+    // link there is read as this attempt's usage.
+    const chatFile = paths?.chatFile ?? null;
+    if (chatFile !== null) {
+      try {
+        events = readUsage(
+          chatFile,
+          // Floored at the moment THIS attempt began — the plan floor plus
+          // that session's own start. NOT the current attempt's floor, which
+          // is later and would erase the prior attempt entirely.
+          Math.max(planMs, entry.atMs),
+          entry.endsAtMs ?? undefined,
+        ).events;
+        priorMainEvents.push(...events);
+        contributed += events.length;
+      } catch {
+        // The prior attempt's chat is lost; its agents may still count.
+      }
     }
     let priorAgentEvents: UsageEvent[] = [];
     if (paths !== undefined) {
@@ -462,7 +498,7 @@ export function computeLedger(
       try {
         contributed += readAgentDir(
           paths.dir,
-          listAgentTranscriptFiles(paths.dir),
+          listAgentTranscriptFiles(paths.dir, projectDir),
           // The same window the chat gets: an interrupted CLI session whose
           // operator kept working would otherwise fold unrelated subagent
           // cost into this review.
