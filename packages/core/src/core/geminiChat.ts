@@ -57,10 +57,13 @@ import {
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import {
+  buildCallIdToSkillName,
   clearLoadedSkillTracking,
   isSkillBodyOutput,
   isSkillDedupConfirmation,
   reconcileLoadedSkillTracking,
+  retrackSkills,
+  resolveLoadedSkillNames,
   skillUnloadedPlaceholder,
   unloadSkillsFromEntries,
 } from '../tools/skill-utils.js';
@@ -102,7 +105,6 @@ import {
 } from '../services/tokenEstimation.js';
 import {
   microcompactHistory,
-  buildCallIdToSkillName,
   type MicrocompactMeta,
 } from '../services/microcompaction/microcompact.js';
 import {
@@ -2575,11 +2577,16 @@ export class GeminiChat {
           // The verbatim restore makes residency knowable again — rebuild
           // tracking from the restored history instead of leaving the
           // blanket clear from the hard-rescue compression in place.
-          reconcileLoadedSkillTracking(
-            this.history,
-            this.config.getToolRegistry(),
-            'hardRescueRestore',
-          );
+          // Forked chats share the parent's tracker while holding only a
+          // tail slice of its history; rebuilding from the slice would
+          // desync the parent (same invariant as the tryCompress clear).
+          if (!this.isForkedChat) {
+            reconcileLoadedSkillTracking(
+              this.history,
+              this.config.getToolRegistry(),
+              'hardRescueRestore',
+            );
+          }
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -4556,17 +4563,23 @@ export class GeminiChat {
   }
 
   /**
-   * Instance wrapper around {@link reconcileLoadedSkillTracking} for
-   * callers that hold the chat but not the tool registry (ACP
-   * continuation strip, which removes orphan entries directly and has
-   * no restore step to re-track through).
+   * Resolve the skill names of skill-body entries against the CURRENT
+   * history. The ACP continuation strip stashes the result at strip time:
+   * the model-side functionCalls needed for pairing can be summarized away
+   * by a compression inside the continuation send, so re-deriving from the
+   * post-send history would fail to re-track the re-pushed bodies.
    */
-  reconcileLoadedSkillTracking(): void {
-    reconcileLoadedSkillTracking(
-      this.history,
-      this.config.getToolRegistry(),
-      'reconcileLoadedSkillTracking',
-    );
+  resolveLoadedSkillNamesInEntries(entries: Content[]): string[] {
+    return resolveLoadedSkillNames(entries, this.history);
+  }
+
+  /**
+   * Additively re-track the given skill names (ACP continuation settle:
+   * every terminal path re-adds the stripped content, so the stashed
+   * bodies are resident again).
+   */
+  retrackLoadedSkillNames(names: string[]): void {
+    retrackSkills(names, this.config.getToolRegistry(), 'acpContinuation');
   }
 
   /**

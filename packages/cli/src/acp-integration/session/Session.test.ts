@@ -591,7 +591,8 @@ describe('Session', () => {
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
-      reconcileLoadedSkillTracking: vi.fn(),
+      resolveLoadedSkillNamesInEntries: vi.fn().mockReturnValue([]),
+      retrackLoadedSkillNames: vi.fn(),
       setTools: vi.fn(),
     } as unknown as GeminiChat;
     mockGeminiClient = {
@@ -2314,6 +2315,9 @@ describe('Session', () => {
       mockChat.stripOrphanedUserEntriesFromHistory = vi
         .fn()
         .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockChat.resolveLoadedSkillNamesInEntries = vi
+        .fn()
+        .mockReturnValue(['demo']);
       // Force the continuation send to fail NON-cancelled (session token limit)
       // so it hits the `!responseStream` branch — the data-loss window.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
@@ -2343,8 +2347,8 @@ describe('Session', () => {
         }),
       );
       // The strip un-tracked any skill body it removed; once the orphan is
-      // preserved back, tracking must be rebuilt from the settled history.
-      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalled();
+      // preserved back, the names stashed at strip time are re-tracked.
+      expect(mockChat.retrackLoadedSkillNames).toHaveBeenCalledWith(['demo']);
     });
 
     it('restores the orphaned turn when a continuation send throws (no data loss)', async () => {
@@ -2357,6 +2361,9 @@ describe('Session', () => {
       mockChat.stripOrphanedUserEntriesFromHistory = vi
         .fn()
         .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockChat.resolveLoadedSkillNamesInEntries = vi
+        .fn()
+        .mockReturnValue(['demo']);
       // No token limit, so we reach the send; the send then throws.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(0);
       mockChat.sendMessageStream = vi
@@ -2382,7 +2389,7 @@ describe('Session', () => {
           ]),
         }),
       );
-      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalled();
+      expect(mockChat.retrackLoadedSkillNames).toHaveBeenCalledWith(['demo']);
     });
 
     it('rejects (accepted:false) when a prompt is already in flight', async () => {

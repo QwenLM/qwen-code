@@ -9,7 +9,6 @@ import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import type { MicrocompactMeta } from '../services/microcompaction/microcompact.js';
-import { buildCallIdToSkillName } from '../services/microcompaction/microcompact.js';
 import type { Content } from '@google/genai';
 import type { ToolRegistry } from './tool-registry.js';
 import { ToolNames } from './tool-names.js';
@@ -429,9 +428,10 @@ export function clearLoadedSkillTracking(
 
 /**
  * Re-track loaded skills whose bodies were restored to history after a
- * rewrite had cleared the tracking (client retry restore of stripped
- * entries). Restores the body-resident ⇒ tracked invariant so the dedup
- * guard does not let a duplicate body through.
+ * rewrite had cleared the tracking (the ACP continuation settle re-adds
+ * the entries the continuation strip removed; the names were resolved at
+ * strip time). Restores the body-resident ⇒ tracked invariant so the
+ * dedup guard does not let a duplicate body through.
  */
 export function retrackSkills(
   names: Iterable<string>,
@@ -451,6 +451,45 @@ export function retrackSkills(
     `[SKILL_TRACKING] re-tracked ${list.length} skill(s) after ${logTag}: ` +
       list.join(', '),
   );
+}
+
+/**
+ * Build a `callId → skill name[]` map for every Skill tool call: the name
+ * lives on the request-side `functionCall.args.skill`, not on the
+ * (possibly blanked) `functionResponse`, so this is the only way to
+ * recover which skill a cleared body belonged to. Calls missing an id or
+ * skill name are absent (callers treat that as unresolvable —
+ * over-clearing only costs a duplicated body on re-invoke, while keeping
+ * a stale entry leaves the skill unrecoverable behind the dedup guard).
+ * Duplicate names for one id (a provider reusing call ids) are deduped
+ * here so every consumer agrees on what counts as ambiguous.
+ *
+ * Lives here (not in microcompact.ts) so skill-utils does not
+ * value-import from a module that value-imports skill-utils.
+ */
+export function buildCallIdToSkillName(
+  history: Content[],
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const content of history) {
+    if (content.role !== 'model' || !content.parts) continue;
+    for (const part of content.parts) {
+      const call = part.functionCall;
+      if (!call?.id || call.name !== ToolNames.SKILL) {
+        continue;
+      }
+      const skillName = (call.args as { skill?: unknown } | undefined)?.skill;
+      if (typeof skillName === 'string' && skillName.length > 0) {
+        const existing = map.get(call.id);
+        if (existing) {
+          if (!existing.includes(skillName)) existing.push(skillName);
+        } else {
+          map.set(call.id, [skillName]);
+        }
+      }
+    }
+  }
+  return map;
 }
 
 /**
@@ -489,6 +528,8 @@ export function resolveLoadedSkillNames(
  * rewrites where residency is KNOWABLE — truncation (the kept prefix),
  * the hard-rescue verbatim restore, and the retry restore of stripped
  * entries — where the blanket-clear uncertainty rationale does not apply.
+ * (The retry restore reconciles via `restoreStrippedRetryEntries` in
+ * client.ts; the ACP continuation strip re-tracks stashed names instead.)
  */
 export function reconcileLoadedSkillTracking(
   history: Content[],

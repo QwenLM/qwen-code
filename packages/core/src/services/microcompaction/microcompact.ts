@@ -11,6 +11,7 @@ import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearCo
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
+  buildCallIdToSkillName,
   isSkillBodyOutput,
   isSkillUnloadedPlaceholder,
 } from '../../tools/skill-utils.js';
@@ -76,41 +77,6 @@ function buildCallIdToFilePath(history: Content[]): Map<string, string[]> {
         const existing = map.get(call.id);
         if (existing) existing.push(filePath);
         else map.set(call.id, [filePath]);
-      }
-    }
-  }
-  return map;
-}
-
-/**
- * Build a `callId → skill name[]` map for every Skill tool call, mirroring
- * `buildCallIdToFilePath`: the name lives on the request-side
- * `functionCall.args.skill`, not on the blanked `functionResponse`, so this
- * is the only way to recover which skill a cleared body belonged to. Calls
- * missing an id or skill name are absent (the caller treats that as
- * unresolvable and falls back to clearing all loaded-skill tracking —
- * over-clearing only costs a duplicated body on re-invoke, while keeping a
- * stale entry leaves the skill unrecoverable behind the dedup guard).
- *
- * Exported for `/unskill`, which reuses the same pairing to locate a
- * skill's tool results in history.
- */
-export function buildCallIdToSkillName(
-  history: Content[],
-): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  for (const content of history) {
-    if (content.role !== 'model' || !content.parts) continue;
-    for (const part of content.parts) {
-      const call = part.functionCall;
-      if (!call?.id || call.name !== ToolNames.SKILL) {
-        continue;
-      }
-      const skillName = (call.args as { skill?: unknown } | undefined)?.skill;
-      if (typeof skillName === 'string' && skillName.length > 0) {
-        const existing = map.get(call.id);
-        if (existing) existing.push(skillName);
-        else map.set(call.id, [skillName]);
       }
     }
   }
@@ -756,7 +722,11 @@ export function microcompactHistory(
       pending.length > 0 ? [...history, ...pending] : keptPathHistory;
     // Use the pending-filtered refs: a result that only exists in pending
     // content has not been committed to history, so a kept ref there cannot
-    // prove residency (matches buildKeepRefs' pending exclusion).
+    // prove residency (matches buildKeepRefs' pending exclusion). Known
+    // corner: if the same turn re-invokes a skill whose old body is blanked
+    // here, the pending replacement cannot suppress that eviction report, so
+    // tracking is un-tracked while the replacement lands — one bounded
+    // duplicate body on the next invoke (the self-healing direction).
     keptPathRefs = tool;
     keepRefs = sizePlan.keepToolRefs;
     clearRefs = sizePlan.clearRefs;

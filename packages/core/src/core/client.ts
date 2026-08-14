@@ -85,8 +85,7 @@ import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import {
-  resolveLoadedSkillNames,
-  retrackSkills,
+  reconcileLoadedSkillTracking,
   syncSkillEvictions,
 } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -645,8 +644,9 @@ export class GeminiClient {
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
-    // Loaded-skill tracking is cleared in GeminiChat.stripOrphanedUserEntriesFromHistory
-    // so both TUI and ACP paths are covered.
+    // Loaded-skill tracking is synced in GeminiChat.stripOrphanedUserEntriesFromHistory
+    // (targeted un-track of provable bodies; unresolvable entries stay
+    // tracked) so both TUI and ACP paths are covered.
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
     // forcing a resend, the next request would either skip IDE context
@@ -741,8 +741,8 @@ export class GeminiClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
-      // Loaded-skill tracking is cleared in GeminiChat.truncateHistory
-      // so both TUI and ACP paths are covered.
+      // Loaded-skill tracking is reconciled to the kept prefix in
+      // GeminiChat.truncateHistory so both TUI and ACP paths are covered.
     }
     this.forceFullIdeContext = true;
   }
@@ -2334,15 +2334,17 @@ export class GeminiClient {
           this.getChat().addHistory(entry);
         }
       }
-      // Either the restore re-added the stripped bodies or the retry
-      // re-pushed them — they are resident again either way, so re-track
-      // the resolved skill names to keep the dedup guard in sync with
-      // history (the strip un-tracked them).
-      retrackSkills(
-        resolveLoadedSkillNames(
-          strippedRetryEntries,
-          this.getChat().getHistory(),
-        ),
+      // Both branches leave history in a FINAL state: either the restore
+      // re-added the stripped entries, or the retry re-pushed them. Only
+      // bodies actually resident should be tracked, so reconcile against
+      // the settled history: an entry the retry did NOT re-push (the
+      // counter can advance on a text-only resubmission while a skill
+      // body entry stays dropped) must not be re-tracked — additive
+      // re-tracking would recreate the ghost the strip just removed.
+      // Read-only pairing walk — the shallow variant avoids a full
+      // deep-clone of long histories on every retry.
+      reconcileLoadedSkillTracking(
+        this.getHistoryShallow(),
         this.config.getToolRegistry(),
         'restoreStrippedRetryEntries',
       );

@@ -4001,11 +4001,14 @@ export class Session implements SessionContext {
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
             // The continuation strip un-tracks any skill body it removes;
-            // once the continuation settles (re-push landed, or the catch
-            // block restored the orphan) residency is knowable again and
-            // tracking must be reconciled — this path has no client.ts-style
-            // restore hook to re-track through.
-            let orphanStrippedForContinuation = false;
+            // every terminal path of this turn re-adds the stripped content
+            // (send re-push, catch restore, or the abort addHistory), so the
+            // stashed names are re-tracked in the outer finally. Names are
+            // resolved AT STRIP TIME: a compression inside the continuation
+            // send can summarize away the model-side functionCalls needed for
+            // pairing, so re-deriving from the post-send history would miss
+            // them.
+            let orphanStrippedSkillNames: string[] = [];
             if (goalTurn?.origin === 'runtime') {
               this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
                 modelPromptBlocks
@@ -4041,8 +4044,12 @@ export class Session implements SessionContext {
                 strippedOrphanEntries =
                   this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
                   null;
-                orphanStrippedForContinuation =
-                  (strippedOrphanEntries?.length ?? 0) > 0;
+                orphanStrippedSkillNames =
+                  (strippedOrphanEntries?.length ?? 0) > 0
+                    ? this.#getCurrentChat().resolveLoadedSkillNamesInEntries(
+                        strippedOrphanEntries!,
+                      )
+                    : [];
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -4529,13 +4536,6 @@ export class Session implements SessionContext {
                   // turn proceeds, on every exit: normal end-of-stream,
                   // cancellation returns, and thrown stream errors alike.
                   await messageDisplay?.finish();
-                  // Every exit path leaves history in a final state (send
-                  // re-pushed the continuation, or catch restored the
-                  // orphan), so rebuild loaded-skill tracking from it.
-                  if (orphanStrippedForContinuation) {
-                    orphanStrippedForContinuation = false;
-                    this.#getCurrentChat().reconcileLoadedSkillTracking();
-                  }
                 }
 
                 commitChannelDeliveryResponseBlock(
@@ -4634,6 +4634,15 @@ export class Session implements SessionContext {
                 channelDeliveryCapture,
               );
             } finally {
+              // Fires on every terminal path of the turn — including the
+              // top-of-loop abort return that re-adds the stripped content
+              // via addHistory without entering the send-try's finally.
+              if (orphanStrippedSkillNames.length > 0) {
+                this.#getCurrentChat().retrackLoadedSkillNames(
+                  orphanStrippedSkillNames,
+                );
+                orphanStrippedSkillNames = [];
+              }
               logConversationFinishedEvent(
                 this.config,
                 new ConversationFinishedEvent(

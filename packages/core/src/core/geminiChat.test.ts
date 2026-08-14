@@ -602,6 +602,24 @@ describe('GeminiChat', async () => {
       expect(skillTool.clearLoadedSkills).toHaveBeenCalledOnce();
       expect(skillTool.trackSkills).toHaveBeenCalledWith(['kept']);
     });
+
+    it('truncate clears tracking entirely when no skill body survives the cut', () => {
+      // The clear must run UNCONDITIONALLY — before the non-empty gate on
+      // trackSkills — or a rewrite that drops every body would leave stale
+      // tracking and deadlock the skill behind the dedup guard.
+      const skillTool = mockSkillTool();
+      wireRegistry(skillTool);
+      chat.setHistory([
+        { role: 'model', parts: [{ text: 'ack' }] },
+        skillCall('s0', 'gone'),
+        skillResponse('s0', buildSkillLlmContent('/gone', 'gone body')),
+      ]);
+
+      chat.truncateHistory(1);
+
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledOnce();
+      expect(skillTool.trackSkills).not.toHaveBeenCalled();
+    });
   });
 
   describe('system instruction helpers', () => {
@@ -4411,7 +4429,41 @@ describe('GeminiChat', async () => {
     });
 
     it('rejects before request serialization and restores history when hard-rescue compression is still oversized', async () => {
+      const skillTool = {
+        unloadSkills: vi.fn(),
+        clearLoadedSkills: vi.fn(),
+        trackSkills: vi.fn(),
+      };
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
       const originalHistory: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 's0',
+                name: 'skill',
+                args: { skill: 'demo' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 's0',
+                name: 'skill',
+                response: {
+                  output: buildSkillLlmContent('/demo', 'demo body'),
+                },
+              },
+            },
+          ],
+        },
         { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
         { role: 'model', parts: [{ text: 'ack' }] },
       ];
@@ -4462,6 +4514,11 @@ describe('GeminiChat', async () => {
       expect(chatWithRecording.getHistory()[0].parts?.[0].text).toBe(
         originalHistory[0].parts?.[0].text,
       );
+      // The verbatim restore reconciles tracking from the restored history:
+      // the tryCompress blanket clear (COMPRESSED) plus the reconcile's own
+      // clear, then the resident body's skill is re-tracked.
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalledTimes(2);
+      expect(skillTool.trackSkills).toHaveBeenCalledWith(['demo']);
     });
 
     it('rejects when compressed history is below hard but the pending user message pushes it over', async () => {
