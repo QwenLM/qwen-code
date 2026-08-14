@@ -208,6 +208,22 @@ describe('pr-self-report-label', () => {
     // the label was removed (the lying-log shape this change exists to kill).
     expect(failed.out).toContain('removal did not land');
     expect(failed.out).not.toContain('removed');
+    // R10-1/R10-3: the tolerated token is exactly "HTTP 404" — a transport
+    // failure embedding a 404-bearing request URL must warn and report
+    // not-landed, never read as the already-off case (the loose *404*
+    // match hit the URL's PR number and claimed "removed").
+    const transport = run({
+      prAuthor: 'alice',
+      issueAuthors: 'bob',
+      hasLabel: true,
+      deleteFails:
+        'gh: Delete "https://api.github.com/repos/o/r/issues/4041/labels/review%2Fself-reported": dial tcp 140.82.121.4:443: connect: connection refused',
+    });
+    expect(transport.removed).toBe(true);
+    expect(transport.out).toContain('::warning::');
+    expect(transport.out).toContain('removal failed');
+    expect(transport.out).toContain('removal did not land');
+    expect(transport.out).not.toContain('removed');
     // POST carries NO tolerance: a label that fails to apply must fail the
     // step (the runBlock sets -e), not leave the PR unlabeled behind green.
     expect(() =>

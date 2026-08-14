@@ -4068,6 +4068,24 @@ describe('qwen-autofix workflow', () => {
       'labels/autofix%2Fneeds-human',
     );
     expect(releaseTransportFailed.log).toContain('release did not land');
+    // R10-1: the tolerance matches the EXACT "HTTP 404" token, never a bare
+    // 404 substring — a transport failure embeds the request URL, so a
+    // 404-bearing PR number in the path (modeled here on #4041) must
+    // classify as not-landed, not as the already-off case.
+    const releaseUrlFourOhFour = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails:
+        'gh: Delete "https://api.github.com/repos/QwenLM/qwen-code/issues/4041/labels/autofix%2Ftakeover": dial tcp 140.82.121.4:443: connect: connection refused',
+    });
+    expect(releaseUrlFourOhFour.writes).toContain(
+      'takeover-ack release-failed',
+    );
+    expect(releaseUrlFourOhFour.writes).not.toContain('takeover-ack released');
+    expect(releaseUrlFourOhFour.writes).not.toContain(
+      'labels/autofix%2Fneeds-human',
+    );
+    expect(releaseUrlFourOhFour.log).toContain('release did not land');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A
@@ -5679,6 +5697,16 @@ exit 1
     expect(relDelete404.status).toBe(0);
     expect(relDelete404.stdout).not.toContain('removal failed');
     expect(relDelete404.body).toContain('<!-- takeover-ack released -->');
+    // R10-3: …but the tolerated token is exactly "HTTP 404" — an error that
+    // carries 404 only as a substring must still warn (the loose *404*
+    // match swallowed it; transport errors embed 404-bearing request URLs).
+    const relDeleteSubstring = runAck({
+      ack: 'released',
+      deleteFails: 'HTTP 502: Bad Gateway (upstream retry of request 404)',
+    });
+    expect(relDeleteSubstring.status).toBe(0);
+    expect(relDeleteSubstring.stdout).toContain('removal failed');
+    expect(relDeleteSubstring.body).toContain('<!-- takeover-ack released -->');
     // R4-16: fork-refused and skip-blocked acks — management never resumed,
     // zero DELETEs (with total-count assertions, not just toContain).
     expect(runAck({ ack: 'fork-refused' }).calls).not.toContain(nhDelete);

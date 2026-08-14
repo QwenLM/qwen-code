@@ -787,11 +787,20 @@ exit 1`;
           ].join('\n'),
         );
         chmodSync(join(dir, 'gh'), 0o755);
+        // R10-2: the verbatim function carries production's shared
+        // /tmp/cperm-err path — rewrite it into THIS case's temp dir so
+        // concurrent suite runs on one machine (shared self-hosted
+        // runners) cannot corrupt each other's classification fixtures
+        // through the one global file.
+        const replayFn = resumeFn
+          .replace(/\n {10}/g, '\n')
+          .replaceAll('/tmp/cperm-err', join(dir, 'cperm-err'));
+        expect(replayFn).not.toContain('/tmp/cperm-err');
         const out = execFileSync(
           'bash',
           [
             '-c',
-            `${gnuDateShim}\n${resumeFn.replace(/\n {10}/g, '\n')}\ncompute_resume_ts "${dir}/ic.json" "${dir}/ev.json"\necho "TS=$RESUME_OUT"\necho "PERM_FAILED=$PERM_READ_FAILED"`,
+            `${gnuDateShim}\n${replayFn}\ncompute_resume_ts "${dir}/ic.json" "${dir}/ev.json"\necho "TS=$RESUME_OUT"\necho "PERM_FAILED=$PERM_READ_FAILED"`,
           ],
           {
             env: {
@@ -1819,11 +1828,18 @@ exit 1`;
           ].join('\n'),
         );
         chmodSync(join(dir, 'gh'), 0o755);
+        // R10-2: same isolation as the compute_resume_ts replay — the
+        // verbatim function writes /tmp/cf-ic.json, a path shared with
+        // every concurrent run on the machine.
+        const replayFn = conflictFn
+          .replace(/\n {10}/g, '\n')
+          .replaceAll('/tmp/cf-ic.json', join(dir, 'cf-ic.json'));
+        expect(replayFn).not.toContain('/tmp/cf-ic.json');
         const res = spawnSync(
           'bash',
           [
             '-c',
-            `${conflictFn.replace(/\n {10}/g, '\n')}\nif conflict_paused 7354; then echo PAUSED; else echo ARMED; fi`,
+            `${replayFn}\nif conflict_paused 7354; then echo PAUSED; else echo ARMED; fi`,
           ],
           {
             env: {

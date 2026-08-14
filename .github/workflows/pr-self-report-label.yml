@@ -101,11 +101,13 @@ jobs:
             # green — the job only re-runs on the next PR event — but must
             # not disappear: without the warning, the log claims "removed"
             # while the label stays on the PR. LBL_DEL_FAILED is keyed on the
-            # exit status (never the output text) and mirrors the identical
+            # exit status, with the exact "HTTP 404" token as the only
+            # text-derived exception (a bare 404 substring also rides
+            # transport failures' embedded URLs), and mirrors the identical
             # idiom in qwen-autofix.yml (a contract test pins them in sync).
             LBL_DEL_FAILED=false
             if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${LABEL}" '$l|@uri')" 2>&1)"; then
-              [[ "${REMOVE_ERR}" == *404* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${LABEL} removal failed — ${REMOVE_ERR}"; }
+              [[ "${REMOVE_ERR}" == *"HTTP 404"* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${LABEL} removal failed — ${REMOVE_ERR}"; }
             fi
             if [[ "${LBL_DEL_FAILED}" == "true" ]]; then
               echo "#${PR}: ${LABEL} removal did not land — will retry on the next PR event"

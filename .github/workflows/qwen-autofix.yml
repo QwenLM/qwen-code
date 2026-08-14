@@ -1947,7 +1947,7 @@ jobs:
               # Management resumed — the escalation label is stale. 404 is
               # the common case (the PR was never paused).
               if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
-                [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+                [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
               fi
             else
               # REST for consistency and runner-version independence: `gh pr
@@ -1989,7 +1989,7 @@ jobs:
               # Engaged (possibly re-engaging an auto-released PR) — the
               # escalation label is stale. 404 is the common case.
               if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
-                [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+                [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
               fi
             fi
           else
@@ -2015,13 +2015,16 @@ jobs:
               # NOT land and the needs-human removal below must NOT run
               # (R4-32) — or the PR keeps the takeover label (still capped,
               # nothing manages it now) while losing the only filterable
-              # escalation state. The flag is keyed on the EXIT STATUS, not
-              # the output text: a 200 success carries the remaining-labels
-              # body and a network error carries no "HTTP" token, so any
-              # text sniff fails one direction or the other (R6-1/R6-19).
+              # escalation state. The flag is keyed on the EXIT STATUS, with
+              # one text-derived exception: a failed DELETE whose error
+              # carries the exact "HTTP 404" token is the already-off case.
+              # The match must stay that precise token, not a bare "404"
+              # substring: transport failures embed the request URL — a PR
+              # number containing 404 would flip the classification — while
+              # no transport error carries an "HTTP" token (R6-1/R6-19).
               LBL_DEL_FAILED=false
               if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
-                [[ "${REMOVE_ERR}" == *404* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"; }
+                [[ "${REMOVE_ERR}" == *"HTTP 404"* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${TAKEOVER_LABEL} removal failed — ${REMOVE_ERR}"; }
               fi
               REMOVED_OK=true
               if [[ "${LBL_DEL_FAILED}" == "true" ]]; then
@@ -2046,7 +2049,7 @@ jobs:
               elif [[ "${SKIP_STATE}" == "true" ]]; then
                 echo "🧭 ${NEEDS_HUMAN_LABEL} removal skipped: ${SKIP_LABEL} present on #${PR}"
               elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
-                [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+                [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
               fi
               # Release ack, direct from the command — the exact mirror of
               # the engage side above, for the same reason: the unlabeled
@@ -2150,7 +2153,7 @@ jobs:
               ' <<< "${RETRY_INFO}")" != "true" ]]; then
             echo "🧭 keeping ${NEEDS_HUMAN_LABEL} on #${PR}: nothing manages it until re-engaged (no takeover label, not bot-authored)"
           elif ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
-            [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+            [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
           fi
 
   takeover-ack:
@@ -2247,7 +2250,7 @@ jobs:
           # under set -e must not strand the stale label.
           if [[ ( "${ACK}" == 'released' || "${ACK}" == 'engaged' ) && "${HAS_SKIP}" != 'true' ]]; then
             if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
-              [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+              [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
             fi
           fi
           gh pr comment "${PR}" --repo "${REPO}" --body "${BODY}"
@@ -3094,7 +3097,7 @@ jobs:
                   # Engaged — the escalation label is stale. 404 is the
                   # common case (the PR was never paused).
                   if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
-                    [[ "${NH_ERR}" == *404* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
+                    [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed — ${NH_ERR}"
                   fi
                   # Atomic re-fetch: ic.json already holds a successful full
                   # fetch from above; a truncated stream must not leave it 0
