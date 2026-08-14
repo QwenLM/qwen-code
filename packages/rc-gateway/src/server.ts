@@ -49,6 +49,7 @@ import {
   evaluatePreflight,
   corsHeadersForActualRequest,
 } from './cors.js';
+import { createFsBrowseRoute } from './routes/fsBrowse.js';
 import { createPermissionVoteRoute } from './routes/permission.js';
 import { createPromptRoute, type PromptAcceptedHook } from './routes/prompt.js';
 import { PromptEventBroadcaster } from './routes/promptEventBroadcaster.js';
@@ -684,6 +685,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     subActorBan, // banned chat user → 403 (before touching the daemon)
     createSessionCreateRoute(deps.daemon, audit),
   );
+  // GET /rc/fs — folder browser so the phone can pick which directory a new
+  // conversation (POST /session above) runs in. Write-scoped, owner/control-
+  // plane route; lists subdirectories only.
+  app.get('/rc/fs', requireScope(WRITE, audit), createFsBrowseRoute());
   // GET /rc/usage (add-cost-tracking) — any authenticated token; the route applies
   // owner-sees-all / lesser-sees-own scope filtering internally. Mounted only when
   // a usage store is wired (native sqlite present + cost tracking enabled).
