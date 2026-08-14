@@ -1021,17 +1021,26 @@ describe('DwsChannel', () => {
     const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
     expect(code).toBeDefined();
     expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.readDocument).toHaveBeenCalledTimes(1);
 
-    expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
     client.directMessages = [];
     await channel.poll();
+    await channel.poll();
+    expect(client.readDocument).toHaveBeenCalledTimes(1);
 
+    expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
+    await channel.poll();
+
+    expect(client.readDocument).toHaveBeenCalledTimes(2);
     expect(bridge.prompt).toHaveBeenCalledOnce();
     expect(bridge.prompt).toHaveBeenCalledWith(
       'session-1',
       expect.stringContaining('reply with the document code'),
       expect.any(Object),
     );
+
+    await channel.poll();
+    expect(client.readDocument).toHaveBeenCalledTimes(2);
   });
 
   it('shows a working eyes reaction on the notification while a document task runs', async () => {

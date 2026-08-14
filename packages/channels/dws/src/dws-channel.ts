@@ -1326,6 +1326,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       ...(this.cursor.pendingDocumentNotifications ?? []),
     ]) {
       if (signal.aborted || !this.connected) return;
+      if (!this.gate.isAllowed(pending.senderId)) continue;
       const notification: DwsDocumentMentionNotification = {
         documentId: pending.documentId,
         commentKey: pending.commentKey,
