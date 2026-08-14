@@ -3674,9 +3674,13 @@ export class Session implements SessionContext {
       return { stopReason: 'cancelled' };
     }
 
+    const channelPromptTurn =
+      (params as { _meta?: Record<string, unknown> })._meta?.[
+        CHANNEL_PROMPT_META_KEY
+      ] === true;
     const recording = this.config.getChatRecordingService();
     const branchCheckpointCursor =
-      scheduledGoalTurn === undefined
+      scheduledGoalTurn === undefined && !channelPromptTurn
         ? recording?.getBranchCheckpointCursor()
         : undefined;
 
@@ -3692,10 +3696,6 @@ export class Session implements SessionContext {
       ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
-    const channelPromptTurn =
-      (params as { _meta?: Record<string, unknown> })._meta?.[
-        CHANNEL_PROMPT_META_KEY
-      ] === true;
     // One server-side channel classification, consumed by both the
     // rejection gate below and the guard-mode selection in
     // #executePromptInner. Only the authenticated channel-prompt marker

@@ -649,6 +649,8 @@ export class ChatRecordingService {
   private lastPersistedRecordUuid: string | null = null;
   /** Active chain mirrored in memory so end-of-turn validation is incremental. */
   private activeBranchRecords: ChatRecord[] = [];
+  /** Parent of the first mirrored record, or the restored tail before appends. */
+  private activeBranchBaseUuid: string | null = null;
   /** Unclosed tool calls at the current active tail. */
   private pendingBranchToolCalls: BranchToolCallIdentity[] = [];
   private readonly config: Config;
@@ -878,6 +880,7 @@ export class ChatRecordingService {
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
     this.activeBranchRecords = [];
+    this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     if (!sessionData) return;
@@ -927,6 +930,7 @@ export class ChatRecordingService {
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
     this.currentCustomTitle = state.customTitle;
     this.currentTitleSource = state.titleSource;
@@ -1054,6 +1058,9 @@ export class ChatRecordingService {
         parentIndex < 0
           ? []
           : this.activeBranchRecords.slice(0, parentIndex + 1);
+      if (parentIndex < 0) {
+        this.activeBranchBaseUuid = record.parentUuid ?? null;
+      }
       this.pendingBranchToolCalls = collectPendingBranchToolCalls(
         this.activeBranchRecords,
       );
@@ -1434,7 +1441,7 @@ export class ChatRecordingService {
       if (endInclusiveRecordUuid === null) return undefined;
       const cursorRecordId =
         input.cursor.activeRecordCount === 0
-          ? null
+          ? this.activeBranchBaseUuid
           : this.activeBranchRecords[input.cursor.activeRecordCount - 1]?.uuid;
       if (
         cursorRecordId !== input.cursor.recordId ||
@@ -2024,6 +2031,7 @@ export class ChatRecordingService {
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.turnParentUuids = [];
     this.activeBranchRecords = [...messages];
+    this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
     for (let i = 0; i < messages.length; i++) {

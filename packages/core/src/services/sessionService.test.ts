@@ -4140,6 +4140,35 @@ describe('SessionService', () => {
       );
     });
 
+    it.runIf(process.platform !== 'win32')(
+      'preserves file-history backup modes on the forked session',
+      async () => {
+        const oldId = '31313131-3131-3131-3131-313131313139';
+        const newId = '41414141-4141-4141-4141-414141414149';
+        const { file, lines } = seedSession(oldId);
+        appendFileHistorySnapshot(oldId, file, lines, ['backup-mode']);
+        const sourceBackupDir = realPath.join(
+          realTmpDir,
+          'file-history',
+          oldId,
+        );
+        const sourceBackupPath = realPath.join(sourceBackupDir, 'backup-mode');
+        const targetBackupPath = realPath.join(
+          realTmpDir,
+          'file-history',
+          newId,
+          'backup-mode',
+        );
+        fs.mkdirSync(sourceBackupDir, { recursive: true });
+        fs.writeFileSync(sourceBackupPath, 'content');
+        fs.chmodSync(sourceBackupPath, 0o755);
+
+        await service.forkSession(oldId, newId);
+
+        expect(fs.statSync(targetBackupPath).mode & 0o777).toBe(0o755);
+      },
+    );
+
     it('publishes only backups referenced by the bounded transcript', async () => {
       const oldId = '31313131-3131-3131-3131-313131313133';
       const newId = '41414141-4141-4141-4141-414141414143';

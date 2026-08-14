@@ -4382,6 +4382,29 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('does not record a branch checkpoint for a channel prompt', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockChatRecordingService.getBranchCheckpointCursor.mockClear();
+      mockChatRecordingService.recordBranchCheckpointTransaction.mockClear();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'channel task' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(
+        mockChatRecordingService.getBranchCheckpointCursor,
+      ).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.recordBranchCheckpointTransaction,
+      ).not.toHaveBeenCalled();
+    });
+
     it('completes the turn when branch checkpoint recording fails', async () => {
       const checkpointError = new Error('checkpoint storage unavailable');
       const cursor = {

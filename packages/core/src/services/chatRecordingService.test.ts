@@ -2188,6 +2188,30 @@ describe('ChatRecordingService', () => {
       expect(record.parentUuid).toBe('leased-projected-leaf');
     });
 
+    it('records the first checkpoint after activating from reduced state', async () => {
+      const service = new ChatRecordingService(mockConfig);
+      service.activate(mockLease, undefined, undefined, {
+        lastCompletedUuid: 'leased-projected-leaf',
+        turnParentUuids: [null],
+      });
+      const cursor = service.getBranchCheckpointCursor();
+
+      service.recordUserMessage([{ text: 'next' }]);
+      service.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'continued answer' }],
+      });
+
+      await expect(
+        service.recordBranchCheckpointTransaction({
+          cursor,
+          stopReason: 'end_turn',
+        }),
+      ).resolves.toMatchObject({
+        startExclusiveRecordUuid: 'leased-projected-leaf',
+      });
+    });
+
     it('uses the effective session writer lease gate by default', async () => {
       mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
       mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);

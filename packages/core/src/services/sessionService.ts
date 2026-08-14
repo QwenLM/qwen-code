@@ -427,6 +427,7 @@ async function copyFileHistoryBackupsToStaging(
           }
           sourceOffset += bytesRead;
         }
+        await targetHandle.chmod(sourceStat.mode & 0o7777);
         await targetHandle.sync();
       } finally {
         await targetHandle.close();
