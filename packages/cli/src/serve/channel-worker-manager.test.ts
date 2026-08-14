@@ -305,6 +305,40 @@ describe('createChannelWorkerManager', () => {
     });
   });
 
+  it('carries restoredWorkspaces from the reconcile error onto the control error (R10-2)', async () => {
+    // The R9-4 chain's untested middle link: the group-level producer
+    // (channel-worker-group.test.ts) and the service-level consumer (the
+    // R9-4 stop guard) are both pinned, but the manager's classifyFailure
+    // spread between them was not. Sever it, and a multi-workspace
+    // disable failure whose aggregate rolledBack is false while THIS
+    // workspace's entry WAS restored hands the service a control error
+    // without the restore report — it records `stopped` for a channel
+    // that is relaunching, which the next `--channel all` skips.
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    vi.mocked(test.group.reconcile).mockRejectedValueOnce(
+      new ChannelWorkerReconcileError('multi-workspace restore failed', {
+        rolledBack: false,
+        restoredWorkspaces: [PRIMARY],
+      }),
+    );
+
+    await expect(
+      test.manager.setSelection({
+        mode: 'names',
+        names: ['telegram', 'feishu'],
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: false,
+      restoredWorkspaces: [PRIMARY],
+    });
+  });
+
   it('restores idle when workspace topology resolution fails', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
@@ -1219,17 +1253,21 @@ describe('createChannelWorkerManager', () => {
     // on the next `--channel all` — the exact regression this PR fixes.
     // The group must be re-read once stop() settles and both captures
     // unioned.
+    // `feishu` is contributed by the PRE-stop capture only (its
+    // lastConnectedChannels carries it; postStop's does not) — deleting
+    // the pre-stop capture turns the expectation red, pinning both halves
+    // of the union instead of the post-stop superset alone (R10-21).
     const preStop = workerSnapshot({
       state: 'starting',
       channels: ['all'],
       requestedChannels: ['telegram', 'feishu'],
-      lastConnectedChannels: ['telegram'],
+      lastConnectedChannels: ['telegram', 'feishu'],
     });
     const postStop = workerSnapshot({
       state: 'running',
-      channels: ['telegram', 'feishu'],
-      requestedChannels: ['telegram', 'feishu'],
-      lastConnectedChannels: ['telegram', 'feishu'],
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      lastConnectedChannels: ['telegram'],
     });
     let stopped = false;
     vi.mocked(group.stop).mockImplementation(async () => {
@@ -1244,6 +1282,46 @@ describe('createChannelWorkerManager', () => {
     expect(result.stoppedChannels).toEqual([
       { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
     ]);
+  });
+
+  it('unions the post-stop capture on a REJECTING stop too (#8975)', async () => {
+    // Reject-path twin: the post-stop capture's `finally` placement exists
+    // for stops that throw after a partial tear-down. Moving the push into
+    // the success-only path keeps every resolve-path test green while a
+    // crash-restart ready committing during a REJECTING multi-workspace
+    // stop carries only the pre-stop capture — the channel that committed
+    // in the window (already written `active` by the worker) gets no
+    // `stopped` record and resurrects on the next `--channel all` (R10-21).
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    const preStop = workerSnapshot({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: ['telegram', 'feishu'],
+      lastConnectedChannels: ['telegram', 'feishu'],
+    });
+    const postStop = workerSnapshot({
+      state: 'running',
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+      lastConnectedChannels: ['telegram'],
+    });
+    let stopped = false;
+    vi.mocked(group.stop).mockImplementation(async () => {
+      stopped = true;
+      throw new Error('worker refused to exit');
+    });
+    vi.mocked(group.snapshots).mockImplementation(() =>
+      stopped ? [postStop] : [preStop],
+    );
+
+    await expect(test.manager.stopSelection()).rejects.toMatchObject({
+      code: 'channel_worker_stop_failed',
+      stoppedChannels: [
+        { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
+      ],
+    });
   });
 
   it('strips lastConnectedChannels from the public control state but not the stop capture (#8975)', async () => {
@@ -1324,6 +1402,18 @@ describe('createChannelWorkerManager', () => {
     expect(group.snapshots()[0]).toHaveProperty('lastConnectedChannels', [
       'telegram',
     ]);
+    // ownershipSnapshots is the in-process ownership view, never
+    // serialized over HTTP: it must KEEP the carried sets, or the
+    // service's terminal-worker predicates read stripped snapshots and
+    // go dead (R10-1).
+    expect(test.manager.ownershipSnapshots()[0]).toHaveProperty(
+      'lastConnectedChannels',
+      ['telegram'],
+    );
+    expect(test.manager.ownershipSnapshots()[0]).toHaveProperty(
+      'lastRequestedChannels',
+      ['telegram'],
+    );
   });
 
   it('relaunches a terminal-failed mode-all worker on a per-channel start (#8975)', async () => {

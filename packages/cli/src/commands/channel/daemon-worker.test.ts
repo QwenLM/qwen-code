@@ -1328,8 +1328,9 @@ describe('runChannelDaemonWorker', () => {
       '[Channel] No channels configured; serving with 0 channels.',
     );
     // Never prune with an empty configured set: settings can transiently
-    // recover to empty, and prune([]) semantics would wipe every recorded
-    // stop and resurrect the channels #8975 must keep stopped.
+    // recover to empty. The store no-ops prune([]) today, but keep this
+    // caller-side guard pinned so a future store change cannot turn an
+    // empty read into a wipe of every recorded stop (#8975).
     expect(mockChannelStateStorePrune).not.toHaveBeenCalled();
     expect(mockParseConfiguredChannels).not.toHaveBeenCalled();
     expect(mockDaemonChannelBridge).not.toHaveBeenCalled();

@@ -1,4 +1,10 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import {
   atomicWriteFileSync,
@@ -32,6 +38,22 @@ interface ChannelStateFile {
    * explicit restart recorded in this workspace's own map.
    */
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
+  /**
+   * The legacy file's mtime at the last adoption sync. A content diff
+   * alone cannot see a re-stop written BYTE-IDENTICALLY by an older
+   * release (re-stopping an already-stopped channel rewrites the same
+   * map): the snapshot matches, so the merge loop would drop it and the
+   * explicitly re-stopped channel resurrects on `--channel all`. When the
+   * mtime moved AND the content still equals the snapshot, the rewrite
+   * itself is a new stop signal re-asserting the whole map, so
+   * snapshot-identical entries are re-applied too. (A rewrite that
+   * CHANGES the content stays on the plain content diff — the unchanged
+   * entries were not re-asserted, and re-applying them would override an
+   * explicit restart, the R9-3 hazard.) Absent on files written before
+   * mtime recording; adoption then keeps the content-only diff for that
+   * one sync and starts recording (#8975).
+   */
+  adoptedLegacyMtime?: number;
 }
 
 /**
@@ -86,22 +108,43 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
  * the snapshot are NOT re-applied: the legacy file is deliberately kept
  * forever (a later-starting workspace adopts the same stops), so blindly
  * re-merging it would override an explicit restart recorded in this
- * workspace's own map with the stale old stop. Entries that disappeared
- * from the legacy file are likewise never propagated: it carries no
- * workspace attribution, so its loss or rewrite must not destroy this
- * workspace's records. Best-effort — any failure only loses this sync and
- * warns, matching the store's never-fails contract (#8975).
+ * workspace's own map with the stale old stop. Exception: a rewrite of
+ * the legacy file that leaves an entry byte-identical (an older release
+ * re-stopping an already-stopped channel) is invisible to the content
+ * diff, so the sync also records the legacy mtime; when it moved since
+ * the snapshot was recorded, the rewrite itself is a new stop signal and
+ * snapshot-identical entries are re-applied (#8975). Entries that
+ * disappeared from the legacy file are likewise never propagated: it
+ * carries no workspace attribution, so its loss or rewrite must not
+ * destroy this workspace's records. Best-effort — any failure only loses
+ * this sync and warns, matching the store's never-fails contract (#8975).
  */
 export function adoptLegacyChannelState(workspaceCwd: string): void {
   const targetPath = channelRuntimeStatePath(workspaceCwd);
   const legacyPath = channelRuntimeStatePath();
   if (!existsSync(legacyPath)) return;
   let legacyChannels: Record<string, ChannelRuntimeState>;
+  let legacyMtime: number;
   try {
-    legacyChannels =
-      parseStateFile(readFileSync(legacyPath, 'utf-8'))?.channels ??
-      Object.create(null);
+    legacyMtime = statSync(legacyPath).mtimeMs;
+    const raw = readFileSync(legacyPath, 'utf-8');
+    const parsed = parseStateFile(raw);
+    // A legacy file that reads successfully but no longer parses is
+    // silently coerced to empty otherwise: the stops it carried are lost
+    // with no trace, so warn like every other discard path (#8975).
+    if (!parsed) {
+      writeStoreWarning(
+        `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; treating it as empty for this adoption.`,
+      );
+    }
+    legacyChannels = parsed?.channels ?? Object.create(null);
   } catch {
+    // ENOENT is pre-checked above, so a throw here is a real read failure
+    // (EACCES/EIO/EISDIR on a shared ~/.qwen): the unadopted stops may
+    // resurrect on the next start, so leave a trace (#8975).
+    writeStoreWarning(
+      `[Channel] Warning: could not read legacy channel state file ${legacyPath}; recorded stops may not be honored.`,
+    );
     return;
   }
 
@@ -115,10 +158,30 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       target = undefined;
     }
   }
+  // A corrupt target is reseeded from the legacy map below, which makes
+  // it valid forever after — no later read/prune can warn about the
+  // discarded records, so the discard itself must (#8975).
+  if (targetExisted && target === undefined) {
+    writeStoreWarning(
+      `[Channel] Warning: could not read channel state file ${targetPath}; treating all channels as active.`,
+    );
+  }
 
   const channels: Record<string, ChannelRuntimeState> =
     target?.channels ?? Object.create(null);
   const snapshot = target?.adoptedLegacy;
+  // A snapshot-identical entry is re-applied only on a BYTE-IDENTICAL
+  // rewrite of the legacy file: the moved mtime proves a rewrite happened
+  // since the snapshot was recorded, and unchanged content means the
+  // rewrite re-asserted exactly the adopted map — a re-stop (see the
+  // function doc). Without a recorded mtime (a file written before mtime
+  // recording) the content-only diff stands for this sync; the write
+  // below starts recording.
+  const legacyRewritten =
+    snapshot !== undefined &&
+    target?.adoptedLegacyMtime !== undefined &&
+    target.adoptedLegacyMtime !== legacyMtime &&
+    sameChannelMaps(snapshot, legacyChannels);
   const merged: string[] = [];
   // A corrupt/unreadable target is treated as empty by design, so reseed
   // it from the whole legacy map; a valid target without a snapshot
@@ -130,13 +193,23 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       if (snapshot?.[name] !== state) {
         channels[name] = state;
         merged.push(name);
+      } else if (legacyRewritten && channels[name] !== state) {
+        // Byte-identical re-stop by an older release (see the function
+        // doc): content cannot distinguish it from 'unchanged since
+        // adoption', but the moved mtime proves a rewrite, and a rewrite
+        // carrying this entry is a stop event — re-apply it over an
+        // explicit restart recorded since (#8975).
+        channels[name] = state;
+        merged.push(name);
       }
     }
   }
   // Nothing new and the snapshot is already recorded: skip the write so a
-  // normal start does not pay an fsync'd rewrite of an unchanged file.
+  // normal start does not pay an fsync'd rewrite of an unchanged file. A
+  // detected rewrite still writes even with nothing merged, to advance
+  // the recorded mtime — otherwise every later sync re-detects it.
   if (targetExisted && target !== undefined && snapshot !== undefined) {
-    if (merged.length === 0) return;
+    if (merged.length === 0 && !legacyRewritten) return;
   }
   try {
     mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
@@ -148,6 +221,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
       version: STORE_VERSION,
       channels,
       adoptedLegacy: legacyChannels,
+      adoptedLegacyMtime: legacyMtime,
     };
     atomicWriteFileSync(targetPath, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',
@@ -169,6 +243,7 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
 interface ParsedStateFile {
   channels: Record<string, ChannelRuntimeState>;
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
+  adoptedLegacyMtime?: number;
 }
 
 /** Tolerant state-file parse: any deviation yields `undefined`. */
@@ -200,6 +275,12 @@ function parseStateFile(raw: string): ParsedStateFile | undefined {
   ) {
     result.adoptedLegacy = filterChannelStates(file.adoptedLegacy);
   }
+  if (
+    typeof file.adoptedLegacyMtime === 'number' &&
+    Number.isFinite(file.adoptedLegacyMtime)
+  ) {
+    result.adoptedLegacyMtime = file.adoptedLegacyMtime;
+  }
   return result;
 }
 
@@ -220,6 +301,16 @@ function filterChannelStates(
 
 function isChannelRuntimeState(value: unknown): value is ChannelRuntimeState {
   return value === 'active' || value === 'stopped';
+}
+
+/** Entry-wise equality of two state maps (both already filtered). */
+function sameChannelMaps(
+  a: Record<string, ChannelRuntimeState>,
+  b: Record<string, ChannelRuntimeState>,
+): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((name) => b[name] === a[name]);
 }
 
 /**
@@ -379,7 +470,22 @@ export class ChannelStateStore {
     const data: ChannelStateFile = {
       version: STORE_VERSION,
       channels,
-      ...(full?.adoptedLegacy ? { adoptedLegacy: full.adoptedLegacy } : {}),
+      // Preserve the snapshot (and its legacy-mtime watermark) across
+      // writes this store does not own. When no snapshot exists to
+      // preserve, record an EMPTY one: every writer in this codebase
+      // creates a file only after adoption ran (start flow) or for a
+      // stop record, so the file has 'seen' the legacy file — `{}` marks
+      // that, letting a later first-ever legacy stop merge instead of
+      // baselining into permanent invisibility. Absent stays the marker
+      // for files that genuinely predate snapshot recording (#8975).
+      ...(full?.adoptedLegacy
+        ? {
+            adoptedLegacy: full.adoptedLegacy,
+            ...(full.adoptedLegacyMtime !== undefined
+              ? { adoptedLegacyMtime: full.adoptedLegacyMtime }
+              : {}),
+          }
+        : { adoptedLegacy: Object.create(null) }),
     };
     atomicWriteFileSync(this.filePath, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',

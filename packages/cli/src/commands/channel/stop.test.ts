@@ -139,6 +139,16 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
+    // The success message must precede the exit — under the no-op exit
+    // mock, relocating it below process.exit(0) ships green while
+    // production exits silently and the stopped-vs-already-stopped
+    // distinction disappears (R10-19).
+    const successCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Daemon-managed channels stopped.'),
+    );
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[successCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
     // A response WITHOUT statePersisted (e.g. a long-running pre-#8975
     // daemon) must not print the durability warning: only an explicit
     // `false` means the record was lost.
@@ -159,6 +169,14 @@ describe('stopCommand', () => {
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(0);
+    // Message-before-exit ordering, twin of the changed:true test
+    // (R10-19).
+    const messageCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Daemon-managed channels are already stopped.'),
+    );
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[messageCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('warns when the daemon stop record failed to persist (#8975)', async () => {
@@ -264,6 +282,13 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+    // Warning-silence is pinned above, but the EXIT CODE of the
+    // body-duck-typing gate was not: a mutation letting the gate influence
+    // the exit code (exit 0 when a body is present without
+    // statePersisted) kept this test green while `set -e` / && teardown
+    // chains treated a FAILED stop as successful — pin both failing stops
+    // to exit 1 (R10-20).
+    expect(vi.mocked(process.exit).mock.calls).toEqual([[1], [1]]);
   });
 
   it('reports remote stop failures without falling through to standalone mode', async () => {
@@ -277,6 +302,16 @@ describe('stopCommand', () => {
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
+    // The stderr diagnostic must precede the exit — the no-op exit mock
+    // lets execution continue, so relocating the write below
+    // process.exit(1) ships green while every failing daemon stop exits
+    // with ZERO diagnostic output in production (R10-19).
+    const errCall = mockWriteStderrLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('stop failed'),
+    );
+    expect(mockWriteStderrLine.mock.invocationCallOrder[errCall]).toBeLessThan(
+      vi.mocked(process.exit).mock.invocationCallOrder[0]!,
+    );
   });
 
   it('records stopped channels so --channel all does not restart them', async () => {
@@ -373,6 +408,16 @@ describe('stopCommand', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       '/tmp/qwen-home/channels/standalone//workspace/a/channel-state.json',
     );
+    // The service is a GLOBAL singleton: a restart from another workspace
+    // reads that workspace's state file and would resurrect the channels.
+    // The record must ALSO land in the legacy global file, which adoption
+    // merges into every workspace on its next start (R10-33). The legacy
+    // derivation is the ZERO-argument call form.
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith();
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
@@ -410,6 +455,12 @@ describe('stopCommand', () => {
       ['telegram', 'feishu'],
       'stopped',
     );
+    // Cross-workspace twin of the live-stop pin: a crashed service's
+    // channels must also land in the legacy global file, or a restart
+    // from another workspace resurrects them (R10-33).
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      '/tmp/qwen-home/channels/channel-state.json',
+    );
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -426,6 +477,17 @@ describe('stopCommand', () => {
     // persisted): exit 0 so `set -e` / && teardown chains do not abort
     // (R9-21).
     expect(process.exit).toHaveBeenCalledWith(0);
+    // The crash-path message must be emitted BEFORE the exit — the
+    // no-op exit mock cannot pin ordering by itself, and relocating the
+    // write below process.exit(0) ships green while the diagnostic (the
+    // only trace that the stops were recorded) is dead in production
+    // (R10-19).
+    const recordedCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Recorded the crashed service channels'),
+    );
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[recordedCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('reports when the crashed service stop record fails to persist (#8975)', async () => {
@@ -458,6 +520,15 @@ describe('stopCommand', () => {
     // warned about — failing the exit aborts `set -e` teardown exactly
     // where the user was told what happened (R9-21).
     expect(process.exit).toHaveBeenCalledWith(0);
+    // Message-before-exit ordering, twin of the success-path pin: the
+    // loss warning is the only trace that `--channel all` may resurrect
+    // the channels (R10-19).
+    const lossCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Could not record the crashed service channels'),
+    );
+    expect(mockWriteStdoutLine.mock.invocationCallOrder[lossCall]).toBeLessThan(
+      vi.mocked(process.exit).mock.invocationCallOrder[0]!,
+    );
   });
 
   it('does not persist for a crashed serve-owned or empty pidfile (#8975)', async () => {
@@ -509,6 +580,33 @@ describe('stopCommand', () => {
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
+  it('stops a LIVE zero-channel service normally (#8975)', async () => {
+    // The live twin of the crashed zero-channel test: serveWithoutChannels
+    // writes a `channels: []` pidfile whenever `--channel all` finds
+    // everything stopped, and that service is real — stop must signal it
+    // and report success, not treat the empty channel list as "no
+    // service" and leave the process alive (R10-47).
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: [],
+      workspaceCwd: '/workspace/a',
+    });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      'No channel service is running.',
+    );
+    expect(process.exit).toHaveBeenCalledWith(0);
+  });
+
   it('falls back to the legacy global file for crashed older pidfiles (#8975)', async () => {
     // Crash-path twin of the live-path legacy test: pidfiles from older
     // releases carry no workspaceCwd, so the recorded stops must land in
@@ -555,6 +653,14 @@ describe('stopCommand', () => {
     // split here writes the stop to a different file than start reads.
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       '/tmp/qwen-home/channels/channel-state.json',
+    );
+    // Path derivation alone is not the contract — the stopped record
+    // must actually be WRITTEN, or the mixed-version case the fallback
+    // exists for (a pre-#8975 service explicitly stopped) resurrects on
+    // the next `--channel all` with nothing persisted (R10-46).
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledWith(
+      ['telegram'],
+      'stopped',
     );
     expect(process.exit).toHaveBeenCalledWith(0);
   });

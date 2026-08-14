@@ -339,7 +339,12 @@ async function serveWithoutChannels(
   writeServiceInfoOrExit([], () => {}, workspaceCwd);
   // Signal listeners and a pending promise do not keep the Node event loop
   // alive, so without a ref'd handle the zero-channel process would exit on
-  // its own and leave a dangling pidfile (#8975).
+  // its own and leave a dangling pidfile (#8975). The delay is
+  // deliberate: TIMEOUT_MAX (2^31 - 1 ms ≈ 24.8 days), the largest value
+  // setInterval accepts — the zero-channel state is a long-lived steady
+  // state, and a small delay would tick an empty callback thousands of
+  // times a second and burn a CPU core on every machine left in it.
+  // Pinned by the zero-channel tests in start.test.ts (R10-44).
   const keepAlive = setInterval(() => {}, 2_147_483_647);
   const shutdown = () => {
     clearInterval(keepAlive);
@@ -454,10 +459,12 @@ async function startSingle(
     bridge.stop();
     process.exit(1);
   }
-  // Adopt legacy stops before the first workspace-scoped write: once the
-  // workspace file exists, adoption's existsSync guard never runs again, so
-  // a named start must not create the file first and orphan the legacy
-  // stops (#8975). Idempotent — a no-op once the workspace file exists.
+  // Adopt legacy stops before the first workspace-scoped write: a named
+  // start must not create a snapshot-less workspace file first, or the
+  // next adoption treats it as predating snapshot recording, baselines
+  // without merging, and drops the legacy stops (#8975). Adoption runs on
+  // EVERY start and snapshot-diff merges; this ordering keeps the first
+  // write from beating the initial sync to file creation.
   adoptLegacyChannelState(workspaceCwd);
   recordChannelActive(name, workspaceCwd);
   writeServiceInfoOrExit(

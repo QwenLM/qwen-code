@@ -64,6 +64,7 @@ import {
   createChannelManagementService,
   type ChannelManagementWorkerManager,
 } from './channel-management-service.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import { ChannelWorkerControlError } from './channel-worker-manager.js';
 
 beforeEach(() => {
@@ -178,6 +179,13 @@ function setup(options: {
             ]
           : [],
     })),
+    // The stub's workers are never stripped, so the unstripped ownership
+    // view can track state(): tests overriding state().workers propagate
+    // to workerFor exactly like the real manager's raw snapshots do
+    // (R10-1).
+    ownershipSnapshots: vi.fn(
+      () => manager.state().workers as ChannelWorkerGroupSnapshot[],
+    ),
     setChannelEnabled: vi.fn(async ({ name }, enabled) => {
       if (enabled) {
         if (names.includes(name)) return { changed: false };
@@ -1158,6 +1166,46 @@ describe('createChannelManagementService', () => {
           primary: true,
         },
       ],
+    });
+
+    await service.restart('bot');
+
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+  });
+
+  it('finds a terminal worker whose channel rides only in lastRequestedChannels (R10-1)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // The R10-1 production shape: selection [telegram, bot], bot's
+    // connect fails persistently until the restart budget exhausts. The
+    // terminal snapshot drops `requestedChannels`, keeps only the last
+    // CONNECTED set in `channels`, and carries the attempted set solely
+    // in `lastRequestedChannels` — which `state()` strips. Ownership
+    // matching must read the unstripped view (ownershipSnapshots), or
+    // the predicates are dead: runtimeFor reports a clean stop and
+    // restart rejects with 409 instead of recovering via reloadWorkspace.
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['telegram', 'bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['telegram'],
+          lastRequestedChannels: ['telegram', 'bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    const result = await service.list();
+
+    expect(result.instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'Channel worker restart budget exhausted.',
     });
 
     await service.restart('bot');

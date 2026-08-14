@@ -326,9 +326,11 @@ describePosix(
       const qwenHome = path.join(testRoot, 'qwen-home');
       const runtimeDir = path.join(testRoot, 'runtime');
       const workspace = path.join(testRoot, 'workspace');
+      const homeDir = path.join(testRoot, 'home');
       mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
       mkdirSync(runtimeDir);
       mkdirSync(qwenHome, { recursive: true });
+      mkdirSync(homeDir, { recursive: true });
       // Nothing configured: the effective channel set is empty.
       writeFileSync(
         path.join(qwenHome, 'settings.json'),
@@ -360,6 +362,13 @@ describePosix(
                 ([k]) => k !== 'QWEN_SERVER_TOKEN',
               ),
             ),
+            // The env-toggle strip alone is not enough: the serve
+            // fast-path .env loader reads $HOME/.env and $HOME/.qwen/.env
+            // regardless of QWEN_HOME, so a QWEN_SERVER_TOKEN defined in
+            // the real home of the dev machine or CI runner would flip
+            // auth on and 401 the unauthenticated polls below. Sandbox
+            // HOME like qwen-serve-routes.test.ts does (#8975).
+            HOME: homeDir,
             QWEN_HOME: qwenHome,
             QWEN_RUNTIME_DIR: runtimeDir,
             QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,

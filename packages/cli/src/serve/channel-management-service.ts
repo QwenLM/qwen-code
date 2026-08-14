@@ -25,6 +25,7 @@ import type {
 } from './channel-settings-store.js';
 import { isAllChannelSelectionName } from './channel-selection.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import { ChannelWorkerControlError } from './channel-worker-manager.js';
 import type {
   ChannelWorkerControlState,
@@ -155,6 +156,14 @@ interface ChannelManagementSettingsStore {
 export interface ChannelManagementWorkerManager {
   committedChannelNames(): string[];
   state(): ChannelWorkerControlState;
+  /**
+   * Unstripped worker snapshots for ownership matching: `state()` strips
+   * the terminal carried sets (`lastRequestedChannels` et al.) before
+   * they ride HTTP, but a crash-dead worker's channels live ONLY there —
+   * matching against `state().workers` makes those predicates dead and
+   * the R9-5 recovery route unreachable (R10-1).
+   */
+  ownershipSnapshots(): ChannelWorkerGroupSnapshot[];
   setChannelEnabled(
     owner: ChannelWorkerRequiredOwner,
     enabled: boolean,
@@ -257,10 +266,14 @@ export function createChannelManagementService(
     }
   };
 
+  // Match on the UNSTRIPPED snapshots: `state()` strips the terminal
+  // carried sets before they ride HTTP, and a budget-exhausted worker's
+  // channels can live only in `lastRequestedChannels` — reading them
+  // through `state().workers` silently drops the predicate (R10-1).
   const workerFor = (name: string) => {
     const matches = opts.manager
-      .state()
-      .workers.filter(
+      .ownershipSnapshots()
+      .filter(
         (worker) =>
           worker.adapters?.some((adapter) => adapter.name === name) ||
           worker.requestedChannels?.includes(name) ||

@@ -14,6 +14,7 @@ import type {
 } from '@qwen-code/channel-base';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
+import { isAllChannelSelectionName } from '../../serve/channel-selection.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from '../extensions/utils.js';
 import { getPlugin, registerPlugin } from './channel-registry.js';
@@ -88,7 +89,29 @@ export function loadChannelsConfig(
   const channels = (
     settings.merged as unknown as { channels?: Record<string, unknown> }
   ).channels;
-  return channels || {};
+  if (!channels) return {};
+  // `all` is the whole-selection placeholder, reserved by the management
+  // API but unenforced here: a hand-edited/legacy `channels.all` entry
+  // would be connected by a mode-`all` worker, yet the stop capture's
+  // placeholder filter then drops the name from the persisted stopped
+  // set and the channel resurrects on the next `--channel all` (R10-36).
+  // Warn and skip the entry where settings are read so the collision
+  // cannot be established; the placeholder filters downstream stay as
+  // defense in depth.
+  if (!Object.keys(channels).some(isAllChannelSelectionName)) {
+    return channels;
+  }
+  const filtered: Record<string, unknown> = {};
+  for (const [name, config] of Object.entries(channels)) {
+    if (isAllChannelSelectionName(name)) {
+      writeStderrLine(
+        `[Channel] Warning: ignoring channel "${sanitizeLogText(name, 128)}" — the name is reserved for the whole-channel selection (#8975).`,
+      );
+      continue;
+    }
+    filtered[name] = config;
+  }
+  return filtered;
 }
 
 export function resolveExtensionChannelEntrySpecifier(

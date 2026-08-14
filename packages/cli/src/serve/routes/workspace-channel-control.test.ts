@@ -84,10 +84,15 @@ function setup(options: {
     vi.fn(async () => ({
       changed: true,
       state: options.control ?? controlState(),
-      // What the manager tore down at commit time (#8975).
-      stoppedChannels: [
-        { workspaceCwd: '/workspace', names: ['telegram', 'feishu'] },
-      ],
+      // What the manager tore down at commit time (#8975). Must be
+      // consistent with the paired controlState() worker: the only
+      // producer (stoppedChannelsByWorkspace) intersects the requested
+      // set with the CONNECTED set, so for channels:['telegram'],
+      // requestedChannels:['telegram','feishu'], no
+      // lastConnectedChannels it yields ['telegram'] — a fixture
+      // claiming more would teach the OPPOSITE contract and invite
+      // dropping the intersection (R10-16).
+      stoppedChannels: [{ workspaceCwd: '/workspace', names: ['telegram'] }],
     }));
   const app = express();
   registerWorkspaceChannelControlRoutes(app, {
@@ -118,9 +123,12 @@ describe('DELETE /workspace/channel', () => {
 
     expect(response.status).toBe(200);
     expect(stopChannelWorker).toHaveBeenCalledTimes(1);
-    // Requested (not just connected) channels are recorded, per workspace.
-    // The daemon (not standalone) state path segment is pinned, so swapping
-    // in the standalone helper cannot ship green (#8975).
+    // The CONNECTED-intersected capture is recorded, per workspace: the
+    // producer records requested ∩ connected — never a requested channel
+    // that never connected, which would pin it stopped and silently skip
+    // it on every later `--channel all` (#8975, R10-16). The daemon (not
+    // standalone) state path segment is pinned, so swapping in the
+    // standalone helper cannot ship green (#8975).
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       expect.stringContaining(path.join('channels', 'daemon')),
     );
@@ -129,7 +137,7 @@ describe('DELETE /workspace/channel', () => {
     );
     expect(mockChannelStateStoreInstances).toHaveLength(1);
     expect(mockChannelStateStoreInstances[0]!.setMany).toHaveBeenCalledWith(
-      ['telegram', 'feishu'],
+      ['telegram'],
       'stopped',
     );
     // The record persisted, so the happy-path response shape stays

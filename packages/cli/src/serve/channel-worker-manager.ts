@@ -175,6 +175,14 @@ export interface ChannelWorkerManager {
   state(): ChannelWorkerControlState;
   primarySnapshot(): ChannelWorkerSnapshot;
   snapshots(): ChannelWorkerGroupSnapshot[];
+  /**
+   * Raw group snapshots WITHOUT the `publicWorkerSnapshot` strip: for
+   * in-process ownership matching only (a terminal worker's carried
+   * `lastRequestedChannels`/`lastConnectedChannels` are load-bearing
+   * there). Never serialize this over HTTP — public surfaces use
+   * `state()`/`snapshots()`, which strip the internal fields (#8975).
+   */
+  ownershipSnapshots(): ChannelWorkerGroupSnapshot[];
   committedChannelNames(): string[];
   enqueueWebhookTask(
     task: ChannelWebhookTask,
@@ -902,6 +910,10 @@ export function createChannelWorkerManager(
         group?.primarySnapshot() ?? { ...DISABLED_SNAPSHOT },
       ),
     snapshots: () => (group?.snapshots() ?? []).map(publicWorkerSnapshot),
+    // Unstripped on purpose: see the interface doc. Ownership matching
+    // must see the terminal carried sets that `publicWorkerSnapshot`
+    // removes from the HTTP-facing accessors (R9-5/R9-6, R10-1).
+    ownershipSnapshots: () => group?.snapshots() ?? [],
     committedChannelNames,
     enqueueWebhookTask(task) {
       if (!group || draining) {

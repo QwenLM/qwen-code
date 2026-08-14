@@ -252,7 +252,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // per-channel sibling below, `not.toBeNever()` stays green if the
     // type degrades to the plain mutation result and the `statePersisted`
     // durability signal disappears from the typed surface. Compiled under
-    // tsconfig.typetest.json, which the CI typecheck step runs (R9-29).
+    // tsconfig.typetest.json, which this package's `test:ci` script runs,
+    // so the required PR test jobs (root fans `npm run test:ci` out to
+    // the workspaces) enforce it (R9-29, wired into the PR gate for
+    // R10-37).
     expectTypeOf<DaemonChannelStopResult>().toEqualTypeOf<{
       changed: boolean;
       state: DaemonChannelControlState;

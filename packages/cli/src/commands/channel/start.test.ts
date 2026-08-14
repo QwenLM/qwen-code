@@ -1473,6 +1473,11 @@ describe('startCommand.handler', () => {
       const processOnSpy = vi
         .spyOn(process, 'on')
         .mockImplementation(() => process);
+      // Spy the timer like the twins so the keep-alive handle is
+      // capturable: an assertion failure before the signal call must not
+      // leak a ref'd 24.8-day interval into the vitest worker (R10-30).
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      let keepAlive: NodeJS.Timeout | undefined;
 
       try {
         void invokeStartHandler({});
@@ -1490,6 +1495,10 @@ describe('startCommand.handler', () => {
         expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
         // Startup no longer exits on an empty channel set.
         expect(exitSpy).not.toHaveBeenCalled();
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+          | NodeJS.Timeout
+          | undefined;
+        expect(keepAlive).toBeDefined();
 
         const sigint = processOnSpy.mock.calls.find(
           ([eventName]) => eventName === 'SIGINT',
@@ -1499,6 +1508,8 @@ describe('startCommand.handler', () => {
         expect(() => sigint!()).toThrow('process.exit: 0');
         expect(mockRemoveServiceInfo).toHaveBeenCalled();
       } finally {
+        if (keepAlive) clearInterval(keepAlive);
+        setIntervalSpy.mockRestore();
         processOnSpy.mockRestore();
         exitSpy.mockRestore();
       }
@@ -1525,6 +1536,10 @@ describe('startCommand.handler', () => {
         .mockImplementation(() => process);
       const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+      // Hoisted above the try: an assertion failure before the signal
+      // call must not leak the ref'd keep-alive timer into the vitest
+      // worker — the finally clears it unconditionally (R10-30).
+      let keepAlive: NodeJS.Timeout | undefined;
 
       try {
         void invokeStartHandler({});
@@ -1553,7 +1568,7 @@ describe('startCommand.handler', () => {
         // must hold the event loop open (#8975).
         expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
         expect(mockAcpBridge).not.toHaveBeenCalled();
-        const keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
           | NodeJS.Timeout
           | undefined;
         expect(keepAlive).toBeDefined();
@@ -1585,6 +1600,7 @@ describe('startCommand.handler', () => {
         // Shutdown releases the keep-alive handle it installed.
         expect(clearIntervalSpy).toHaveBeenCalledWith(keepAlive);
       } finally {
+        if (keepAlive) clearInterval(keepAlive);
         clearIntervalSpy.mockRestore();
         setIntervalSpy.mockRestore();
         processOnSpy.mockRestore();
@@ -1602,6 +1618,9 @@ describe('startCommand.handler', () => {
         .mockImplementation(() => process);
       const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+      // Hoisted above the try so the finally can clear it unconditionally
+      // (R10-30).
+      let keepAlive: NodeJS.Timeout | undefined;
 
       try {
         void invokeStartHandler({});
@@ -1610,11 +1629,21 @@ describe('startCommand.handler', () => {
         // Signal listeners plus a pending promise cannot keep the Node event
         // loop alive; a ref'd timer must hold it open or the zero-channel
         // service exits on its own and leaves a dangling pidfile.
-        const keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
           | NodeJS.Timeout
           | undefined;
         expect(keepAlive).toBeDefined();
         expect(keepAlive!.hasRef()).toBe(true);
+        // Pin the delay too: the load-bearing value is TIMEOUT_MAX
+        // (2^31 - 1 ms ≈ 24.8 days). A cleanup refactor 'simplifying' the
+        // odd-looking literal to a small delay ships green against the
+        // hasRef/clearInterval pins alone, then ticks an empty callback
+        // thousands of times a second in the long-lived zero-channel
+        // steady state, burning a CPU core (R10-44).
+        expect(setIntervalSpy).toHaveBeenCalledWith(
+          expect.any(Function),
+          2_147_483_647,
+        );
 
         const sigterm = processOnSpy.mock.calls.find(
           ([eventName]) => eventName === 'SIGTERM',
@@ -1624,6 +1653,7 @@ describe('startCommand.handler', () => {
         // Shutdown releases the handle it installed.
         expect(clearIntervalSpy).toHaveBeenCalledWith(keepAlive);
       } finally {
+        if (keepAlive) clearInterval(keepAlive);
         clearIntervalSpy.mockRestore();
         setIntervalSpy.mockRestore();
         processOnSpy.mockRestore();
@@ -1952,8 +1982,10 @@ describe('startCommand.handler', () => {
       '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
     );
     // The named path adopts legacy stops too, and BEFORE the first
-    // workspace-scoped write: once the workspace file exists, adoption's
-    // existsSync guard never runs again (#8975).
+    // workspace-scoped write: a named start must not create a
+    // snapshot-less workspace file first, or the next adoption treats it
+    // as predating snapshot recording, baselines without merging, and
+    // drops the legacy stops (#8975).
     expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
     expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
     // The store is constructed with the workspace-scoped path the helper

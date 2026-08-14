@@ -468,9 +468,11 @@ export async function runChannelDaemonWorker(
     try {
       // Drop entries for channels removed from settings so they cannot be
       // skipped forever by a stale `stopped` record. Never prune with an
-      // empty configured set (e.g. settings transiently recovered to empty):
-      // that would wipe every recorded stop and resurrect the channels
-      // #8975 must keep stopped.
+      // empty configured set (e.g. settings transiently recovered to
+      // empty): the store no-ops prune([]) today, but keep this
+      // caller-side guard so a future store change cannot turn an empty
+      // read into a wipe of every recorded stop, resurrecting exactly
+      // the channels #8975 must keep stopped.
       states =
         names.length > 0 ? stateStore.prune(names) : stateStore.readAll();
     } catch {

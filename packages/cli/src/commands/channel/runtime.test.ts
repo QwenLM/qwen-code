@@ -1,12 +1,14 @@
 import { EventEmitter } from 'node:events';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { LoadedSettings } from '../../config/settings.js';
 import {
   channelLoopPath,
   daemonChannelLoopPath,
   daemonChannelStateDir,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
+  loadChannelsConfig,
   parseConfiguredChannels,
   registerBackgroundResponseRelay,
   registerPermissionRelay,
@@ -97,6 +99,55 @@ it('isolates daemon channel state by workspace and safe instance key', () => {
   expect(daemonChannelStateDir('/workspace', 'team/../bot')).toBe(stateDir);
   expect(daemonChannelStateDir('/workspace', 'team:../bot')).not.toBe(stateDir);
   expect(daemonChannelStateDir('/other', 'team/../bot')).not.toBe(stateDir);
+});
+
+describe('loadChannelsConfig (#8975)', () => {
+  function settingsWith(
+    channels: Record<string, unknown> | undefined,
+  ): LoadedSettings {
+    return { merged: { channels } } as unknown as LoadedSettings;
+  }
+
+  it('returns the configured channels untouched without a reserved name', () => {
+    const channels = {
+      telegram: { type: 'telegram' },
+      feishu: { type: 'feishu' },
+    };
+    expect(loadChannelsConfig('/workspace', settingsWith(channels))).toBe(
+      channels,
+    );
+    expect(loadChannelsConfig('/workspace', settingsWith(undefined))).toEqual(
+      {},
+    );
+  });
+
+  it('warns and skips a channel literally named "all" (R10-36)', () => {
+    // `all` is the whole-selection placeholder: a real channel with that
+    // name would be connected by a mode-`all` worker, yet the stop
+    // capture's placeholder filter would drop it from the persisted
+    // stopped set and the channel resurrects on the next `--channel all`.
+    // The collision is refused where settings are read.
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      const loaded = loadChannelsConfig(
+        '/workspace',
+        settingsWith({
+          all: { type: 'telegram' },
+          telegram: { type: 'telegram' },
+        }),
+      );
+
+      expect(Object.keys(loaded)).toEqual(['telegram']);
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining('the name is reserved'),
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
 
 describe('parseConfiguredChannels', () => {

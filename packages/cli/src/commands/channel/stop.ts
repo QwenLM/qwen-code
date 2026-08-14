@@ -16,6 +16,35 @@ import {
   QWEN_SERVER_TOKEN_ENV,
 } from '../../serve/channel-worker-env.js';
 
+/**
+ * Persist an explicit stop durably across workspaces (#8975). The record
+ * is scoped to the workspace it is written for (matching its config
+ * scope), but the standalone service is a GLOBAL singleton: a later
+ * `qwen channel start` reads the state file of whatever cwd it runs
+ * from, so a workspace-scoped record alone resurrects every stopped
+ * channel when the restart happens from another workspace. The legacy
+ * global file closes that gap — `adoptLegacyChannelState` merges it into
+ * every workspace on its next start. Returns whether EVERY write
+ * persisted; callers whose message claims a durable stop must surface a
+ * partial loss.
+ */
+function recordStoppedChannels(
+  workspaceCwd: string | undefined,
+  channels: readonly string[],
+): boolean {
+  const scoped = new ChannelStateStore(
+    channelRuntimeStatePath(workspaceCwd),
+  ).trySetMany(channels, 'stopped');
+  // Without a workspace (an older release's pidfile) the scoped path IS
+  // the legacy global file; do not double-write it.
+  if (!workspaceCwd) return scoped;
+  const legacy = new ChannelStateStore(channelRuntimeStatePath()).trySetMany(
+    channels,
+    'stopped',
+  );
+  return scoped && legacy;
+}
+
 interface StopArgs {
   'daemon-url'?: string;
   token?: string;
@@ -113,9 +142,12 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
         pidfileSnapshot.owner === 'channel' &&
         pidfileSnapshot.channels.length > 0
       ) {
-        const recorded = new ChannelStateStore(
-          channelRuntimeStatePath(pidfileSnapshot.workspaceCwd),
-        ).trySetMany(pidfileSnapshot.channels, 'stopped');
+        // Same cross-workspace hazard as the live stop below: a restart
+        // from another workspace must see these channels as stopped.
+        const recorded = recordStoppedChannels(
+          pidfileSnapshot.workspaceCwd,
+          pidfileSnapshot.channels,
+        );
         writeStdoutLine(
           recorded
             ? 'No channel service is running. Recorded the crashed service channels as stopped.'
@@ -138,12 +170,12 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
     writeStdoutLine(`Stopping channel service (PID ${info.pid})...`);
 
     // An explicit stop must persist, so a later `--channel all` restart does
-    // not bring these channels back (#8975). Scope the record to the
-    // workspace the service was started from, matching its config scope;
-    // pidfiles from older releases fall back to the legacy global file.
-    const recorded = new ChannelStateStore(
-      channelRuntimeStatePath(info.workspaceCwd),
-    ).trySetMany(info.channels, 'stopped');
+    // not bring these channels back (#8975). The record is written for the
+    // workspace the service was started from AND the legacy global file,
+    // so a restart from a DIFFERENT workspace (global singleton service,
+    // commonly user-level config) honors the stop too; pidfiles from older
+    // releases carry no workspace and write the legacy file only.
+    const recorded = recordStoppedChannels(info.workspaceCwd, info.channels);
 
     if (!signalService(info.pid, 'SIGTERM')) {
       // This branch exits before the recorded-conditional message below,
