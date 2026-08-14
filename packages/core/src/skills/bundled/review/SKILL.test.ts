@@ -181,6 +181,40 @@ describe('bundled review skill', () => {
     expect(body).toContain("at the **root's own confidence**");
   });
 
+  it('pins the convergence posture and its load-bearing clauses', () => {
+    // The posture is the reviewer-side brake on the review→fix→re-review
+    // bloat loop. Each clause below carries a distinct obligation a later
+    // "simplify the prose" edit is most likely to drop: the floor's
+    // round-adaptive default, the never-defer-Criticals rule, the
+    // record-not-request contract, and the age-reference/anchor distinction
+    // (conflating `commitId` with the ledger `sha` would scope an
+    // incremental review past scope a fail-closed round never certified).
+    const body = skillBody();
+    expect(body).toContain('Through round 5 the floor is `suggestion`');
+    expect(body).toContain('**from round 6 it is `critical`**');
+    expect(body).toContain(
+      'A Critical is never deferred — any round, any floor',
+    );
+    expect(body).toContain('a non-Critical finding is recorded, not requested');
+    expect(body).toContain('an **age reference, never an incremental anchor**');
+    expect(body).toContain('skip the age rule, not the review');
+    // The explicit knob's two directions: `critical` from round 1, and
+    // `suggestion` as the off switch — the operator override the default
+    // must never shadow.
+    expect(body).toContain(
+      '`critical` applies the Critical-only posture from round 1',
+    );
+    expect(body).toContain('`suggestion` turns the posture **off**');
+    // Deferral is a posting decision: the finding stays in the artifact, and
+    // the deferred list must never become ledger work for the next round.
+    expect(body).toContain(
+      'the deferral is a posting decision recorded in the compose state',
+    );
+    expect(body).toContain(
+      'Findings the convergence posture deferred stay out the same way',
+    );
+  });
+
   it('routes both remote-resolution paths through match-remote', () => {
     // The pr-url path (Step 1) and the bare-PR-number path both resolve the
     // remote via the deterministic matcher. A later edit reverting either

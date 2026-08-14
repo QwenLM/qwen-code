@@ -1008,7 +1008,7 @@ describe('latestOwnLedger', () => {
   });
 
   it('takes the LATEST marker from the reviewing account only', () => {
-    const ledger = latestOwnLedger(
+    const recovered = latestOwnLedger(
       [
         review('bot', '2026-01-01T00:00:00Z', marker(1)),
         review('bot', '2026-01-03T00:00:00Z', marker(3)),
@@ -1018,7 +1018,7 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(3);
+    expect(recovered?.ledger.round).toBe(3);
   });
 
   it('breaks a submitted_at tie on the review id, not on array order', () => {
@@ -1026,14 +1026,14 @@ describe('latestOwnLedger', () => {
     // ordered only by id. Keeping the earlier one hands the next round the
     // older work list — the one failure the whole recovery exists to prevent.
     const at = '2026-01-01T00:00:00Z';
-    const ledger = latestOwnLedger(
+    const recovered = latestOwnLedger(
       [
         { id: 2, user: { login: 'bot' }, submitted_at: at, body: marker(1) },
         { id: 9, user: { login: 'bot' }, submitted_at: at, body: marker(4) },
       ],
       'bot',
     );
-    expect(ledger?.round).toBe(4);
+    expect(recovered?.ledger.round).toBe(4);
   });
 
   it('carries the anchor sha through the recovery seam intact', () => {
@@ -1058,7 +1058,41 @@ describe('latestOwnLedger', () => {
       ],
       'bot',
     );
-    expect(recovered).toEqual(anchored);
+    expect(recovered?.ledger).toEqual(anchored);
+  });
+
+  it('recovers the winning review’s own commit_id as the age reference', () => {
+    // The reference must come from the SAME review the ledger came from — a
+    // recovery that took the newest ledger but another review's commit_id
+    // would date old code against the wrong head. An invalid or missing
+    // commit_id yields null, never a truncated or garbage reference.
+    const head = 'a'.repeat(40);
+    const recovered = latestOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'b'.repeat(40),
+        },
+        {
+          ...review('bot', '2026-01-02T00:00:00Z', marker(2)),
+          commit_id: head,
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(2);
+    expect(recovered?.commitId).toBe(head);
+    const invalid = latestOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          commit_id: 'abc123',
+        },
+      ],
+      'bot',
+    );
+    expect(invalid?.ledger.round).toBe(1);
+    expect(invalid?.commitId).toBeNull();
   });
 
   it('yields nothing with no login, no marker, or a malformed one', () => {

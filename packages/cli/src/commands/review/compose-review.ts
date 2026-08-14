@@ -126,6 +126,18 @@ export interface ComposeReviewInput {
   /** Suggestions discarded as unanchorable (offline validation or 422). */
   suggestionsDiscarded?: number;
   /**
+   * Non-Critical findings the convergence posture deferred — Step 6's
+   * round-aware posting discipline (from round 6, or under an explicit
+   * `--severity-floor critical`, and the rounds-2-5 code-age rule). One line
+   * each (`file:line — title`). They are neither drafted inline nor counted
+   * toward `S` — the whole point is that a deferral must not regenerate a
+   * review round — but they must not vanish either: the body renders them as
+   * a disclosed, NON-capping list, so the record survives on the PR while
+   * the round stays convergent. A deferral never withholds the ledger
+   * anchor: it is a posting decision, not unreviewed scope.
+   */
+  deferredSuggestions?: string[];
+  /**
    * Existing Criticals already on the PR whose Step 6 re-check landed on
    * `cannot tell` — one line each (location + what could not be decided).
    * Not counted in `C` (the review did not confirm them), but their
@@ -486,6 +498,37 @@ export function composeReview(
 }
 
 /**
+ * The previous posted round's number, recovered from the side file
+ * `pr-context` wrote — never from the model. 0 when the plan names no PR or
+ * no previous round was recovered: this is round 1. Shared by the marker
+ * (which stamps `prevRound + 1`) and the deferred-suggestions clause (which
+ * names the round the posture engaged on), so the two cannot disagree about
+ * which round this is.
+ */
+function prevRoundFor(planPath: string | undefined): number {
+  try {
+    if (!planPath) return 0;
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      prNumber?: unknown;
+    };
+    const pr = plan?.prNumber;
+    const isPr =
+      (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+      (typeof pr === 'string' && /^\d+$/.test(pr));
+    if (!isPr) return 0;
+    const prev = JSON.parse(
+      readFileSync(
+        join(dirname(planPath), `qwen-review-pr-${pr}-prev-ledger.json`),
+        'utf8',
+      ),
+    ) as Ledger;
+    return Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * The next round's marker, or null when this review has no PR to carry one.
  * Round number comes from the side file `pr-context` wrote from the PREVIOUS
  * posted round (+1) — never from the model, never from this input.
@@ -505,22 +548,7 @@ function ledgerMarkerFor(
       (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
       (typeof pr === 'string' && /^\d+$/.test(pr));
     if (!isPr) return null;
-    let prevRound = 0;
-    try {
-      const prev = JSON.parse(
-        readFileSync(
-          join(
-            dirname(input.planPath),
-            `qwen-review-pr-${pr}-prev-ledger.json`,
-          ),
-          'utf8',
-        ),
-      ) as Ledger;
-      if (Number.isInteger(prev.round) && prev.round > 0)
-        prevRound = prev.round;
-    } catch {
-      // No previous posted round recovered: this is round 1.
-    }
+    const prevRound = prevRoundFor(input.planPath);
     // The anchor rides only when this round's scope was clean, and "clean" is
     // the verdict this module just computed: `cappedBy` aggregates every
     // fail-closed state — each named input pushes its own cap entry, plus the
@@ -585,6 +613,12 @@ function composeReviewBody(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );
+  const deferredSuggestions = toStringList(
+    input.deferredSuggestions,
+    'deferredSuggestions',
+  )
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
@@ -1545,6 +1579,43 @@ function composeReviewBody(
       ]
     : [];
 
+  // Non-Critical findings the convergence posture deferred: disclosed on
+  // EVERY event, never capping. The disclosure is the record the round
+  // discipline demands — a deferral silently dropped is a finding lost, and
+  // a deferral that capped would withhold the incremental anchor and
+  // regenerate exactly the full-diff re-review the posture exists to end.
+  // Entries are model-written: newlines collapse the way the cannot-tell
+  // entries collapse, and the list is capped like the budget-gap lines — an
+  // unbounded join would drown the verdict it rides on. The round number is
+  // the same side-file-derived one the ledger marker stamps, so the clause
+  // and the marker cannot disagree about which round deferred.
+  const MAX_DEFERRED_SUGGESTION_LINES = 20;
+  const deferredShown = deferredSuggestions
+    .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
+    .map((entry) =>
+      entry
+        .split('\n')
+        .map((seg) => seg.trim())
+        .filter((seg) => seg !== '')
+        .join(' '),
+    );
+  const deferredMore = deferredSuggestions.length - deferredShown.length;
+  const deferredRound = deferredSuggestions.length
+    ? prevRoundFor(input.planPath) + 1
+    : 0;
+  const deferredSuggestionsBlock: Bi[] = deferredSuggestions.length
+    ? [
+        {
+          en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker) — recorded, not requested in this round:\n\n${deferredShown
+            .map((entry) => `- ${entry}`)
+            .join(
+              '\n',
+            )}${deferredMore > 0 ? `\n- …and ${deferredMore} more (see the run report)` : ''}`,
+          zh: `收敛姿态下延后（第 ${deferredRound} 轮，非阻断）——已记录，本轮不要求修改：共 ${deferredSuggestions.length} 条（原文未翻译，列表见上方英文部分）。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -1559,6 +1630,7 @@ function composeReviewBody(
       ...deferredBlock,
       ...testPlanBlock,
       ...repositoryContextBlock,
+      ...deferredSuggestionsBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -1580,20 +1652,27 @@ function composeReviewBody(
     // disclosure, not a defect — hiding "stopped at the tool budget" behind
     // an unqualified LGTM would break the one promise the disclosure channel
     // makes, that it reaches the author mechanically.
+    // With posture-deferred Suggestions on record, "No issues found" would be
+    // a lie the deferral list two lines down contradicts: the review DID find
+    // them — it recorded them and chose, per the posture, not to request them.
     return {
       event,
       body: render(
         [
-          { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          deferredSuggestionsBlock.length
+            ? { en: 'No blocking issues. LGTM! ✅', zh: '无阻断问题。LGTM！✅' }
+            : { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
           ...notReviewedParts,
           ...deferredBlock,
           ...testPlanBlock,
           ...repositoryContextBlock,
+          ...deferredSuggestionsBlock,
         ],
         notReviewedParts.length ||
           deferredBlock.length ||
           testPlanBlock.length ||
-          repositoryContextBlock.length
+          repositoryContextBlock.length ||
+          deferredSuggestionsBlock.length
           ? '\n\n'
           : ' ',
       ),
@@ -1735,6 +1814,10 @@ function composeReviewBody(
   // 6d. Repository proof boundaries (non-capping) — dimensions the context
   //     planner recommends disclosing without claiming the code is defective.
   clauses.push(...repositoryContextBlock);
+
+  // 6e. Convergence-posture deferrals (non-capping) — non-Critical findings
+  //     recorded but not requested this round.
+  clauses.push(...deferredSuggestionsBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers

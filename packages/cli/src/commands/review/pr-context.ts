@@ -66,6 +66,8 @@ export interface RawReview {
   body?: string;
   state?: string; // APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING
   submitted_at?: string;
+  /** The head commit the review was submitted against, per the API. */
+  commit_id?: string;
 }
 
 interface PrContextArgs {
@@ -641,6 +643,13 @@ function blockerSection(
 }
 
 /**
+ * A full object id, as the API serves `commit_id`. Deliberately stricter than
+ * the ledger marker's abbreviated-anchor check: this value comes from the API
+ * response, not from an untrusted body, and a full sha is what it always is.
+ */
+const COMMIT_SHA_RE = /^[0-9a-f]{40,64}$/;
+
+/**
  * The latest machine ledger the REVIEWING account itself posted, if any.
  *
  * Own-account only: the ledger claims "these are the findings the previous
@@ -652,13 +661,27 @@ function blockerSection(
  * which is monotonic: keeping the earlier review on a tie would hand the next
  * round the older work list, the one failure this whole recovery exists to
  * prevent.
+ *
+ * `commitId` is the review's own `commit_id` — the head the previous round's
+ * review was submitted against, set by GitHub, not by the body. It is the age
+ * reference for Step 6's convergence posture ("was this line changed since
+ * the previous round saw it?") and NEVER an incremental anchor: the ledger's
+ * `sha` certifies "this range was cleanly reviewed" and is withheld on a
+ * fail-closed round on purpose, while `commit_id` exists on every posted
+ * round, fail-closed or not — a posting bar needs a reference point, not a
+ * certification.
  */
 export function latestOwnLedger(
   reviews: RawReview[],
   login: string | null,
-): Ledger | null {
+): { ledger: Ledger; commitId: string | null } | null {
   if (!login) return null;
-  let best: { at: string; id: number; ledger: Ledger } | null = null;
+  let best: {
+    at: string;
+    id: number;
+    ledger: Ledger;
+    commitId: string | null;
+  } | null = null;
   for (const r of reviews) {
     if (r.user?.login !== login) continue;
     const ledger = parseLedger(r.body);
@@ -666,10 +689,18 @@ export function latestOwnLedger(
     const at = r.submitted_at ?? '';
     const id = typeof r.id === 'number' ? r.id : 0;
     if (!best || at > best.at || (at === best.at && id > best.id)) {
-      best = { at, id, ledger };
+      best = {
+        at,
+        id,
+        ledger,
+        commitId:
+          typeof r.commit_id === 'string' && COMMIT_SHA_RE.test(r.commit_id)
+            ? r.commit_id
+            : null,
+      };
     }
   }
-  return best?.ledger ?? null;
+  return best ? { ledger: best.ledger, commitId: best.commitId } : null;
 }
 
 /** Render the previous round's ledger for the context file. */
@@ -961,17 +992,18 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // posted review, and persist it beside the context file: compose-review reads
   // the side file for the round number, and Step 6 owes each entry a ruling.
   // Best-effort — offline/unauthenticated just means no ledger, never a failure.
-  let prevLedger: Ledger | null = null;
+  let prevRecovered: { ledger: Ledger; commitId: string | null } | null = null;
   try {
     // `currentUser()` is a network round-trip; with no reviews on the PR there
     // is nothing for its answer to match against, so it is not made.
-    prevLedger = reviews.length
+    prevRecovered = reviews.length
       ? latestOwnLedger(reviews, currentUser())
       : null;
   } catch {
-    prevLedger = null;
+    prevRecovered = null;
   }
-  if (prevLedger) {
+  const prevLedger = prevRecovered?.ledger ?? null;
+  if (prevRecovered) {
     // mkdir FIRST and guard: this write precedes the one below that creates the
     // directory, and an unguarded ENOENT would fail the whole command over a
     // best-effort carry-forward.
@@ -979,7 +1011,17 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
       mkdirSync(dirname(out), { recursive: true });
       writeFileSync(
         join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
-        JSON.stringify(prevLedger, null, 2),
+        // The ledger's own fields plus `commitId` — the previous round's
+        // reviewed head, Step 6's age reference for the convergence posture.
+        // Readers of the ledger shape (compose-review's round count, Step 1's
+        // recovered-anchor check) ignore the extra key.
+        JSON.stringify(
+          prevRecovered.commitId
+            ? { ...prevRecovered.ledger, commitId: prevRecovered.commitId }
+            : prevRecovered.ledger,
+          null,
+          2,
+        ),
       );
     } catch {
       // No side file: compose-review starts the round count over, nothing else.

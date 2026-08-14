@@ -355,6 +355,95 @@ describe('parseReviewArgs', () => {
   });
 });
 
+describe('parseReviewArgs — --severity-floor (the convergence posture knob)', () => {
+  it('defaults to auto: the round-adaptive rule is resolved at Step 6, not here', () => {
+    const got = parseReviewArgs('6711');
+    expect(got.severityFloor).toBe('auto');
+    expect(got.severityFloorSource).toBe('default');
+  });
+
+  it('parses both forms case-insensitively; the last valid occurrence wins', () => {
+    expect(parseReviewArgs('6711 --severity-floor critical')).toMatchObject({
+      severityFloor: 'critical',
+      severityFloorSource: 'explicit',
+    });
+    expect(parseReviewArgs('6711 --severity-floor=Suggestion')).toMatchObject({
+      severityFloor: 'suggestion',
+    });
+    expect(
+      parseReviewArgs(
+        '6711 --severity-floor critical --severity-floor suggestion',
+      ),
+    ).toMatchObject({ severityFloor: 'suggestion' });
+  });
+
+  it('warns and ignores the flag on a non-PR target, exactly as --comment does', () => {
+    const got = parseReviewArgs('src/foo.ts --severity-floor critical');
+    expect(got.target.type).toBe('file');
+    expect(got.severityFloor).toBe('auto');
+    expect(got.severityFloorSource).toBe('default');
+    expect(got.warnings.some((w) => w.includes('--severity-floor'))).toBe(true);
+  });
+
+  it('an invalid value warns naming what is in effect, and never eats the target', () => {
+    // The typo is discarded when another token is the target — without the
+    // disposal rule, `criticl` would classify as a file path and shadow the
+    // real PR target that follows it.
+    const got = parseReviewArgs('--severity-floor criticl 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --severity-floor value "criticl"') &&
+          w.includes('round-adaptive default'),
+      ),
+    ).toBe(true);
+  });
+
+  it('flag-final or flag-followed is a missing value, never a consumed flag', () => {
+    const got = parseReviewArgs('6711 --severity-floor --comment');
+    expect(got.comment.requested).toBe(true);
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) => w.includes('--severity-floor requires a value')),
+    ).toBe(true);
+  });
+
+  it('applies the configured review.severityFloor; an explicit flag still wins', () => {
+    expect(
+      parseReviewArgs('6711', { severityFloor: 'critical' }),
+    ).toMatchObject({
+      severityFloor: 'critical',
+      severityFloorSource: 'configured',
+    });
+    expect(
+      parseReviewArgs('6711 --severity-floor suggestion', {
+        severityFloor: 'critical',
+      }),
+    ).toMatchObject({
+      severityFloor: 'suggestion',
+      severityFloorSource: 'explicit',
+    });
+  });
+
+  it('a configured floor is silently inert on a non-PR target', () => {
+    const got = parseReviewArgs('src/foo.ts', { severityFloor: 'critical' });
+    expect(got.severityFloor).toBe('auto');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('an invalid configured floor warns on a PR target instead of dropping silently', () => {
+    const got = parseReviewArgs('6711', { severityFloor: 'blocker' });
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid review.severityFloor value "blocker"'),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe('parseReviewArgs — settings-provided defaults', () => {
   it('applies the configured effort when --effort is absent', () => {
     const got = parseReviewArgs('6711', { effort: 'medium' });

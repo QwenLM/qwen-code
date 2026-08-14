@@ -28,6 +28,14 @@ import { bundleStalenessNotices } from './lib/stale-bundle.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
+/**
+ * The posting floor for findings on a PR review: `critical` posts only
+ * Critical findings (non-Criticals are recorded and deferred), `suggestion`
+ * posts Criticals and Suggestions — today's behaviour. The floor governs what
+ * the review PUBLISHES, never what it finds or verifies.
+ */
+export type ReviewSeverityFloor = 'critical' | 'suggestion';
+
 export type ReviewTarget =
   | { type: 'pr-number'; number: number }
   | {
@@ -79,6 +87,17 @@ export interface ParsedReviewArgs {
     /** `--fix` applies (the target has a durable working tree). */
     effective: boolean;
   };
+  /**
+   * The posting floor, or `'auto'` — the round-adaptive default, resolved at
+   * Step 6 where the round is known (`suggestion` through round 5, `critical`
+   * from round 6). The parser cannot resolve `auto` itself: the round comes
+   * from the previous posted round's ledger, which is not fetched yet. An
+   * explicit `--severity-floor` on a non-PR target is ignored with a warning,
+   * exactly as `--comment` is — the floor is a posting rule, and rounds exist
+   * only for PRs.
+   */
+  severityFloor: ReviewSeverityFloor | 'auto';
+  severityFloorSource: 'explicit' | 'configured' | 'default';
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -90,6 +109,11 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
   'low',
   'medium',
   'high',
+]);
+
+export const SEVERITY_FLOORS: ReadonlySet<string> = new Set([
+  'critical',
+  'suggestion',
 ]);
 
 // The verdict's owner/repo/number are interpolated into `gh` commands by the
@@ -110,6 +134,11 @@ const PR_URL_RE =
 function asEffort(value: string): ReviewEffort | null {
   const lower = value.toLowerCase();
   return EFFORT_LEVELS.has(lower) ? (lower as ReviewEffort) : null;
+}
+
+function asSeverityFloor(value: string): ReviewSeverityFloor | null {
+  const lower = value.toLowerCase();
+  return SEVERITY_FLOORS.has(lower) ? (lower as ReviewSeverityFloor) : null;
 }
 
 /**
@@ -206,6 +235,12 @@ export function parseReviewArgs(
      * authorises only the PR the arguments name.
      */
     comment?: boolean;
+    /**
+     * The standing `review.severityFloor` setting, raw (`auto` already mapped
+     * to undefined by the caller). Validated exactly like the flag — a typo
+     * warns and falls back to the round-adaptive default.
+     */
+    severityFloor?: string;
   } = {},
 ): ParsedReviewArgs {
   const tokens = tokenizeArgs(raw);
@@ -215,6 +250,7 @@ export function parseReviewArgs(
   let commentRequestedByFlag = false;
   let fixRequested = false;
   let explicitEffort: ReviewEffort | null = null;
+  let explicitFloor: ReviewSeverityFloor | null = null;
 
   // The configured default gets the same validation as an explicit flag:
   // settings loading performs no enum validation, so a hand-edited typo
@@ -231,6 +267,16 @@ export function parseReviewArgs(
       invalidConfiguredEffort = defaults.effort;
     }
   }
+  let configuredFloor: ReviewSeverityFloor | undefined;
+  let invalidConfiguredFloor: string | undefined;
+  if (defaults.severityFloor !== undefined) {
+    const normalized = asSeverityFloor(defaults.severityFloor);
+    if (normalized !== null) {
+      configuredFloor = normalized;
+    } else {
+      invalidConfiguredFloor = defaults.severityFloor;
+    }
+  }
 
   // Warnings about a rejected `--effort` occurrence must state what effort
   // is ACTUALLY in effect — which is not known until every occurrence is
@@ -244,15 +290,19 @@ export function parseReviewArgs(
     | { kind: 'discarded'; value: string }
     | { kind: 'kept-as-target'; value: string };
   const effortIssues: EffortIssue[] = [];
+  // `--severity-floor` shares the value-token grammar and therefore the same
+  // deferred-warning problem; its issues are a separate list because its
+  // resolution sentence is its own.
+  const floorIssues: EffortIssue[] = [];
 
-  // First pass: pull out flags (and each `--effort`'s value token, when the
-  // spaced form legitimately consumes one). Non-flag tokens are kept in
-  // order; invalid spaced `--effort` values are kept as *candidates* whose
-  // disposal is decided after we know whether any other token is the target.
+  // First pass: pull out flags (and each value-taking flag's value token,
+  // when the spaced form legitimately consumes one). Non-flag tokens are kept
+  // in order; invalid spaced values are kept as *candidates* whose disposal
+  // is decided after we know whether any other token is the target.
   interface Kept {
     token: string;
-    /** True when this token arrived as an invalid `--effort` value. */
-    fromInvalidEffortValue: boolean;
+    /** Set when this token arrived as an invalid value of the named flag. */
+    invalidValueOf?: '--effort' | '--severity-floor';
   }
   const kept: Kept[] = [];
 
@@ -297,7 +347,34 @@ export function parseReviewArgs(
       // Spaced form with an invalid non-flag value. Whether `next` is a
       // discarded typo or the review target is decided below, once we know
       // whether any other token can be the target.
-      kept.push({ token: next, fromInvalidEffortValue: true });
+      kept.push({ token: next, invalidValueOf: '--effort' });
+      i++;
+      continue;
+    }
+
+    if (token === '--severity-floor' || token.startsWith('--severity-floor=')) {
+      if (token.includes('=')) {
+        const value = token.slice(token.indexOf('=') + 1);
+        const floorValue = asSeverityFloor(value);
+        if (floorValue !== null) {
+          explicitFloor = floorValue;
+        } else {
+          floorIssues.push({ kind: 'invalid-eq', value });
+        }
+        continue;
+      }
+      const next = i + 1 < tokens.length ? tokens[i + 1] : undefined;
+      const nextFloor = next !== undefined ? asSeverityFloor(next) : null;
+      if (nextFloor !== null) {
+        explicitFloor = nextFloor;
+        i++;
+        continue;
+      }
+      if (next === undefined || isFlag(next)) {
+        floorIssues.push({ kind: 'missing' });
+        continue;
+      }
+      kept.push({ token: next, invalidValueOf: '--severity-floor' });
       i++;
       continue;
     }
@@ -308,21 +385,22 @@ export function parseReviewArgs(
       continue;
     }
 
-    kept.push({ token, fromInvalidEffortValue: false });
+    kept.push({ token });
   }
 
-  // Disposal rule for invalid `--effort` values: a typo is discarded when
-  // any *other* token is the target; it survives only when it is itself the
+  // Disposal rule for invalid flag values: a typo is discarded when any
+  // *other* token is the target; it survives only when it is itself the
   // sole target candidate (`/review --effort 6711`).
-  const hasOtherCandidate = kept.some((k) => !k.fromInvalidEffortValue);
+  const hasOtherCandidate = kept.some((k) => k.invalidValueOf === undefined);
   const targetTokens: string[] = [];
   for (const k of kept) {
-    if (k.fromInvalidEffortValue && hasOtherCandidate) {
-      effortIssues.push({ kind: 'discarded', value: k.token });
+    const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
+    if (k.invalidValueOf !== undefined && hasOtherCandidate) {
+      issues.push({ kind: 'discarded', value: k.token });
       continue;
     }
-    if (k.fromInvalidEffortValue) {
-      effortIssues.push({ kind: 'kept-as-target', value: k.token });
+    if (k.invalidValueOf !== undefined) {
+      issues.push({ kind: 'kept-as-target', value: k.token });
     }
     targetTokens.push(k.token);
   }
@@ -464,12 +542,70 @@ export function parseReviewArgs(
     );
   }
 
+  // The floor resolves like the effort — explicit flag over configured
+  // setting over the built-in default — except the default is `auto`: the
+  // round-adaptive rule, which only Step 6 can resolve (the round comes from
+  // the previous posted round's ledger, not fetched yet). Non-PR gating
+  // mirrors `--comment`: the floor is a posting rule and rounds exist only
+  // for PRs, so an explicit flag on a local/file target warns and is
+  // ignored, and a configured setting is silently inert there.
+  let severityFloor: ReviewSeverityFloor | 'auto' = 'auto';
+  let severityFloorSource: ParsedReviewArgs['severityFloorSource'] = 'default';
+  if (explicitFloor !== null && !isPr) {
+    warnings.push(
+      'Warning: `--severity-floor` flag is ignored because the review target is not a PR.',
+    );
+  } else if (explicitFloor !== null) {
+    severityFloor = explicitFloor;
+    severityFloorSource = 'explicit';
+  } else if (configuredFloor !== undefined && isPr) {
+    severityFloor = configuredFloor;
+    severityFloorSource = 'configured';
+  }
+  const floorResolution =
+    severityFloorSource === 'explicit'
+      ? `--severity-floor ${severityFloor} (the last valid occurrence) is in effect`
+      : severityFloorSource === 'configured'
+        ? 'using the configured review.severityFloor'
+        : 'using the round-adaptive default';
+  for (const issue of floorIssues) {
+    switch (issue.kind) {
+      case 'invalid-eq':
+        warnings.push(
+          `Invalid --severity-floor value ${JSON.stringify(issue.value)}; ${floorResolution}.`,
+        );
+        break;
+      case 'missing':
+        warnings.push(`--severity-floor requires a value; ${floorResolution}.`);
+        break;
+      case 'discarded':
+        warnings.push(
+          `Invalid --severity-floor value ${JSON.stringify(issue.value)} discarded; ${floorResolution}.`,
+        );
+        break;
+      case 'kept-as-target':
+        warnings.push(
+          `Invalid --severity-floor value ${JSON.stringify(issue.value)}; treating it as the review target — ${floorResolution}.`,
+        );
+        break;
+      default:
+        break;
+    }
+  }
+  if (invalidConfiguredFloor !== undefined && isPr) {
+    warnings.push(
+      `Invalid review.severityFloor value ${JSON.stringify(invalidConfiguredFloor)} in settings; ${floorResolution}.`,
+    );
+  }
+
   return {
     target,
     effort,
     effortSource,
     comment: { requested: commentRequestedByFlag, effective: commentEffective },
     fix: { requested: fixRequested, effective: fixEffective },
+    severityFloor,
+    severityFloorSource,
     extraTokens,
     unknownFlags,
     warnings,
@@ -494,6 +630,7 @@ interface ParseArgsCliArgs {
 function reviewDefaultsFromSettings(): {
   effort?: string;
   comment?: boolean;
+  severityFloor?: string;
 } {
   const review = operatorReviewSettings();
   return {
@@ -502,13 +639,18 @@ function reviewDefaultsFromSettings(): {
         ? undefined
         : review.effort,
     comment: review.comment,
+    severityFloor:
+      review.severityFloor === undefined ||
+      review.severityFloor.toLowerCase() === 'auto'
+        ? undefined
+        : review.severityFloor,
   };
 }
 
 export const parseArgsCommand: CommandModule = {
   command: 'parse-args [raw]',
   describe:
-    'Parse the /review skill argument string (--comment, --fix, --effort, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
+    'Parse the /review skill argument string (--comment, --fix, --effort, --severity-floor, target disambiguation) and emit the verdict as JSON; pass the string on stdin via --stdin (a positional that begins with a dash never reaches this handler — yargs rejects it as an unknown flag)',
   builder: (yargs) =>
     yargs
       .positional('raw', {

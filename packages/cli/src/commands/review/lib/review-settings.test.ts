@@ -53,11 +53,17 @@ describe('operatorReviewSettings', () => {
   });
 
   it('explicit values pass through unchanged', () => {
-    setReview({ attribution: false, comment: true, effort: 'low' });
+    setReview({
+      attribution: false,
+      comment: true,
+      effort: 'low',
+      severityFloor: 'critical',
+    });
     expect(operatorReviewSettings()).toEqual({
       attribution: false,
       comment: true,
       effort: 'low',
+      severityFloor: 'critical',
     });
   });
 
@@ -69,6 +75,13 @@ describe('operatorReviewSettings', () => {
   it('drops a non-string effort instead of leaking it to callers', () => {
     setReview({ effort: 42 });
     expect(operatorReviewSettings().effort).toBeUndefined();
+  });
+
+  it('severityFloor rides the same raw-passthrough contract as effort', () => {
+    setReview({ severityFloor: 'Auto' });
+    expect(operatorReviewSettings().severityFloor).toBe('Auto');
+    setReview({ severityFloor: 42 });
+    expect(operatorReviewSettings().severityFloor).toBeUndefined();
   });
 
   it('a hand-edited non-boolean attribution falls back to the schema default', () => {

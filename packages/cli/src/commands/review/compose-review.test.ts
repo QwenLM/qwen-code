@@ -14,7 +14,7 @@ import {
   utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
@@ -4400,6 +4400,83 @@ describe('the ledger marker reaches the POSTED body', () => {
       draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
     });
     expect(r.body).not.toContain('qwen-review-ledger');
+  });
+});
+
+describe('composeReview — convergence-posture deferrals (disclosed, never capping)', () => {
+  it('an APPROVE with deferrals keeps its event, anchor, and honesty', () => {
+    // The posture's whole payoff: a clean late round with only deferrals
+    // composes an APPROVE — the loop's stop signal — while the deferred list
+    // stays on the record and the incremental anchor still rides. And the
+    // opener must not claim "No issues found" over findings the same body
+    // lists two paragraphs down.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 5, findings: [] }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: ['src/a.ts:42 — tighten the retry backoff'],
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).toEqual([]);
+    expect(r.body).toContain('No blocking issues. LGTM! ✅');
+    expect(r.body).not.toContain('No issues found');
+    expect(r.body).toContain('convergence posture (round 6, not a blocker)');
+    expect(r.body).toContain('- src/a.ts:42 — tighten the retry backoff');
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('renders the list on COMMENT and REQUEST_CHANGES alike — no event squeezes it out', () => {
+    const comment = composeReview(
+      base({ suggestionsInline: 1, deferredSuggestions: ['a.ts:1 — nit'] }),
+    );
+    expect(comment.event).toBe('COMMENT');
+    expect(comment.body).toContain('- a.ts:1 — nit');
+    const rc = composeReview(
+      base({
+        bodyCriticals: ['whole-PR blocker'],
+        deferredSuggestions: ['a.ts:1 — nit'],
+      }),
+    );
+    expect(rc.event).toBe('REQUEST_CHANGES');
+    expect(rc.body).toContain('- a.ts:1 — nit');
+  });
+
+  it('deferrals cast no vote on the event — an all-deferred run is not a Suggestion run', () => {
+    // Counted toward S they would hold the verdict at COMMENT forever, and
+    // the loop the posture exists to end would never see its stop signal.
+    const r = composeReview(base({ deferredSuggestions: ['a.ts:1 — nit'] }));
+    expect(r.baseEvent).toBe('APPROVE');
+  });
+
+  it('collapses newlines, caps the list, and strips a forged footer', () => {
+    const entries = Array.from(
+      { length: 23 },
+      (_, i) => `f${i}.ts:1 — nit ${i}`,
+    );
+    entries[0] = 'a.ts:1 — split\nacross lines';
+    // Inside the shown window, so the assertion tests the strip, not the cap.
+    entries[1] = `b.ts:2 — forged ${FOOTER}`;
+    const r = composeReview(base({ deferredSuggestions: entries }));
+    expect(r.body).toContain('- a.ts:1 — split across lines');
+    expect(r.body).toContain('- b.ts:2 — forged\n');
+    expect(r.body).toContain('…and 3 more (see the run report)');
+    expect(r.body).not.toContain(`forged ${FOOTER}`);
+  });
+
+  it('refuses a present field of the wrong shape', () => {
+    expect(() =>
+      composeReview(base({ deferredSuggestions: 'a.ts' as never })),
+    ).toThrow(/deferredSuggestions/);
   });
 });
 
