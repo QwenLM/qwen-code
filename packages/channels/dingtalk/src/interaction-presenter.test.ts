@@ -11,7 +11,11 @@ import {
 } from './interactive-card-client.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import { QuestionCardController } from './question-card-controller.js';
-import { StatusCardController } from './status-card-controller.js';
+import {
+  CONTENT_LIMIT,
+  StatusCardController,
+  TRUNCATION_MARKER,
+} from './status-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
@@ -764,6 +768,66 @@ describe('DingtalkInteractionPresenter', () => {
       'photo [Image pending]',
       'session-1',
     );
+  });
+
+  it('neutralizes complete file markers in text fallbacks', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      'file [FILE: /Users/ben/private/report.pdf] ready',
+    );
+
+    await expect(
+      presenter.closeOutput('segment-1', '', 'response_boundary'),
+    ).resolves.toBe(true);
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'file  ready',
+      'session-1',
+    );
+  });
+
+  it.each([
+    [
+      'tilde-fenced code',
+      ['~~~text', '[FILE: /Users/ben/private/report.pdf]', '~~~'].join('\n'),
+    ],
+    ['indented code', '    [FILE: /Users/ben/private/report.pdf]'],
+    [
+      'multiline inline code',
+      '`example\n[FILE: /Users/ben/private/report.pdf]\ncontinued`',
+    ],
+  ])('preserves file-like text inside %s', async (_label, output) => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-1'), output);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith('cid-1', output, 'session-1');
+  });
+
+  it('does not expose a file path when truncation splits its marker', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    const marker = '[FILE: /Users/ben/private/report.pdf]';
+    const splitOffset = '[FILE: '.length;
+    const prefix = 'x'.repeat(TRUNCATION_MARKER.length + 10);
+    const suffix = 'z'.repeat(
+      CONTENT_LIMIT - TRUNCATION_MARKER.length + splitOffset - marker.length,
+    );
+    presenter.appendOutput(segment('segment-1'), `${prefix}${marker}${suffix}`);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).toBe(`${TRUNCATION_MARKER}${suffix}`);
+    expect(fallbackText).not.toContain('/Users/ben/private');
   });
 
   it('keeps a bare trailing bracket out of text fallbacks', async () => {
