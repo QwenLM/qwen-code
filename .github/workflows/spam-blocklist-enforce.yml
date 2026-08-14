@@ -245,20 +245,30 @@ jobs:
               // would 403 and red-run this one. Defer to the lanes holding
               // a write token: pull_request_target closes fork PRs at open
               // time, the hourly sweep deletes comments and repairs thread
-              // state. A deleted fork arrives as head.repo: null with the
-              // same read-only downgrade, so a missing head repo counts as
-              // a fork.
+              // state. The payload carries no top-level pull_request —
+              // PR-ness sits on issue.pull_request and the head repo must
+              // be resolved with pulls.get. A deleted fork reads back as
+              // head.repo: null with the same read-only downgrade, so a
+              // missing head repo counts as a fork.
               if (
-                payload.pull_request &&
-                (!payload.pull_request.head?.repo ||
-                  payload.pull_request.head.repo.full_name !== `${owner}/${repo}`) &&
+                issue?.pull_request &&
                 (isBlocked(comment?.user?.login) ||
                   isBlocked(issue?.user?.login))
               ) {
-                core.notice(
-                  'fork PR: GITHUB_TOKEN is read-only here; deferring to the sweep lane',
-                );
-                return;
+                const { data: pr } = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: issue.number,
+                });
+                if (
+                  !pr.head?.repo ||
+                  pr.head.repo.full_name !== `${owner}/${repo}`
+                ) {
+                  core.notice(
+                    'fork PR: GITHUB_TOKEN is read-only here; deferring to the sweep lane',
+                  );
+                  return;
+                }
               }
               if (isBlocked(comment?.user?.login)) {
                 await run(`delete issue comment ${comment.id}`, () =>

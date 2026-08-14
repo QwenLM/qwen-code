@@ -222,6 +222,21 @@ describe('spam-blocklist-enforce: script wiring', () => {
       'the LOOKBACK_HOURS consumer depends on this declared input',
     );
   });
+
+  it('keeps ${{ }} expressions out of the script bodies', () => {
+    // The runner substitutes ${{ }} before the script text is parsed as
+    // JavaScript: an expression inside a script body interpolates
+    // event-controlled text (a comment body) into code running on the
+    // write token. The behavioural half cannot catch one — interpolated
+    // text inside a JS string literal is inert in the AsyncFunction
+    // harness but live in production.
+    for (const [name, job] of jobs) {
+      assert.ok(
+        !String(scriptStepOf(job).with.script).includes('${{'),
+        `expression interpolation inside the ${name} script body is code injection`,
+      );
+    }
+  });
 });
 
 describe('spam-blocklist-enforce: event coverage', () => {
@@ -351,13 +366,18 @@ const makeCore = () => {
 
 // The fake Octokit records every mutation and returns canned pages for the
 // three repo-wide listings the sweep paginates over, plus canned `data`
-// replies for the lock-race read-back (issues.get).
+// replies for the read-backs and PR lookups (issues.get, pulls.get). A
+// reply may also be a function of the call params, so one run can model
+// per-thread verdicts.
 const makeGithub = ({ calls, fail = () => null, pages = {}, replies = {} }) => {
   const record = (name) => async (params) => {
     calls.push({ name, params });
     const error = fail(name, params);
     if (error) throw error;
-    return { data: replies[name] ?? {} };
+    const reply = replies[name];
+    return {
+      data: typeof reply === 'function' ? reply(params) : (reply ?? {}),
+    };
   };
   return {
     rest: {
@@ -374,6 +394,7 @@ const makeGithub = ({ calls, fail = () => null, pages = {}, replies = {} }) => {
       pulls: {
         deleteReviewComment: record('pulls.deleteReviewComment'),
         update: record('pulls.update'),
+        get: record('pulls.get'),
         listReviewCommentsForRepo: 'pulls.listReviewCommentsForRepo',
       },
     },
@@ -460,16 +481,24 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
   it('does not close an innocent PR that merely received spam', async () => {
     // The whole reason closing keys on thread authorship: one spam comment
     // must not close an unrelated contributor's pull request.
-    const { calls } = await enforce('issue_comment', {
-      comment: { id: 9, user: { login: 'spamuser' } },
-      issue: {
-        number: 8626,
-        user: { login: 'legit' },
-        state: 'open',
-        pull_request: {},
+    const { calls } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'spamuser' } },
+        issue: {
+          number: 8626,
+          user: { login: 'legit' },
+          state: 'open',
+          pull_request: {},
+        },
       },
-    });
-    assert.deepEqual(names(calls), ['issues.deleteComment']);
+      {
+        replies: {
+          'pulls.get': { head: { repo: { full_name: 'QwenLM/qwen-code' } } },
+        },
+      },
+    );
+    assert.deepEqual(names(calls), ['pulls.get', 'issues.deleteComment']);
   });
 
   it('closes and locks the thread when the blocklisted user authored it', async () => {
@@ -504,81 +533,137 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
   });
 
   it('routes a blocklisted author bumping their own PR through pulls.update', async () => {
-    const { calls } = await enforce('issue_comment', {
-      comment: { id: 9, user: { login: 'spamuser' } },
-      issue: {
-        number: 77,
-        user: { login: 'spamuser' },
-        state: 'open',
-        pull_request: { url: 'x' },
+    const { calls } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'spamuser' } },
+        issue: {
+          number: 77,
+          user: { login: 'spamuser' },
+          state: 'open',
+          pull_request: { url: 'x' },
+        },
       },
-    });
+      {
+        replies: {
+          'pulls.get': { head: { repo: { full_name: 'QwenLM/qwen-code' } } },
+        },
+      },
+    );
     assert.deepEqual(names(calls), [
+      'pulls.get',
       'issues.deleteComment',
       'pulls.update',
       'issues.lock',
     ]);
-    assert.equal(calls[1].params.pull_number, 77);
-    assert.equal(calls[1].params.state, 'closed');
-    assert.equal(calls[2].params.issue_number, 77);
+    assert.equal(calls[0].params.pull_number, 77);
+    assert.equal(calls[2].params.pull_number, 77);
+    assert.equal(calls[2].params.state, 'closed');
+    assert.equal(calls[3].params.issue_number, 77);
   });
 
   it('closes a blocklisted PR via pulls.update when the comment is legitimate', async () => {
     // Closing keys on the thread author, and the same-repo head must pass
     // the fork guard: a clean reply on a spammer's PR still closes the PR.
-    const { calls } = await enforce('issue_comment', {
-      comment: { id: 9, user: { login: 'legit' } },
-      issue: {
-        number: 77,
-        user: { login: 'spamuser' },
-        state: 'open',
-        pull_request: { url: 'x' },
+    const { calls } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'legit' } },
+        issue: {
+          number: 77,
+          user: { login: 'spamuser' },
+          state: 'open',
+          pull_request: { url: 'x' },
+        },
       },
-      pull_request: {
-        number: 77,
-        user: { login: 'spamuser' },
-        state: 'open',
-        head: { repo: { full_name: 'QwenLM/qwen-code' } },
+      {
+        replies: {
+          'pulls.get': { head: { repo: { full_name: 'QwenLM/qwen-code' } } },
+        },
       },
-    });
-    assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
-    assert.equal(calls[0].params.pull_number, 77);
-    assert.equal(calls[1].params.issue_number, 77);
+    );
+    assert.deepEqual(names(calls), [
+      'pulls.get',
+      'pulls.update',
+      'issues.lock',
+    ]);
+    assert.equal(calls[1].params.pull_number, 77);
+    assert.equal(calls[2].params.issue_number, 77);
   });
 
   it('skips a fork PR issue comment: the read-only token cannot delete it', async () => {
     // Issue comments on fork PRs run on a read-only GITHUB_TOKEN just like
     // review events; the write would 403 and red-run the lane. The sweep
-    // lane holds the write token and repairs within the hour.
-    const { calls, core } = await enforce('issue_comment', {
-      comment: { id: 111, user: { login: 'spamuser' } },
-      issue: { number: 5, user: { login: 'legit' }, state: 'open' },
-      pull_request: {
-        number: 5,
-        user: { login: 'legit' },
-        state: 'open',
-        head: { repo: { full_name: 'forker/qwen-code' } },
+    // lane holds the write token and repairs within the hour. The payload
+    // carries no top-level pull_request, so the guard resolves the head
+    // repo through pulls.get.
+    const { calls, core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 111, user: { login: 'spamuser' } },
+        issue: {
+          number: 5,
+          user: { login: 'legit' },
+          state: 'open',
+          pull_request: { url: 'x' },
+        },
       },
-    });
-    assert.deepEqual(names(calls), []);
+      {
+        replies: {
+          'pulls.get': { head: { repo: { full_name: 'forker/qwen-code' } } },
+        },
+      },
+    );
+    assert.deepEqual(names(calls), ['pulls.get']);
+    assert.equal(calls[0].params.pull_number, 5);
     assert.deepEqual(core.logs.failed, []);
     assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
   });
 
   it('skips a deleted-fork PR issue comment: head.repo is null', async () => {
-    // The deleted-fork twin: head.repo: null carries the same read-only
-    // downgrade, so the guard must fire exactly as for a live fork.
-    const { calls, core } = await enforce('issue_comment', {
-      comment: { id: 111, user: { login: 'spamuser' } },
-      issue: { number: 5, user: { login: 'spamuser' }, state: 'open' },
-      pull_request: {
-        number: 5,
-        user: { login: 'spamuser' },
-        state: 'open',
-        head: { repo: null },
+    // The deleted-fork twin: pulls.get reads head.repo: null back, which
+    // carries the same read-only downgrade, so the guard must fire exactly
+    // as for a live fork.
+    const { calls, core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 111, user: { login: 'spamuser' } },
+        issue: {
+          number: 5,
+          user: { login: 'spamuser' },
+          state: 'open',
+          pull_request: { url: 'x' },
+        },
       },
-    });
-    assert.deepEqual(names(calls), []);
+      { replies: { 'pulls.get': { head: { repo: null } } } },
+    );
+    assert.deepEqual(names(calls), ['pulls.get']);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
+  });
+
+  it('skips a fork PR issue comment when only the PR author is blocklisted', async () => {
+    // The thread-author disjunct alone: a legitimate comment on a
+    // blocklisted author's fork PR still runs on the read-only token, so
+    // the guard must fire without any comment-author involvement.
+    const { calls, core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 111, user: { login: 'legit' } },
+        issue: {
+          number: 5,
+          user: { login: 'spamuser' },
+          state: 'open',
+          pull_request: { url: 'x' },
+        },
+      },
+      {
+        replies: {
+          'pulls.get': { head: { repo: { full_name: 'forker/qwen-code' } } },
+        },
+      },
+    );
+    assert.deepEqual(names(calls), ['pulls.get']);
     assert.deepEqual(core.logs.failed, []);
     assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
   });
@@ -784,6 +869,24 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
   });
 
+  it('skips a fork PR review comment when only the PR author is blocklisted', async () => {
+    // The thread-author disjunct alone: a legitimate review comment on a
+    // blocklisted author's fork PR hits the same read-only token and must
+    // defer without any comment-author involvement.
+    const { calls, core } = await enforce('pull_request_review_comment', {
+      comment: { id: 5, user: { login: 'legit' } },
+      pull_request: {
+        number: 60,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: { full_name: 'forker/qwen-code' } },
+      },
+    });
+    assert.deepEqual(names(calls), []);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.notice.some((m) => /fork PR/.test(m)));
+  });
+
   it('minimizes a review body, which has no REST delete', async () => {
     const { calls } = await enforce('pull_request_review', {
       review: { id: 7, node_id: 'PRR_abc', user: { login: 'spamuser' } },
@@ -919,6 +1022,25 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.ok(core.logs.notice.some((m) => /manual minimization/.test(m)));
   });
 
+  it('skips a fork PR review body when only the PR author is blocklisted', async () => {
+    // The thread-author disjunct alone: a legitimate review on a
+    // blocklisted author's fork PR cannot be minimized on the read-only
+    // token, so the manual-minimization notice must fire without any
+    // review-author involvement.
+    const { calls, core } = await enforce('pull_request_review', {
+      review: { id: 6, node_id: 'PRR_ok', user: { login: 'legit' } },
+      pull_request: {
+        number: 61,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: { full_name: 'forker/qwen-code' } },
+      },
+    });
+    assert.deepEqual(names(calls), []);
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.notice.some((m) => /manual minimization/.test(m)));
+  });
+
   it('ignores an issues event, which this workflow no longer subscribes to', async () => {
     // Pins the current behaviour: the script has no `issues` branch, so an
     // issues event is a no-op and spam issues wait for the sweep lane. The
@@ -926,6 +1048,7 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     // restores it, that assertion sends them here, to the pinned no-op — not
     // to a script that silently handles issue events some other way.
     const { calls, core } = await enforce('issues', {
+      action: 'opened',
       issue: { number: 100, user: { login: 'other' } },
     });
     assert.deepEqual(names(calls), []);
@@ -935,12 +1058,33 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
   it('closes a fork PR through pulls.update but locks through issues.lock', async () => {
     const { calls } = await enforce('pull_request_target', {
       // Mixed-case PR author: pins case-insensitivity on the close path.
-      pull_request: { number: 101, user: { login: 'SpAmUsEr' } },
+      // Fork head: this lane exists so fork PRs are closable — a guard
+      // that deferred on the fork head would silently no-op the lane.
+      pull_request: {
+        number: 101,
+        user: { login: 'SpAmUsEr' },
+        head: { repo: { full_name: 'forker/qwen-code' } },
+      },
     });
     assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
     assert.equal(calls[0].params.pull_number, 101);
     assert.equal(calls[0].params.state, 'closed');
     assert.equal(calls[1].params.issue_number, 101);
+  });
+
+  it('closes a deleted-fork PR too: head.repo is null', async () => {
+    // A deleted fork must not escape the close through a head-presence
+    // guard — the lane exists exactly so fork PRs are closable.
+    const { calls } = await enforce('pull_request_target', {
+      pull_request: {
+        number: 103,
+        user: { login: 'spamuser' },
+        state: 'open',
+        head: { repo: null },
+      },
+    });
+    assert.deepEqual(names(calls), ['pulls.update', 'issues.lock']);
+    assert.equal(calls[0].params.pull_number, 103);
   });
 
   it('leaves a legitimate PR author alone', async () => {
@@ -1146,6 +1290,56 @@ describe('spam-blocklist-enforce: enforce lane behaviour', () => {
     assert.deepEqual(names(mutationsOf(calls)), [
       'issues.deleteComment',
       'issues.update',
+      'issues.lock',
+    ]);
+  });
+
+  it('treats a close 404 as already-done and still locks the thread', async () => {
+    // A thread deleted between the payload snapshot and the close attempt
+    // already holds the desired end state; the 404 must not red-run the
+    // lane, and the lock that follows the close must still be attempted.
+    const { calls, core } = await enforce(
+      'issue_comment',
+      {
+        comment: { id: 9, user: { login: 'legit' } },
+        issue: { number: 42, user: { login: 'spamuser' }, state: 'open' },
+      },
+      {
+        fail: (name) =>
+          name === 'issues.update' ? new HttpError(404, 'Not Found') : null,
+      },
+    );
+    assert.deepEqual(core.logs.failed, []);
+    assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
+    assert.deepEqual(names(mutationsOf(calls)), [
+      'issues.update',
+      'issues.lock',
+    ]);
+  });
+
+  it('treats a PR close 404 and lock 404 as already-done', async () => {
+    // The PR-shape twin: a PR deleted between the event and the close
+    // attempt 404s on both the close and the lock that follows — both
+    // prove the target is gone, so the run stays green.
+    const { calls, core } = await enforce(
+      'pull_request_target',
+      {
+        pull_request: { number: 101, user: { login: 'spamuser' } },
+      },
+      {
+        fail: (name) =>
+          name === 'pulls.update' || name === 'issues.lock'
+            ? new HttpError(404, 'Not Found')
+            : null,
+      },
+    );
+    assert.deepEqual(core.logs.failed, []);
+    assert.equal(
+      core.logs.info.filter((m) => /already gone/.test(m)).length,
+      2,
+    );
+    assert.deepEqual(names(mutationsOf(calls)), [
+      'pulls.update',
       'issues.lock',
     ]);
   });
@@ -1513,6 +1707,29 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
     assert.ok(core.logs.info.some((m) => /already gone/.test(m)));
   });
 
+  it('treats a sweep close 404 and lock 404 as already-done', async () => {
+    // Sweep listings are stale by construction: a thread deleted between
+    // listForRepo and the close attempt 404s on the close, and the lock
+    // on the gone thread 404s too — the desired end state already holds,
+    // so neither red-runs the sweep.
+    const { calls, core } = await sweep({
+      threads: [{ number: 11, user: { login: 'spamuser' }, state: 'open' }],
+      fail: (name) =>
+        name === 'issues.update' || name === 'issues.lock'
+          ? new HttpError(404, 'Not Found')
+          : null,
+    });
+    assert.deepEqual(core.logs.failed, []);
+    assert.equal(
+      core.logs.info.filter((m) => /already gone/.test(m)).length,
+      2,
+    );
+    assert.deepEqual(names(mutationsOf(calls)), [
+      'issues.update',
+      'issues.lock',
+    ]);
+  });
+
   it('treats a sweep lock 422 as already-done once it reads back locked', async () => {
     // A concurrent run locking the thread between listForRepo and
     // issues.lock must not read as a sweep failure — but the lock state
@@ -1537,6 +1754,36 @@ describe('spam-blocklist-enforce: sweep lane behaviour', () => {
     });
     assert.equal(core.logs.failed.length, 1);
     assert.match(core.logs.failed[0], /lock .*422/);
+  });
+
+  it('keeps lock-422 verdicts per-thread across one sweep', async () => {
+    // Two blocklisted leftovers, both lock 422s: one reads back locked
+    // (a genuine race — tolerated), the other reads back unlocked (a
+    // validation failure — must fail). A memoized or otherwise shared
+    // readback would leak one thread's verdict onto the other.
+    const { calls, core } = await sweep({
+      threads: [
+        { number: 31, user: { login: 'spamuser' }, state: 'open' },
+        { number: 32, user: { login: 'spamuser' }, state: 'open' },
+      ],
+      fail: (name) =>
+        name === 'issues.lock' ? new HttpError(422, 'Already locked') : null,
+      replies: {
+        'issues.get': (params) => ({ locked: params.issue_number === 31 }),
+      },
+    });
+    assert.deepEqual(
+      names(mutationsOf(calls)).filter((name) => name !== 'issues.get'),
+      ['issues.update', 'issues.lock', 'issues.update', 'issues.lock'],
+    );
+    assert.deepEqual(
+      calls
+        .filter((call) => call.name === 'issues.get')
+        .map((call) => call.params.issue_number),
+      [31, 32],
+    );
+    assert.equal(core.logs.failed.length, 1);
+    assert.match(core.logs.failed[0], /lock issue #32.*422/);
   });
 
   it('fails the sweep when a delete 422s', async () => {
