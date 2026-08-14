@@ -17,8 +17,11 @@ const tauriManifest = readJson(
   path.join(repoRoot, 'packages/desktop-shell/src-tauri/tauri.conf.json'),
 );
 const main = read('src/main/index.ts');
+const petWindow = read('src/main/pet-window.ts');
+const preload = read('src/preload/index.ts');
 const runtime = read('src/main/runtime.ts');
 const runtimeBuilder = read('scripts/prepare-runtime.js');
+const appBuilder = read('scripts/build-main.js');
 const entitlements = read('build/entitlements.mac.plist');
 const afterPack = read('scripts/electron-builder-after-pack.cjs');
 const workflow = fs.readFileSync(
@@ -62,7 +65,12 @@ function testPackageIdentity() {
     'scripts/electron-builder-after-pack.cjs',
   );
   assert.equal(manifest.build.asar, true);
-  assert.deepEqual(manifest.build.files, ['dist/main/**/*', 'package.json']);
+  assert.deepEqual(manifest.build.files, [
+    'dist/main/**/*',
+    'dist/preload/**/*',
+    'dist/renderer/**/*',
+    'package.json',
+  ]);
   assert.deepEqual(manifest.build.extraResources, [
     { from: 'runtime/qwen-code', to: 'runtime/qwen-code' },
   ]);
@@ -88,11 +96,19 @@ function testSecurityBoundary() {
   assert.match(main, /insertCSS\(MACOS_TITLE_BAR_CSS\)/);
   assert.match(main, /var\(--sidebar-background/);
   assert.match(main, /app-region: drag/);
+  assert.match(main, /requireMainSender\(event\.sender\.id\)/);
+  assert.match(main, /petController\?\.owns\(event\.sender\.id\)/);
+  assert.match(preload, /contextBridge\.exposeInMainWorld\('qwenCodeHost'/);
+  assert.match(preload, /contextBridge\.exposeInMainWorld\('qwenCodePet'/);
+  assert.match(petWindow, /nodeIntegration: false/);
+  assert.match(petWindow, /contextIsolation: true/);
+  assert.match(petWindow, /sandbox: true/);
+  assert.match(petWindow, /webSecurity: true/);
   assert.match(runtime, /--require-auth/);
   assert.match(runtime, /127\.0\.0\.1/);
   assert.match(runtime, /url\.hash = new URLSearchParams\(\{ token \}\)/);
   assert.doesNotMatch(runtime, /--allow-origin|qwen-desktop:\/\//);
-  assert.doesNotMatch(main, /ipcMain|contextBridge|preload:|WebContentsView/);
+  assert.doesNotMatch(main, /WebContentsView/);
 }
 
 function testStandaloneWebShellOwnership() {
@@ -100,6 +116,11 @@ function testStandaloneWebShellOwnership() {
   assert.match(runtimeBuilder, /build.*packages\/web-shell/s);
   assert.match(runtimeBuilder, /web-shell\/index\.html/);
   assert.match(runtimeBuilder, /copyDirectory\(distDir, libDir\)/);
+  assert.match(
+    appBuilder,
+    /packages\/desktop\/apps\/electron\/src\/renderer\/assets\/pets\/qwen-spritesheet\.webp/,
+  );
+  assert.match(appBuilder, /dist.*renderer.*qwen-spritesheet\.webp/s);
   assert.doesNotMatch(main, /WebShellWithProviders|desktop\.css/);
   for (const dependency of [
     '@tailwindcss/vite',
@@ -117,7 +138,7 @@ function testStandaloneWebShellOwnership() {
 function testRemovedDesktopSurfaces() {
   assert.doesNotMatch(
     main,
-    /new-chat-window|open-browser|voice-overlay|WebContentsView|ipcMain/,
+    /new-chat-window|open-browser|voice-overlay|WebContentsView/,
   );
   assert.doesNotMatch(entitlements, /audio-input/);
   for (const permission of [
@@ -134,10 +155,21 @@ function testRemovedDesktopSurfaces() {
     sourceFiles.map((file) => path.relative(packageDir, file)).sort(),
     [
       'src/main/index.ts',
+      'src/main/pet-activity.test.ts',
+      'src/main/pet-activity.ts',
+      'src/main/pet-window.ts',
       'src/main/runtime.test.ts',
       'src/main/runtime.ts',
       'src/main/state.test.ts',
       'src/main/state.ts',
+      'src/preload/index.ts',
+      'src/renderer/globals.d.ts',
+      'src/renderer/pet-animation.test.ts',
+      'src/renderer/pet-animation.ts',
+      'src/renderer/pet.css',
+      'src/renderer/pet.html',
+      'src/renderer/pet.ts',
+      'src/shared/desktop-api.ts',
     ],
   );
   const productionFiles = sourceFiles.filter(

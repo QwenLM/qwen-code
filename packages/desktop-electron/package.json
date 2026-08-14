@@ -38,6 +38,8 @@
     "afterPack": "scripts/electron-builder-after-pack.cjs",
     "files": [
       "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/renderer/**/*",
       "package.json"
     ],
     "extraResources": [
