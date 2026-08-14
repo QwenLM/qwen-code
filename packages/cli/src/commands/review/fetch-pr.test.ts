@@ -12,6 +12,7 @@ import {
   isEmptyDiff,
   isCollapsedFromUpstream,
   resolveIncrementalAnchor,
+  hunksContainedIn,
   type AnchorProbe,
 } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
@@ -475,22 +476,15 @@ describe('fetch-pr report assembly', () => {
     );
   }
 
-  /**
-   * gitOpt that vouches for ANCHOR as a commit behind the head, with the PR
-   * NOT collapsed (base tree ≠ head tree — the trees are what the delta
-   * round's emptiness ruling reads).
-   */
-  function anchorIsValid(opts: { collapsed?: boolean } = {}) {
-    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
-      if (args[0] === 'cat-file' || args[0] === 'merge-base') return '';
-      if (args[0] !== 'rev-parse') return null;
-      const arg = String(args[1]);
-      if (arg.endsWith('^{tree}')) {
-        if (opts.collapsed) return 'same-tree';
-        return arg.startsWith(BASE) ? 'base-tree' : 'head-tree';
-      }
-      return ANCHOR;
-    });
+  /** gitOpt that vouches for ANCHOR as a commit behind the head. */
+  function anchorIsValid() {
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'cat-file' || args[0] === 'merge-base'
+        ? ''
+        : args[0] === 'rev-parse'
+          ? ANCHOR
+          : null,
+    );
   }
 
   it('scopes the plan to a valid anchor and suppresses the full-range flags', async () => {
@@ -502,7 +496,8 @@ describe('fetch-pr report assembly', () => {
     servesBothRanges();
     // Advertised stat large enough that an ungated collapse ratio WOULD fire
     // on the tiny delta: the flag's absence below is what kills the mutant
-    // that drops the !scopedDelta gate.
+    // that keys the collapse ratio (or emptyDiff) on the PUBLISHED delta
+    // instead of on fullText.
     producerMocks.gh.mockReturnValue(
       JSON.stringify({
         headRefName: 'feat/x',
@@ -546,6 +541,39 @@ describe('fetch-pr report assembly', () => {
       '--is-ancestor',
       BASE,
       ANCHOR,
+    ]);
+  });
+
+  it('takes the LAST value of a repeated --since, and expands an abbreviation', async () => {
+    // Two findings in one round trip. yargs folds a repeated flag into an
+    // array — the recovery flow produces one — and the array stringifies to
+    // "shaA,shaB", which the hex gate refuses with zero git probes. And the
+    // ruling must scope from what rev-parse RESOLVED, not from the string
+    // that came in: `diffBase` is welded into Agent 7's `--base`, where an
+    // abbreviation is ambiguous once the repo grows.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args[0] === 'cat-file' || args[0] === 'merge-base'
+        ? ''
+        : args[0] === 'rev-parse'
+          ? ANCHOR // the full sha for the abbreviation
+          : null,
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: ['0'.repeat(40), 'abc1234'] });
+    expect(report.incremental).toEqual({
+      since: 'abc1234',
+      effective: true,
+      diffBase: ANCHOR,
+    });
+    // The probes ran against the LAST value, not the first or the join.
+    expect(producerMocks.gitOpt.mock.calls).toContainEqual([
+      'cat-file',
+      '-e',
+      'abc1234^{commit}',
     ]);
   });
 
@@ -1078,6 +1106,24 @@ describe('resolveIncrementalAnchor', () => {
     );
   });
 
+  it('reports unknown-commit when BOTH probes fail — the shape real git produces', () => {
+    // A sha this history never held fails `cat-file -e` AND
+    // `merge-base --is-ancestor`; the canonical side-file case (a fresh
+    // clone validating a marker sha posted elsewhere). The order decides
+    // which reason the user is told, and "a rebase retired it" is the wrong
+    // story for a commit that was never here.
+    const r = resolveIncrementalAnchor(ANCHOR, HEAD, {
+      commitExists: () => false,
+      isAncestor: () => false,
+      resolveCommit: () => null,
+    });
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'unknown-commit',
+    });
+  });
+
   it('never hands a flag-shaped or non-hex anchor to git', () => {
     // The anchor arrives from a cache file or a posted marker; the hex
     // allowlist runs BEFORE any probe so nothing flag-shaped reaches git.
@@ -1118,6 +1164,133 @@ describe('resolveIncrementalAnchor', () => {
       reason: 'unknown-commit',
     });
     expect(r.diffBase).toBeNull();
+  });
+});
+
+describe('hunksContainedIn — the containment oracle', () => {
+  const sec = (file: string, hunks: Array<[number, number]>) =>
+    [
+      `diff --git a/${file} b/${file}`,
+      `--- a/${file}`,
+      `+++ b/${file}`,
+      ...hunks.flatMap(([start, count]) => [
+        `@@ -${start},${count} +${start},${count} @@`,
+        ...Array.from({ length: count }, (_, i) => `+line ${start + i}`),
+      ]),
+      '',
+    ].join('\n');
+
+  it('accepts a delta whose hunks sit inside the PR diff, per file', () => {
+    expect(
+      hunksContainedIn(sec('a.ts', [[10, 3]]), sec('a.ts', [[1, 100]])),
+    ).toBe(true);
+  });
+
+  it('discriminates BOTH boundary directions', () => {
+    // `s <= start && end <= e` — a mutant flipping either comparison accepts
+    // a delta carrying hunks GitHub's PR diff does not contain, and one
+    // comment anchored there 422s the whole review.
+    const outer = sec('a.ts', [[10, 10]]); // covers [10, 19]
+    // starts BELOW the covering hunk
+    expect(hunksContainedIn(sec('a.ts', [[1, 3]]), outer)).toBe(false);
+    // starts inside, ends PAST it
+    expect(hunksContainedIn(sec('a.ts', [[12, 50]]), outer)).toBe(false);
+  });
+
+  it('keys coverage per FILE — a numerically-inside range in another file is not covered', () => {
+    // A pooled-ranges mutant (dropping the file key) accepts this shape: the
+    // delta's b.ts hunk falls numerically inside a.ts's full-range hunk.
+    expect(
+      hunksContainedIn(sec('b.ts', [[10, 3]]), sec('a.ts', [[1, 100]])),
+    ).toBe(false);
+  });
+
+  it('does not read added CONTENT as diff structure', () => {
+    // An added line shaped like a file header — an embedded diff fixture is
+    // exactly that — used to re-attribute every LATER hunk of the file:
+    // here the second hunk would be filed under `big.ts` and found covered
+    // by its [1,2000] range, so a delta carrying a hunk outside GitHub's PR
+    // diff published as the review scope. Structure is recognized only
+    // outside hunk bodies, as both sibling parsers in this file already do.
+    const spoofing = [
+      'diff --git a/x.ts b/x.ts',
+      '--- a/x.ts',
+      '+++ b/x.ts',
+      '@@ -1,2 +1,3 @@',
+      ' context',
+      '+++ b/big.ts',
+      ' context2',
+      '@@ -99,2 +99,4 @@',
+      ' keep',
+      '+undo per feedback',
+      '+second line',
+      ' keep2',
+      '',
+    ].join('\n');
+    // Both hunks belong to x.ts, so a PR diff that only touches big.ts
+    // cannot cover them however wide its range is.
+    expect(hunksContainedIn(spoofing, sec('big.ts', [[1, 2000]]))).toBe(false);
+    // …and against x.ts's own wide hunk they are covered.
+    expect(hunksContainedIn(spoofing, sec('x.ts', [[1, 200]]))).toBe(true);
+  });
+
+  it('refuses a deletion the PR diff does not share', () => {
+    // `+++ /dev/null` contributes no new-side range, so a deletion-only
+    // delta used to pass vacuously: an undo-per-feedback commit deleting a
+    // file the PR added is absent from the full range, and a finding
+    // anchored on it 422s the review.
+    const deletion = [
+      'diff --git a/gone.ts b/gone.ts',
+      'deleted file mode 100644',
+      '--- a/gone.ts',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '-was here',
+      '-and here',
+      '',
+    ].join('\n');
+    expect(hunksContainedIn(deletion, sec('a.ts', [[1, 100]]))).toBe(false);
+    expect(hunksContainedIn(deletion, deletion)).toBe(true);
+  });
+
+  it('refuses hunk-less sections — mode, binary and rename', () => {
+    // git emits no `+++`/`@@` for these at all, so they were invisible to a
+    // hunk-only parser and passed vacuously.
+    const modeOnly = [
+      'diff --git a/script.sh b/script.sh',
+      'old mode 100644',
+      'new mode 100755',
+      '',
+    ].join('\n');
+    const binary = [
+      'diff --git a/logo.png b/logo.png',
+      'Binary files a/logo.png and b/logo.png differ',
+      '',
+    ].join('\n');
+    const rename = [
+      'diff --git a/old.ts b/new.ts',
+      'similarity index 100%',
+      'rename from old.ts',
+      'rename to new.ts',
+      '',
+    ].join('\n');
+    for (const delta of [modeOnly, binary, rename]) {
+      expect(hunksContainedIn(delta, sec('a.ts', [[1, 100]]))).toBe(false);
+      // …and the same section in the PR's own diff is contained.
+      expect(hunksContainedIn(delta, delta)).toBe(true);
+    }
+  });
+
+  it('fails closed on a path it cannot name unambiguously', () => {
+    const spacey = [
+      'diff --git a/my b/file.ts b/my b/file.ts',
+      '--- a/my b/file.ts',
+      '+++ b/my b/file.ts',
+      '@@ -1,1 +1,1 @@',
+      '+x',
+      '',
+    ].join('\n');
+    expect(hunksContainedIn(spacey, spacey)).toBe(false);
   });
 });
 

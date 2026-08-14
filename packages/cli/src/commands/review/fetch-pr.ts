@@ -327,39 +327,88 @@ function fileLineCount(ref: string, path: string): number {
  * anchored on such a hunk 422s the whole Create Review call.
  */
 export function hunksContainedIn(inner: string, outer: string): boolean {
-  const outerRanges = newSideHunks(outer);
-  for (const [file, ranges] of newSideHunks(inner)) {
-    const covering = outerRanges.get(file);
+  const innerSections = diffSections(inner);
+  const outerSections = diffSections(outer);
+  // A section this parser could not name (a path with spaces, a shape it
+  // does not model) is not a section it may vouch for: fail closed to the
+  // full range rather than scope on an unparsed diff.
+  if (innerSections === null || outerSections === null) return false;
+  for (const [file, hunks] of innerSections) {
+    const covering = outerSections.get(file);
+    // The PATH check, not just the hunk check: a section with no hunks at
+    // all — a mode change, a binary replacement, a pure rename — carries no
+    // range to compare, and a deletion carries none on the new side. Each
+    // used to pass vacuously, which is how a delta whose only content is a
+    // file the PR's own diff never mentions became the review's scope.
     if (!covering) return false;
-    for (const [start, end] of ranges) {
+    for (const [start, end] of hunks) {
       if (!covering.some(([s, e]) => s <= start && end <= e)) return false;
     }
   }
   return true;
 }
 
-/** `path -> [start, end]` post-image line ranges, one entry per hunk. */
-function newSideHunks(diffText: string): Map<string, Array<[number, number]>> {
+/**
+ * `path -> post-image [start, end]` per hunk, one entry per file SECTION —
+ * including sections that carry no hunk at all, which map to an empty list.
+ *
+ * Null when any section's path cannot be named unambiguously; the caller
+ * fails closed on it.
+ *
+ * Structure is recognized only OUTSIDE hunk bodies. Inside a hunk, `+++ b/x`
+ * and `@@ … @@` are ordinary added content — an embedded diff fixture is
+ * exactly that — and reading them as structure silently re-attributes every
+ * later hunk, corrupting the very oracle this check exists to be. Both
+ * sibling parsers in this codebase already guard it (`countDiffChangedLines`
+ * below tracks `inHunk`; `parseAddedLines` in `test-efficacy.ts` documents
+ * the same hazard), and the first cut of this one did not.
+ */
+function diffSections(
+  diffText: string,
+): Map<string, Array<[number, number]>> | null {
   const out = new Map<string, Array<[number, number]>>();
   let file: string | null = null;
+  // Body lines still owed to the current hunk, old side and new side.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of diffText.split('\n')) {
-    if (line.startsWith('+++ ')) {
-      // `+++ b/path`, or `+++ /dev/null` for a deletion (no new side).
-      const p = line.slice(4).trim();
-      file = p === '/dev/null' ? null : p.replace(/^b\//, '');
+    if (oldLeft > 0 || newLeft > 0) {
+      // Inside a hunk body: consume, never interpret. `\` is the
+      // "no newline at end of file" marker and consumes nothing.
+      if (line.startsWith('\\')) continue;
+      if (line.startsWith('-')) oldLeft--;
+      else if (line.startsWith('+')) newLeft--;
+      else {
+        oldLeft--;
+        newLeft--;
+      }
+      continue;
+    }
+    if (line.startsWith('diff --git ')) {
+      // `diff --git a/X b/Y`. The b-path names the section for every shape
+      // that has one — a deletion still reads `diff --git a/F b/F` — so it
+      // keys mode-only, binary and rename sections too, which have no
+      // `+++` line at all. A path containing ` b/` cannot be split here;
+      // the whole diff is then unparsed rather than half-understood.
+      const rest = line.slice('diff --git '.length);
+      const halves = rest.split(' b/');
+      if (halves.length !== 2 || !rest.startsWith('a/')) return null;
+      file = halves[1];
+      if (!out.has(file)) out.set(file, []);
       continue;
     }
     if (!line.startsWith('@@') || file === null) continue;
-    const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (!m) continue;
-    const start = Number(m[1]);
-    const count = m[2] === undefined ? 1 : Number(m[2]);
+    const oldCount = m[2] === undefined ? 1 : Number(m[2]);
+    const start = Number(m[3]);
+    const count = m[4] === undefined ? 1 : Number(m[4]);
+    oldLeft = oldCount;
+    newLeft = count;
     // A pure deletion hunk has count 0 and sits BETWEEN two post-image
     // lines; give it the zero-width range at its position so it can still
     // be matched against a covering hunk.
-    const ranges = out.get(file) ?? [];
-    ranges.push([start, start + Math.max(count, 1) - 1]);
-    out.set(file, ranges);
+    out.get(file)!.push([start, start + Math.max(count, 1) - 1]);
   }
   return out;
 }

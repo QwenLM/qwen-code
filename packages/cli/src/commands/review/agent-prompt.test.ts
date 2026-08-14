@@ -2436,6 +2436,34 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       { planPath },
     );
     expect(upToDate).toContain('--base abc123');
+    // The other two conjuncts, each its own mutant: a REFUSED ruling must
+    // not weld a delta base (nothing rebuilds `diffBase` out of a demotion
+    // today, but the guard is what makes the consumer safe if a producer
+    // path ever preserves it), and a non-string `diffBase` must not reach
+    // the shell as one.
+    const refused = buildRoleBrief(
+      {
+        ...PR_PLAN,
+        incremental: {
+          since: 'a'.repeat(40),
+          effective: false,
+          reason: 'hunks-outside-pr-diff',
+          diffBase: 'de17aba5e',
+        },
+      },
+      '7',
+      { planPath },
+    );
+    expect(refused).toContain('--base abc123');
+    const malformed = buildRoleBrief(
+      {
+        ...PR_PLAN,
+        incremental: { since: 'a'.repeat(40), effective: true, diffBase: 42 },
+      },
+      '7',
+      { planPath },
+    );
+    expect(malformed).toContain('--base abc123');
   });
 
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
