@@ -154,9 +154,11 @@ function observePromiseRejections<T>(run: () => T): T {
   const defineProperty = Object.defineProperty;
   const deleteProperty = Reflect.deleteProperty;
   let attaching = false;
+  let createdPromise = false;
   const hook = createHook({
     init(_asyncId, type, _triggerAsyncId, resource) {
       if (type !== 'PROMISE' || attaching) return;
+      createdPromise = true;
       attaching = true;
       const ownConstructor = getOwnPropertyDescriptor(resource, 'constructor');
       try {
@@ -179,14 +181,18 @@ function observePromiseRejections<T>(run: () => T): T {
   });
   hook.enable();
   try {
-    return run();
+    const value = run();
+    if (createdPromise) {
+      throw new Error(META_PROMISE_ERROR);
+    }
+    return value;
   } finally {
     hook.disable();
   }
 }
 
 function formatMetaEvaluationError(error: unknown): string {
-  const context = vm.createContext(Object.create(null));
+  const context = createMetaContext();
   Object.defineProperty(context, META_ERROR_SLOT, { value: error });
   try {
     const message = new vm.Script(META_ERROR_SOURCE).runInContext(context, {
@@ -196,6 +202,34 @@ function formatMetaEvaluationError(error: unknown): string {
   } catch {
     return 'unknown error';
   }
+}
+
+function createMetaContext(): vm.Context {
+  return vm.createContext(Object.create(null), {
+    microtaskMode: 'afterEvaluate',
+  });
+}
+
+function drainMetaMicrotasks(context: vm.Context): void {
+  new vm.Script('void 0').runInContext(context, {
+    timeout: META_EVAL_TIMEOUT_MS,
+  });
+}
+
+function metaStageError(
+  stage: 'evaluate' | 'serialize',
+  error: unknown,
+  metaContext: vm.Context,
+): Error {
+  let message = formatMetaEvaluationError(error);
+  try {
+    drainMetaMicrotasks(metaContext);
+  } catch (drainError) {
+    message = formatMetaEvaluationError(drainError);
+  }
+  return new Error(
+    `extractAndStripMeta: failed to ${stage} meta object literal: ${message}`,
+  );
 }
 
 /**
@@ -256,7 +290,7 @@ export function extractAndStripMeta(source: string): {
   // / `args` / workflow-sandbox bridge globals). The vm realm still
   // provides its own intrinsics, but that's intentional — see the
   // docstring above.
-  const metaContext = vm.createContext(Object.create(null));
+  const metaContext = createMetaContext();
   let raw: unknown;
   let serialized: unknown;
   observePromiseRejections(() => {
@@ -264,18 +298,20 @@ export function extractAndStripMeta(source: string): {
       raw = new vm.Script(`(${metaSource})`).runInContext(metaContext, {
         timeout: META_EVAL_TIMEOUT_MS,
       });
+    } catch (e) {
+      throw metaStageError('evaluate', e, metaContext);
+    }
 
-      const serializeContext = vm.createContext(Object.create(null));
+    try {
+      const serializeContext = createMetaContext();
       Object.defineProperty(serializeContext, META_SLOT, { value: raw });
       serialized = new vm.Script(META_SERIALIZE_SOURCE).runInContext(
         serializeContext,
         { timeout: META_EVAL_TIMEOUT_MS },
       );
+      drainMetaMicrotasks(metaContext);
     } catch (e) {
-      throw new Error(
-        'extractAndStripMeta: failed to evaluate meta object literal: ' +
-          formatMetaEvaluationError(e),
-      );
+      throw metaStageError('serialize', e, metaContext);
     }
   });
 
@@ -304,7 +340,7 @@ export function extractAndStripMeta(source: string): {
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'unknown error';
     throw new Error(
-      `extractAndStripMeta: failed to evaluate meta object literal: ${msg}`,
+      `extractAndStripMeta: failed to serialize meta object literal: ${msg}`,
     );
   }
 
@@ -317,20 +353,17 @@ export function extractAndStripMeta(source: string): {
   // from the run that triggered it. The serializer marks any thenable it
   // reaches as handled inside the vm; reject the meta literal up front.
   if (walked.hasThenable) {
-    throw new Error(
-      'extractAndStripMeta: meta values must not be Promises ' +
-        '(no async / dynamic import allowed in meta literal)',
-    );
+    throw new Error(META_PROMISE_ERROR);
   }
   if (walked.tooLarge) {
     throw new Error(
-      'extractAndStripMeta: failed to evaluate meta object literal: ' +
+      'extractAndStripMeta: failed to serialize meta object literal: ' +
         'meta literal is too large',
     );
   }
   if (!Object.hasOwn(walked, 'value')) {
     throw new Error(
-      'extractAndStripMeta: failed to evaluate meta object literal: ' +
+      'extractAndStripMeta: failed to serialize meta object literal: ' +
         'unexpected serializer result',
     );
   }
@@ -469,6 +502,9 @@ const META_EVAL_TIMEOUT_MS = 250;
 // host to retain and re-parse — a 250ms budget is enough to allocate a very
 // large string, and the JSON round-trip would then copy it twice more.
 const META_SERIALIZED_MAX_CHARS = 64 * 1024;
+const META_PROMISE_ERROR =
+  'extractAndStripMeta: meta values must not be Promises ' +
+  '(no async / dynamic import allowed in meta literal)';
 
 // Context slot that carries the evaluated literal from script 1 to script 2.
 const META_SLOT = '__qwenWorkflowMetaValue';

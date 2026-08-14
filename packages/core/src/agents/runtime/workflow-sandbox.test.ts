@@ -296,6 +296,22 @@ describe('extractAndStripMeta', () => {
       expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
     });
 
+    it('bounds a Promise microtask that loops after literal evaluation', () => {
+      const src = `export const meta = { name: (Promise.resolve().then(() => { while (true) {} }), 'x'), description: 'd' }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    it('bounds a Promise microtask scheduled by a serializer getter', () => {
+      const src = `export const meta = { name: 'x', description: 'd', get phases() { Promise.resolve().then(() => { while (true) {} }); return []; } }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to serialize meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
     // The case a timeout on the literal's own evaluation does NOT catch: a
     // getter defers its work to property-read time, so the literal itself
     // evaluates instantly and only spins when the value is walked. Walking on
@@ -303,7 +319,7 @@ describe('extractAndStripMeta', () => {
     it('bounds a getter that loops when the value is walked', () => {
       const src = `export const meta = { name: 'x', description: 'd', get phases() { while (true) {} } }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
-        /failed to evaluate meta object literal/,
+        /failed to serialize meta object literal/,
       );
       expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
     });
@@ -311,7 +327,7 @@ describe('extractAndStripMeta', () => {
     it('bounds a getter nested inside phases', () => {
       const src = `export const meta = { name: 'x', description: 'd', phases: [{ get title() { while (true) {} } }] }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
-        /failed to evaluate meta object literal/,
+        /failed to serialize meta object literal/,
       );
       expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
     });
@@ -319,21 +335,21 @@ describe('extractAndStripMeta', () => {
     it('refuses a meta literal that exceeds the serialized size cap', () => {
       const src = `export const meta = { name: 'x'.repeat(200000), description: 'd' }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
-        /failed to evaluate meta object literal/,
+        /failed to serialize meta object literal/,
       );
     });
 
     it('enforces the cap after JSON escaping', () => {
       const src = `export const meta = { name: '\\0'.repeat(20000), description: 'd' }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
-        /failed to evaluate meta object literal/,
+        /failed to serialize meta object literal/,
       );
     });
 
     it('enforces the cap for string-free containers', () => {
       const src = `export const meta = { name: 'x', description: 'd', phases: Array.from({ length: 40000 }, () => ({})) }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
-        /failed to evaluate meta object literal/,
+        /failed to serialize meta object literal/,
       );
     });
 
@@ -348,7 +364,7 @@ describe('extractAndStripMeta', () => {
     it('bounds a looping then getter', () => {
       const src = `export const meta = { name: 'x', description: 'd', extra: { get then() { while (true) {} } } }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
-        /failed to evaluate meta object literal/,
+        /failed to serialize meta object literal/,
       );
       expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
     });
@@ -361,6 +377,22 @@ describe('extractAndStripMeta', () => {
           static get [Symbol.species]() { while (true) {} }
         })((resolve) => resolve(1)),
       }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to serialize meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    it('bounds an error message getter that schedules a looping microtask', () => {
+      const src = `export const meta = { name: (function () { throw { get message() { Promise.resolve().then(() => { while (true) {} }); return 'hostile'; } }; })(), description: 'd' }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    it('bounds an error whose message getter loops', () => {
+      const src = `export const meta = { name: (function () { throw { get message() { while (true) {} } }; })(), description: 'd' }\nreturn 1`;
       expect(() => extractAndStripMeta(src)).toThrow(
         /failed to evaluate meta object literal/,
       );
@@ -389,37 +421,71 @@ describe('extractAndStripMeta', () => {
     });
   });
 
+  it('preserves a thrown string in the evaluation diagnostic', () => {
+    const src = `export const meta = { name: (function () { throw 'kapow'; })(), description: 'd' }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /failed to evaluate meta object literal: kapow/,
+    );
+  });
+
+  it.each([
+    [
+      'then callback',
+      `export const meta = { name: (Promise.resolve().then(() => Promise.reject(new Error('boom'))), 'x'), description: 'd' }\nreturn 1`,
+    ],
+    [
+      'await continuation',
+      `export const meta = { name: ((async () => { await 0; Promise.reject(new Error('boom')); })(), 'x'), description: 'd' }\nreturn 1`,
+    ],
+  ])('rejects a Promise created by a deferred %s', async (_name, src) => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /meta values must not be Promises/,
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it.each([
     [
       'literal timeout',
       `export const meta = { name: (function () { Promise.reject(new Error('boom')); while (true) {} })(), description: 'd' }\nreturn 1`,
+      /failed to evaluate meta object literal/,
     ],
     [
       'async literal timeout',
       `export const meta = { name: (function () { (async () => { throw new Error('boom'); })(); while (true) {} })(), description: 'd' }\nreturn 1`,
+      /failed to evaluate meta object literal/,
     ],
     [
       'proxy timeout before a sibling rejection',
       `export const meta = { name: 'x', description: 'd', blocked: new Proxy({}, { ownKeys() { while (true) {} } }), rejected: Promise.reject(new Error('boom')) }\nreturn 1`,
+      /failed to serialize meta object literal/,
     ],
     [
       'throwing getter after creating a rejection',
       `export const meta = { name: 'x', description: 'd', get extra() { Promise.reject(new Error('boom')); throw new Error('getter'); } }\nreturn 1`,
+      /failed to serialize meta object literal/,
     ],
     [
       'looping getter after creating a rejection',
       `export const meta = { name: 'x', description: 'd', get extra() { Promise.reject(new Error('boom')); while (true) {} } }\nreturn 1`,
+      /failed to serialize meta object literal/,
     ],
   ])(
-    'contains rejected Promises when %s aborts evaluation',
-    async (_name, src) => {
+    'contains rejected Promises when %s aborts extraction',
+    async (_name, src, error) => {
       const unhandled: unknown[] = [];
       const onUnhandled = (reason: unknown) => unhandled.push(reason);
       process.on('unhandledRejection', onUnhandled);
       try {
-        expect(() => extractAndStripMeta(src)).toThrow(
-          /failed to evaluate meta object literal/,
-        );
+        expect(() => extractAndStripMeta(src)).toThrow(error);
         await new Promise<void>((resolve) => setImmediate(resolve));
         expect(unhandled).toEqual([]);
       } finally {
@@ -645,14 +711,9 @@ describe('extractAndStripMeta', () => {
 
   // P4a Round 3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
   // value in the meta literal previously crashed the host process. The
-  // synchronous `runInContext` returns normally with a dangling rejection
-  // scheduled for the next tick; validateMeta passes (the field isn't on
-  // the contract surface so it's silently dropped); the workflow even
-  // returns its result; THEN the unhandled rejection terminates the
-  // process under Node's default `--unhandled-rejections=throw`. The fix
-  // is to walk the eval result, neutralise any thenables with a `.catch`
-  // so they no longer trigger the unhandled-rejection handler, and throw
-  // an explicit error so the bad meta is rejected up front.
+  // serializer's handlePromise marks reachable Promises handled, while the
+  // async-hooks observer catches Promises created on abort paths or outside
+  // the returned graph. Both paths reject the bad meta up front.
   it('throws when meta value is a Promise (dynamic import) — no unhandled rejection crash', () => {
     const src = `export const meta = { name: 'x', description: 'd', extra: import('node:fs') }\nreturn 1`;
     expect(() => extractAndStripMeta(src)).toThrow(
@@ -690,15 +751,9 @@ describe('extractAndStripMeta', () => {
     expect(sandbox.getPhases()).toEqual(['X', 'Y', 'X']);
   });
 
-  // P4 Round 4 (wenshao): the R3 thenable walker recursed without a
-  // seen-guard. A meta literal that builds a cyclic object via spread
-  // (no getters, no Promises, no exotic constructs — just self-reference)
-  // overflows the call stack. The walker's RangeError propagates OUT of
-  // extractAndStripMeta because the try/catch only wraps the vm-eval, so
-  // the run failure surfaces as `Maximum call stack size exceeded` rather
-  // than the meta-validation error this guard exists to produce. A
-  // WeakSet bounds the recursion against cycles AND against future
-  // shapes where the same node is reached through multiple keys.
+  // The serializer's ancestors set bounds cycles by removing each node on
+  // exit. Shared subgraphs are intentionally copied at every array position;
+  // only nodes on the active recursion path are skipped.
   it('rejects a cyclic meta value built via spread without stack-overflowing', () => {
     const src = `export const meta = {
       name: 'x',
