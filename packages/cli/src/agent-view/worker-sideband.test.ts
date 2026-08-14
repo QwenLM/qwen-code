@@ -322,7 +322,7 @@ describe('worker sideband env', () => {
     expect(mockCallAgentViewSupervisor).toHaveBeenCalledTimes(2);
   });
 
-  it('defaults worker state report cwd to the current process cwd', async () => {
+  it('defaults worker state report cwd to the sideband active cwd', async () => {
     const env = createAgentViewWorkerSidebandEnv({
       sessionId: 'session-1',
       sidebandEndpoint: '/tmp/qwen-agent-view.sock',
@@ -336,7 +336,7 @@ describe('worker sideband env', () => {
       '/tmp/qwen-agent-view.sock',
       'workerEvent',
       expect.objectContaining({
-        cwd: process.cwd(),
+        cwd: '/repo',
       }),
     );
   });

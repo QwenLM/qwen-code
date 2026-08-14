@@ -1040,7 +1040,10 @@ async function acquireSocketPathLock(
 ): Promise<() => Promise<void>> {
   const lockPath = `${socketPath}.lock`;
   await fs.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Loop until the O_EXCL create wins or a confirmed-live holder is found:
+  // every iteration that continues has just removed a stale lock, so a
+  // successful reclaim always earns another create attempt.
+  while (true) {
     try {
       await fs.writeFile(lockPath, String(process.pid), { flag: 'wx' });
       return async () => {
