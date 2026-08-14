@@ -5,6 +5,47 @@ set -eo pipefail
 # environment from the caller. WORKDIR and BRANCH are job-level env;
 # GITHUB_OUTPUT and RUNNER_TEMP are runner-provided. None is defined here.
 
+# Deterministic verification must not read the RUNNER's git config: the
+# persistent pool accumulates state, and a leaked global exec knob fails
+# branch tests the branch never caused. Measured counterexample, run
+# 31516789251: a stray `diff.external=global-driver` in the runner user's
+# ~/.gitconfig killed four per-hunk probe tests in packages/cli on #8613 —
+# charged to the round (package tests are A/B-exempt), which burned the
+# 18-minute repair on a failure no repair can reach and ended the round as
+# a timeout. Every git this script or its checks spawn (vitest fixture
+# repos included) reads a per-run throwaway global config instead — seeded
+# with the workspace safe.directory actions/checkout put in the real one —
+# and no system config — any system-level git setting the checks ever
+# come to depend on (a CA bundle, a proxy) must be replicated via per-job
+# env, not /etc/gitconfig, because the redirect silently drops it. The
+# redirect also keeps a branch-authored `git config --global` from writing
+# durable state onto the host: it lands in the throwaway file and dies
+# with the run. Enforcement is inherited-env only — branch code writing
+# the real file directly bypasses it, which is why the PAT-bearing steps
+# re-run resanitize-git-config.sh afterwards.
+# Environment-carried config outranks BOTH file redirects and defeats
+# every file-level guard: GIT_CONFIG_COUNT/_PARAMETERS carry config at
+# command-line precedence, GIT_SSL_* / GIT_PROXY_COMMAND steer transport,
+# GIT_EXEC_PATH swaps the transport-helper binary, GIT_DIR/GIT_WORK_TREE
+# repoint git, GIT_ASKPASS/GIT_SSH* hijack auth/exec — branch code in an
+# earlier step can inject any of them through $GITHUB_ENV. Strip them, then
+# redirect the file scopes. Keep this env+redirect block equal to the
+# issue-fix gate's copy (the contract test pins them).
+unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+  GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+  GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+  GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+export GIT_CONFIG_COUNT=0
+export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+: > "${GIT_CONFIG_GLOBAL}"
+git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+if [ -s /etc/gitconfig ]; then
+  echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
+fi
+
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
 # agent that commits and then aborts. The failure handoff keys its

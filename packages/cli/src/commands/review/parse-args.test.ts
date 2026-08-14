@@ -63,6 +63,37 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: vi.fn(),
 }));
 
+// The handler resolves `review.effort` / `review.comment` from the operator's
+// real settings.json — pin it empty, or a developer running with either set
+// reddens the wiring tests below.
+const reviewSettingsMock = vi.hoisted(() =>
+  vi.fn((): Record<string, unknown> => ({})),
+);
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    // The production call carries `{ skipWorkspaceSettings: true }` — these
+    // policy keys resolve from operator scopes only. A caller that forgets
+    // the flag reads the workspace-polluted view below instead, and the
+    // wiring assertions redden: a repository's `.qwen/settings.json` must
+    // not control them.
+    loadSettings: vi.fn((...callArgs: unknown[]) => {
+      const opts = callArgs[1] as
+        | { skipWorkspaceSettings?: boolean }
+        | undefined;
+      return {
+        merged: {
+          review: opts?.skipWorkspaceSettings
+            ? reviewSettingsMock()
+            : { attribution: false, comment: true, effort: 'low' },
+        },
+      };
+    }),
+  };
+});
+
 describe('tokenizeArgs', () => {
   it('splits on whitespace and collapses runs', () => {
     expect(tokenizeArgs('  6711   --comment ')).toEqual(['6711', '--comment']);
@@ -324,6 +355,122 @@ describe('parseReviewArgs', () => {
   });
 });
 
+describe('parseReviewArgs — settings-provided defaults', () => {
+  it('applies the configured effort when --effort is absent', () => {
+    const got = parseReviewArgs('6711', { effort: 'medium' });
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('configured');
+  });
+
+  it('an explicit --effort beats the configured default', () => {
+    const got = parseReviewArgs('6711 --effort low', { effort: 'medium' });
+    expect(got.effort).toBe('low');
+    expect(got.effortSource).toBe('explicit');
+  });
+
+  it('an effective --comment still forces high over the configured effort', () => {
+    const got = parseReviewArgs('6711 --comment', { effort: 'low' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+  });
+
+  it('an effective --fix still floors the configured effort at medium', () => {
+    const got = parseReviewArgs('--fix', { effort: 'low' });
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('forced-by-fix');
+  });
+
+  it('the standing comment setting makes comment effective on a PR target', () => {
+    const got = parseReviewArgs('6711', { comment: true });
+    expect(got.comment.requested).toBe(false);
+    expect(got.comment.effective).toBe(true);
+    // The PR default is already high, so there is nothing to force.
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+  });
+
+  it('the standing comment setting forces high over a configured lower effort', () => {
+    const got = parseReviewArgs('6711', { comment: true, effort: 'low' });
+    expect(got.comment.effective).toBe(true);
+    // Posting still requires a verified review — and the warning says it was
+    // the setting, not a flag the user never typed.
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+    expect(got.warnings.some((w) => w.includes('review.comment'))).toBe(true);
+  });
+
+  it('a flag-forced high names the flag in the forcing warning, not the setting', () => {
+    // The flag branch of the same ternary: with no setting enabled, the
+    // warning must not send the operator hunting a setting that is off.
+    const got = parseReviewArgs('6711 --comment --effort low');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+    expect(got.warnings).toContain(
+      '`--comment` requires a verified review; running at high effort.',
+    );
+    expect(
+      got.warnings.some((w) => w.includes('`review.comment` is enabled')),
+    ).toBe(false);
+  });
+
+  it('the standing comment setting stays inert on a local target', () => {
+    const got = parseReviewArgs('', { comment: true });
+    expect(got.comment.effective).toBe(false);
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('a configured effort above the built-in default applies to local targets', () => {
+    const got = parseReviewArgs('', { effort: 'high' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('configured');
+  });
+
+  it('an invalid explicit --effort falls back to the configured default and says so', () => {
+    // The resolution text names what is ACTUALLY in effect; the `configured`
+    // arm of that ternary is what this pins — every sibling arm is pinned
+    // already, and a mutation to 'using the default effort' here must not
+    // survive.
+    const got = parseReviewArgs('6711 --effort bogus', { effort: 'medium' });
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('configured');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('using the configured review.effort'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an invalid configured effort warns like the flag path instead of dropping silently', () => {
+    // A hand-edited typo must not run every review at the built-in default
+    // while the operator believes another level is on — the flag path warns
+    // on the identical typo, so the configured path mirrors it.
+    const got = parseReviewArgs('6711', { effort: 'hihg' });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toContain(
+      'Invalid review.effort value "hihg" in settings; using the default effort.',
+    );
+  });
+
+  it('a setting-forced high names the setting in the resolution, not a flag the user never typed', () => {
+    // The invalid-effort warning states what is ACTUALLY in effect; when the
+    // forcing came from the standing setting it must not claim `--comment`.
+    const got = parseReviewArgs('6711 --effort bogus', {
+      comment: true,
+      effort: 'medium',
+    });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('forced-by-comment');
+    const invalidWarning = got.warnings.find((w) => w.includes('"bogus"'));
+    expect(invalidWarning).toContain(
+      'the `review.comment` setting forces high effort',
+    );
+    expect(invalidWarning).not.toContain('`--comment` forces high effort');
+  });
+});
+
 describe('parseReviewArgs — `--fix` is `--comment` reflected: it needs a tree, not a PR', () => {
   // The two flags are gated on opposite targets, and each is *ignored with a
   // warning* on the other's. A PR review's tree is the ephemeral worktree Step 9
@@ -436,6 +583,10 @@ describe('parseReviewArgs — repeated --effort warnings state what is actually 
     const invalidWarning = got.warnings.find((w) => w.includes('"typo"'));
     expect(invalidWarning).toContain('forces high effort');
     expect(invalidWarning).not.toContain('default');
+    // The flag drove the forcing — the resolution must name the flag, not a
+    // setting that is off (both branches contain 'forces high effort').
+    expect(invalidWarning).toContain('`--comment` forces high effort');
+    expect(invalidWarning).not.toContain('review.comment');
   });
 
   it('with no valid occurrence anywhere the warning still says the default applies', () => {
@@ -580,6 +731,105 @@ describe('parseArgsCommand wiring', () => {
         runNested(['review', 'parse-args', '--', '--effort low']),
       ).rejects.toThrow(/--stdin/);
     });
+  });
+});
+
+/**
+ * Settings wiring: the real handler, not the pure function. Deleting
+ * `reviewDefaultsFromSettings()` from the handler leaves every pure-function
+ * test above green while real `/review` invocations silently ignore the
+ * configured effort/comment — so these drive the yargs command with a
+ * configurable settings mock.
+ */
+describe('parseArgsCommand — configured defaults wiring', () => {
+  beforeEach(() => {
+    fsState.stdin = '';
+    fsState.written.clear();
+    vi.mocked(writeStdoutLine).mockClear();
+    reviewSettingsMock.mockReturnValue({});
+  });
+
+  async function verdictFor(stdin: string): Promise<ParsedReviewArgs> {
+    fsState.stdin = stdin;
+    await yargs(['parse-args', '--stdin'])
+      .command(parseArgsCommand)
+      .strict()
+      .exitProcess(false)
+      .fail((msg, err) => {
+        throw err ?? new Error(msg ?? 'yargs failure');
+      })
+      .parseAsync();
+    const calls = vi.mocked(writeStdoutLine).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return JSON.parse(String(calls[calls.length - 1][0])) as ParsedReviewArgs;
+  }
+
+  it('a configured effort reaches the verdict through the handler', async () => {
+    reviewSettingsMock.mockReturnValue({ effort: 'medium' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('configured');
+  });
+
+  it('a configured comment setting makes comment effective through the handler', async () => {
+    reviewSettingsMock.mockReturnValue({ comment: true });
+    const got = await verdictFor('6711\n');
+    expect(got.comment).toEqual({ requested: false, effective: true });
+  });
+
+  it('normalizes a case-variant configured effort like the flag path', async () => {
+    // `"Low"` unnormalized misses the exact `effort === 'low'` comparisons
+    // the forcings run — the `--fix` floor would never fire.
+    reviewSettingsMock.mockReturnValue({ effort: 'Low' });
+    const got = await verdictFor('src/foo.ts --fix\n');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('forced-by-fix');
+  });
+
+  it('maps a configured auto effort to the built-in rule without warning', async () => {
+    // The schema default written explicitly must behave exactly like the
+    // setting's absence. Deleting the `auto` arm of reviewDefaultsFromSettings
+    // leaves the resolved effort correct while every run warns about a value
+    // that means the default — nothing else would surface the regression.
+    reviewSettingsMock.mockReturnValue({ effort: 'auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('maps a case-variant auto effort like auto', async () => {
+    // `"Auto"` means exactly the built-in default the operator in fact gets;
+    // a case-sensitive comparison drew a factually wrong invalid-value
+    // warning on every run instead.
+    reviewSettingsMock.mockReturnValue({ effort: 'Auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
+  });
+
+  it('discards an invalid configured effort, warning instead of dropping it silently', async () => {
+    reviewSettingsMock.mockReturnValue({ effort: 'bogus' });
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid review.effort value "bogus" in settings'),
+      ),
+    ).toBe(true);
+  });
+
+  it('ignores workspace settings — the policy keys resolve from operator scopes only', async () => {
+    // The mock answers a flag-less loadSettings call with a workspace-
+    // polluted view (comment on, low effort); the handler's
+    // skipWorkspaceSettings flag keeps it out. Dropping the flag reddens
+    // this for every key at once.
+    const got = await verdictFor('6711\n');
+    expect(got.comment).toEqual({ requested: false, effective: false });
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
   });
 });
 

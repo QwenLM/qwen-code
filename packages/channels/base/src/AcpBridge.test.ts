@@ -109,6 +109,7 @@ type TestableAcpBridge = AcpBridge & {
     extMethod: ReturnType<typeof vi.fn>;
     newSession?: ReturnType<typeof vi.fn>;
     loadSession?: ReturnType<typeof vi.fn>;
+    unstable_resumeSession?: ReturnType<typeof vi.fn>;
     prompt?: ReturnType<typeof vi.fn>;
   };
   knownSessionIds: Set<string>;
@@ -416,6 +417,34 @@ describe('AcpBridge', () => {
     expect(bridge.knownSessionIds.has('shared-session')).toBe(false);
     expect(bridge.sessionBindingTokens.has('shared-session')).toBe(false);
     expect(extMethod).toHaveBeenCalledOnce();
+  });
+
+  it('restores channel sessions through resume without replaying history', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const resumeSession = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      unstable_resumeSession: resumeSession,
+    } as TestableAcpBridge['connection'];
+    const bindingToken = {};
+
+    await expect(
+      bridge.loadSession('restored-session', '/tmp', undefined, bindingToken),
+    ).resolves.toBe('restored-session');
+
+    expect(resumeSession).toHaveBeenCalledWith({
+      sessionId: 'restored-session',
+      cwd: '/tmp',
+      mcpServers: [],
+    });
+    expect(bridge.knownSessionIds.has('restored-session')).toBe(true);
+    expect(bridge.sessionBindingTokens.get('restored-session')).toBe(
+      bindingToken,
+    );
   });
 
   it('returns only the final turn text after tool calls', async () => {

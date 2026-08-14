@@ -19,10 +19,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  assertExactLiveConversationRoot,
-  getLiveConversationRootPath,
-  LiveConversationWorkspace,
-  revalidateLiveConversationRoot,
+  assertExactConversationRoot,
+  ConversationWorkspace,
+  getConversationRootPath,
+  revalidateConversationRoot,
 } from './conversation-workspace.js';
 
 const cleanup: string[] = [];
@@ -44,11 +44,11 @@ async function tempHome(): Promise<string> {
 describe('Live conversation workspace root', () => {
   it('lazily creates the injected default root with a private canonical identity', async () => {
     const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
+    const workspace = new ConversationWorkspace({ homeDir: home });
     const expected = join(home, 'Documents', 'Qwen Code', 'Conversations');
 
     expect(workspace.rootPath).toBe(expected);
-    expect(getLiveConversationRootPath(home)).toBe(expected);
+    expect(getConversationRootPath(home)).toBe(expected);
     await expect(lstat(expected)).rejects.toMatchObject({ code: 'ENOENT' });
 
     const [first, second] = await Promise.all([
@@ -71,14 +71,14 @@ describe('Live conversation workspace root', () => {
     if (process.platform === 'win32') return;
 
     const symlinkHome = await tempHome();
-    const symlinkRoot = getLiveConversationRootPath(symlinkHome);
+    const symlinkRoot = getConversationRootPath(symlinkHome);
     await mkdir(join(symlinkHome, 'Documents', 'Qwen Code'), {
       recursive: true,
     });
     const target = join(symlinkHome, 'target');
     await mkdir(target, { mode: 0o700 });
     await symlink(target, symlinkRoot);
-    const symlinkWorkspace = new LiveConversationWorkspace({
+    const symlinkWorkspace = new ConversationWorkspace({
       homeDir: symlinkHome,
     });
     await expect(symlinkWorkspace.getRoot()).rejects.toThrow(/non-symlink/);
@@ -86,19 +86,19 @@ describe('Live conversation workspace root', () => {
     expect((await symlinkWorkspace.getRoot()).configuredRoot).toBe(symlinkRoot);
 
     const fileHome = await tempHome();
-    const fileRoot = getLiveConversationRootPath(fileHome);
+    const fileRoot = getConversationRootPath(fileHome);
     await mkdir(join(fileHome, 'Documents', 'Qwen Code'), { recursive: true });
     await writeFile(fileRoot, 'not a directory');
     await expect(
-      new LiveConversationWorkspace({ homeDir: fileHome }).getRoot(),
+      new ConversationWorkspace({ homeDir: fileHome }).getRoot(),
     ).rejects.toThrow(/non-symlink/);
 
     const permissiveHome = await tempHome();
-    const permissiveRoot = getLiveConversationRootPath(permissiveHome);
+    const permissiveRoot = getConversationRootPath(permissiveHome);
     await mkdir(permissiveRoot, { recursive: true, mode: 0o700 });
     await chmod(permissiveRoot, 0o755);
     await expect(
-      new LiveConversationWorkspace({ homeDir: permissiveHome }).getRoot(),
+      new ConversationWorkspace({ homeDir: permissiveHome }).getRoot(),
     ).rejects.toThrow(/only to its owner/);
 
     const ownerHome = await tempHome();
@@ -114,7 +114,7 @@ describe('Live conversation workspace root', () => {
     });
     try {
       await expect(
-        new LiveConversationWorkspace({ homeDir: ownerHome }).getRoot(),
+        new ConversationWorkspace({ homeDir: ownerHome }).getRoot(),
       ).rejects.toThrow(/owned by the daemon user/);
     } finally {
       if (originalDescriptor) {
@@ -127,11 +127,11 @@ describe('Live conversation workspace root', () => {
 
   it('revalidates both canonical identity and the configured path', async () => {
     const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
+    const workspace = new ConversationWorkspace({ homeDir: home });
     const identity = await workspace.getRoot();
 
     expect(await workspace.revalidate()).toBe(identity);
-    expect(await revalidateLiveConversationRoot(identity)).toBe(identity);
+    expect(await revalidateConversationRoot(identity)).toBe(identity);
 
     await rename(identity.configuredRoot, `${identity.configuredRoot}-old`);
     await mkdir(identity.configuredRoot, { mode: 0o700 });
@@ -141,7 +141,7 @@ describe('Live conversation workspace root', () => {
 
   it('accepts only the exact configured or canonical root identity', async () => {
     const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
+    const workspace = new ConversationWorkspace({ homeDir: home });
     const identity = await workspace.getRoot();
     const child = join(identity.canonicalRoot, 'child');
     await mkdir(child, { mode: 0o700 });
@@ -150,7 +150,7 @@ describe('Live conversation workspace root', () => {
       identity,
     );
     expect(
-      await assertExactLiveConversationRoot(identity, identity.canonicalRoot),
+      await assertExactConversationRoot(identity, identity.canonicalRoot),
     ).toBe(identity);
     await expect(workspace.assertExactRoot(child)).rejects.toThrow(/exact/);
 
@@ -161,7 +161,7 @@ describe('Live conversation workspace root', () => {
 
   it('materializes one private direct child per conversation session', async () => {
     const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
+    const workspace = new ConversationWorkspace({ homeDir: home });
 
     const first = await workspace.materializeConversationDirectory('first');
     const same = await workspace.materializeConversationDirectory('first');
@@ -180,7 +180,7 @@ describe('Live conversation workspace root', () => {
 
   it('rejects a replaced conversation child symlink', async () => {
     const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
+    const workspace = new ConversationWorkspace({ homeDir: home });
     const child = await workspace.materializeConversationDirectory('replace');
     const outside = join(home, 'outside');
     await mkdir(outside, { mode: 0o700 });
@@ -194,7 +194,7 @@ describe('Live conversation workspace root', () => {
 
   it('discards only an empty expected conversation child', async () => {
     const home = await tempHome();
-    const workspace = new LiveConversationWorkspace({ homeDir: home });
+    const workspace = new ConversationWorkspace({ homeDir: home });
     const empty = await workspace.materializeConversationDirectory('empty');
     const occupied =
       await workspace.materializeConversationDirectory('occupied');
