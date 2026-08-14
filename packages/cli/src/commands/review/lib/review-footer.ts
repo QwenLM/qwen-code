@@ -632,7 +632,7 @@ export function rendersAsNothing(text: string): boolean {
     .replace(/\p{Cf}/gu, '')
     // No-break, space, and invisible named/numeric entity families.
     .replace(
-      /&nbsp;|&ensp;|&emsp;|&thinsp;|&shy;|&zwj;|&zwnj;|&lrm;|&rlm;|&#0*(?:160|173|819[2-9]|820[0-7]|8288|65279);|&#x0*(?:a0|ad|200[0-9a-f]|206[0-4]|feff);/gi,
+      /&nbsp;|&ensp;|&emsp;|&thinsp;|&shy;|&zwj;|&zwnj;|&lrm;|&rlm;|&zerowidthspace;|&#0*(?:160|173|819[2-9]|820[0-7]|8288|65279);|&#x0*(?:a0|ad|200[0-9a-f]|206[0-4]|feff);/gi,
       '',
     )
     // Empty inline links render no pixels; an empty-alt image still
@@ -711,8 +711,11 @@ export function stripForgedFooterLines(body: string): string {
  * and re-promotes exactly like an unquoted one. Quoted code is left alone,
  * as with the other strips.
  */
+// The whole stacked run, not one marker: a non-global single-marker match
+// re-ran the full fixpoint chain per stacked marker — quadratic on
+// model-written bodies whose rest defeats the strips' early bailouts.
 const PARAGRAPH_MARKER_RE =
-  /^[ \t]{0,3}(?:>[ \t]*)*(?:\*\*\[Critical\]\*\*|\*\*\[Suggestion\]\*\*)[ \t]*:?[ \t]*/;
+  /^[ \t]{0,3}(?:>[ \t]*)*(?:(?:\*\*\[Critical\]\*\*|\*\*\[Suggestion\]\*\*)[ \t]*:?[ \t]*)+/;
 
 export function stripParagraphMarkers(body: string): string {
   if (!body.includes('**[')) return body;

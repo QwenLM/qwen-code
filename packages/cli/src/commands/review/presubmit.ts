@@ -548,34 +548,33 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const allComments = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
   ) as RawComment[];
-  // Footer match first — and NOT the only match: with `review.attribution`
-  // off, posted comments carry no footer, and a filter keyed on the footer
-  // alone goes blind to every earlier attribution-off post — the overlap and
-  // stale classification (and the `blockOnExistingComments` gate that exists
-  // to stop duplicate posting) silently stop seeing them. Attribution-off
-  // posts carry the invisible comment marker instead, and this filter
-  // matches it only together with authorship by the reviewing account AND
-  // the exact shape `submit` posts (the marker trailing the body): the
-  // marker string is public and renders invisibly, so an ungated match would
-  // let a PR author plant it on the line they expect a blocker on and have
-  // the next round silently withhold that blocker — provenance the
-  // commenter cannot fake is the account, not the marker. The `severityOf`
-  // disjunct remains for posts made before the marker existed, gated on the
-  // finding shape — the same trimmed predicate `submit` posts through (a
-  // body that leaves with leading whitespace must still be recognized
-  // here), while a hand-written comment by the same account is not a posted
-  // finding: admitting one lets a same-line hand comment trip the overlap
-  // gate into silently dropping a genuinely new finding. Replies stay
-  // excluded either way. Attribution-off posts from OTHER accounts still
-  // escape detection — no footer, no authorship signal — and the setting's
-  // description says so.
+  // Match any of the three public strings a posted finding carries — the
+  // visible footer, the invisible marker, the finding shape — and gate
+  // EVERY match on authorship by the reviewing account: all three are
+  // public and plantable, and an ungated match lets anyone plant one on the
+  // line they expect a blocker on and have the next round silently withhold
+  // that blocker as a duplicate — provenance the commenter cannot fake is
+  // the account, not the string. The footer disjunct recognizes attributed
+  // posts (and is the only signal pre-marker posts carry); the marker
+  // disjunct recognizes attribution-off posts, matched only in the exact
+  // shape `submit` posts (the marker trailing the body); the `severityOf`
+  // disjunct remains for this account's posts made before the marker
+  // existed, gated on the finding shape — the same trimmed predicate
+  // `submit` posts through (a body that leaves with leading whitespace must
+  // still be recognized here), while a hand-written comment by the same
+  // account is not a posted finding: admitting one lets a same-line hand
+  // comment trip the overlap gate into silently dropping a genuinely new
+  // finding. Replies stay excluded. The gate's cost is named: posts from
+  // OTHER accounts escape detection, attributed or not — the limitation
+  // #8994 documents for attribution-off posts, extended to attributed ones.
   const qwenComments = allComments.filter(
     (c) =>
-      /via Qwen Code \/review/.test(c.body ?? '') ||
-      (!c.in_reply_to_id &&
-        me !== '' &&
-        (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
-        (carriesCommentMarker(c.body ?? '') || severityOf(c) !== null)),
+      !c.in_reply_to_id &&
+      me !== '' &&
+      (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
+      (/via Qwen Code \/review/.test(c.body ?? '') ||
+        carriesCommentMarker(c.body ?? '') ||
+        severityOf(c) !== null),
   );
 
   const repliedToIds = new Set<number>();

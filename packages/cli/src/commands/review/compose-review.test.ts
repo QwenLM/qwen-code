@@ -597,6 +597,28 @@ describe('composeReview — the C/S table', () => {
     ).toThrow(/renders as nothing/);
   });
 
+  it('refuses a body Critical held up only by a forged footer past the caps', () => {
+    // The gate must project the shape the render legs post: the uncapped
+    // trailing strip runs BEFORE the emptiness check, exactly as in
+    // submit's gate. A forged footer past the capped strips' 400-char
+    // middle once passed as ballast; the render legs then stripped it
+    // entirely and a bare **[Critical]** line posted and counted.
+    const forged = `**[Critical]** _— ${'x'.repeat(450)} via Qwen Code /review (v0.21.2)_`;
+    expect(() => composeReview(base({ bodyCriticals: [forged] }))).toThrow(
+      /renders as nothing/,
+    );
+  });
+
+  it('refuses a cannot-tell entry a forged footer past the caps reduces to nothing', () => {
+    // The twin leg must fail the draft, not silently drop the entry:
+    // dropping it lifts the `cannot-tell-existing-critical` cap, and the
+    // composed verdict flips.
+    const forged = `_— ${'x'.repeat(450)} via Qwen Code /review (v0.21.2)_`;
+    expect(() =>
+      composeReview(base({ cannotTellCriticals: [forged] })),
+    ).toThrow(/renders as nothing/);
+  });
+
   it('attribution off: a forged footer split across a soft break still strips', () => {
     // Re-wrapping can cut the footer across two lines of one entry; neither
     // half contains the marker, but GitHub renders the soft break as a
@@ -4453,6 +4475,29 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(ledger.findings[0]?.title).toBe('whole-PR blocker');
     expect(JSON.stringify(ledger)).not.toContain('forged');
     expect(JSON.stringify(ledger)).not.toContain('**[Critical]**');
+  });
+
+  it('the ledger title matches the visible item when the forged footer splits across a blank line', () => {
+    // The ledger leg must ingest exactly what the render legs post —
+    // collapse, then strip. Reading the raw multi-line entry let a
+    // blank-line-split forged footer escape the ledger's line-anchored
+    // strips: the visible item rendered `race` while the ledger title
+    // carried the forged-attribution fragment.
+    const r = composeReview(
+      {
+        planPath: plan(),
+        modelId: 'm',
+        bodyCriticals: [
+          '**[Critical]** race _— Model via Qwen\n\nCode /review (v0.21.2)_',
+        ],
+      },
+      '0.21.2',
+      false,
+    );
+    expect(r.body).toContain('race');
+    expect(r.body).not.toContain('via Qwen Code');
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.findings[0]?.title).toBe('race');
   });
 
   it('attribution off: a PR run posts no severity marker anywhere — visible body and ledger alike', () => {

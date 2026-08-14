@@ -18,6 +18,7 @@ import {
   stripFooterSpans,
   stripForUnattributedPost,
   stripForgedFooterLines,
+  stripParagraphMarkers,
   stripReviewFooter,
 } from './review-footer.js';
 import { CANONICAL_LGTM_RE } from '../pr-context.js';
@@ -315,8 +316,9 @@ describe('the review footer and the regex that strips it', () => {
       ]) {
         expect(rendersAsNothing(scaffold)).toBe(true);
       }
-      // Not a standard HTML5 entity — stays content.
-      expect(rendersAsNothing('&ZeroWidthSpace;')).toBe(false);
+      // A WHATWG-standard named entity decoding to U+200B — it classifies
+      // with its literal Cf twin, not as content.
+      expect(rendersAsNothing('&ZeroWidthSpace;')).toBe(true);
       // Literal and entity-encoded forms of the same space classify alike.
       expect(rendersAsNothing('\u2002')).toBe(true);
     });
@@ -613,6 +615,41 @@ describe('the review footer and the regex that strips it', () => {
       expect(
         stripForUnattributedPost('> > **[Suggestion]**: old finding text'),
       ).toBe('old finding text');
+    });
+  });
+
+  describe('paragraph markers — a stacked run strips whole', () => {
+    it('consumes every marker of a stacked run in one pass', () => {
+      // A looping draft can stack markers; the strip takes the whole run,
+      // colons and all, not one marker per fixpoint pass.
+      expect(
+        stripParagraphMarkers('**[Critical]** **[Suggestion]** text'),
+      ).toBe('text');
+      expect(
+        stripParagraphMarkers('**[Critical]**: **[Suggestion]**: text'),
+      ).toBe('text');
+      expect(
+        stripParagraphMarkers('> **[Critical]** **[Critical]** text'),
+      ).toBe('text');
+      expect(stripParagraphMarkers('prose **[Critical]** text')).toBe(
+        'prose **[Critical]** text',
+      );
+    });
+
+    it('a large stacked stack in a later paragraph converges fast', () => {
+      // Regression pin for the quadratic: a one-marker-per-pass strip
+      // re-ran the full fixpoint chain per stacked marker — measured >1 s at
+      // 2000 markers when the body's rest defeats the strips' early
+      // bailouts. The whole-run match makes it one pass.
+      const body =
+        'intro paragraph\n\n' +
+        '**[Critical]** '.repeat(2000) +
+        'x /review & y';
+      const started = Date.now();
+      expect(stripForUnattributedPost(body)).toBe(
+        'intro paragraph\n\nx /review & y',
+      );
+      expect(Date.now() - started).toBeLessThan(1000);
     });
   });
 });

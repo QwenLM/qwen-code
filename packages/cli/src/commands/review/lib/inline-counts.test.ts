@@ -5,7 +5,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { stripSeverityPrefix } from './inline-counts.js';
+import {
+  countInlineFindings,
+  severityOf,
+  stripSeverityPrefix,
+  unmarkedComments,
+} from './inline-counts.js';
 
 describe('stripSeverityPrefix — the attribution-off posted shape', () => {
   it('strips both markers, with the whitespace the counter tolerates', () => {
@@ -51,5 +56,31 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     expect(stripSeverityPrefix('**[Critical]**')).toBe('');
     expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe('');
     expect(stripSeverityPrefix('**[Critical]** **[Suggestion]**')).toBe('');
+  });
+});
+
+describe('severityOf — one acceptance set with the strip', () => {
+  it('classifies through the leading residue the strip skips', () => {
+    // The gates and the counter accept exactly the drafts the strip is
+    // written and tested to remove — a body opening with render-nothing
+    // residue before its marker is MARKED, not an unmarked refusal that
+    // forces a pointless re-compose.
+    expect(severityOf({ body: '<!-- x -->**[Critical]** text' })).toBe(
+      'critical',
+    );
+    expect(severityOf({ body: '\u200B**[Suggestion]** text' })).toBe(
+      'suggestion',
+    );
+    expect(
+      countInlineFindings([{ body: '<!-- x -->**[Critical]** text' }]),
+    ).toEqual({ criticalsInline: 1, suggestionsInline: 0 });
+    expect(
+      unmarkedComments([{ body: '<!-- x -->**[Critical]** text' }]),
+    ).toEqual([]);
+  });
+
+  it('still refuses a body with no marker after the residue', () => {
+    expect(severityOf({ body: '<!-- x -->prose' })).toBe(null);
+    expect(unmarkedComments([{ body: '<!-- x -->prose' }])).toEqual([0]);
   });
 });

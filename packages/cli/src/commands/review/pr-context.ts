@@ -478,6 +478,21 @@ export function isBlockerBody(
 }
 
 /**
+ * Whether any posted comment carries the invisible severity marker — a
+ * signal only authorship unlocks (`isBlockerBody`'s marker disjunct gates
+ * on the reviewing account). When identity lookup fails while one is
+ * present, the context must fail closed instead of proceeding with an
+ * empty `me`: an unresolved attribution-off Critical would classify as
+ * ordinary discussion and disappear from the blocker set later rounds use,
+ * and "could not tell" must not read the same as "was not".
+ */
+export function anyCommentCarriesMarker(
+  comments: ReadonlyArray<{ body?: string | undefined }>,
+): boolean {
+  return comments.some((c) => commentMarkerSeverity(c.body ?? '') !== null);
+}
+
+/**
  * Group the flat inline-comment list into threads and classify each root.
  * The single copy of this walk: `buildMarkdown` renders from it and the
  * stdout summary counts from it, so the reported count can never diverge
@@ -996,14 +1011,29 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // The reviewing account gates BOTH the ledger recovery and the comment
   // marker's blocker promotion. `currentUser()` is a network round-trip;
   // with no reviews and no inline comments there is nothing for its answer
-  // to match against, so it is not made. Best-effort — offline or
-  // unauthenticated just means no ledger and no marker promotion, never a
-  // failure.
+  // to match against, so it is not made. A failed lookup fails CLOSED when
+  // something the identity gates is present — a posted severity marker or a
+  // ledger — because proceeding with an empty `me` would demote a still-open
+  // attribution-off Critical to ordinary discussion and drop it from the
+  // blocker set later rounds use; when nothing needs the identity, the
+  // lookup's failure still costs nothing.
   let me = '';
-  try {
-    me = reviews.length || inline.length ? currentUser() : '';
-  } catch {
-    me = '';
+  if (reviews.length || inline.length) {
+    try {
+      me = currentUser();
+    } catch (err) {
+      if (
+        anyCommentCarriesMarker(inline) ||
+        reviews.some((r) => parseLedger(r.body ?? '') !== null)
+      ) {
+        throw new Error(
+          `cannot determine the reviewing account (${
+            err instanceof Error ? err.message : String(err)
+          }) while posted comments carry Qwen severity markers or ledgers — ` +
+            'the blocker re-check and ledger recovery depend on it; re-run',
+        );
+      }
+    }
   }
   let prevLedger: Ledger | null = null;
   try {

@@ -27,17 +27,33 @@ export interface DraftedComment {
 }
 
 /**
+ * Leading render-nothing residue: whitespace, HTML comments, and Cf runs —
+ * what the render-nothing projection already removes. Invisible BETWEEN
+ * stacked markers on the rendered post, so the strip iteration skips it
+ * when re-classifying; otherwise it hides the second marker from the
+ * classifier and the loop converges with a bare machine marker intact.
+ */
+const LEADING_INVISIBLE_RE = /^(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})+/u;
+
+/**
  * Which severity marker a drafted comment opens with — or null for neither.
  *
  * The ONE statement of the predicate. The counter and the unmarked-scan each
  * restated it at first, and drift between restatements is exactly the
  * bug-class this file's header describes; every caller classifies through
  * here so the two can never disagree about what "marked" means.
+ *
+ * Classification runs on the same projection the post-time strip matches:
+ * leading render-nothing residue is invisible BEFORE the marker on the
+ * rendered post, so a gate that classified the raw bytes refused exactly
+ * the drafts the strip is written and tested to accept, forcing a pointless
+ * re-compose.
  */
 export function severityOf(
   c: DraftedComment,
 ): 'critical' | 'suggestion' | null {
-  const body = typeof c?.body === 'string' ? c.body.trimStart() : '';
+  const body =
+    typeof c?.body === 'string' ? c.body.replace(LEADING_INVISIBLE_RE, '') : '';
   if (body.startsWith(CRITICAL_PREFIX)) return 'critical';
   if (body.startsWith(SUGGESTION_PREFIX)) return 'suggestion';
   return null;
@@ -59,15 +75,6 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
 }
 
 /**
- * Leading render-nothing residue: whitespace, HTML comments, and Cf runs —
- * what the render-nothing projection already removes. Invisible BETWEEN
- * stacked markers on the rendered post, so the strip iteration skips it
- * when re-classifying; otherwise it hides the second marker from the
- * classifier and the loop converges with a bare machine marker intact.
- */
-const LEADING_INVISIBLE_RE = /^(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})+/u;
-
-/**
  * The body with its leading severity markers removed — the shape an
  * attribution-off (`review.attribution: false`) run POSTS, applied by
  * `submit` after the verdict was counted from the marked payload.
@@ -83,9 +90,9 @@ const LEADING_INVISIBLE_RE = /^(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})+/u;
 export function stripSeverityPrefix(body: string): string {
   let current = body;
   for (;;) {
-    const visible = current.replace(LEADING_INVISIBLE_RE, '');
-    const severity = severityOf({ body: visible });
+    const severity = severityOf({ body: current });
     if (severity === null) return current;
+    const visible = current.replace(LEADING_INVISIBLE_RE, '');
     const prefix =
       severity === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
     const rest = visible

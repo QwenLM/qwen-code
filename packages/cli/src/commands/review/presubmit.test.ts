@@ -724,7 +724,13 @@ describe('presubmitCommand', () => {
 
     const FINDINGS = [{ path: 'a.ts', line: 12 }];
 
-    it('classifies footer-bearing comments regardless of their author', async () => {
+    it('no longer admits a footer-bearing comment from another account — the footer is plantable too', async () => {
+      // The footer string is exactly as public and plantable as the marker:
+      // anyone can post it on the line they expect a blocker on, and an
+      // ungated match would have the next round silently withhold the real
+      // finding there as a duplicate. Authorship gates the footer disjunct
+      // the same way it gates the marker. The cost is named: attributed
+      // posts from OTHER accounts escape dedup.
       const result = await presubmitWithComments(
         [
           {
@@ -734,6 +740,26 @@ describe('presubmitCommand', () => {
             line: 12,
             commit_id: 'abc123',
             user: { login: 'someone-else' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
+    it('classifies a footer-bearing prose comment by the reviewing account', async () => {
+      // Prose, not finding-shaped: only the footer disjunct recognizes this
+      // attributed post for dedup — deleting it reddens here.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 1,
+            body: 'looks good overall _— model via Qwen Code /review (v0.21.2)_',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            user: { login: 'qwen-code-ci-bot' },
           },
         ],
         FINDINGS,

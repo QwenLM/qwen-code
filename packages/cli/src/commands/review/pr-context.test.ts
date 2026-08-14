@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Argv, CommandModule } from 'yargs';
 import {
   prContextCommand,
+  anyCommentCarriesMarker,
   isLegacySuggestionSummary,
   isReviewWorthShowing,
   SUMMARY_MARKER,
@@ -27,6 +29,26 @@ import {
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
+
+// The handler-level identity tests drive `runPrContext` through the command
+// with the gh layer mocked — everything else in this file tests pure
+// functions and never reaches it.
+const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
+const ghApiAllMock = vi.hoisted(() =>
+  vi.fn((..._args: string[]): unknown[] => []),
+);
+const currentUserMock = vi.hoisted(() => vi.fn(() => 'review-bot'));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghMock,
+    ghApiAll: ghApiAllMock,
+    currentUser: currentUserMock,
+    ensureAuthenticated: vi.fn(),
+    setGhHost: vi.fn(),
+  };
+});
 
 // Guards the recognition of legacy suggestion-summary comments. This is what
 // decides which issue comment is excluded from the "Already discussed" list.
@@ -975,6 +997,23 @@ describe('classifyInlineThreads', () => {
     expect(t.openBlockerRoots).toEqual([]);
   });
 
+  it('fails closed on an unresolved identity — a matching author is not enough', () => {
+    // The marker disjunct must never fire with an empty `me` — exactly
+    // the state a failed identity lookup used to swallow silently, where a
+    // planted marker from a ghost or deleted author would otherwise
+    // promote to a blocker.
+    const inline: RawComment[] = [
+      {
+        id: 7,
+        user: { login: 'qwen-code-ci-bot' },
+        body: 'the guard checks the wrong variable\n\n<!-- qwen-review critical -->',
+      },
+    ];
+    const t = classifyInlineThreads(inline, '');
+    expect(t.openBlockerRoots).toEqual([]);
+    expect(t.openRoots.map((c) => c.id)).toEqual([7]);
+  });
+
   it('reads the marker severity only from the trailing posted shape', () => {
     // A Critical quoting code that contains the suggestion marker: the
     // planted mid-body string must not demote the thread.
@@ -1029,6 +1068,78 @@ describe('classifyInlineThreads', () => {
     // Rendered before any Open/Already-discussed section, i.e. inside the read
     // window, not as a trailing snippet.
     expect(md).not.toContain('## Open inline comments');
+  });
+
+  it('promotes an attribution-off marker body through buildMarkdown only with the reviewing identity', () => {
+    // `me` is load-bearing end to end: a regression dropping it from the
+    // classify call reddens here — the marker comment settles into a
+    // one-line open-thread snippet and the re-check section never exists.
+    const meta = {
+      title: 'T',
+      body: 'D',
+      author: { login: 'a' },
+      baseRefName: 'main',
+      headRefName: 'b',
+      headRefOid: 's',
+      additions: 1,
+      deletions: 1,
+      changedFiles: 1,
+      state: 'OPEN',
+    } as PrMetadata;
+    const markerComment = {
+      id: 9,
+      user: { login: 'review-bot' },
+      path: 'a.ts',
+      line: 3,
+      body: 'the guard checks the wrong variable\n\n<!-- qwen-review critical -->',
+    };
+    const withIdentity = buildMarkdown(
+      '1',
+      'o/r',
+      meta,
+      [markerComment],
+      [],
+      [],
+      null,
+      'review-bot',
+    );
+    const section = withIdentity.indexOf('## Blockers to re-check');
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(
+      withIdentity.indexOf('the guard checks the wrong variable'),
+    ).toBeGreaterThan(section);
+    const withoutIdentity = buildMarkdown(
+      '1',
+      'o/r',
+      meta,
+      [markerComment],
+      [],
+      [],
+      null,
+      '',
+    );
+    expect(withoutIdentity).not.toContain('## Blockers to re-check');
+    expect(withoutIdentity).toContain('## Open inline comments');
+  });
+});
+
+describe('anyCommentCarriesMarker', () => {
+  it('sees only the trailing posted marker shape', () => {
+    expect(
+      anyCommentCarriesMarker([{ body: 'x\n\n<!-- qwen-review critical -->' }]),
+    ).toBe(true);
+    expect(
+      anyCommentCarriesMarker([
+        { body: 'x\n\n<!-- qwen-review suggestion -->' },
+      ]),
+    ).toBe(true);
+    expect(anyCommentCarriesMarker([{ body: 'plain prose' }])).toBe(false);
+    expect(
+      anyCommentCarriesMarker([
+        { body: '<!-- qwen-review critical --> mid-body' },
+      ]),
+    ).toBe(false);
+    expect(anyCommentCarriesMarker([])).toBe(false);
   });
 });
 
@@ -1269,5 +1380,104 @@ describe('renderLedgerSection escaping', () => {
     });
     const row = md.split('\n').find((l) => l.startsWith('| R1-1'))!;
     expect(row).toBe("| R1-1 | Suggestion | `a'.ts** bold **` | t |");
+  });
+});
+
+describe('prContextCommand handler — identity fail-closed', () => {
+  // A transient `currentUser()` failure must not silently demote a
+  // still-open attribution-off Critical to ordinary discussion: the
+  // handler refuses the context file when something the identity gates is
+  // posted, and stays best-effort when nothing is.
+  const META = JSON.stringify({
+    title: 'T',
+    body: null,
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'b',
+    headRefOid: 's',
+    additions: 1,
+    deletions: 1,
+    changedFiles: 1,
+    state: 'OPEN',
+  });
+  const MARKER_COMMENT = {
+    id: 1,
+    user: { login: 'review-bot' },
+    path: 'a.ts',
+    line: 3,
+    body: 'the guard checks the wrong variable\n\n<!-- qwen-review critical -->',
+  };
+
+  let outDir: string;
+  beforeEach(() => {
+    outDir = mkdtempSync(join(tmpdir(), 'pr-context-identity-'));
+    ghMock.mockClear();
+    ghMock.mockReturnValue(META);
+    ghApiAllMock.mockClear();
+    ghApiAllMock.mockReturnValue([]);
+    currentUserMock.mockClear();
+    currentUserMock.mockReturnValue('review-bot');
+  });
+  afterEach(() => rmSync(outDir, { recursive: true, force: true }));
+
+  const run = (out: string): Promise<void> =>
+    Promise.resolve(
+      prContextCommand.handler({
+        pr_number: '42',
+        owner_repo: 'o/r',
+        out,
+      } as never) as void,
+    );
+
+  const withMarkerPosted = (): void => {
+    ghApiAllMock.mockImplementation((path: string) =>
+      path.includes('/pulls/') && path.endsWith('/comments')
+        ? [MARKER_COMMENT]
+        : [],
+    );
+  };
+
+  it('refuses the context when identity fails while a severity marker is posted', async () => {
+    withMarkerPosted();
+    currentUserMock.mockImplementation(() => {
+      throw new Error('network down');
+    });
+    await expect(run(join(outDir, 'context.md'))).rejects.toThrow(
+      /cannot determine the reviewing account/,
+    );
+  });
+
+  it('proceeds best-effort when identity fails and nothing needs it', async () => {
+    ghApiAllMock.mockImplementation((path: string) =>
+      path.includes('/pulls/') && path.endsWith('/comments')
+        ? [
+            {
+              id: 1,
+              user: { login: 'someone' },
+              path: 'a.ts',
+              line: 3,
+              body: 'plain prose',
+            },
+          ]
+        : [],
+    );
+    currentUserMock.mockImplementation(() => {
+      throw new Error('network down');
+    });
+    const out = join(outDir, 'context.md');
+    await run(out);
+    expect(readFileSync(out, 'utf8')).toContain('## Open inline comments');
+  });
+
+  it('promotes the marker comment into the re-check section when identity resolves', async () => {
+    withMarkerPosted();
+    const out = join(outDir, 'context.md');
+    await run(out);
+    const md = readFileSync(out, 'utf8');
+    const section = md.indexOf('## Blockers to re-check');
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(md.indexOf('the guard checks the wrong variable')).toBeGreaterThan(
+      section,
+    );
   });
 });

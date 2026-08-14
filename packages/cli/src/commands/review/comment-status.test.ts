@@ -91,6 +91,26 @@ describe('buildThreadStatuses — thread grouping', () => {
     expect(planted.isBlocker).toBe(false);
   });
 
+  it('fails closed on an unresolved identity — a matching author is not enough', () => {
+    // The marker disjunct must never fire with an empty `me` — exactly
+    // the state a failed identity lookup used to swallow silently, where a
+    // planted marker from a ghost or deleted author would otherwise
+    // promote to a blocker.
+    const [t] = buildThreadStatuses(
+      [
+        comment({
+          id: 1,
+          user: { login: 'qwen-code-ci-bot' },
+          body: 'the guard checks the wrong variable\n\n<!-- qwen-review critical -->',
+        }),
+      ],
+      'author',
+      noChange,
+      '',
+    );
+    expect(t.isBlocker).toBe(false);
+  });
+
   it('survives a reply cycle without hanging', () => {
     const threads = buildThreadStatuses(
       [

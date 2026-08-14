@@ -555,9 +555,7 @@ function ledgerMarkerFor(
           line?: unknown;
           body?: unknown;
         }>,
-        toStringList(input.bodyCriticals, 'bodyCriticals')
-          .map(stripReviewFooter)
-          .filter((entry) => entry.trim() !== ''),
+        ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
       ),
       ...(sha ? { sha } : {}),
     });
@@ -585,6 +583,25 @@ function collapseEntry(entry: string): string {
     : entry;
 }
 
+/**
+ * A model-written entry list as EVERY consumer sees it: one line per entry,
+ * trailing footers gone. Stripped per entry, not on the assembled body:
+ * these strings render verbatim as the LAST body part, and a forged footer
+ * relocated into one would post directly above the canonical footer — the
+ * `$`-anchored regex only sees an entry's end, before the footer is
+ * appended. Collapsed ONCE at ingestion, before the gates: the gates, the
+ * render legs, and the ledger titles must project ONE shape — line-anchored
+ * strips have no power on the raw multi-line form, and a leg reading a
+ * different shape once carried a forged-attribution fragment the visible
+ * list had stripped.
+ */
+function ingestEntryList(value: unknown, field: string): string[] {
+  return toStringList(value, field)
+    .map(collapseEntry)
+    .filter((entry) => entry.trim() !== '')
+    .map(stripReviewFooter);
+}
+
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
@@ -595,26 +612,17 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  // Stripped per entry, not on the assembled body: these model-written
-  // strings render verbatim as the LAST body part, and a forged footer
-  // relocated into one would post directly above the canonical footer —
-  // the `$`-anchored regex only sees an entry's end, before the footer is
-  // appended.
-  // Collapsed ONCE at ingestion, before the gates: the entries render as
-  // single lines, and the gates and the render legs must project the same
-  // shape — line-anchored strips have no power on the raw multi-line form.
-  const bodyCriticalsCollapsed = toStringList(
-    input.bodyCriticals,
-    'bodyCriticals',
-  )
-    .map(collapseEntry)
-    .filter((entry) => entry.trim() !== '');
+  const bodyCriticals = ingestEntryList(input.bodyCriticals, 'bodyCriticals');
   // A body Critical that is nothing but scaffolding renders nothing yet
   // would still count toward REQUEST_CHANGES — the inline-comment path
   // refuses this shape at submit's gate; refuse it here too, while the
-  // draft is still cheap to fix.
-  for (const entry of bodyCriticalsCollapsed) {
-    if (rendersAsNothing(stripForUnattributedPost(entry))) {
+  // draft is still cheap to fix. The gate checks the shape the render legs
+  // post: strip the trailing forged footer BEFORE the emptiness projection
+  // (mirroring `submit`'s gate) — otherwise a footer past the strip's caps
+  // passes as ballast, the render legs strip it entirely, and a bare-marker
+  // entry posts and counts.
+  for (const entry of bodyCriticals) {
+    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
       throw new Error(
         'compose-review: a body Critical renders as nothing (marker-only, ' +
           'empty comment, or otherwise invisible) — redraft it with the ' +
@@ -622,21 +630,19 @@ function composeReviewBody(
       );
     }
   }
-  const bodyCriticals = bodyCriticalsCollapsed
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );
-  const cannotTellCollapsed = toStringList(
+  const cannotTell = ingestEntryList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
-  )
-    .map(collapseEntry)
-    .filter((entry) => entry.trim() !== '');
-  for (const entry of cannotTellCollapsed) {
-    if (rendersAsNothing(stripForUnattributedPost(entry))) {
+  );
+  // The same gate in the same order: an entry the render leg would reduce
+  // to nothing must fail the draft, not vanish — silently dropping it lifts
+  // the `cannot-tell-existing-critical` cap and flips the verdict.
+  for (const entry of cannotTell) {
+    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
       throw new Error(
         'compose-review: a cannot-tell entry renders as nothing ' +
           '(marker-only, empty comment, or otherwise invisible) — ' +
@@ -644,9 +650,6 @@ function composeReviewBody(
       );
     }
   }
-  const cannotTell = cannotTellCollapsed
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
