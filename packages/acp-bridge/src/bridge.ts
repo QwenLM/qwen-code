@@ -2300,6 +2300,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // can elapse inside a slow restore too.
     const owner = channelInfoForEntry(entry);
     if (owner?.pendingRestoreIds.has(entry.sessionId)) return false;
+    // A child that negotiated active-work but cannot report every category
+    // the daemon currently relies on must not authorize ordinary teardown.
+    // This differs from a legacy child that never negotiated at all: legacy
+    // cleanup keeps its historical behavior, while an incomplete negotiated
+    // answer is explicitly known not to cover the full retention predicate.
+    const capability = owner?.activeWork;
+    if (
+      capability &&
+      !owner.isQuarantined &&
+      !owner.restoreSettlementOverdue &&
+      ACTIVE_WORK_HOLD_CATEGORIES.some(
+        (category) => !capability.categories.includes(category),
+      )
+    ) {
+      return false;
+    }
     return !childReportsHeldWork(entry);
   }
 
@@ -3651,6 +3667,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
                       v: ACTIVE_WORK_HEARTBEAT_VERSION,
                       intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+                      categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
                     },
                     [CHANNEL_STARTUP_PROFILE_META_KEY]: {
                       v: CHANNEL_STARTUP_PROFILE_VERSION,
