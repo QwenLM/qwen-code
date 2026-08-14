@@ -376,16 +376,28 @@ export function computeLedger(
   // redirects every session's stream at once — including this one's.
   const root = containedRoot(projectDir);
   const chatsDir = root === null ? null : join(root, 'chats');
+  const chatsVerdict =
+    root === null || chatsDir === null
+      ? ({ ok: false, reason: 'uncontained' } as const)
+      : containedDir(root, chatsDir);
   const chatFile =
-    chatsDir !== null && containedDir(root as string, chatsDir).ok
+    chatsVerdict.ok && chatsDir !== null
       ? join(chatsDir, `${sessionId}.jsonl`)
       : null;
   let mainEvents: UsageEvent[];
   try {
     if (chatFile === null) {
+      // The two verdicts get different sentences. `chats/` is created lazily
+      // on the first recorded turn, so ABSENT is a mundane configuration
+      // fact (recording off), and printing the containment word for it sends
+      // an operator hunting for a planted link that does not exist — in a
+      // subcommand whose whole purpose is diagnosability.
       throw new Error(
-        `the harness chat directory under ${projectDir} is not a contained ` +
-          'directory',
+        !chatsVerdict.ok && chatsVerdict.reason === 'missing'
+          ? `the harness chat directory ${chatsDir} does not exist ` +
+            '(chat recording off?)'
+          : `the harness chat directory under ${projectDir} is not a ` +
+            'contained directory',
       );
     }
     mainEvents = readUsage(chatFile, floorMs).events;
@@ -485,7 +497,17 @@ export function computeLedger(
     // containment got its guard bypassed by the very next expression, and a
     // link there is read as this attempt's usage.
     const chatFile = paths?.chatFile ?? null;
-    if (chatFile !== null) {
+    if (chatFile === null) {
+      // `chats/` itself failed containment. Every prior session loses its
+      // main loop at once, and the summary would otherwise announce that
+      // this attempt is included while none of its main-loop cost is.
+      missingStreams++;
+      writeStderrLineSafe(
+        `WARNING: the harness chat directory under ${projectDir} is not a ` +
+          `contained directory; the prior attempt ${entry.sessionId}'s ` +
+          `main-loop cost is missing from this ledger.`,
+      );
+    } else {
       try {
         events = readUsage(
           chatFile,
@@ -497,17 +519,32 @@ export function computeLedger(
         ).events;
         priorMainEvents.push(...events);
         contributed += events.length;
-      } catch {
-        // The prior attempt's chat is lost; its agents may still count.
+      } catch (err) {
+        // Absent is ordinary — a prior attempt that recorded no chat at all.
+        // Every OTHER refusal is a fact: routing this read through the
+        // contained reader created classes that did not exist before (a
+        // linked leaf, a FIFO, a file over the ceiling), and a silent skip
+        // presents a lower total as a complete one while the summary still
+        // says the session is included.
+        const code = (err as { cause?: NodeJS.ErrnoException })?.cause?.code;
+        if (code !== 'ENOENT') {
+          missingStreams++;
+          writeStderrLineSafe(
+            `WARNING: could not read the prior attempt ${entry.sessionId}'s ` +
+              `chat transcript at ${chatFile} (${(err as Error).message}); ` +
+              `that attempt's main-loop cost is missing from this ledger.`,
+          );
+        }
       }
     }
     let priorAgentEvents: UsageEvent[] = [];
-    if (paths !== undefined) {
+    const priorDir = paths?.dir ?? null;
+    if (priorDir !== null) {
       const before = agentEvents.length;
       try {
         contributed += readAgentDir(
-          paths.dir,
-          listAgentTranscriptFiles(paths.dir, projectDir),
+          priorDir,
+          listAgentTranscriptFiles(priorDir, projectDir),
           // The same window the chat gets: an interrupted CLI session whose
           // operator kept working would otherwise fold unrelated subagent
           // cost into this review.
@@ -522,7 +559,7 @@ export function computeLedger(
         if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
           writeStderrLineSafe(
             `WARNING: could not list the prior session's subagent transcripts at ` +
-              `${paths.dir} (${(err as NodeJS.ErrnoException)?.code ?? (err as Error).message}); ` +
+              `${priorDir} (${(err as NodeJS.ErrnoException)?.code ?? (err as Error).message}); ` +
               `that attempt's agent cost is missing from this ledger.`,
           );
         }

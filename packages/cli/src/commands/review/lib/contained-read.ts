@@ -44,7 +44,7 @@ import {
   readSync,
   readdirSync,
 } from 'node:fs';
-import { parse, relative, resolve, sep } from 'node:path';
+import { isAbsolute, parse, relative, resolve, sep } from 'node:path';
 
 /**
  * Bookkeeping files (`run-sessions.json`, `resume.json`) hold a handful of
@@ -141,7 +141,17 @@ export class ContainedReadError extends Error {
 export function readContainedFile(
   path: string,
   maxBytes: number,
-  opts: { minMtimeMs?: number } = {},
+  opts: {
+    minMtimeMs?: number;
+    /**
+     * The `readSync` this uses. A seam, and only that: the short-read branch
+     * below is the one piece of this module no fixture can reach from the
+     * outside, because a fully-present file always comes back in one call —
+     * so without it, the loop that keeps a half-flushed transcript from
+     * being reported with an uninitialized buffer tail is unpinnable.
+     */
+    read?: typeof readSync;
+  } = {},
 ): ContainedFile {
   let fd: number;
   try {
@@ -190,7 +200,7 @@ export function readContainedFile(
     // promised, which is a partial record, not a fault — `parseTranscript`
     // and `parseLineTolerant` already drop a torn last line.
     while (off < st.size) {
-      const n = readSync(fd, buf, off, st.size - off, off);
+      const n = (opts.read ?? readSync)(fd, buf, off, st.size - off, off);
       if (n <= 0) break;
       off += n;
     }
@@ -255,6 +265,12 @@ interface DirIdentity {
  */
 function isWithin(parent: string, child: string): boolean {
   const rel = relative(resolve(parent), resolve(child));
+  // An ABSOLUTE `rel` means the two paths share no root at all: on Windows,
+  // `relative('C:\\root', 'D:\\other')` returns `'D:\\other'`, which is
+  // neither empty nor `..`-prefixed and would otherwise read as contained.
+  // POSIX `relative` never returns an absolute path, so this clause only
+  // bites on the platform where the leaf guard is already weakest.
+  if (isAbsolute(rel)) return false;
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..');
 }
 

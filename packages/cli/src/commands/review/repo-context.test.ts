@@ -1317,9 +1317,13 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       );
       // And no WARNING: the verification compares floats that survived a
       // filesystem round trip, so an exact-equality check reports failure on
-      // every enrichment that changed anything.
+      // every enrichment that changed anything. Captured before the restore
+      // below — vitest's `mockRestore` clears the recorded calls as well, so
+      // a capture taken after it is always empty and the assertion always
+      // passes.
       const printed = err.mock.calls.map((c) => String(c[0])).join('');
       expect(printed).not.toContain("could not restore the plan's timestamp");
+      expect(printed).not.toContain('WARNING');
     } finally {
       err.mockRestore();
       rmSync(root, { recursive: true, force: true });

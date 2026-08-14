@@ -16,6 +16,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -365,6 +366,36 @@ describe('cost-ledger — the spend, from the records already on disk', () => {
       /QWEN_CODE_PROJECT_DIR/,
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked or FIFO plan path, promptly',
+    () => {
+      // The floor read is descriptor-first for two reasons, and neither is
+      // pinned by the primitive's own tests at this call site: a FIFO at the
+      // predictable plan path blocked `readFileSync` forever, and a split
+      // stat/read took the billing floor from a different object than the
+      // bytes whose shape it validated.
+      const { plan, project, env } = fixture();
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      dirs.push(elsewhere);
+      const realPlan = join(elsewhere, 'plan.json');
+      writeFileSync(realPlan, readFileSync(plan, 'utf8'));
+      rmSync(plan);
+      symlinkSync(realPlan, plan);
+      expect(() => computeLedger(plan, env)).toThrow(
+        /could not read the plan report/,
+      );
+
+      const fifoPlan = join(project, 'plan-fifo.json');
+      execFileSync('mkfifo', [fifoPlan]);
+      const started = Date.now();
+      expect(() => computeLedger(fifoPlan, env)).toThrow(
+        /could not read the plan report/,
+      );
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+    5000,
+  );
 
   it('names a missing plan as the plan, not the usage records', () => {
     const { env } = fixture();
@@ -1660,6 +1691,67 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
     // 7777 at the prior ceiling is excluded from the prior leg.
     expect(ledger.totals.inputTokens).toBe(1500);
   });
+
+  it('bills a prior attempt that died before launching any agent', () => {
+    // The ledger entry lands at fetch-pr time; `subagents/<id>` appears only
+    // on the first launch. An attempt interrupted in between — the state this
+    // whole feature exists to recover — has a real chat stream and no
+    // directory, and an accessor that dropped it lost its main-loop cost with
+    // no disclosure: the review reads as cheaper than it was.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+    );
+    runLedger(plan);
+
+    const ledger = computeLedger(plan, env);
+    expect(ledger.priorSessions).toBe(1);
+    expect(ledger.totals.inputTokens).toBe(1500);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'discloses a prior chat it cannot read, rather than dropping it',
+    () => {
+      // Routing this read through the contained reader created refusal
+      // classes that did not exist when it was a bare `readFileSync`: a
+      // linked leaf, a FIFO, a file over the ceiling. Skipping those in
+      // silence prints a lower total as a complete one, while the summary
+      // still announces the earlier session as included.
+      const { plan, project, env } = fixture();
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      dirs.push(elsewhere);
+      writeFileSync(
+        join(elsewhere, 'foreign.jsonl'),
+        event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+      );
+      symlinkSync(
+        join(elsewhere, 'foreign.jsonl'),
+        join(project, 'chats', 'S0.jsonl'),
+      );
+      runLedger(plan);
+
+      const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let ledger;
+      let printed: string;
+      try {
+        ledger = computeLedger(plan, env);
+      } finally {
+        // Read the calls BEFORE restoring: vitest's `mockRestore` clears the
+        // recorded calls as well as restoring the original, so a capture
+        // taken afterwards is always empty — and an assertion on it always
+        // passes.
+        printed = err.mock.calls.map((c) => String(c[0])).join('');
+        err.mockRestore();
+      }
+
+      expect(ledger.missingStreams).toBeGreaterThan(0);
+      expect(printed).toContain('S0');
+      expect(printed).toContain('missing from this ledger');
+      // The forged bytes behind the link are not billed.
+      expect(ledger.totals.inputTokens).toBe(500);
+    },
+  );
 
   it("folds the interrupted attempt's main loop and agents into the totals", () => {
     const { plan, env, project } = fixture();

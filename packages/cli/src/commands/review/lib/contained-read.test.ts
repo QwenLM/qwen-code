@@ -7,8 +7,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
+  readSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -164,6 +166,53 @@ describe('readContainedFile', () => {
     expect(readContainedFile(file, 64).size).toBe(64);
   });
 
+  it('returns only the bytes it actually read on a short read', () => {
+    // The incremental-flush case the module names: `fstat` promises a size,
+    // the file is still being appended to (or was truncated), and the read
+    // comes back short. Without the loop-and-`subarray`, the uninitialized
+    // tail of an `allocUnsafe` buffer is returned AS TRANSCRIPT CONTENT —
+    // fabricated records, on the one path this module exists to keep honest.
+    const file = join(root, 'agent-partial.jsonl');
+    writeFileSync(file, 'abcdefghij');
+    let calls = 0;
+    const opened = readContainedFile(file, MAX_LEDGER_BYTES, {
+      read: (fd, buf, off, len, pos) => {
+        calls++;
+        // First call delivers 4 of the 10 bytes; the second reports EOF.
+        if (calls === 1) return readSync(fd, buf, off, 4, pos as number);
+        return 0;
+      },
+    });
+
+    expect(opened.content).toBe('abcd');
+    expect(opened.size).toBe(4);
+    expect(opened.content.length).toBe(opened.size);
+  });
+
+  it.skipIf(isWindows)(
+    'refuses a stale FIFO by TYPE, before the staleness short-circuit',
+    () => {
+      // Order matters between these two: reversed, a stale FIFO returns
+      // `{stale: true}` instead of throwing, and the agent path turns a
+      // disclosed floor (`missingStreams` → "this ledger is a floor") into an
+      // undisclosed skip.
+      const fifo = join(root, 'agent-old.jsonl');
+      execFileSync('mkfifo', [fifo]);
+      const old = new Date('2020-01-02T03:04:05Z');
+      utimesSync(fifo, old, old);
+
+      try {
+        readContainedFile(fifo, MAX_LEDGER_BYTES, {
+          minMtimeMs: old.getTime() + 1,
+        });
+        expect.unreachable('a FIFO must be refused by type');
+      } catch (err) {
+        expect((err as ContainedReadError).reason).toBe('not-regular');
+      }
+    },
+    5000,
+  );
+
   it('reports a missing file as an open failure, not as empty content', () => {
     try {
       readContainedFile(join(root, 'nope.json'), MAX_LEDGER_BYTES);
@@ -238,6 +287,49 @@ describe('containedDir', () => {
     }
   });
 
+  it.skipIf(isWindows)('refuses a symlinked ROOT', () => {
+    // The i=0 component of the walk. `readLedgerFile` roots at the plan's own
+    // parent and `readTranscripts` passes a raw `projectDir`, so for those
+    // callers this check IS the ancestor defence: with the root itself
+    // planted as a link, every deeper component lstats as an ordinary
+    // directory through it and forged evidence reads as contained.
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'linked-root-')));
+    try {
+      const real = join(base, 'project');
+      mkdirSync(join(real, 'subagents', 'S-1'), { recursive: true });
+      const linked = join(base, 'linked-project');
+      symlinkSync(real, linked);
+
+      expect(containedDir(linked, join(linked, 'subagents', 'S-1'))).toEqual({
+        ok: false,
+        reason: 'uncontained',
+      });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isWindows || process.getuid?.() === 0)(
+    'reports an UNREADABLE ancestor as uncontained, not as missing',
+    () => {
+      // The non-ENOENT arm of the lstat routing. The consumer makes the two
+      // reasons opposites — `missing` is absorbed as "no agents ran",
+      // `uncontained` throws — so a future edit collapsing lstat failures to
+      // one reason would silently absorb an unreadable tree.
+      const blocked = join(root, 'subagents');
+      mkdirSync(join(blocked, 'S-1'), { recursive: true });
+      chmodSync(blocked, 0o000);
+      try {
+        expect(containedDir(root, join(blocked, 'S-1'))).toEqual({
+          ok: false,
+          reason: 'uncontained',
+        });
+      } finally {
+        chmodSync(blocked, 0o755);
+      }
+    },
+  );
+
   it('refuses a path outside the root by shape', () => {
     const outside = realpathSync(mkdtempSync(join(tmpdir(), 'outside-')));
     try {
@@ -285,6 +377,25 @@ describe('listContainedDir', () => {
     if (!res.ok) return;
 
     expect(listContainedDir(dir, res.identity)).toEqual(['agent-a.jsonl']);
+  });
+
+  it('discards the listing on a DEVICE mismatch alone', () => {
+    // The `dev` half of the re-check, exercised on its own: a swap to a
+    // same-inode directory on another device (a bind or overlay mount, or
+    // deliberate inode reuse) is invisible to the inode comparison.
+    const dir = join(root, 'S-1');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'agent-a.jsonl'), '');
+    const res = containedDir(root, dir);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    expect(
+      listContainedDir(dir, {
+        dev: res.identity.dev + 1,
+        ino: res.identity.ino,
+      }),
+    ).toEqual([]);
   });
 
   it('discards the listing when the directory is no longer the same one', () => {

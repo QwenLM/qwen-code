@@ -494,7 +494,9 @@ describe('readRunTranscripts — the run across its sessions', () => {
         rmSync(join(dir, 'subagents'), { recursive: true, force: true });
         symlinkSync(elsewhere, join(dir, 'subagents'));
 
-        expect(priorSessionDirs(plan, ENV)).toEqual([]);
+        // The session stays listed — its chat is a separate fact — but no
+        // directory this run may read.
+        expect(priorSessionDirs(plan, ENV).map((p) => p.dir)).toEqual([null]);
         // ...and the current session's own directory, reached the same way,
         // is an infrastructure fault rather than "this run has no agents".
         expect(() => readRunTranscripts(plan, undefined, ENV)).toThrow(
@@ -528,6 +530,48 @@ describe('readRunTranscripts — the run across its sessions', () => {
       }
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'nulls the prior chat when `chats/` is redirected',
+    () => {
+      // `O_NOFOLLOW` guards the LEAF; a redirected `chats/` puts an ordinary
+      // regular file behind an ordinary name, so only the accessor's
+      // directory check stands between a forged stream and the cost ledger.
+      const plan = planWithLedger('S0', 'S1');
+      priorFile('S0', 'agent-a0.jsonl', transcript('a0'));
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      try {
+        writeFileSync(join(elsewhere, 'S0.jsonl'), '{"forged":true}\n');
+        mkdirSync(join(dir, 'chats'), { recursive: true });
+        rmSync(join(dir, 'chats'), { recursive: true, force: true });
+        symlinkSync(elsewhere, join(dir, 'chats'));
+
+        const priors = priorSessionDirs(plan, ENV);
+        expect(priors.map((p) => p.sessionId)).toEqual(['S0']);
+        expect(priors[0].chatFile).toBeNull();
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps a prior session that never launched an agent', () => {
+    // The ledger entry lands at fetch-pr time; the harness creates
+    // `subagents/<id>` only on the first launch. An attempt interrupted
+    // before that — the state resume exists to recover — has a real chat
+    // stream and no directory, and dropping it from the listing lost its
+    // main-loop cost with nothing said.
+    const plan = planWithLedger('S0', 'S1');
+    file('agent-a1.jsonl', transcript('a1'));
+
+    const priors = priorSessionDirs(plan, ENV);
+    expect(priors.map((p) => [p.sessionId, p.dir])).toEqual([['S0', null]]);
+    expect(priors[0].chatFile).toBe(join(dir, 'chats', 'S0.jsonl'));
+    // ...and it contributes no transcripts, without faulting.
+    expect(
+      readRunTranscripts(plan, undefined, ENV).map((r) => r.agentId),
+    ).toEqual(['a1']);
+  });
 
   it('lists each prior session once, and only those that exist', () => {
     const plan = planWithLedger('S0', 'S0', 'S1');
@@ -636,7 +680,10 @@ describe('readRunTranscripts — containment and fault handling', () => {
 
     const recs = readRunTranscripts(plan, undefined, ENV);
     expect(recs.map((r) => r.agentId)).toEqual(['a1']);
-    expect(priorSessionDirs(plan, ENV)).toEqual([]);
+    // No readable directory. The session itself stays listed: whether its
+    // chat can be billed is an independent question from whether its
+    // subagent directory is a redirect.
+    expect(priorSessionDirs(plan, ENV).map((p) => p.dir)).toEqual([null]);
   });
 
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(

@@ -41,6 +41,7 @@ import {
   ToolNames,
   sanitizeFilenameComponent,
 } from '@qwen-code/qwen-code-core';
+import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 import { join } from 'node:path';
 import { readdirSync } from 'node:fs';
 import {
@@ -618,7 +619,17 @@ export function priorSessionDirs(
   env: NodeJS.ProcessEnv = process.env,
 ): Array<{
   sessionId: string;
-  dir: string;
+  /**
+   * The attempt's subagent directory, or null when there is none this run may
+   * read — absent (it never launched an agent) or not contained.
+   *
+   * An attempt has a ledger entry from the moment `fetch-pr` runs, while the
+   * harness creates `subagents/<id>` only on the FIRST launch. An attempt
+   * interrupted before that — the very state resume exists to recover — is
+   * therefore a real session with a real chat stream and no directory here.
+   * Dropping it from the listing entirely lost its main-loop cost silently.
+   */
+  dir: string | null;
   /**
    * The attempt's chat stream, or null when `chats/` is not a contained
    * directory. Null means "do not read this session's chat", and callers must
@@ -632,7 +643,7 @@ export function priorSessionDirs(
   const { projectDir } = transcriptPaths(env);
   const out: Array<{
     sessionId: string;
-    dir: string;
+    dir: string | null;
     chatFile: string | null;
     endsAtMs: number | null;
   }> = [];
@@ -643,7 +654,15 @@ export function priorSessionDirs(
   // `chats/` is validated once, not per session: it is the same directory for
   // every entry, and the leaf open below still refuses a per-file link.
   const chatsDir = join(root, 'chats');
-  const chatsOk = containedDir(root, chatsDir).ok;
+  // ABSENT is not a containment verdict. `chats/` is created lazily on the
+  // first recorded turn, so a run with recording off has no directory and no
+  // file — the leaf open then fails with ENOENT, which every consumer already
+  // treats as the ordinary "this attempt recorded no chat" state. Nulling the
+  // path for that would make the consumers' disclosure fire on a mundane
+  // configuration fact. Null here means exactly one thing: a redirect was
+  // found where the harness's own directory should be.
+  const chatsVerdict = containedDir(root, chatsDir);
+  const chatsOk = chatsVerdict.ok || chatsVerdict.reason === 'missing';
   for (const { sessionId, endsAtMs } of priorSessionEntries(planPath, env)) {
     // The harness writes the directory under the SANITIZED id, so the lookup
     // applies the same mapping before the containment walk.
@@ -657,10 +676,13 @@ export function priorSessionDirs(
     // link at `subagents` redirects every prior session at once, and each
     // individual `subagents/<id>` under it stats as a perfectly ordinary
     // directory.
-    if (!containedDir(root, dir).ok) continue;
+    //
+    // A failure here nulls the DIRECTORY and keeps the session: the two facts
+    // are independent, and folding them lost the chat of every attempt that
+    // died before its first agent launch.
     out.push({
       sessionId,
-      dir,
+      dir: containedDir(root, dir).ok ? dir : null,
       chatFile: chatsOk ? join(chatsDir, `${sessionId}.jsonl`) : null,
       endsAtMs,
     });
@@ -701,8 +723,10 @@ export function readRunTranscripts(
   opts: { currentDirOptional?: boolean } = {},
 ): AgentRecord[] {
   // Validates the env first, so the optional-dir branch below can only ever
-  // be absorbing "no directory yet", never "no environment".
-  transcriptPaths(env);
+  // be absorbing "no directory yet", never "no environment" — and the
+  // validated value is KEPT rather than re-derived per prior session, which
+  // is what `transcriptPaths`' own contract asks callers to do.
+  const { projectDir } = transcriptPaths(env);
   const priors = priorSessionDirs(planPath, env);
   let out: AgentRecord[];
   try {
@@ -731,16 +755,30 @@ export function readRunTranscripts(
     out = [];
   }
   for (const prior of priors) {
+    // No directory (never launched an agent, or not contained) means no
+    // transcripts to union — the cost ledger still reads that session's chat.
+    if (prior.dir === null) continue;
+    const priorDir = prior.dir;
     let names: string[];
     try {
-      names = listAgentTranscriptFiles(
-        prior.dir,
-        transcriptPaths(env).projectDir,
-      );
-    } catch {
+      names = listAgentTranscriptFiles(priorDir, projectDir);
+    } catch (err) {
+      // Absent is the ordinary state. A CONTAINMENT fault is not: it is the
+      // swap this machinery exists to detect, and swallowing it makes every
+      // resumed run silently re-demand the same chunks with nothing said.
+      // The cost ledger discloses the identical shape; so does this.
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        writeStderrLineSafe(
+          `WARNING: could not read the prior attempt's subagent transcripts ` +
+            `at ${priorDir} ` +
+            `(${(err as NodeJS.ErrnoException)?.code ?? (err as Error).message}); ` +
+            `that attempt's evidence is not visible to this run, so its work ` +
+            `is required again.`,
+        );
+      }
       continue; // Earlier attempt's evidence invisible → its work is re-owed.
     }
-    for (const rec of recordsIn(prior.dir, names, since, diffPath, {
+    for (const rec of recordsIn(priorDir, names, since, diffPath, {
       sessionId: prior.sessionId,
       until: prior.endsAtMs ?? undefined,
     })) {
