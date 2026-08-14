@@ -1480,9 +1480,12 @@ describe('qwen-triage verify workflow', () => {
     expect(runStep.indexOf(sweep)).toBeLessThan(
       runStep.indexOf('start_openai_proxy'),
     );
-    // Uploaded artifacts must not carry node-planted symlinks:
-    // actions/upload-artifact dereferences them.
-    expect(runStep).toContain('-type l -delete');
+    // Uploaded artifacts must not carry node-planted symlinks (or FIFOs/
+    // sockets/devices, which can hang or redirect the collection):
+    // actions/upload-artifact dereferences symlinks.
+    expect(runStep).toContain(
+      'find "$RUNNER_TEMP/verify-results" \\( -type l -o -type p -o -type s -o -type b -o -type c \\) -delete',
+    );
   });
 
   // RUNNER_TEMP hygiene between jobs is runner-managed; this pool is
@@ -2903,7 +2906,9 @@ describe('qwen-triage verify hardening round 2', () => {
     const copy = runStep.indexOf(
       '-exec cp -r {} "$RUNNER_TEMP/verify-results/"',
     );
-    const strip = runStep.indexOf('-type l -delete');
+    const strip = runStep.indexOf(
+      'find "$RUNNER_TEMP/verify-results" \\( -type l -o -type p -o -type s -o -type b -o -type c \\) -delete',
+    );
     expect(copy).toBeGreaterThan(-1);
     expect(strip).toBeGreaterThan(copy);
   });
