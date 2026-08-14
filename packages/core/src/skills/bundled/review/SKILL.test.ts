@@ -195,7 +195,6 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'A Critical is never deferred — any round, any floor',
     );
-    expect(body).toContain('a non-Critical finding is recorded, not requested');
     expect(body).toContain('an **age reference, never an incremental anchor**');
     expect(body).toContain('skip the age rule, not the review');
     // The explicit knob's two directions: `critical` from round 1, and
@@ -205,6 +204,33 @@ describe('bundled review skill', () => {
       '`critical` applies the Critical-only posture from round 1',
     );
     expect(body).toContain('`suggestion` turns the posture **off**');
+    // The deferrable set is what the floor takes away — never the
+    // terminal-only tiers: routing low-confidence or Nice-to-have findings
+    // through the deferral list would PUBLISH what the posting path never
+    // would (round-1 review finding).
+    expect(body).toContain(
+      'a non-Critical finding that would otherwise post is recorded, not requested',
+    );
+    expect(body).toContain('stay terminal-only exactly as before');
+    // Deferral publishes, so it owes verification like a posted finding —
+    // a deferrals-only APPROVE must not slip the verifier floor.
+    expect(body).toContain(
+      'an unverified claim does not become publishable by being deferred',
+    );
+    // The age command is hostile-input-hardened in both operands (round-1
+    // review findings: shell injection via unquoted PR-controlled filename;
+    // glob pathspec matching a sibling file). A "simplify the command"
+    // edit must fail here.
+    expect(body).toContain(
+      "git --literal-pathspecs diff <commitId>..HEAD --unified=0 -- '<file>'",
+    );
+    expect(body).toContain('neither hardening is optional');
+    // The age rule's premise needs the previous round to have READ the code
+    // it vouches for: scope that round disclosed as not reviewed gets no
+    // age suppression (round-1 review finding).
+    expect(body).toContain(
+      'a first-time Suggestion in code nobody read must post like any round-1 finding',
+    );
     // Deferral is a posting decision: the finding stays in the artifact, and
     // the deferred list must never become ledger work for the next round.
     expect(body).toContain(

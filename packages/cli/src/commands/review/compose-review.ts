@@ -129,7 +129,10 @@ export interface ComposeReviewInput {
    * Non-Critical findings the convergence posture deferred — Step 6's
    * round-aware posting discipline (from round 6, or under an explicit
    * `--severity-floor critical`, and the rounds-2-5 code-age rule). One line
-   * each (`file:line — title`). They are neither drafted inline nor counted
+   * each (`file:line — title`), and only **high-confidence Suggestions that
+   * would otherwise post**: low-confidence and Nice-to-have findings stay
+   * terminal-only as ever — deferral publishes, and must not publish what
+   * the posting path never would. They are neither drafted inline nor counted
    * toward `S` — the whole point is that a deferral must not regenerate a
    * review round — but they must not vanish either: the body renders them as
    * a disclosed, NON-capping list, so the record survives on the PR while
@@ -237,6 +240,14 @@ export interface ComposeReviewResult {
    * operator which command repairs it. Two registers, two channels.
    */
   remediation: string[];
+  /**
+   * How many non-Critical findings the convergence posture deferred — the
+   * count of `deferredSuggestions` entries that survived validation. On the
+   * verdict surface so `verdictLine` can say a deferrals-only Approve
+   * deferred findings rather than implying none existed: the low-signal
+   * sentence's premise is "zero findings", and a deferral is a finding.
+   */
+  deferredCount: number;
   /**
    * Set on an APPROVE composed from zero findings over a non-trivial source
    * diff (the plan's `srcDiffLines` above `LOW_SIGNAL_SRC_DIFF_LINES`).
@@ -487,13 +498,18 @@ export function composeReview(
   cliVersion = 'unknown',
   attribution = true,
 ): ComposeReviewResult {
-  const result = composeReviewBody(input, cliVersion, attribution);
+  // One read, one round: the deferred-suggestions clause and the ledger
+  // marker both name this round, and each reading the side file for itself
+  // would let a mid-compose update publish two different round numbers in
+  // one review.
+  const prevRound = prevRoundFor(input.planPath);
+  const result = composeReviewBody(input, cliVersion, attribution, prevRound);
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input, result.cappedBy);
+  const marker = ledgerMarkerFor(input, result.cappedBy, prevRound);
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -536,6 +552,7 @@ function prevRoundFor(planPath: string | undefined): number {
 function ledgerMarkerFor(
   input: ComposeReviewInput,
   cappedBy: string[],
+  prevRound: number,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -548,7 +565,6 @@ function ledgerMarkerFor(
       (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
       (typeof pr === 'string' && /^\d+$/.test(pr));
     if (!isPr) return null;
-    const prevRound = prevRoundFor(input.planPath);
     // The anchor rides only when this round's scope was clean, and "clean" is
     // the verdict this module just computed: `cappedBy` aggregates every
     // fail-closed state — each named input pushes its own cap entry, plus the
@@ -595,6 +611,7 @@ function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
   attribution: boolean,
+  prevRound: number,
 ): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
@@ -975,8 +992,16 @@ function composeReviewBody(
     // Its own try, so a read failure here says so rather than wearing the coverage
     // message, and does not undo a coverage pass a line above it.
     try {
+      // Deferred findings count toward the delivery floor: they publish in
+      // the body as the deferral list, and an unverified claim published as
+      // "recorded, not requested" is still an unverified claim published — a
+      // deferrals-only APPROVE must not slip past the verifier floor that a
+      // posting run would have met.
       const findingsToVerify =
-        criticalsInline + suggestionsInline + nonDeterministicBodyCriticals;
+        criticalsInline +
+        suggestionsInline +
+        nonDeterministicBodyCriticals +
+        deferredSuggestions.length;
       const verification = verificationGaps(
         input.planPath,
         { postsFindings: findingsToVerify > 0 },
@@ -1197,7 +1222,14 @@ function composeReviewBody(
   // the field the topology is chosen from), so a docs-only or typo-class diff
   // keeps its bare Approve — there, finding nothing is the expected outcome.
   let lowSignal: ComposeReviewResult['lowSignal'] = null;
-  if (event === 'APPROVE' && input.planPath) {
+  // A deferrals-only APPROVE is not low signal: the agents DID report
+  // findings — this run recorded them as deferred — and the low-signal
+  // sentence's whole claim is that none reported any.
+  if (
+    event === 'APPROVE' &&
+    input.planPath &&
+    deferredSuggestions.length === 0
+  ) {
     let plan: RosterPlan | undefined;
     try {
       plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as RosterPlan;
@@ -1587,9 +1619,16 @@ function composeReviewBody(
   // Entries are model-written: newlines collapse the way the cannot-tell
   // entries collapse, and the list is capped like the budget-gap lines — an
   // unbounded join would drown the verdict it rides on. The round number is
-  // the same side-file-derived one the ledger marker stamps, so the clause
-  // and the marker cannot disagree about which round deferred.
+  // the same side-file read the ledger marker stamps (one read, passed in),
+  // so the clause and the marker cannot disagree about which round deferred.
+  // Both dimensions are bounded: the line count AND each entry's length —
+  // entries are model-written with no upstream cap, and twenty 4,000-char
+  // entries would put an ~80 KB block into a body GitHub rejects outright
+  // at 65,536, losing the whole review over its own footnote. 240 chars
+  // holds a `file:line — title` line with room to spare; the findings
+  // artifact keeps every entry whole.
   const MAX_DEFERRED_SUGGESTION_LINES = 20;
+  const MAX_DEFERRED_SUGGESTION_CHARS = 240;
   const deferredShown = deferredSuggestions
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
     .map((entry) =>
@@ -1597,12 +1636,11 @@ function composeReviewBody(
         .split('\n')
         .map((seg) => seg.trim())
         .filter((seg) => seg !== '')
-        .join(' '),
+        .join(' ')
+        .slice(0, MAX_DEFERRED_SUGGESTION_CHARS),
     );
   const deferredMore = deferredSuggestions.length - deferredShown.length;
-  const deferredRound = deferredSuggestions.length
-    ? prevRoundFor(input.planPath) + 1
-    : 0;
+  const deferredRound = deferredSuggestions.length ? prevRound + 1 : 0;
   const deferredSuggestionsBlock: Bi[] = deferredSuggestions.length
     ? [
         {
@@ -1641,6 +1679,7 @@ function composeReviewBody(
       downgraded,
       downgradedFrom,
       remediation,
+      deferredCount: deferredSuggestions.length,
       lowSignal,
     };
   }
@@ -1681,6 +1720,7 @@ function composeReviewBody(
       downgraded,
       downgradedFrom,
       remediation,
+      deferredCount: deferredSuggestions.length,
       lowSignal,
     };
   }
@@ -1847,6 +1887,7 @@ function composeReviewBody(
     downgraded,
     downgradedFrom,
     remediation,
+    deferredCount: deferredSuggestions.length,
     lowSignal,
   };
 }
@@ -2630,6 +2671,13 @@ export function verdictLine(r: ComposeReviewResult): string {
       ` — low signal: none of the ${r.lowSignal.agents} review agents ` +
       `reported a finding on a non-trivial diff ` +
       `(${r.lowSignal.srcDiffLines} source diff lines)`;
+  }
+  // Deferrals are findings the run stands behind and chose not to request;
+  // a verdict line that omits them reads as "nothing was found" on exactly
+  // the runs the posture targets. `lowSignal` is mutually exclusive with
+  // this by construction — a deferrals-only APPROVE never sets it.
+  if (r.deferredCount > 0) {
+    line += ` — ${r.deferredCount} non-Critical finding(s) deferred under the convergence posture (listed in the body)`;
   }
   return line;
 }

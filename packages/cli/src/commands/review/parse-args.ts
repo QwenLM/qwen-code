@@ -390,12 +390,17 @@ export function parseReviewArgs(
 
   // Disposal rule for invalid flag values: a typo is discarded when any
   // *other* token is the target; it survives only when it is itself the
-  // sole target candidate (`/review --effort 6711`).
-  const hasOtherCandidate = kept.some((k) => k.invalidValueOf === undefined);
+  // SOLE target candidate (`/review --effort 6711`). "Sole" is literal —
+  // one kept token in total: two invalid values (`--severity-floor blocker
+  // --severity-floor warning`) are two typos, not a target and a tiebreak,
+  // and promoting the first to a file target would send the caller off to
+  // stat `blocker` instead of falling back to the local diff the input
+  // never named a target for.
+  const soleCandidate = kept.length === 1;
   const targetTokens: string[] = [];
   for (const k of kept) {
     const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
-    if (k.invalidValueOf !== undefined && hasOtherCandidate) {
+    if (k.invalidValueOf !== undefined && !soleCandidate) {
       issues.push({ kind: 'discarded', value: k.token });
       continue;
     }

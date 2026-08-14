@@ -105,7 +105,7 @@ describe('operatorReviewSettings', () => {
 });
 
 describe('review settings in the /settings dialog', () => {
-  it('exposes all three settings for toggling', () => {
+  it('exposes all four settings for toggling', () => {
     // Maintainer A/B verification of this PR caught the description claiming
     // dialog membership while the schema shipped showInDialog: false. Pin the
     // membership so the claim and the schema cannot drift again.
@@ -113,5 +113,6 @@ describe('review settings in the /settings dialog', () => {
     expect(dialogKeys).toContain('review.attribution');
     expect(dialogKeys).toContain('review.effort');
     expect(dialogKeys).toContain('review.comment');
+    expect(dialogKeys).toContain('review.severityFloor');
   });
 });

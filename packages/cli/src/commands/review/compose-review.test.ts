@@ -3051,6 +3051,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgraded: false,
       downgradedFrom: null,
       remediation: [],
+      deferredCount: 0,
       lowSignal: null,
       ...over,
     });
@@ -4477,6 +4478,64 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     expect(() =>
       composeReview(base({ deferredSuggestions: 'a.ts' as never })),
     ).toThrow(/deferredSuggestions/);
+  });
+
+  it('a deferrals-only APPROVE is not low signal, and the verdict line names the deferrals', () => {
+    // R1-14: the body opener was fixed but `verdictLine` still printed "none
+    // of the N review agents reported a finding" on exactly the posture's
+    // canonical end state — agents DID report the findings the same run
+    // records as deferred. The low-signal premise is "zero findings".
+    const r = composeReview(
+      base({
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          srcDiffLines: 5000,
+        }),
+        deferredSuggestions: ['a.ts:1 — nit'],
+      }),
+    );
+    expect(r.event).toBe('APPROVE');
+    expect(r.lowSignal).toBeNull();
+    expect(r.deferredCount).toBe(1);
+    expect(verdictLine(r)).toBe(
+      'Verdict: Approve — 1 non-Critical finding(s) deferred under the convergence posture (listed in the body)',
+    );
+    expect(verdictLine(r)).not.toContain('low signal');
+  });
+
+  it('bounds each entry, not only the entry count — the list must never sink the body', () => {
+    // Twenty model-written 4,000-char entries would put ~80 KB into a body
+    // GitHub rejects at 65,536, losing the whole review over its footnote.
+    const r = composeReview(
+      base({ deferredSuggestions: [`a.ts:1 — ${'x'.repeat(4000)}`] }),
+    );
+    const listLine = r.body.split('\n').find((l) => l.startsWith('- a.ts:1'))!;
+    expect(listLine.length).toBeLessThanOrEqual(242); // '- ' + 240
+  });
+
+  it('deferred findings count toward the verifier-delivery floor', () => {
+    // The deferral list publishes their claims in the body, so a
+    // deferrals-only run owes a verifier exactly as a posting run does; a
+    // run with no findings at all still owes none. NOT base(): its planPath
+    // default calls coveredPlan() unconditionally — the spread replaces the
+    // value but not the side effect, and the default's `verify` record in
+    // the shared record dir would satisfy the very floor this test proves.
+    const planPath = coveredPlan(['reverse-audit']);
+    const common = {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+    };
+    const control = composeReview(common);
+    expect(control.cappedBy).toEqual([]);
+    const deferred = composeReview({
+      ...common,
+      deferredSuggestions: ['a.ts:1 — nit'],
+    });
+    expect(deferred.cappedBy).toContain('unreviewed-dimension');
+    expect(deferred.event).toBe('COMMENT');
+    expect(deferred.body).toContain('- a.ts:1 — nit');
   });
 });
 

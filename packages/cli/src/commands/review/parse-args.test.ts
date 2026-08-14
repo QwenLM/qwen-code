@@ -401,6 +401,46 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
     ).toBe(true);
   });
 
+  it('an invalid equals-form value warns instead of vanishing', () => {
+    // Mutation-verified gap: replacing the invalid-eq push with a bare
+    // `continue` left the whole suite green — an operator who typed the flag
+    // believing round 6 went Critical-only would get Suggestions posted with
+    // nothing saying the flag never took effect.
+    const got = parseReviewArgs('6711 --severity-floor=critcl');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid --severity-floor value "critcl"'),
+      ),
+    ).toBe(true);
+  });
+
+  it('a sole invalid value becomes the target, and the warning says so', () => {
+    const got = parseReviewArgs('--severity-floor criticl');
+    expect(got.target).toEqual({ type: 'file', path: 'criticl' });
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --severity-floor value "criticl"') &&
+          w.includes('treating it as the review target'),
+      ),
+    ).toBe(true);
+  });
+
+  it('two invalid values are two typos, not a target and a tiebreak', () => {
+    // "Sole target candidate" is literal: with two invalid tokens neither is
+    // sole, so both are discarded and the review falls back to the local
+    // diff — promoting the first to a file target would send the caller off
+    // to stat `blocker`.
+    const got = parseReviewArgs(
+      '--severity-floor blocker --severity-floor warning',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.extraTokens).toEqual([]);
+    expect(got.warnings.filter((w) => w.includes('discarded')).length).toBe(2);
+  });
+
   it('flag-final or flag-followed is a missing value, never a consumed flag', () => {
     const got = parseReviewArgs('6711 --severity-floor --comment');
     expect(got.comment.requested).toBe(true);
@@ -908,6 +948,24 @@ describe('parseArgsCommand — configured defaults wiring', () => {
         w.includes('Invalid review.effort value "bogus" in settings'),
       ),
     ).toBe(true);
+  });
+
+  it('a configured severityFloor reaches the verdict through the handler', async () => {
+    // Deleting the severityFloor line of reviewDefaultsFromSettings leaves
+    // every pure-parser test green while production silently ignores the
+    // setting — same seam as the effort/comment cases above.
+    reviewSettingsMock.mockReturnValue({ severityFloor: 'critical' });
+    const got = await verdictFor('6711\n');
+    expect(got.severityFloor).toBe('critical');
+    expect(got.severityFloorSource).toBe('configured');
+  });
+
+  it('maps a configured auto severityFloor to the round-adaptive default without warning', async () => {
+    reviewSettingsMock.mockReturnValue({ severityFloor: 'Auto' });
+    const got = await verdictFor('6711\n');
+    expect(got.severityFloor).toBe('auto');
+    expect(got.severityFloorSource).toBe('default');
+    expect(got.warnings).toHaveLength(0);
   });
 
   it('ignores workspace settings — the policy keys resolve from operator scopes only', async () => {

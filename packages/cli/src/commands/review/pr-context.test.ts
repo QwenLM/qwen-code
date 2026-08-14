@@ -1064,8 +1064,12 @@ describe('latestOwnLedger', () => {
   it('recovers the winning review’s own commit_id as the age reference', () => {
     // The reference must come from the SAME review the ledger came from — a
     // recovery that took the newest ledger but another review's commit_id
-    // would date old code against the wrong head. An invalid or missing
-    // commit_id yields null, never a truncated or garbage reference.
+    // would date old code against the wrong head. The fixture must be able
+    // to refute that mutant: the account's NEWEST review is marker-less with
+    // a different commit_id (the bot's follow-up comment posted against a
+    // later head), so "take commitId from the latest review regardless of
+    // ledger" fails here instead of passing by coincidence. An invalid or
+    // missing commit_id yields null, never a truncated or garbage reference.
     const head = 'a'.repeat(40);
     const recovered = latestOwnLedger(
       [
@@ -1076,6 +1080,10 @@ describe('latestOwnLedger', () => {
         {
           ...review('bot', '2026-01-02T00:00:00Z', marker(2)),
           commit_id: head,
+        },
+        {
+          ...review('bot', '2026-01-03T00:00:00Z', 'marker-less follow-up'),
+          commit_id: 'c'.repeat(40),
         },
       ],
       'bot',
