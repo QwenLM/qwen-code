@@ -2394,6 +2394,112 @@ describe('Server Config (config.ts)', () => {
       };
     };
 
+    // A pre-canonical transcript whose newest Goal record is a legacy
+    // `goal_status` card. Recovering it is the one restore path that has to
+    // *write*: it journals a migrated `goal_state` record.
+    const legacyGoalSession = (): ResumedSessionData => {
+      const record = {
+        uuid: 'legacy-goal',
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          phase: 'result',
+          outputHistoryItems: [
+            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
+          ],
+        },
+      } as unknown as ChatRecord;
+      return {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [record],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: record.uuid,
+      };
+    };
+
+    // Under a writer lease the recorder is `inactive` until it is handed the
+    // lease, and rejects every write until then. Kicking the legacy
+    // migration off from the constructor drove that write into the guard,
+    // and `restore()` latches the failure as `recoveryError` permanently:
+    // the migrated goal was dropped and the whole resumed session lost goal
+    // persistence. Ordering is the deciding variable, so this asserts the
+    // deferred restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before migrating a legacy Goal', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      expect(recorder.hasWriteOwnership()).toBe(false);
+
+      let settled = false;
+      const ready = config.getGoalRuntimeReady().then(
+        (runtime) => {
+          settled = true;
+          return runtime;
+        },
+        (error: unknown) => {
+          settled = true;
+          throw error;
+        },
+      );
+      // Flush microtasks: the pre-fix code had already rejected by here.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      const recordGoalState = vi
+        .spyOn(recorder, 'recordGoalState')
+        .mockResolvedValue({} as ChatRecord);
+      // Stands in for `activateChatRecording()` handing over the lease.
+      vi.spyOn(recorder, 'hasWriteOwnership').mockReturnValue(true);
+      (
+        config as unknown as { startPendingGoalRestore(): void }
+      ).startPendingGoalRestore();
+
+      const runtime = await ready;
+      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        objective: 'ship the thing',
+        status: 'paused',
+      });
+      // The runtime is usable, not latched on `recoveryError` — which is
+      // what `assertOperational()` would rethrow from every later
+      // beginTurn/dispatch/finishTurn.
+      expect(() => runtime.beginTurn('turn-1')).not.toThrow();
+    });
+
+    it('fails a deferred Goal restore instead of hanging when the writer never arrives', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const ready = config.getGoalRuntimeReady();
+      config.startNewSession('replacement-session');
+
+      await expect(ready).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
     it('restores the complete resumed-session Goal before exposing readiness', async () => {
       const config = new Config({
         ...baseParams,
@@ -2414,6 +2520,83 @@ describe('Server Config (config.ts)', () => {
       const replacement = await config.getGoalRuntimeReady();
       expect(replacement).not.toBe(initial);
       expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('holds selective Goal readiness and autonomous work until finalization', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const started: string[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      let ready = false;
+      void config.getGoalRuntimeReady().then(() => {
+        ready = true;
+      });
+
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      expect(started).toEqual([]);
+
+      config.finalizeSessionRestore();
+
+      await expect(config.getGoalRuntimeReady()).resolves.toBe(
+        config.getGoalRuntime(),
+      );
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+    });
+
+    it('rejects selective Goal readiness when restore is abandoned', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const readiness = config.getGoalRuntimeReady();
+
+      config.startNewSession('replacement-session');
+
+      await expect(readiness).rejects.toThrow('Session restore was abandoned');
     });
 
     it('owns one durable Goal runtime per canonical session', async () => {

@@ -89,6 +89,19 @@ export interface GoalSnapshotV2 {
   activity: GoalActivity;
 }
 
+/**
+ * What a session with no reachable Goal runtime looks like.
+ *
+ * `getGoalRuntimeReady()` rejects when goal persistence is unavailable —
+ * permanently, once a malformed transcript record has set a sticky recovery
+ * error. For anything that only reads or reduces goal state, the honest
+ * answer is "no goal", not a failed request: the caller asked what the goal
+ * is, and the answer is nothing.
+ */
+export function emptyGoalSnapshot(): GoalSnapshotV2 {
+  return { v: GOAL_STATE_VERSION, goal: null, activity: 'idle' };
+}
+
 /** True while any new model send must carry the runtime's exact turn permit. */
 export function goalRequiresExactPermit(snapshot: GoalSnapshotV2): boolean {
   return (

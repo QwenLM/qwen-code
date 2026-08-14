@@ -19,14 +19,16 @@ import * as path from 'node:path';
 import { sanitizeFilenameComponent } from '../agents/agent-transcript.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
-import { stripDisplayControlChars } from '../utils/terminalSafe.js';
+import {
+  stripDisplayControlChars,
+  truncateNotificationLabel,
+} from '../utils/terminalSafe.js';
 import { escapeXml } from '../utils/xml.js';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 
 const debugLogger = createDebugLogger('MONITOR_REGISTRY');
 
 const EVENT_LINE_TRUNCATE = 2000;
-const MAX_DESCRIPTION_LENGTH = 80;
 export const MAX_CONCURRENT_MONITORS = 16;
 export const MAX_RETAINED_TERMINAL_MONITORS = 128;
 
@@ -499,9 +501,7 @@ export class MonitorRegistry {
 
   /** Emit a streaming event notification (status=running, includes stdout line). */
   private emitNotification(entry: MonitorTask, eventLine: string): void {
-    const desc = stripDisplayControlChars(
-      this.truncateDescription(entry.description),
-    );
+    const desc = truncateNotificationLabel(entry.description);
     const safeEventLine = stripDisplayControlChars(eventLine);
     const displayLine = `Monitor "${desc}" event #${entry.eventCount}: ${safeEventLine}`;
 
@@ -545,9 +545,7 @@ export class MonitorRegistry {
           ? 'failed'
           : 'was cancelled';
 
-    const desc = stripDisplayControlChars(
-      this.truncateDescription(entry.description),
-    );
+    const desc = truncateNotificationLabel(entry.description);
     const droppedSuffix =
       entry.droppedLines > 0
         ? `, ${entry.droppedLines} lines dropped due to throttling`
@@ -610,15 +608,5 @@ export class MonitorRegistry {
     } catch (error) {
       debugLogger.error('Failed to emit monitor notification:', error);
     }
-  }
-
-  private truncateDescription(desc: string): string {
-    // Ellipsis counts against the configured cap so the returned string is
-    // guaranteed to be <= MAX_DESCRIPTION_LENGTH characters, matching the
-    // documented contract and the Monitor tool's display truncation.
-    const ELLIPSIS = '...';
-    if (desc.length <= MAX_DESCRIPTION_LENGTH) return desc;
-    const keep = Math.max(0, MAX_DESCRIPTION_LENGTH - ELLIPSIS.length);
-    return desc.slice(0, keep) + ELLIPSIS;
   }
 }
