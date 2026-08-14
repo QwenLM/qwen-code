@@ -11133,6 +11133,9 @@ describe('Session', () => {
           'the active model override could not be resolved',
         );
         expect(secondMessage.some((part) => 'inlineData' in part)).toBe(false);
+        expect(agentMessageChunks()).toContain(
+          'Audio was not sent: the active model override could not be resolved.',
+        );
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           "audio route capability check failed for 'vision-agent\0https://vision.example.com/v1': missing route",
         );

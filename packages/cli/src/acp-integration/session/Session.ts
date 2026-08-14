@@ -11312,6 +11312,15 @@ export class Session implements SessionContext {
             error instanceof Error ? error.message : String(error)
           }`,
         );
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            'Audio was not sent: the active model override could not be resolved.',
+          );
+        } catch (noticeError) {
+          debugLogger.debug(
+            `audio bridge: failed to emit notice; continuing with fail-closed result error=${String(noticeError instanceof Error ? noticeError.message : noticeError)}`,
+          );
+        }
         return replaceAudioPartsWithUnavailable(
           parts,
           'the active model override could not be resolved',
