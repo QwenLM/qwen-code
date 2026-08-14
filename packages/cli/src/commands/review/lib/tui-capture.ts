@@ -17,15 +17,6 @@
 // unit-testable without tmux, freeze, or a filesystem. The command layer owns
 // the processes.
 
-/**
- * The private tmux server name for one capture run.
- *
- * `-L` scopes a whole tmux SERVER, not just a session: the capture must never
- * enumerate, resize, or kill anything on the user's own tmux server — the
- * measured failure mode of desktop-automation verification was exactly
- * "drives the user's own windows". A pid+nonce-scoped socket name means even
- * two concurrent reviews cannot collide.
- */
 /** The one server-name prefix, shared by the producer (captureServerName)
  * and the orphan sweep's matcher (cleanup.ts): as two independent literals,
  * a prefix rename silently turns the sweep into a permanent no-op. */
@@ -49,10 +40,26 @@ export function isNothingToKill(stderr: string): boolean {
     // printed a false orphan WARNING (reproduced on 3.3a with a long
     // TMUX_TMPDIR).
     /file name too long/i.test(stderr) ||
+    // Directory-level refusals, probed verbatim on 3.4: tmux answers both
+    // to new-session AND kill-server, so a start that never created a
+    // socket printed a false orphan WARNING naming a server that cannot
+    // exist. A socket dir that is not 0700, and one that is not a
+    // directory at all.
+    /directory .* has unsafe permissions/i.test(stderr) ||
+    /is not a directory/i.test(stderr) ||
     /no such file or directory/i.test(stderr)
   );
 }
 
+/**
+ * The private tmux server name for one capture run.
+ *
+ * `-L` scopes a whole tmux SERVER, not just a session: the capture must never
+ * enumerate, resize, or kill anything on the user's own tmux server — the
+ * measured failure mode of desktop-automation verification was exactly
+ * "drives the user's own windows". A pid+nonce-scoped socket name means even
+ * two concurrent reviews cannot collide.
+ */
 export function captureServerName(pid: number, nonce: string): string {
   return `${CAPTURE_SERVER_PREFIX}${pid}-${nonce}`;
 }

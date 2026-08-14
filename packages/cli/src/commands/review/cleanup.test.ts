@@ -379,6 +379,48 @@ describe('runCleanup', () => {
         );
       });
 
+      it('treats a NON-EPERM probe error as alive too — only ESRCH reaps', () => {
+        // The invariant is "reap only a pid positively known dead". Pinning
+        // EPERM alone left `alive = code === 'EPERM'` shipping green, and a
+        // host answering EINVAL would then have its live server reaped.
+        const orphan = captureServerName(515151, 'def');
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        const realKill = process.kill;
+        process.kill = ((): never => {
+          throw Object.assign(new Error('EINVAL'), { code: 'EINVAL' });
+        }) as typeof process.kill;
+        try {
+          runCleanup('local');
+        } finally {
+          process.kill = realKill;
+        }
+        expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('Reaped orphaned capture server'),
+        );
+      });
+
+      it('keeps the run alive when the post-kill UNLINK fails', () => {
+        // The unlink guard's `catch {}` has no test: mocks.rmSync is a bare
+        // vi.fn() that never throws, so removing the catch — turning
+        // cosmetic litter into a crash that aborts the sweep mid-way —
+        // ships green.
+        const orphan = captureServerName(626262, 'aaa');
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [orphan] : [],
+        );
+        mocks.rmSync.mockImplementation(() => {
+          throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+        });
+        expect(() => runCleanup('local')).not.toThrow();
+        expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+          `Reaped orphaned capture server: ${orphan}`,
+        );
+      });
+
       it('leaves a socket alone when the pid probe answers EPERM', () => {
         // EPERM means the pid is alive under another user, so the socket
         // named for it in THIS uid's 0700 directory is pid reuse, not our
@@ -386,7 +428,7 @@ describe('runCleanup', () => {
         // sweep cannot prove is ours. The simplifying mutant (`alive =
         // false` on any throw) shipped green through the whole suite
         // because process.kill was never stubbed here.
-        const orphan = `${'qwen-review-capture-'}424242-abc`;
+        const orphan = captureServerName(424242, 'abc');
         mocks.existsSync.mockImplementation((p: string) => p === dir);
         mocks.readdirSync.mockImplementation((p: string) =>
           p === dir ? [orphan] : [],

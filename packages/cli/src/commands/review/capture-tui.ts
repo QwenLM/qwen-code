@@ -48,6 +48,7 @@ import {
   closeSync,
   constants as fsConstants,
   existsSync,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -284,16 +285,16 @@ let brokenPipeGuarded = false;
  * successful capture as a failed command. */
 let artifactsComplete = false;
 
-/** The contract writes (refusal/success JSON, stderr summary, the reap
- * WARNING) must never flip the exit disposition: a gone reader raises an
- * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
- * trace where the machine-read contract promised exit 3 (or 0). Swallow
- * EPIPE only; anything else stays loud. */
 /** Thrown when an artifact path was claimed by something else DURING the
  * capture window. Distinct from a write failure because the cleanup must
  * behave differently: the occupant is not ours to remove. */
 class ArtifactCollision extends Error {}
 
+/** The contract writes (refusal/success JSON, stderr summary, the reap
+ * WARNING) must never flip the exit disposition: a gone reader raises an
+ * ASYNC EPIPE 'error' event that crashes the process at exit 1 with a stack
+ * trace where the machine-read contract promised exit 3 (or 0). Swallow
+ * EPIPE only; anything else stays loud. */
 function guardBrokenPipes(): void {
   if (brokenPipeGuarded) return;
   brokenPipeGuarded = true;
@@ -375,8 +376,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // per-run name under the system temp dir cannot collide with anything of
   // the user's, and cannot be stale either: the pid+nonce is this run's
   // alone, which is what the unconditional clear used to be for.
+  // resolve(), because os.tmpdir() hands back a RELATIVE TMPDIR verbatim
+  // (measured on Node 22): unresolved, this path resolves against the
+  // LAUNCHER's cwd for our probe and our polling, but against the PANE's
+  // cwd (--cwd) inside the holder script — so the holder wrote its sentinel
+  // somewhere we never looked, and the precise early refusal this probe
+  // exists for silently became a dead ready-gate wait.
   const holderReadyPath = join(
-    tmpdir(),
+    resolve(tmpdir()),
     `qwen-capture-ready-${process.pid}-${randomBytes(6).toString('hex')}`,
   );
   // What sat at each artifact path after the clear phase, by identity.
@@ -436,16 +443,35 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           `capture did not write — refusing to replace it`,
       );
     }
-    // O_NOFOLLOW is POSIX-only; on Windows it does not exist and the
-    // occupancy check above is the whole guard.
-    const fd = openSync(
-      path,
-      fsConstants.O_WRONLY |
-        fsConstants.O_CREAT |
-        fsConstants.O_TRUNC |
-        (fsConstants.O_NOFOLLOW ?? 0),
-      0o666,
-    );
+    // O_EXCL, not O_TRUNC: the check above is a check, and O_NOFOLLOW only
+    // closed the SYMLINK half of the race between it and this open — a
+    // REGULAR file planted in that window was truncated and replaced, with
+    // the run reporting success and the manifest crediting the path. By
+    // this point the path is always absent (the clear phase removed this
+    // run's own artifacts; anything else refused at the collision gate), so
+    // "create it, and fail if it already exists" is both the true intent
+    // and the only form the kernel decides atomically. O_NOFOLLOW stays for
+    // the Linux/macOS difference on a dangling symlink, where O_EXCL alone
+    // reports EEXIST rather than following it.
+    let fd: number;
+    try {
+      fd = openSync(
+        path,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW ?? 0),
+        0o666,
+      );
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new ArtifactCollision(
+          `${path} was claimed during the capture window by something this ` +
+            `capture did not write — refusing to replace it`,
+        );
+      }
+      throw e;
+    }
     try {
       writeFileSync(fd, data, 'utf8');
     } finally {
@@ -514,6 +540,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     };
     let shaped = false;
     let manifestHadPng = false;
+    let manifestFd: number | undefined;
     try {
       // A FIFO here would block readFileSync FOREVER — a hang, not a throw,
       // so no refusal is printed, no reap handler is installed yet, and NO
@@ -522,7 +549,22 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // its own 10s test timeout until the runner killed it). Only a
       // regular file can be a capture manifest anyway; anything else is
       // unverifiable, which the catch below already treats as "not ours".
-      const st = lstatSync(manifestPath);
+      // ONE descriptor for both the checks and the read: lstat verified a
+      // path, readFileSync then re-resolved it, and a racer swapping
+      // <out>.json between the two re-opened both failure classes these
+      // checks close — a FIFO that blocks the synchronous read forever, and
+      // an arbitrarily large file that dies on the heap limit. O_NOFOLLOW
+      // keeps the lstat semantics (a symlink is not a manifest of ours),
+      // and fstat asks about the file this fd is already holding open.
+      manifestFd = openSync(
+        manifestPath,
+        fsConstants.O_RDONLY |
+          (fsConstants.O_NOFOLLOW ?? 0) |
+          // Never BLOCK on the open either: a FIFO opened read-only waits
+          // for a writer, which is the same hang one step earlier.
+          (fsConstants.O_NONBLOCK ?? 0),
+      );
+      const st = fstatSync(manifestFd);
       if (!st.isFile()) throw new Error('not a file');
       // A capture manifest is a few hundred bytes. Reading an arbitrarily
       // large regular file here killed the process before any refusal could
@@ -530,7 +572,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // `FATAL ERROR: Reached heap limit` — and lstat already has the size,
       // so the cap costs nothing. Too big to be ours: treat as unverified.
       if (st.size > MAX_MANIFEST_BYTES) throw new Error('too large');
-      const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      const m = JSON.parse(readFileSync(manifestFd, 'utf8')) as {
         evidence?: unknown;
         pngPath?: unknown;
         ansPath?: unknown;
@@ -584,6 +626,14 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // this block's own invariant. Stale evidence left beside a refusal is
       // the lesser harm — the refusal names itself, a deleted file does not.
       shaped = false;
+    } finally {
+      if (manifestFd !== undefined) {
+        try {
+          closeSync(manifestFd);
+        } catch {
+          // Nothing downstream depends on this close succeeding.
+        }
+      }
     }
     if (shaped) {
       clearArtifact(ansPath);
@@ -666,9 +716,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         ? 'this process is out of file descriptors'
         : code === 'ENOSPC'
           ? 'the filesystem is full'
-          : code === 'EROFS'
-            ? 'the filesystem is read-only'
-            : null;
+          : code === 'EDQUOT'
+            ? "this user's disk quota is exhausted"
+            : code === 'EROFS'
+              ? 'the filesystem is read-only'
+              : null;
     refuse(
       hostState
         ? `--out could not be prepared — ${hostState}, not a problem with ` +
@@ -799,6 +851,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let socketBase = '/tmp';
     if (envBase) {
       try {
+        // Directoryness FIRST, like the --cwd gate: a regular file (or a
+        // symlink to one) passes W_OK|X_OK on some hosts, and measuring the
+        // socket path against a base tmux will never use produced a
+        // machine-read refusal naming the wrong problem.
+        if (!statSync(envBase).isDirectory()) throw new Error('not a dir');
         accessSync(envBase, fsConstants.W_OK | fsConstants.X_OK);
         socketBase = envBase;
       } catch {
@@ -1121,6 +1178,16 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   };
   function onSignal(sig: NodeJS.Signals): void {
     reap();
+    // The re-raise below terminates the process WITHOUT unwinding, so the
+    // finally holding the only other sentinel cleanup never runs — every
+    // signal death left a qwen-capture-ready-* file behind in the system
+    // temp dir, and a harness reaping stuck captures produces one per run.
+    // Cheap, and the last chance to do it.
+    try {
+      rmSync(holderReadyPath, { force: true });
+    } catch {
+      // Litter is cosmetic; the reap above is what matters here.
+    }
     releaseSignals();
     process.kill(process.pid, sig);
   }
@@ -1655,7 +1722,7 @@ export const captureTuiCommand: CommandModule = {
         type: 'number',
         default: 60_000,
         describe:
-          'One shared deadline for the --ready gate and --until polling — a ready+keys capture without --until is still bounded by this',
+          'One shared deadline for the --ready gate and --until polling. NOT the whole capture: --settle-ms runs after it, so wall time is bounded by timeout-ms + settle-ms',
       }),
   handler: (argv) =>
     runCaptureTui({

@@ -443,7 +443,14 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
       // answers and only one of them is safe to ignore.
       entries = entries.concat(readdirSync(dir).map((name) => ({ dir, name })));
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      // ENOENT, ENOTDIR and ELOOP are all definite "this base cannot hold a
+      // socket" answers — a TMUX_TMPDIR that is a regular file or a symlink
+      // loop is not a scan failure, and reporting it as one set sweepFailed
+      // permanently and suppressed "Nothing to clean" on a host where there
+      // was, in fact, nothing to clean. EACCES stays loud: that one CAN be
+      // hiding an orphan.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') continue;
       // A directory we cannot READ can be hiding an orphan — that is a
       // failure to surface, not a silent nothing (the doc contract above:
       // noted on stderr AND surfaced as failed).

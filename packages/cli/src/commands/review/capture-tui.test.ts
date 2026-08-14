@@ -187,6 +187,25 @@ describe('capture-tui without tmux (probe seam)', () => {
       // reads the same variable.
       probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-badtmp-'));
+      // Seeded, and call-logged: the elapsed pin below catches only the
+      // gate-DELETED mutant (the old ready-wait burn). A gate MOVED below
+      // plan.start refuses just as fast, having started a real server and
+      // run the user's command first — and leaves the previous run's
+      // evidence:"png" manifest beside the refusal if it also moved above
+      // the clear. Both are what the sibling gate families pin.
+      writeFileSync(join(dir, 'cap.ans'), 'old run');
+      writeFileSync(join(dir, 'cap.png'), 'old run');
+      writeFileSync(join(dir, 'cap.json'), staleManifest(join(dir, 'cap')));
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const callLog = join(dir, 'tmux-calls');
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh\necho "$*" >> "${callLog}"\n[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }\necho ""\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
       const realTmp = process.env['TMPDIR'];
       process.env['TMPDIR'] = join(dir, 'no-such-temp-dir');
       const started = Date.now();
@@ -210,8 +229,16 @@ describe('capture-tui without tmux (probe seam)', () => {
         expect(stderr).toContain('temporary directory is not usable');
         expect(stderr).toContain('TMPDIR');
         expect(Date.now() - started).toBeLessThan(10_000);
+        // Nothing started...
+        const calls = existsSync(callLog) ? readFileSync(callLog, 'utf8') : '';
+        expect(calls).not.toContain('new-session');
+        // ...and the clear ran first, like every sibling gate.
         expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+        expect(existsSync(join(dir, 'cap.png'))).toBe(false);
+        expect(existsSync(join(dir, 'cap.json'))).toBe(false);
       } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
         if (realTmp === undefined) delete process.env['TMPDIR'];
         else process.env['TMPDIR'] = realTmp;
         rmSync(dir, { recursive: true, force: true });
@@ -1534,6 +1561,27 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       ...over,
     } as never);
   }
+
+  it('refuses a FIFO at <out>.json instead of hanging on it', async () => {
+    // The manifest checks and the read used to resolve the path twice, so a
+    // racer could swap a verified regular file for a FIFO and hang the
+    // synchronous read forever — no refusal printed, no timeout able to
+    // interrupt it. One descriptor decides both now, opened non-blocking.
+    // A FIFO standing there from the start is the same shape without the
+    // race, and it must not stall the run.
+    const started = Date.now();
+    const { stderr } = await withStdio(() =>
+      run({
+        command: `mkfifo cap.json 2>/dev/null || mknod cap.json p; printf 'MARK\\n'; sleep 20`,
+        until: 'MARK',
+      }),
+    );
+    expect(process.exitCode).toBe(3);
+    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(stderr).toContain('claimed during the capture window');
+    // Not ours, so still there.
+    expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+  });
 
   it('refuses when the CAPTURED COMMAND claims an artifact path mid-window', async () => {
     // The collision gate runs before the window; the window then lasts up
@@ -3507,25 +3555,36 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // session dies with the server. The detached arm is the limit: it
       // setsids into its own session, its parent is init before the reap
       // even runs, and nothing portable reaches it.
-      // The two arms are told apart by their sleep DURATION — unique to
-      // this pid's run, and visible in pgrep's argv match without any
-      // rewriting of the command under test.
-      const arms: Array<[string, number, string, boolean]> = [
+      // Scoped to THIS run by a pid-bearing tag carried in the child's own
+      // argv. It rides as a second, trivial command — `sleep N; : <tag>` —
+      // for two reasons: as an argument `sleep 42 <tag>` is not a valid
+      // call, and with a SINGLE command sh execs it and the argv (tag and
+      // all) is replaced by the sleep's own, leaving nothing to match. Keyed
+      // to a bare `sleep 41`, a concurrent run of this suite on a shared
+      // host satisfied the match and the pkill in the finally reached into
+      // other runs; every other shared-host resource in this file already
+      // carries the pid.
+      const tag = (arm: string): string =>
+        `capture-tui-orphan-${process.pid}-${arm}`;
+      const arms: Array<[string, string, boolean]> = [
         // A child in the pane's session: dies with the server. The guarantee.
-        ['attached', 41, `sleep 41 & printf 'MARK\\n'; sleep 20`, false],
+        [
+          'attached',
+          `sh -c 'sleep 41; : ${tag('attached')}' & printf 'MARK\\n'; sleep 20`,
+          false,
+        ],
         // setsid'd into its own session, parent already init before the reap
         // runs: nothing portable reaches it. The documented limit.
         [
           'detached',
-          42,
-          `node -e "require('child_process').spawn('sleep',['42'],{detached:true,stdio:'ignore'}).unref()"; printf 'MARK\\n'; sleep 20`,
+          `node -e "require('child_process').spawn('sh',['-c','sleep 42; : ${tag('detached')}'],{detached:true,stdio:'ignore'}).unref()"; printf 'MARK\\n'; sleep 20`,
           true,
         ],
       ];
-      for (const [arm, secs, command, expectedAlive] of arms) {
+      for (const [arm, command, expectedAlive] of arms) {
         const alive = (): boolean =>
           (
-            spawnSync('pgrep', ['-f', `sleep ${secs}`], {
+            spawnSync('pgrep', ['-f', tag(arm)], {
               encoding: 'utf8',
             }).stdout ?? ''
           ).trim() !== '';
@@ -3540,7 +3599,7 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
           for (let i = 0; i < 40 && alive(); i++) await sleep(50);
           expect(`${arm}:${alive()}`).toBe(`${arm}:${expectedAlive}`);
         } finally {
-          spawnSync('pkill', ['-f', `sleep ${secs}`]);
+          spawnSync('pkill', ['-f', tag(arm)]);
         }
       }
     },
