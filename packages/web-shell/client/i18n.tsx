@@ -393,6 +393,8 @@ const EN: Messages = {
   'common.downloading': 'Downloading…',
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
+  'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
+  'artifact.openLink': 'Open link',
   'common.na': 'N/A',
   'common.server': 'Server',
   'common.agent': 'Agent',
@@ -522,6 +524,21 @@ const EN: Messages = {
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
   'at.category.files.description': 'Reference workspace files',
+  'at.files.upload': 'Upload file',
+  'at.files.upload.description': 'Upload a file into this folder',
+  'composer.upload.pending': 'Waiting',
+  'composer.upload.uploading': 'Uploading',
+  'composer.upload.done': 'Uploaded',
+  'composer.upload.error': 'Failed',
+  'composer.upload.error.noDaemon': 'No daemon connection',
+  'composer.upload.error.tooLarge': (v) =>
+    `File exceeds the ${v?.limit ?? ''} upload limit`,
+  'composer.upload.error.tooManyFiles': (v) =>
+    `${v?.count ?? 0} more files were not added (limit per batch)`,
+  'composer.upload.cancel': 'Cancel upload',
+  'composer.upload.dismiss': 'Dismiss',
+  'composer.upload.renamed': 'Saved as',
+  'composer.upload.drop': 'Drop files',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -561,6 +578,22 @@ const EN: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
+  'askUser.shortcuts.previous': '← previous',
+  'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
+  'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
+  'askUser.shortcuts.optionsFinal': '↑↓ select · Enter submit',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.multiNext':
+    '↑↓ move · Space select/deselect · Enter select & next',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ move · Space select/deselect · Enter select & submit',
+  'askUser.shortcuts.customTrigger': '↑↓ select · Enter edit',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ move · Enter edit',
+  'askUser.shortcuts.inputEmpty': 'Type an answer · Esc stop editing',
+  'askUser.shortcuts.inputSingle': 'Enter submit · Esc stop editing',
+  'askUser.shortcuts.inputNext': 'Enter next · Esc stop editing',
+  'askUser.shortcuts.inputFinal': 'Enter submit · Esc stop editing',
   'copy.failedFallback': 'Failed to copy to the clipboard',
   'copy.inlineLatexMissing':
     'No matching inline LaTeX expression found in the last AI output.',
@@ -1136,6 +1169,7 @@ const EN: Messages = {
     "Checked in this task's own session before each run. The prompt only runs in a fresh session when the check says yes — otherwise the run is skipped.",
   'scheduledTasks.condition.cardPrefix': 'If:',
   'turnOutputs.filesEdited': (v) => `Edited ${v?.count ?? 0} files`,
+  'turnOutputs.imagePreview': 'Image Preview',
   'turnOutputs.viewChanges': 'View changes',
   // Key keeps its historical `review` name; the label moved to "Changes" when
   // the code-review result view (`codeReview.*`) took over the word.
@@ -1160,6 +1194,7 @@ const EN: Messages = {
   'codeReview.noMatches': 'No findings match these filters.',
   'codeReview.source': (v) => `Source: ${v?.value ?? ''}`,
   'codeReview.failureScenario': 'Failure scenario',
+  'codeReview.witness': 'Witness',
   'codeReview.suggestedFix': 'Suggested fix',
   'codeReview.outcome': 'Outcome',
   'codeReview.locations': 'Locations',
@@ -1197,6 +1232,10 @@ const EN: Messages = {
   'sidebar.newWorktreeTask': 'New worktree task',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
+  'sidebar.sessionSource': 'Session source',
+  'sidebar.sessionSource.tasks': 'Tasks',
+  'sidebar.sessionSource.channels': 'Channels',
+  'sidebar.channelType.other': 'Other channels',
   'sidebar.live': 'Live',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
@@ -1422,6 +1461,38 @@ const EN: Messages = {
   'system.taskCompleted': 'Background task completed',
   'system.taskFailed': 'Background task failed',
   'system.taskCancelled': 'Background task cancelled',
+  'notification.shell.completed': (v) =>
+    `Background shell "${v?.command ?? ''}" completed.`,
+  'notification.shell.failed': (v) =>
+    `Background shell "${v?.command ?? ''}" failed.`,
+  'notification.shell.cancelled': (v) =>
+    `Background shell "${v?.command ?? ''}" was cancelled.`,
+  'notification.monitor.completed': (v) =>
+    `Monitor "${v?.description ?? ''}" completed. (${v?.events ?? 0} events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
+  'notification.monitor.failed': (v) =>
+    `Monitor "${v?.description ?? ''}" failed. (${v?.events ?? 0} events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
+  'notification.monitor.cancelled': (v) =>
+    `Monitor "${v?.description ?? ''}" was cancelled. (${
+      v?.events ?? 0
+    } events${
+      v?.droppedLines
+        ? `, ${v.droppedLines} lines dropped due to throttling`
+        : ''
+    })`,
+  'notification.agent.completed': (v) =>
+    `Background agent "${v?.description ?? ''}" completed.`,
+  'notification.agent.failed': (v) =>
+    `Background agent "${v?.description ?? ''}" failed.`,
+  'notification.agent.cancelled': (v) =>
+    `Background agent "${v?.description ?? ''}" was cancelled.`,
   'branch.failed': 'Failed to branch session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
@@ -1443,7 +1514,6 @@ const EN: Messages = {
   'shell.command': 'Shell Command',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
-  'compact.hint': 'Press Ctrl+O to show full tool output',
   'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
@@ -1945,6 +2015,7 @@ const EN: Messages = {
   'mcp.userMcp': 'Global MCP',
   'mcp.workingDirectory': 'Working Directory',
   'goal.aborted': 'Goal aborted',
+  'goal.paused': 'Goal paused',
   'goal.achieved': 'Goal achieved',
   'goal.check': 'Goal check',
   'goal.cleared': 'Goal cleared',
@@ -2106,6 +2177,15 @@ const EN: Messages = {
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
   'model.none': 'No models available',
   'model.select': 'Select Model',
+  'model.section': 'Model',
+  'reasoning.options': 'Options',
+  'reasoning.thinking': 'Thinking',
+  'reasoning.thinkingOff': 'Thinking Off',
+  'reasoning.effort': 'Effort',
+  'reasoning.effort.low': 'Low',
+  'reasoning.effort.medium': 'Medium',
+  'reasoning.effort.xhigh': 'Extra High',
+  'reasoning.updateFailed': 'Failed to update reasoning options',
   'model.setFast': 'Set Fast Model',
   'model.setVoice': 'Set Voice Model',
   'model.setVision': 'Set Vision Model',
@@ -2121,6 +2201,7 @@ const EN: Messages = {
   'resume.title': 'Resume Session',
   'parallelAgents.title': 'Parallel agents',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} done`,
+  'parallelAgents.failed': (v) => `${v?.count ?? 0} failed`,
   'skills.actions': 'Skill actions',
   'skills.disable': 'Disable',
   'skills.disabled': 'Skill disabled.',
@@ -2473,9 +2554,9 @@ const EN: Messages = {
   'toolGroup.summary.otherTools': (v) =>
     `Called ${v?.count ?? 0} other tool${v?.count === 1 ? '' : 's'}`,
   'toolGroup.running': (v) =>
-    `Running ${v?.name ?? 'tool'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · ${v?.count ?? 0} tools` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `Running ${v?.count ?? 0} tools: ${v?.name ?? 'tool'}`
+      : `Running ${v?.name ?? 'tool'}`,
   'toolGroup.runningPrefix': 'Running',
   'thinking.expand': 'Expand thinking',
   'thinking.collapse': 'Collapse thinking',
@@ -2585,10 +2666,19 @@ const EN: Messages = {
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
+  'channels.editor.section.session': 'Session',
   'channels.editor.section.access': 'Access policy',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
   'channels.editor.environmentReference': '$ENV_VAR supported',
+  'channels.editor.field.sessionScope': 'Session scope',
+  'channels.editor.field.sessionScope.description':
+    'Controls which incoming conversations share one agent session.',
+  'channels.editor.field.sessionScope.option.user': 'Per user and chat',
+  'channels.editor.field.sessionScope.option.thread': 'Per thread',
+  'channels.editor.field.sessionScope.option.chat_thread':
+    'Per chat and thread',
+  'channels.editor.field.sessionScope.option.single': 'One shared session',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
   'channels.editor.field.wecom.botId': 'Bot ID',
@@ -3214,6 +3304,8 @@ const ZH: Messages = {
   'common.downloading': '正在下载…',
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
+  'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
+  'artifact.openLink': '打开链接',
   'common.na': '不适用',
   'common.server': '服务器',
   'common.agent': '智能体',
@@ -3341,6 +3433,21 @@ const ZH: Messages = {
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
   'at.category.files.description': '引用工作区文件',
+  'at.files.upload': '上传文件',
+  'at.files.upload.description': '上传文件到此文件夹',
+  'composer.upload.pending': '等待中',
+  'composer.upload.uploading': '上传中',
+  'composer.upload.done': '已上传',
+  'composer.upload.error': '失败',
+  'composer.upload.error.noDaemon': '未连接 Daemon',
+  'composer.upload.error.tooLarge': (v) =>
+    `文件超过 ${v?.limit ?? ''} 上传上限`,
+  'composer.upload.error.tooManyFiles': (v) =>
+    `另有 ${v?.count ?? 0} 个文件未添加（单批数量上限）`,
+  'composer.upload.cancel': '取消上传',
+  'composer.upload.dismiss': '关闭',
+  'composer.upload.renamed': '已保存为',
+  'composer.upload.drop': '拖放文件',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -3380,6 +3487,22 @@ const ZH: Messages = {
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} 个问题`,
   'askUser.selectAnswer': '选择一个答案',
   'askUser.typePlaceholder': '输入内容...',
+  'askUser.shortcuts.previous': '← 上一步',
+  'askUser.shortcuts.optionsSingle': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.optionsNext': '↑↓ 选择 · Enter 下一步',
+  'askUser.shortcuts.optionsFinal': '↑↓ 选择 · Enter 提交',
+  'askUser.shortcuts.multiSingle':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.multiNext':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并下一步',
+  'askUser.shortcuts.multiFinal':
+    '↑↓ 移动 · Space 选中/取消 · Enter 选中并提交',
+  'askUser.shortcuts.customTrigger': '↑↓ 选择 · Enter 编辑',
+  'askUser.shortcuts.customTriggerMulti': '↑↓ 移动 · Enter 编辑',
+  'askUser.shortcuts.inputEmpty': '输入答案 · Esc 退出编辑',
+  'askUser.shortcuts.inputSingle': 'Enter 提交 · Esc 退出编辑',
+  'askUser.shortcuts.inputNext': 'Enter 下一步 · Esc 退出编辑',
+  'askUser.shortcuts.inputFinal': 'Enter 提交 · Esc 退出编辑',
   'copy.failedFallback': '复制到剪贴板失败',
   'copy.inlineLatexMissing': '最后一条 AI 输出中没有匹配的行内 LaTeX 表达式。',
   'copy.latexMissing': '最后一条 AI 输出中没有匹配的 LaTeX 块。',
@@ -3916,6 +4039,7 @@ const ZH: Messages = {
     '每次触发前，先在本任务自己的会话中检查该条件。只有判定为"是"，才会新建会话执行命令；否则跳过本次运行。',
   'scheduledTasks.condition.cardPrefix': '若：',
   'turnOutputs.filesEdited': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.imagePreview': '图片预览',
   'turnOutputs.viewChanges': '查看更改',
   // 与英文键同理：键名保留历史 `review`，标签改为“文件更改”，
   // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
@@ -3940,6 +4064,7 @@ const ZH: Messages = {
   'codeReview.noMatches': '没有符合当前筛选条件的发现。',
   'codeReview.source': (v) => `来源：${v?.value ?? ''}`,
   'codeReview.failureScenario': '失败场景',
+  'codeReview.witness': '实测证据',
   'codeReview.suggestedFix': '建议修复',
   'codeReview.outcome': '处理结果',
   'codeReview.locations': '位置',
@@ -3975,6 +4100,10 @@ const ZH: Messages = {
   'sidebar.newWorktreeTask': '新建 Worktree 任务',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
+  'sidebar.sessionSource': '会话来源',
+  'sidebar.sessionSource.tasks': '任务',
+  'sidebar.sessionSource.channels': '频道',
+  'sidebar.channelType.other': '其他频道',
   'sidebar.live': 'Live',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
@@ -4183,6 +4312,30 @@ const ZH: Messages = {
   'system.taskCompleted': '后台任务执行完成',
   'system.taskFailed': '后台任务执行失败',
   'system.taskCancelled': '后台任务已取消',
+  'notification.shell.completed': (v) =>
+    `后台 Shell 已完成：${v?.command ?? ''}`,
+  'notification.shell.failed': (v) =>
+    `后台 Shell 执行失败：${v?.command ?? ''}`,
+  'notification.shell.cancelled': (v) =>
+    `后台 Shell 已取消：${v?.command ?? ''}`,
+  'notification.monitor.completed': (v) =>
+    `监控器已完成（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
+  'notification.monitor.failed': (v) =>
+    `监控器执行失败（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
+  'notification.monitor.cancelled': (v) =>
+    `监控器已取消（${v?.events ?? 0} 个事件${
+      v?.droppedLines ? `，因限流丢弃 ${v.droppedLines} 行` : ''
+    }）：${v?.description ?? ''}`,
+  'notification.agent.completed': (v) =>
+    `后台智能体已完成：${v?.description ?? ''}`,
+  'notification.agent.failed': (v) =>
+    `后台智能体执行失败：${v?.description ?? ''}`,
+  'notification.agent.cancelled': (v) =>
+    `后台智能体已取消：${v?.description ?? ''}`,
   'branch.failed': '分支会话失败。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
@@ -4203,7 +4356,6 @@ const ZH: Messages = {
   'shell.command': 'Shell 命令',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
-  'compact.hint': '按 Ctrl+O 显示完整工具输出',
   'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
@@ -4660,6 +4812,7 @@ const ZH: Messages = {
   'mcp.userMcp': '全局 MCP',
   'mcp.workingDirectory': '工作目录',
   'goal.aborted': '目标已中止',
+  'goal.paused': '目标已暂停',
   'goal.achieved': '目标已达成',
   'goal.check': '目标检查',
   'goal.cleared': '目标已清除',
@@ -4811,6 +4964,15 @@ const ZH: Messages = {
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,
   'model.none': '没有可用模型',
   'model.select': '选择模型',
+  'model.section': '模型',
+  'reasoning.options': '选项',
+  'reasoning.thinking': '思考',
+  'reasoning.thinkingOff': '思考已关闭',
+  'reasoning.effort': '思考强度',
+  'reasoning.effort.low': '低',
+  'reasoning.effort.medium': '中',
+  'reasoning.effort.xhigh': '极高',
+  'reasoning.updateFailed': '更新思考选项失败',
   'model.setFast': '设置 Fast Model',
   'model.setVoice': '设置语音模型',
   'model.setVision': '设置视觉模型',
@@ -4826,6 +4988,7 @@ const ZH: Messages = {
   'resume.title': '恢复会话',
   'parallelAgents.title': '并行智能体',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} 完成`,
+  'parallelAgents.failed': (v) => `失败 ${v?.count ?? 0} 个`,
   'skills.actions': 'Skill 操作',
   'skills.disable': '禁用',
   'skills.disabled': 'Skill 已禁用。',
@@ -5153,9 +5316,9 @@ const ZH: Messages = {
   'toolGroup.summary.askedQuestions': (v) => `已询问 ${v?.count ?? 0} 个问题`,
   'toolGroup.summary.otherTools': (v) => `调用了 ${v?.count ?? 0} 个工具`,
   'toolGroup.running': (v) =>
-    `正在执行 ${v?.name ?? '工具'}${v?.duration ? ` ${v.duration}` : ''}${
-      Number(v?.count ?? 0) > 1 ? ` · 共 ${v?.count ?? 0} 个工具` : ''
-    }`,
+    Number(v?.count ?? 0) > 1
+      ? `正在执行 ${v?.count ?? 0} 个工具：${v?.name ?? '工具'}`
+      : `正在执行 ${v?.name ?? '工具'}`,
   'toolGroup.runningPrefix': '正在执行',
   'thinking.expand': '展开思考',
   'thinking.collapse': '收起思考',
@@ -5258,10 +5421,18 @@ const ZH: Messages = {
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
+  'channels.editor.section.session': '会话',
   'channels.editor.section.access': '准入策略',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',
   'channels.editor.environmentReference': '支持 $ENV_VAR',
+  'channels.editor.field.sessionScope': '会话作用域',
+  'channels.editor.field.sessionScope.description':
+    '控制哪些来源的消息共享同一个 Agent 会话。',
+  'channels.editor.field.sessionScope.option.user': '按用户和对话',
+  'channels.editor.field.sessionScope.option.thread': '按话题',
+  'channels.editor.field.sessionScope.option.chat_thread': '按对话和话题',
+  'channels.editor.field.sessionScope.option.single': '整个频道共享',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',

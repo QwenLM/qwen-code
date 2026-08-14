@@ -26,6 +26,8 @@ export interface DaemonCapabilitiesLimits {
   maxTotalSessions?: number | null;
   /** Server-side deadline for ACP session load/resume. */
   sessionRestoreTimeoutMs?: number;
+  /** Present when `workspace_file_upload` is advertised. */
+  maxWorkspaceFileUploadBytes?: number;
 }
 
 export interface DaemonWorkspaceCapability {
@@ -487,6 +489,12 @@ export interface DaemonStatusReportSession {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /**
+   * Effective live-journal caps right now — the baseline, or higher when
+   * adaptive growth raised them mid-turn. Absent on older daemons.
+   */
+  maxJournalEvents?: number;
+  maxJournalBytes?: number;
 }
 
 /**
@@ -631,8 +639,23 @@ export interface DaemonStatusReport {
      * none.
      */
     memory?: {
-      /** False, and required: nothing in this section is applied to a process. */
+      /**
+       * False, and required — scoped to the child-heap model: nothing in
+       * this section except `journalGrowth` is applied to a process.
+       */
       enforced: false;
+      /**
+       * Adaptive live-journal growth derived from the budget — the one
+       * figure with runtime effect: session journal caps really do grow
+       * within this daemon-wide pool mid-turn. `null` when growth is
+       * disabled; absent on daemons predating it.
+       */
+      journalGrowth?: {
+        poolBytes: number;
+        hardCapBytes: number;
+        baselineMaxEvents: number;
+        baselineMaxBytes: number;
+      } | null;
       /**
        * The per-child heap partition the daemon models but does not apply.
        * `null` when no policy was built; absent on daemons predating it.
@@ -930,6 +953,10 @@ export interface DaemonSessionState {
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
   artifactWarnings?: string[];
+  /** True when persisted replay could only be reconstructed partially. */
+  partial?: true;
+  /** Diagnostic for a partial persisted replay. */
+  replayError?: string;
   /** Compacted events for completed turns (load only). */
   compactedReplay?: DaemonEvent[];
   /** Bounded replay events for the current incomplete turn (load only). */
@@ -1964,6 +1991,32 @@ export interface DaemonWorkspaceFileEditResult {
 }
 
 /**
+ * Binary file upload request. The bytes are sent as
+ * `application/octet-stream`; `path` is the target relative to the workspace
+ * root. Uploads never overwrite — an occupied name is auto-numbered by the
+ * daemon, and the returned `path` is the final server-confirmed name.
+ */
+export interface DaemonWorkspaceFileUploadRequest {
+  path: string;
+  data: ArrayBuffer | Uint8Array | Blob;
+  signal?: AbortSignal;
+  /** Omitted inherits the client's default; `0` disables the timeout. */
+  timeoutMs?: number;
+  /**
+   * Browser-only upload progress. Requesting progress where
+   * `XMLHttpRequest` is unavailable throws before sending.
+   */
+  onProgress?: (event: { loaded: number; total: number }) => void;
+}
+
+export interface DaemonWorkspaceFileUploadResult {
+  kind: 'file_upload';
+  path: string;
+  sizeBytes: number;
+  hash: DaemonContentHash;
+}
+
+/**
  * Subagent CRUD types. `agentType` on the wire is
  * the `name` field from the agent's frontmatter (case-insensitive);
  * `level` distinguishes project-/user-/builtin-/extension-level
@@ -2509,6 +2562,11 @@ export interface SetModelResult {
   [key: string]: unknown;
 }
 
+/** Returned from `POST /session/:id/config-option`. */
+export interface DaemonSessionConfigOptionResult {
+  configOptions: unknown[];
+}
+
 /** Returned from `POST /session/:id/language`. */
 export interface SetSessionLanguageResult {
   language: string;
@@ -3016,9 +3074,8 @@ export interface DaemonSessionBtwResult {
 
 /**
  * Result body of `POST /session/:id/mid-turn-message`. `accepted` is `true`
- * when the message was queued for the running turn (the ACP child drains it
- * between tool batches); `false` when the session was idle, in which case the
- * caller should send the message as a normal next-turn prompt instead.
+ * when the message is owned by the daemon, either in the running turn's queue
+ * or promoted into the normal prompt FIFO.
  */
 export interface DaemonMidTurnMessageResult {
   accepted: boolean;
@@ -3027,6 +3084,31 @@ export interface DaemonMidTurnMessageResult {
 
 export interface DaemonRemoveMidTurnMessageResult {
   removed: boolean;
+}
+
+/**
+ * One entry still waiting in the daemon's mid-turn queue (projection of the
+ * bridge's `MidTurnQueueEntry`). The queue is session-global.
+ */
+export interface DaemonMidTurnMessageSummary {
+  messageId: string;
+  text: string;
+}
+
+/**
+ * Response body of `GET /session/:id/mid-turn-messages`. Reconciliation
+ * session-owned snapshot for page refresh, session switching, and missed
+ * event recovery: a row whose `messageId` appears in
+ * `messages` is still waiting (restore/keep it), a row whose id appears in
+ * `settledMessageIds` was injected or explicitly removed, and an id in
+ * `promotedMessageIds` entered the normal prompt FIFO. None may be resent.
+ * Older daemons lack the route — pre-flight the
+ * `session_mid_turn_message_query` capability before calling.
+ */
+export interface DaemonMidTurnMessagesResult {
+  messages: DaemonMidTurnMessageSummary[];
+  settledMessageIds: string[];
+  promotedMessageIds: string[];
 }
 
 /**
@@ -3921,7 +4003,8 @@ export type DaemonExtensionOriginSource =
   | 'QwenCode'
   | 'Claude'
   | 'Gemini'
-  | 'Qoder';
+  | 'Qoder'
+  | 'AgentPlugins';
 
 export interface DaemonExtensionCapabilities {
   mcpServerCount: number;

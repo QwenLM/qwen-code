@@ -21,10 +21,9 @@ import type {
  * Simple version counter for pending-prompt queue changes.
  *
  * The daemon publishes `pending_prompt_added`, `pending_prompt_started`,
- * and `pending_prompt_completed` SSE events whenever the pending queue
- * changes. This sidechannel increments a version counter on each event,
- * and consumers (e.g. web-shell) re-fetch the full queue via
- * `GET /session/:id/pending-prompts` when the version changes.
+ * and `pending_prompt_completed` SSE events whenever a daemon-owned user queue
+ * changes. This sidechannel increments a version counter on each event, and
+ * consumers re-fetch their authoritative pending and mid-turn snapshots.
  *
  * This is intentionally simpler than `midTurnInjectedSidechannel`: the web UI
  * owns one active daemon event stream per browser runtime, so a monotonic

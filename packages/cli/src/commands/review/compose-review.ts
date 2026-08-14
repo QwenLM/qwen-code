@@ -30,6 +30,7 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
+import { compressSummary } from './findings.js';
 import {
   BUDGET_STOP_PHRASE,
   ROUND_CAP_PHRASE,
@@ -39,7 +40,14 @@ import {
 } from './lib/deadline.js';
 import { MAX_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
-import { gh, setGhHost } from './lib/gh.js';
+import {
+  HOSTNAME_RE,
+  gh,
+  getGhHost,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import {
   isPositivePrNumber,
   hasExecutableScript,
@@ -48,6 +56,7 @@ import {
   type RosterPlan,
 } from './lib/roster.js';
 import { repositoryContextOf } from './lib/repository-context.js';
+import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
@@ -64,11 +73,12 @@ import {
   type DraftedComment,
 } from './lib/inline-counts.js';
 import {
-  REVIEW_FOOTER_RE,
   footerVersion,
   isFooterSafeModelId,
   reviewFooter,
+  stripReviewFooter,
 } from './lib/review-footer.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
@@ -242,6 +252,182 @@ function withMarker(line: string): string {
   return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
 }
 
+/** The plan's PR identity, when it names one — the base for comment anchors. */
+interface PrIdentity {
+  ownerRepo: string;
+  prNumber: string;
+  /** The host fetch-pr recorded for a non-default instance, else null. */
+  host: string | null;
+}
+
+/**
+ * The one rule for "this parsed plan names a PR" — the bilingual recovery
+ * and the comment anchors both read it, so a hardening of plan-identity
+ * validation lands once, not twice in this file.
+ */
+function planPrIdentity(plan: unknown): PrIdentity | null {
+  if (typeof plan !== 'object' || plan === null) return null;
+  const p = plan as {
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+    host?: unknown;
+  };
+  const ownerRepo =
+    typeof p.ownerRepo === 'string' && isOwnerRepo(p.ownerRepo)
+      ? p.ownerRepo
+      : null;
+  const prNumber = isPositivePrNumber(p.prNumber) ? String(p.prNumber) : null;
+  // The plan is a file on disk; hold a recorded host to the same standard
+  // the rest of this surface applies (HOSTNAME_RE in setGhHost) before it
+  // rides into a posted anchor URL.
+  const host =
+    typeof p.host === 'string' && HOSTNAME_RE.test(p.host) ? p.host : null;
+  return ownerRepo && prNumber ? { ownerRepo, prNumber, host } : null;
+}
+
+function prIdentityFromPlan(planPath: string | undefined): PrIdentity | null {
+  if (!planPath) return null;
+  try {
+    return planPrIdentity(JSON.parse(readFileSync(planPath, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `comment 3733696855` in a model-written unresolved entry is a bare number
+ * the PR page cannot navigate; with the plan's PR identity it becomes the
+ * anchor GitHub already serves — review-thread comments under
+ * `#discussion_r`, issue-level ones under `#issuecomment`. An entry that
+ * already carries a markdown link is left alone: the model linked it itself,
+ * and rewriting inside its link text would corrupt it.
+ */
+function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
+  if (!pr || text.includes('](')) return text;
+  // The anchor must point at the instance the PR lives on: the host the
+  // plan recorded, else this run's routed host, else an operator-exported
+  // GH_HOST — the same effective-host resolution `submit` posts through.
+  // Defaulting to github.com 404s a GHE review's anchors, or lands them on
+  // a same-named public repo's different PR.
+  // Normalized before the github.com comparison below: hostnames are
+  // case-insensitive, :443 is the implicit port (leading zeros included),
+  // a trailing dot is the same DNS name, and www. fronts the same default
+  // instance — every one of these variants must land on the floor, or a
+  // `GH_HOST=www.github.com` run links an ordinal `comment 5` into a dead
+  // anchor.
+  const host = (resolveGhHost(pr.host ?? getGhHost()) ?? 'github.com')
+    .toLowerCase()
+    .replace(/:0*443$/, '')
+    .replace(/\.$/, '')
+    .replace(/^www\.github\.com$/, 'github.com');
+  const base = `https://${host}/${pr.ownerRepo}/pull/${pr.prNumber}`;
+  // github.com's comment ids run long, so a short number after "comment"
+  // reads likelier as an ordinal; a GHE instance's id space is its own and
+  // often short, and the floor would leave the feature inert there.
+  // Case-insensitive: the pipeline's own label is capitalized
+  // (`**Issue-level comment**` in pr-context), and an entry echoing that
+  // casing must still anchor under #issuecomment, not #discussion_r.
+  const commentRef =
+    host === 'github.com'
+      ? /\b(issue-level )?comment (\d{6,})\b/gi
+      : /\b(issue-level )?comment (\d+)\b/gi;
+  // The anchor family is decided per ENTRY, not per match: issue-comment
+  // ids and review-comment ids are separate id spaces, and an issue-level
+  // entry that echoes pr-context's own header shape (`**Issue-level
+  // comment** — … (comment 5199834809)`) carries its id apart from the
+  // phrase — routed by adjacency alone, that id anchors under
+  // #discussion_r, a link that can never resolve.
+  const issueLevelEntry = /\bissue(?:-level)?\s+comment\b/i.test(text);
+  return text.replace(
+    commentRef,
+    (_m, issueLevel: string | undefined, id: string) =>
+      issueLevel || issueLevelEntry
+        ? `[${issueLevel ?? ''}comment ${id}](${base}#issuecomment-${id})`
+        : `[comment ${id}](${base}#discussion_r${id})`,
+  );
+}
+
+/**
+ * The unresolved-existing-Critical block, as a Markdown list instead of a
+ * space-joined paragraph: #8388's posted body ran 31 of these together in
+ * one unreadable wall. Entries sharing the exact reason after their first
+ * ` — ` collapse into one marked group that states the reason once and
+ * lists the subjects — the same repetition-killing move the not-reviewed
+ * sentences already make. Nothing is dropped: every subject and every
+ * distinct reason still renders, because erasing one is how a review
+ * approves the very thing it is asking about. The Chinese half carries a
+ * count and a pointer instead of duplicating the untranslatable English
+ * list — on #8388 that duplication alone doubled the body.
+ */
+function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
+  const parsed = cannotTell.map((raw) => {
+    // Entries render as one-line list items: an unindented newline ends a
+    // list item (CommonMark), so a model-written entry spanning lines would
+    // leak its continuation out of the list. Collapsed by split/join, not
+    // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
+    // a long whitespace run with no newline in it, and these entries are
+    // model-written with no length cap — one such entry stalled a measured
+    // probe for seconds at 80k characters.
+    const unmarked = raw.startsWith(CRITICAL_PREFIX)
+      ? raw.slice(CRITICAL_PREFIX.length).trim()
+      : raw;
+    const line = linkifyCommentRefs(
+      unmarked.includes('\n')
+        ? unmarked
+            .split('\n')
+            .map((seg) => seg.trim())
+            .filter((seg) => seg !== '')
+            .join(' ')
+        : unmarked,
+      pr,
+    );
+    const idx = line.indexOf(' — ');
+    // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
+    // empty-string reason would become a group key and render `2 entries — :`.
+    return idx === -1
+      ? { head: line, reason: null }
+      : {
+          head: line.slice(0, idx),
+          reason: line.slice(idx + 3).trim() || null,
+        };
+  });
+  // Grouped on the exact reason text, in first-appearance order. A reasonless
+  // entry stays its own item — there is nothing to share.
+  interface Group {
+    reason: string | null;
+    heads: string[];
+  }
+  const groups: Group[] = [];
+  const byReason = new Map<string, Group>();
+  for (const p of parsed) {
+    const existing = p.reason === null ? undefined : byReason.get(p.reason);
+    if (existing) {
+      existing.heads.push(p.head);
+      continue;
+    }
+    const group: Group = { reason: p.reason, heads: [p.head] };
+    groups.push(group);
+    if (p.reason !== null) byReason.set(p.reason, group);
+  }
+  const lines: string[] = [];
+  for (const { reason, heads } of groups) {
+    if (heads.length === 1) {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads[0]}${reason === null ? '' : ` — ${reason}`}`,
+      );
+    } else {
+      lines.push(
+        `- ${CRITICAL_PREFIX} ${heads.length} entries — ${reason}:`,
+        ...heads.map((head) => `  - ${head}`),
+      );
+    }
+  }
+  return {
+    en: `Unresolved, please confirm:\n\n${lines.join('\n')}`,
+    zh: `未决，请确认：共 ${cannotTell.length} 条（原文未翻译，列表见上方英文部分）。`,
+  };
+}
+
 // The input arrives as JSON a model wrote, and the skill tells it to omit
 // fields that do not apply — so absence is normal and means zero/empty. What
 // must never pass is a PRESENT field of the wrong shape: `undefined + 1` is
@@ -270,10 +456,6 @@ function toStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
-function stripReviewFooter(entry: string): string {
-  return entry.replace(REVIEW_FOOTER_RE, '');
-}
-
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -291,14 +473,15 @@ function toBool(value: unknown, field: string): boolean {
 export function composeReview(
   input: ComposeReviewInput,
   cliVersion = 'unknown',
+  attribution = true,
 ): ComposeReviewResult {
-  const result = composeReviewBody(input, cliVersion);
+  const result = composeReviewBody(input, cliVersion, attribution);
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input);
+  const marker = ledgerMarkerFor(input, result.cappedBy);
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -307,11 +490,15 @@ export function composeReview(
  * Round number comes from the side file `pr-context` wrote from the PREVIOUS
  * posted round (+1) — never from the model, never from this input.
  */
-function ledgerMarkerFor(input: ComposeReviewInput): string | null {
+function ledgerMarkerFor(
+  input: ComposeReviewInput,
+  cappedBy: string[],
+): string | null {
   try {
     if (!input.planPath) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       prNumber?: unknown;
+      fetchedSha?: unknown;
     };
     const pr = plan?.prNumber;
     const isPr =
@@ -334,8 +521,30 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
     } catch {
       // No previous posted round recovered: this is round 1.
     }
-    return serializeLedger(
-      buildLedger(
+    // The anchor rides only when this round's scope was clean, and "clean" is
+    // the verdict this module just computed: `cappedBy` aggregates every
+    // fail-closed state — each named input pushes its own cap entry, plus the
+    // caps with no input channel at all (a chunk nobody read, findings still
+    // `— [unverified]`, the deterministic gates' enrichments). The input
+    // fields alone were measured leaking exactly those channel-less caps: a
+    // round the module stamped "could not certify that any of this diff was
+    // reviewed" still carried the anchor. One raw check stays alongside, for
+    // the sliver the cap list deliberately drops: a whitespace-only
+    // `cannotTellCriticals` entry is filtered out of the rendered caps, but
+    // Step 8's contract is "any entry" — an undecided blocker whose text was
+    // lost is still an undecided blocker. An anchor written past unreviewed
+    // or undecided scope scopes the NEXT round's incremental diff past it,
+    // and no later round ever re-covers the gap. The findings always ride —
+    // a fail-closed round's work list is still a work list; it just cannot
+    // certify a range.
+    const failClosed =
+      (input.cannotTellCriticals?.length ?? 0) > 0 || cappedBy.length > 0;
+    const sha =
+      !failClosed && typeof plan.fetchedSha === 'string'
+        ? plan.fetchedSha
+        : undefined;
+    return serializeLedger({
+      ...buildLedger(
         prevRound + 1,
         (input.draftedComments ?? []) as Array<{
           path?: unknown;
@@ -346,7 +555,8 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
           .map(stripReviewFooter)
           .filter((entry) => entry.trim() !== ''),
       ),
-    );
+      ...(sha ? { sha } : {}),
+    });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
     return null;
@@ -356,6 +566,7 @@ function ledgerMarkerFor(input: ComposeReviewInput): string | null {
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
+  attribution: boolean,
 ): ComposeReviewResult {
   const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
   const suggestionsInline = toCount(
@@ -521,6 +732,11 @@ function composeReviewBody(
     gateDisclosed.push(...gate.disclosed);
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
     repositoryContextNotes.push(...repositoryContextGate(input.planPath));
+    // Modeled-executable-system diffs (declared by the manifest domain) owe
+    // per-layer reverse-audit coverage; an unwalked defect layer joins
+    // `unreviewedDimensions` and caps a would-be Approve, exactly like a
+    // dimension nobody reviewed. Inert on every diff the manifest does not mark.
+    unreviewed.push(...layerAuditGate(input.planPath, input.env).unreviewed);
   }
 
   // The Criticals a verifier must have ruled on before this review may post them as
@@ -584,6 +800,7 @@ function composeReviewBody(
       for (const label of cov.idleAgents) {
         coverageEntries.push({
           subject: label,
+          publicSubject: publicAgentSubject(label),
           reason: 'the agent made no tool call: it read nothing',
           reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
         });
@@ -605,6 +822,7 @@ function composeReviewBody(
       for (const label of cov.blindAgents) {
         coverageEntries.push({
           subject: label,
+          publicSubject: publicAgentSubject(label),
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
@@ -626,11 +844,13 @@ function composeReviewBody(
       for (const label of cov.unopenedAgents) {
         coverageEntries.push({
           subject: label,
+          publicSubject: publicAgentSubject(label),
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
           reasonZh:
-            '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
+            '启动 prompt 为它指定了 diff 中的行，但它从未打开：有工具调用，' +
+            '却没有一次读取 diff',
         });
       }
       if (cov.unopenedAgents.length > 0) {
@@ -829,17 +1049,21 @@ function composeReviewBody(
     'presubmit.downgradeReasons',
   );
   const modelId: unknown = input.modelId;
-  if (typeof modelId !== 'string' || modelId.trim() === '') {
-    throw new TypeError(
-      'compose-review: modelId is required (the public footer names the reviewing model)',
-    );
-  }
-  if (!isFooterSafeModelId(modelId)) {
-    throw new TypeError(
-      'compose-review: modelId is interpolated into the public footer ' +
-        'verbatim — it must be a single line that does not contain the ' +
-        'footer marker',
-    );
+  let footer = '';
+  if (attribution) {
+    if (typeof modelId !== 'string' || modelId.trim() === '') {
+      throw new TypeError(
+        'compose-review: modelId is required (the public footer names the reviewing model)',
+      );
+    }
+    if (!isFooterSafeModelId(modelId)) {
+      throw new TypeError(
+        'compose-review: modelId is interpolated into the public footer ' +
+          'verbatim — it must be a single line that does not contain the ' +
+          'footer marker',
+      );
+    }
+    footer = reviewFooter(modelId, cliVersion);
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
@@ -958,7 +1182,6 @@ function composeReviewBody(
     }
   }
 
-  const footer = reviewFooter(modelId, cliVersion);
   // Bilingual rendering: when the plan (fetch-pr's report) says the PR
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
@@ -978,7 +1201,7 @@ function composeReviewBody(
       bilingual && zh !== en
         ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
         : en;
-    return `${text}\n\n${footer}`;
+    return footer === '' ? text : `${text}\n\n${footer}`;
   };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
@@ -1117,11 +1340,19 @@ function composeReviewBody(
     const shown = keptBudgetGaps.slice(0, MAX_BUDGET_GAP_LINES);
     const more = keptBudgetGaps.length - shown.length;
     const enList =
-      shown.map((it) => `${it.agent}: ${mdField(it.gap)}`).join('; ') +
-      (more > 0 ? `, and ${more} more` : '');
+      shown
+        .map(
+          (it) =>
+            `${publicAgentSubject(it.agent) ?? it.agent}: ${mdField(it.gap)}`,
+        )
+        .join('; ') + (more > 0 ? `, and ${more} more` : '');
     const zhList =
-      shown.map((it) => `${it.agent}：${mdField(it.gap)}`).join('；') +
-      (more > 0 ? `，另有 ${more} 条` : '');
+      shown
+        .map(
+          (it) =>
+            `${publicAgentSubject(it.agent) ?? it.agent}：${mdField(it.gap)}`,
+        )
+        .join('；') + (more > 0 ? `，另有 ${more} 条` : '');
     notReviewedParts.push({
       en: `Not explored to full depth (tool budget reached): ${enList}.`,
       zh: `未探索到全部深度（达到工具调用预算）：${zhList}。`,
@@ -1177,20 +1408,35 @@ function composeReviewBody(
     // selector — and the partition below keys on the INTERNAL subject, so a
     // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
-    const named: string[] = [];
-    const namedZh: string[] = [];
+    const named = new Map<string, { zh: string; count: number }>();
     for (const e of entries) {
       const m = /^chunk (\d+)$/.exec(e.subject);
       if (m) chunkIds.push(Number(m[1]));
       else {
-        named.push(e.publicSubject ?? e.subject);
-        namedZh.push(e.subjectZh ?? e.publicSubject ?? e.subject);
+        const subject = e.publicSubject ?? e.subject;
+        const existing = named.get(subject);
+        if (existing) existing.count++;
+        else
+          named.set(subject, {
+            zh: e.subjectZh ?? subject,
+            count: 1,
+          });
       }
     }
     const gap =
       chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
-    const shown = [...(gap ? [gap.phrase] : []), ...named];
-    const shownZh = [...(gap ? [gap.phraseZh] : []), ...namedZh];
+    const shown = [
+      ...(gap ? [gap.phrase] : []),
+      ...[...named].map(([subject, { count }]) =>
+        count > 1 ? `${subject} (×${count})` : subject,
+      ),
+    ];
+    const shownZh = [
+      ...(gap ? [gap.phraseZh] : []),
+      ...[...named.values()].map(({ zh, count }) =>
+        count > 1 ? `${zh}（×${count}）` : zh,
+      ),
+    ];
     const reasonZh = reasonZhOf.get(reason) ?? reason;
     notReviewedParts.push({
       en: reason
@@ -1208,14 +1454,7 @@ function composeReviewBody(
   const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
-      : [
-          {
-            en: `Unresolved, please confirm: ${cannotTell
-              .map((l) => withMarker(l))
-              .join(' ')}`,
-            zh: `未决，请确认：${cannotTell.map((l) => withMarker(l)).join(' ')}`,
-          },
-        ];
+      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
 
   // Model-written blockers: quoted as-is in both halves.
   const bodyCriticalBlock: Bi[] = bodyCriticals
@@ -1226,6 +1465,31 @@ function composeReviewBody(
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
+
+  const disclosedChunkIds = new Set<number>();
+  for (const e of coverageEntries) {
+    const m = /^chunk (\d+)$/.exec(e.subject);
+    if (m) disclosedChunkIds.add(Number(m[1]));
+  }
+  const nothingCertified =
+    coverageEntries.some((e) => e.subject === 'coverage') ||
+    (plannedChunks.length > 0 &&
+      coveredChunks.every((id) => disclosedChunkIds.has(id)));
+  const hasCoverageGaps =
+    unreviewed.length + coverageEntries.length > 0 ||
+    missingReceipts.length > 0 ||
+    uncoverable.length > 0;
+  const coverageOpener: Bi | undefined = nothingCertified
+    ? {
+        en: '⚠️ This run could not certify that any of this diff was reviewed.',
+        zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
+      }
+    : hasCoverageGaps
+      ? {
+          en: 'Partially reviewed — gaps disclosed.',
+          zh: '仅完成部分审查，审查缺口已披露。',
+        }
+      : undefined;
 
   // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
   // including Approve — so the reader knows a workflow's shell was not linted, but
@@ -1287,6 +1551,7 @@ function composeReviewBody(
     // trust warning (clause 2), an undecided existing Critical (clause 5),
     // or the unread-scope disclosure (clause 6).
     const parts = [
+      ...(coverageOpener ? [coverageOpener] : []),
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
@@ -1355,9 +1620,9 @@ function composeReviewBody(
     });
   }
 
-  // 2. Context-unavailable clause — when present, it opens the body and no
-  //    clause may certify "no blockers".
+  // 2. Context-unavailable clause — no later clause may certify "no blockers".
   if (contextUnavailable) {
+    if (coverageOpener) clauses.push(coverageOpener);
     clauses.push(contextUnavailableClause);
   } else {
     // 3. Opener — certifying only when the review can actually certify it.
@@ -1372,13 +1637,11 @@ function composeReviewBody(
       !downgradeRequestChanges &&
       c === 0 &&
       cannotTell.length === 0 &&
-      uncoverable.length === 0 &&
-      unreviewed.length + coverageEntries.length === 0 &&
+      !hasCoverageGaps &&
       // A missing receipt caps the event but was left out of certification, so a
       // body could open "Reviewed — no blockers." two lines above "nobody read
       // them." Nothing nobody read can be certified blocker-free — and neither
       // can a loop that ended with findings no verifier ever ruled on.
-      missingReceipts.length === 0 &&
       // A disclosed budget gap is not a blocker, but "Reviewed — no
       // blockers." two lines above "Not explored to full depth" is the
       // opener certifying what the disclosure takes back — the exact
@@ -1396,24 +1659,27 @@ function composeReviewBody(
     // `coverage` subject is the no-plan/unreadable-transcripts family — there
     // is no chunk universe to count, and what cannot be counted cannot be
     // certified.
-    const disclosedChunkIds = new Set<number>();
-    for (const e of coverageEntries) {
-      const m = /^chunk (\d+)$/.exec(e.subject);
-      if (m) disclosedChunkIds.add(Number(m[1]));
-    }
-    const nothingCertified =
-      coverageEntries.some((e) => e.subject === 'coverage') ||
-      (plannedChunks.length > 0 &&
-        coveredChunks.every((id) => disclosedChunkIds.has(id)));
+    // Any opener starting with "Reviewed" reads as contradicting the
+    // "Not reviewed:" clauses below it — announcing the gaps does not fix
+    // it, as the first cut of this wording showed (#8811). When disclosures
+    // follow, the opener says the review is PARTIAL instead, so the pair
+    // reads in one direction; the certifying and the zero-certified openers
+    // above keep their exact wording.
     clauses.push(
-      nothingCertified
-        ? {
-            en: '⚠️ This run could not certify that any of this diff was reviewed.',
-            zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
-          }
-        : canCertify
+      coverageOpener ??
+        (canCertify
           ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
-          : { en: 'Reviewed.', zh: '已审查。' },
+          : findingsFileUnreadable
+            ? {
+                en: 'Review incomplete — findings unavailable.',
+                zh: '审查未完成——发现不可用。',
+              }
+            : findingsUnverifiedAtCompose
+              ? {
+                  en: 'Review incomplete — unverified findings disclosed.',
+                  zh: '审查未完成——未验证的发现已披露。',
+                }
+              : { en: 'Reviewed.', zh: '已审查。' }),
     );
   }
 
@@ -1440,6 +1706,13 @@ function composeReviewBody(
         `此处无需进一步处理。`,
     });
   }
+
+  // Clauses 1–4 are the verdict: short sentences that read as one opener
+  // paragraph. Everything after — unresolved Criticals, disclosures, body
+  // blockers — gets a paragraph of its own: #8388's posted body joined all
+  // of it with spaces, 31 unresolved entries and seven disclosures in a
+  // single unreadable wall.
+  const openerCount = clauses.length;
 
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
@@ -1471,9 +1744,21 @@ function composeReviewBody(
     clauses.push(...bodyCriticalBlock);
   }
 
+  const openerParts = clauses.slice(0, openerCount);
+  const paragraphs: Bi[] = [
+    ...(openerParts.length > 0
+      ? [
+          {
+            en: openerParts.map((c) => c.en).join(' '),
+            zh: openerParts.map((c) => c.zh).join(' '),
+          },
+        ]
+      : []),
+    ...clauses.slice(openerCount),
+  ];
   return {
     event,
-    body: render(clauses, ' '),
+    body: render(paragraphs, '\n\n'),
     baseEvent,
     cappedBy,
     downgraded,
@@ -1481,6 +1766,25 @@ function composeReviewBody(
     remediation,
     lowSignal,
   };
+}
+
+/**
+ * The public subject for an agent-derived disclosure label. A `chunk N`
+ * label stays bare — the chunk collapse translates it into the author's
+ * units. Any other label is usually a parsed codename (`agent security`,
+ * `agent reverse-audit (round 2)` — coverage's `label()` prefers the
+ * identity line), falling back to the truncated first line of a launch
+ * prompt: prose. The quoting serves both: prose rendered bare reads as a
+ * claim about the PR itself — #8811's posted body carried "Not reviewed:
+ * This PR narrows the daemon-marker check from a truthy tes..." — and
+ * quoted, either shape reads as a name. Short codename labels pass
+ * `compressSummary`'s cap untouched. The INTERNAL subject stays the
+ * unquoted label: the dedup and certification checks key on it.
+ */
+function publicAgentSubject(label: string): string | undefined {
+  return /^chunk \d+$/.test(label)
+    ? undefined
+    : mdField(JSON.stringify(compressSummary(label.replace(/[`\r\n]+/g, ' '))));
 }
 
 /**
@@ -1591,7 +1895,7 @@ export function repositoryContextGate(planPath: string): string[] {
   const dimensions = context?.unverifiedDimensions ?? [];
   // The same cap discipline testPlanGate applies: unbounded entries joined
   // into one disclosure drown the verdict they ride on — and at the schema
-  // bounds (128 x 512 chars) the paragraph outruns the review body's own
+  // bounds (256 x 512 chars) the paragraph outruns the review body's own
   // budget before any other content gets a word in.
   const MAX_DIMENSIONS = 5;
   const disclosed = dimensions
@@ -1861,29 +2165,23 @@ function bilingualFromPlan(
   fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
 ): boolean {
   if (!planPath) return false;
-  let plan: {
-    prDescriptionHasHan?: unknown;
-    ownerRepo?: unknown;
-    prNumber?: unknown;
-  };
+  let plan: unknown;
   try {
     plan = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch {
     return false;
   }
-  if (typeof plan?.prDescriptionHasHan === 'boolean') {
-    return plan.prDescriptionHasHan;
+  const han = (plan as { prDescriptionHasHan?: unknown })?.prDescriptionHasHan;
+  if (typeof han === 'boolean') {
+    return han;
   }
-  const ownerRepo =
-    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
-      ? plan.ownerRepo
-      : undefined;
-  const prNumber = isPositivePrNumber(plan?.prNumber)
-    ? String(plan.prNumber)
-    : undefined;
-  if (!ownerRepo || !prNumber) return false;
+  // The identity rule is shared with the comment anchors (planPrIdentity).
+  // The stricter ownerRepo shape changes no outcome: a misshapen one failed
+  // the gh fetch and fell back to English anyway.
+  const pr = planPrIdentity(plan);
+  if (!pr) return false;
   try {
-    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
+    return /\p{Script=Han}/u.test(fetchPrBody(pr.ownerRepo, pr.prNumber));
   } catch {
     return false;
   }
@@ -2043,6 +2341,7 @@ export const composeReviewCommand: CommandModule = {
       // compose time — a shared runner can rewrite the install mid-session.
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
+      operatorReviewSettings().attribution,
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
