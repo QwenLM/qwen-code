@@ -283,6 +283,7 @@ class AgentViewSupervisorProcessHandler
           store,
           this.hasPendingWorkerInputControl(snapshot.sessionId),
           this.workers.has(snapshot.sessionId),
+          this.startedAt,
         );
       } catch {
         // Per-session healing is best-effort: one unreadable session
@@ -659,8 +660,17 @@ class AgentViewSupervisorProcessHandler
       }
       throw error;
     }
-    if (event.type === 'ready' && applied) {
-      this.workers.resolvePendingWorkerReady(event.sessionId);
+    if (event.type === 'ready') {
+      if (applied) {
+        this.workers.resolvePendingWorkerReady(event.sessionId);
+      } else {
+        // The ready was dropped (dead-worker guard or in-queue re-validation):
+        // fail the waiter fast instead of hanging until the ready timeout.
+        this.workers.rejectPendingWorkerReady(
+          event.sessionId,
+          new AgentViewSessionStoppedError(event.sessionId, 'worker'),
+        );
+      }
     }
     this.notifyChanged();
     return { sessionId: event.sessionId, accepted: true };
@@ -801,6 +811,7 @@ class AgentViewSupervisorProcessHandler
       store,
       this.hasPendingWorkerInputControl(sessionId),
       this.workers.has(sessionId),
+      this.startedAt,
     );
     if (activity !== storedActivity) {
       this.notifyChanged();
@@ -1256,6 +1267,7 @@ class AgentViewSupervisorProcessHandler
       this.attachLeases.heartbeat(sessionId, leaseResult.lease.leaseId);
     }, DEFAULT_ATTACH_LEASE_HEARTBEAT_MS);
     heartbeat.unref?.();
+    let bridged = false;
     try {
       await writeAttachState(sessionId, 'attached', this.store);
       this.attachSockets.set(sessionId, socket);
@@ -1267,6 +1279,7 @@ class AgentViewSupervisorProcessHandler
         })}\n`,
       );
       this.queueWorkerRedraw(sessionId);
+      bridged = true;
       await bridgeAgentViewTerminal({
         stdin: socket,
         stdout: socket,
@@ -1279,13 +1292,17 @@ class AgentViewSupervisorProcessHandler
         this.attachSockets.delete(sessionId);
       }
       this.attachLeases.release(sessionId, leaseResult.lease.leaseId);
-      try {
-        await writeAttachState(sessionId, 'detached', this.store);
-      } catch {
-        // Best-effort: a store error during detach must not mask
-        // the original error from the try block.
+      if (bridged) {
+        try {
+          await writeAttachState(sessionId, 'detached', this.store);
+        } catch {
+          // Best-effort: a store error during detach must not mask
+          // the original error from the try block.
+        }
+        socket.end();
       }
-      socket.end();
+      // Pre-bridge failure: leave the socket open so the RPC layer can
+      // deliver the structured error envelope instead of a bare EOF.
     }
   }
 
@@ -1353,6 +1370,7 @@ class AgentViewSupervisorProcessHandler
       this.store,
       this.hasPendingWorkerInputControl(sessionId),
       this.workers.has(sessionId),
+      this.startedAt,
     );
     if (
       hasPendingPrompt(activity) ||
@@ -1636,6 +1654,7 @@ class WorkerRegistry {
       new AgentViewSessionStoppedError(sessionId, 'worker'),
       generation,
     );
+    this.bootGeneration.delete(sessionId);
     if (host && this.ptyHosts.get(sessionId) === host) {
       this.ptyHosts.delete(sessionId);
       this.onHostReleased(sessionId);
@@ -1656,6 +1675,7 @@ class WorkerRegistry {
         new AgentViewSessionStoppedError(sessionId, 'worker'),
         generation,
       );
+      this.bootGeneration.delete(sessionId);
       this.ptyHosts.delete(sessionId);
       this.onHostReleased(sessionId);
     }
@@ -1907,20 +1927,36 @@ class WorkerRegistry {
       // the ready timeout.
       const latestState =
         (await readAgentViewSessionState(sessionId, this.store)) ?? state;
-      await patchAgentViewSessionState(
+      let preLaunchPatchApplied = false;
+      await patchAgentViewSessionStateIf(
         sessionId,
-        {
-          sessionState:
-            latestState.processState === 'alive'
-              ? latestState.sessionState
-              : 'starting',
-          processState:
-            latestState.processState === 'alive' ? 'alive' : 'starting',
-          attachState: 'detached',
-          updatedAt: new Date().toISOString(),
+        (existing) => {
+          // Re-validate inside the queue: a concurrent stop verdict enqueued
+          // after the pre-launch read must not be overwritten by 'starting'.
+          if (
+            existing.sessionState === 'stopped' &&
+            (latestState.sessionState !== 'stopped' ||
+              existing.updatedAt !== latestState.updatedAt)
+          ) {
+            return undefined;
+          }
+          preLaunchPatchApplied = true;
+          return {
+            sessionState:
+              existing.processState === 'alive'
+                ? existing.sessionState
+                : 'starting',
+            processState:
+              existing.processState === 'alive' ? 'alive' : 'starting',
+            attachState: 'detached',
+            updatedAt: new Date().toISOString(),
+          };
         },
         this.store,
       );
+      if (!preLaunchPatchApplied) {
+        throw new AgentViewSessionStoppedError(sessionId, 'session');
+      }
       await writeAgentViewWorker(
         sessionId,
         {
@@ -2705,19 +2741,29 @@ async function updateExitedSession(
   if (state.ownership !== 'managed' || state.processState === 'hibernated') {
     return;
   }
-  await patchAgentViewSessionState(
+  await patchAgentViewSessionStateIf(
     sessionId,
-    {
-      sessionState:
-        state.sessionState === 'stopped' ||
-        state.sessionState === 'failed' ||
-        state.sessionState === 'completed'
-          ? state.sessionState
-          : exitCode === 0 && state.sessionState !== 'starting'
-            ? 'completed'
-            : 'failed',
-      processState: 'exited',
-      updatedAt: new Date().toISOString(),
+    (existing) => {
+      // Re-validate inside the queue: a concurrent stop verdict enqueued
+      // after the read above must keep its terminal sessionState.
+      if (
+        existing.ownership !== 'managed' ||
+        existing.processState === 'hibernated'
+      ) {
+        return undefined;
+      }
+      return {
+        sessionState:
+          existing.sessionState === 'stopped' ||
+          existing.sessionState === 'failed' ||
+          existing.sessionState === 'completed'
+            ? existing.sessionState
+            : exitCode === 0 && existing.sessionState !== 'starting'
+              ? 'completed'
+              : 'failed',
+        processState: 'exited',
+        updatedAt: new Date().toISOString(),
+      };
     },
     options,
   );
@@ -3012,6 +3058,7 @@ async function clearStalePendingPromptIfNeeded(
   store: { globalDir?: string },
   hasLiveInputControl: boolean,
   hasLiveHost = false,
+  supervisorStartedAt?: string,
 ): Promise<AgentViewActivityFile | undefined> {
   if (!hasPendingPrompt(activity)) {
     return activity;
@@ -3027,12 +3074,20 @@ async function clearStalePendingPromptIfNeeded(
   // live host registered and an uninterrupted daemon, 'marker present,
   // control absent' instead means the worker already drained the control
   // — clearing here would let a retry deliver the same prompt twice.
+  // A marker queued before this daemon started cannot have a live in-memory
+  // control (the queue is process-local), so it is orphaned even on a
+  // needs_input session whose worker survived the restart.
+  const markerPredatesDaemon =
+    supervisorStartedAt !== undefined &&
+    activity?.lastQueuedPromptAt !== undefined &&
+    Date.parse(activity.lastQueuedPromptAt) < Date.parse(supervisorStartedAt);
   const orphaned =
-    !hasLiveHost &&
-    (state.sessionState === 'idle' ||
-      state.sessionState === 'completed' ||
-      state.sessionState === 'failed' ||
-      state.sessionState === 'stopped');
+    markerPredatesDaemon ||
+    (!hasLiveHost &&
+      (state.sessionState === 'idle' ||
+        state.sessionState === 'completed' ||
+        state.sessionState === 'failed' ||
+        state.sessionState === 'stopped'));
   if (!orphaned && !shouldClearStalePendingPrompt(state, activity)) {
     return activity;
   }
