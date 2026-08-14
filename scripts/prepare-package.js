@@ -301,10 +301,12 @@ function writeDistPackageJson(rootDir, distDir) {
       'bundled',
       'web-shell',
       // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
-      // web-tree-sitter wasm, native render library) relocated by
-      // copy_bundle_assets.js; the bundled renderer sets OTUI_ASSET_ROOT to
-      // this directory for code-block syntax highlighting.
-      'opentui-assets',
+      // web-tree-sitter wasm) are intentionally NOT published in the npm
+      // package: npm installs run on Node, where the runtime gate falls back
+      // to ink, so the assets would be dead weight (~22MB on the linux CI
+      // platform's native render library alone) against the unpacked-size
+      // budget. Standalone archives (which bake Bun and do render OpenTUI)
+      // carry them via create-standalone-package.js instead.
     ],
     config: rootPackageJson.config,
     dependencies: {},
