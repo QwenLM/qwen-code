@@ -84,7 +84,9 @@ describe('qwen serve live journal recovery', () => {
 
       // Gate the fixture's session-close ack in default CI: the only other
       // consumer of this path is the opt-in loadtest, so without this call a
-      // drifted close method name or ack shape would rot silently.
+      // drifted close method name or missing close handler would rot silently
+      // (ack-shape drift is absorbed by the daemon's cancel fallback and is
+      // not observable from the client).
       await expect(
         activeDaemon.client.closeSession(created.sessionId),
       ).resolves.toBeUndefined();
