@@ -28,6 +28,7 @@ import {
   EXTERNAL_TOOL_GUARD_READY_META_KEY,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import { Writable, Readable } from 'node:stream';
 
@@ -46,10 +47,11 @@ const emitChunks = parseInt(process.env.MOCK_ACP_EMIT_CHUNKS || '3', 10);
 let sessionCounter = 0;
 
 // Mirror the real child (acpAgent.ts): `qwen serve` requires the guard ack
-// in the initialize response, and the marker is consumed + deleted before
-// anything else can inherit it.
+// in the initialize response, and the markers are consumed + deleted before
+// anything else can inherit them.
 const externalToolGuardMarker = process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
 delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
 const externalToolGuardRequired =
   externalToolGuardMarker === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
 
