@@ -583,9 +583,9 @@ const GIT_WORD_PATTERN = /\bgit\b/i;
 // A `cd`/`pushd` inside such a payload relocates the git that follows it just
 // as effectively as a `-C` flag (`su -c 'cd <outside> && git reset --hard'`).
 const TEXT_RELOCATION_MARKER_WITHOUT_C_PATTERN =
-  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 const TEXT_RELOCATION_MARKER_PATTERN =
-  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|\s)(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
+  /(^|\s)(-C|--git-dir=?|--work-tree=?|-execdir)|(^|[\s;&|(){}])(cd|pushd)([\s;&|]|$)|(^|[\s;&|(){}])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GIT_EXEC_PATH|PATH)\+?=/;
 
 // Assignments that decide WHICH git binary the run executes. The guard
 // classifies the program word `git` and then reasons about paths; if the
@@ -2054,7 +2054,13 @@ async function evaluateCommandWithCwd(
     const defined = definedBodies.get(programToken)!;
     if (depth >= MAX_PAYLOAD_RECURSION_DEPTH) return denyDynamicRelocation();
     let replay = defined.body;
-    const programIndex = run.findIndex((token) => token.text === programToken);
+    // Skip redirect/fd operands the way `readProgramWord` does, so a decoy
+    // `> name` before the call does not truncate the prefix-assignment scan and
+    // drop the call's leading `VAR=val` relocations.
+    const programIndex = run.findIndex(
+      (token) =>
+        !token.redirect && !token.ambiguousFd && token.text === programToken,
+    );
     if (defined.alias) {
       const args = joinArgvTexts(run.slice(programIndex + 1));
       if (args.length > 0) replay = `${replay} ${args}`;

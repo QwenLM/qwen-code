@@ -748,6 +748,10 @@ it -C ${outsideRepo} reset --hard`,
     // binary runs — the direct forms are denied, so the wrapper must be too.
     () => `find . -exec sh -c 'PATH=/tmp/evil git reset --hard' ';'`,
     () => `find . -exec sh -c 'GIT_EXEC_PATH=/tmp/evil git reset --hard' ';'`,
+    // A relocation assignment glued to a shell delimiter inside a quoted
+    // payload must still register as a marker, matching the `cd`/`pushd` arm.
+    () => `su -c 'true;GIT_DIR=${outsideRepo}/.git git reset --hard'`,
+    () => `su -c 'x && GIT_WORK_TREE=${outsideRepo} git reset --hard'`,
   ])(
     'fails closed when an unrecognized program may run a relocated Git command %#',
     async (buildCommand) => {
@@ -1558,6 +1562,9 @@ it -C ${outsideRepo} reset --hard`,
     // A body defined earlier runs where the later bare word appears.
     () => `alias g='git reset --hard'; cd ${outsideRepo}; g`,
     () => `f() { git reset --hard; }; cd ${outsideRepo}; f`,
+    // A decoy `> g` redirect whose target equals the function name must not
+    // truncate the prefix-assignment scan of the `GIT_DIR=` on the call.
+    () => `g() { git reset --hard; }; > g GIT_DIR=${outsideRepo}/.git g`,
   ])('closes the round-6 escapes %#', async (build) => {
     const guard = createDaemonToolGuard();
 
