@@ -66,7 +66,6 @@ import {
   severityOf,
 } from './lib/inline-counts.js';
 import {
-  COMMENT_MARKER,
   commentMarker,
   footerVersion,
   reviewFooter,
@@ -546,10 +545,13 @@ export function runSubmit(
       ? (payload.comments ?? [])
       : (payload.comments ?? []).map((c) => {
           if (typeof c.body !== 'string') return c;
+          // The gate above refuses unmarked bodies, so the severity is
+          // always known here.
           const sev = severityOf(c);
+          if (sev === null) return c;
           return {
             ...c,
-            body: `${stripForUnattributedPost(c.body)}\n\n${sev === null ? COMMENT_MARKER : commentMarker(sev)}`,
+            body: `${stripForUnattributedPost(c.body)}\n\n${commentMarker(sev)}`,
           };
         }),
   };

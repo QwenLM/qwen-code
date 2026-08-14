@@ -81,8 +81,8 @@ export function stripSeverityPrefix(body: string): string {
     const rest = current
       .trimStart()
       .slice(prefix.length)
-      .replace(/^:?\s*/, '');
-    if (rest === '') return '';
+      .replace(/^[ \t]*:?[ \t]*/, '');
+    if (rest.trim() === '') return '';
     current = rest;
   }
 }
