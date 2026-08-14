@@ -1299,6 +1299,12 @@ describe('renderLedgerSection', () => {
       sha: 'abc1234def56789',
     });
     expect(anchored).toContain('reviewed at `abc1234def56789`');
+    // The routing instruction itself, not just the sha: reverting this tail
+    // to the pre-`--since` wording would render "hand-validate the anchor"
+    // into every ledger-carrying context file — the skippable hand check
+    // the CLI now owns — with no other test red.
+    expect(anchored).toContain('pass it as `--since <sha>`');
+    expect(anchored).toContain('never run git against an anchor yourself');
     expect(
       renderLedgerSection({
         v: 1,

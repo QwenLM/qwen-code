@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Argv, CommandModule } from 'yargs';
+import { resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
@@ -530,6 +531,7 @@ describe('fetch-pr report assembly', () => {
     // diffBase advertise something else — the same mismatch class as the
     // diffPath leak this PR shipped and fixed.
     expect(writtenDiff()).toBe(DELTA_DIFF);
+    expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
@@ -647,9 +649,77 @@ describe('fetch-pr report assembly', () => {
       effective: false,
       reason: 'hunks-outside-pr-diff',
     });
-    // Refused, so the round reviews the PR's own diff instead.
+    // Refused, so the round reviews the PR's own diff instead — and the
+    // FILE agents read must be that diff, not the refused delta: a publish
+    // left at capture time would hand them hunks the oracle just proved
+    // absent from GitHub's PR diff.
     expect(report.diffPath).not.toBeNull();
     expect(report.diffLines).toBeGreaterThan(0);
+    expect(writtenDiff()).toBe(FULL_DIFF);
+    // `read_file` rejects a relative path, so every agent dereferences this
+    // one — a relative leak fails the whole fan-out.
+    expect(report.diffPathAbsolute).toBe(resolve(report.diffPath as string));
+  });
+
+  it('refuses to scope when the containment oracle was LOST, not absent', async () => {
+    // A base WAS resolved and its capture threw (the 120s git timeout on the
+    // large long-lived PR --since exists for). Publishing the delta here
+    // would scope with the oracle never run — the fail-open shape the guard
+    // exists to refuse. Distinct from the base-FREE shape, where there is no
+    // PR diff to be contained in.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) => {
+      if (args.includes(`${BASE}..f00df00df00d`)) throw new Error('timed out');
+      return Buffer.from(DELTA_DIFF);
+    });
+    const report = await reportFor({ since: ANCHOR });
+    // The arm refuses (`capture-failed`), and since the full range is what
+    // failed, the round ends with nothing published — so the planless stamp
+    // renames it. What this pins is that the delta did NOT become the scope:
+    // without the arm the report would read `{effective: true, diffBase}`.
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'full-range-unavailable',
+    });
+    expect(report.diffPath).toBeNull();
+    expect(writtenDiff()).not.toBe(DELTA_DIFF);
+    // The underlying cause survives on stderr, as the reason contract says.
+    expect(
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('refused')),
+    ).toContain('capture-failed');
+  });
+
+  it('names an UNRULEABLE oracle apart from a disproved delta', async () => {
+    // A path the parser cannot name leaves the oracle unavailable; saying
+    // `hunks-outside-pr-diff` there asserts a containment failure that was
+    // never established, and steers recovery on a false reason.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    const UNPARSEABLE = [
+      'diff --git a/my b/file.ts b/my b/file.ts',
+      '--- a/my b/file.ts',
+      '+++ b/my b/file.ts',
+      '@@ -1,0 +1,1 @@',
+      '+x',
+      '',
+    ].join('\n');
+    servesBothRanges(FULL_DIFF, UNPARSEABLE);
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'containment-unverified',
+    });
   });
 
   it('refuses the anchor end to end when the base fetch failed', async () => {
@@ -807,12 +877,15 @@ describe('fetch-pr report assembly', () => {
     });
     const report = await reportFor({ since: ANCHOR });
     expect(report.diffPath).toBeNull();
-    // No plan survived, so the planless reason is what the report publishes
-    // (the partition failure itself is named on stderr).
+    // Planless, but NOT `full-range-unavailable`: both ranges captured
+    // fine, so the cause is the partitioner, and the same bytes re-fail it
+    // identically — SKILL's same-sha retry must keep excluding this reason.
+    // Planless-ness is on the report as `diffPath: null`, which is what the
+    // degraded flow reads.
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
-      reason: 'full-range-unavailable',
+      reason: 'partition-failed',
     });
     expect(report.collapsedFromUpstream).toBeUndefined();
   });
@@ -899,6 +972,9 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
     expect(report.emptyDiff).toBeUndefined();
     expect(report.diffPath).toBeNull();
+    // Both halves null, or a consumer dereferences a path for a plan that
+    // does not exist.
+    expect(report.diffPathAbsolute).toBeNull();
     // `upToDate` SURVIVES the missing full range: it is a fact about the
     // anchor, proven by the delta capture, and the flow it serves — "No new
     // changes since last review" → cleanup, stop — consumes no plan. The
@@ -1331,6 +1407,28 @@ describe('hunksContainedIn — the containment oracle', () => {
       // …and the same section in the PR's own diff is contained.
       expect(hunksContainedIn(delta, delta)).toBe(true);
     }
+  });
+
+  it('rules containment on a non-ASCII path — the quotePath pin, from the oracle side', () => {
+    // git C-style-quotes such a path unless `core.quotePath=false` is pinned
+    // (it is, in PINNED_DIFF_CONFIG). Unquoted, the oracle rules normally;
+    // quoted, it cannot name the section and every --since round on a PR
+    // touching the file would refuse as `containment-unverified`.
+    const unquoted = sec('docs/架构.md', [[1, 3]]);
+    expect(hunksContainedIn(unquoted, sec('docs/架构.md', [[1, 100]]))).toBe(
+      true,
+    );
+    const quoted = [
+      'diff --git "a/docs/\\346\\236\\266\\346\\236\\204.md" "b/docs/\\346\\236\\266\\346\\236\\204.md"',
+      '--- "a/docs/\\346\\236\\266\\346\\236\\204.md"',
+      '+++ "b/docs/\\346\\236\\266\\346\\236\\204.md"',
+      '@@ -1,0 +1,1 @@',
+      '+x',
+      '',
+    ].join('\n');
+    // The shape the pin exists to keep out of the oracle: unruleable, and
+    // reported as such rather than as a disproved delta.
+    expect(hunksContainedIn(quoted, quoted)).toBe(false);
   });
 
   it('fails closed on a path it cannot name unambiguously', () => {

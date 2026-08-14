@@ -536,9 +536,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
 
-  // 5. Capture the diff to a file and partition it. Written as raw bytes:
-  //    CRLF normalisation would rewrite every hunk of a CRLF file, and the
-  //    diff must keep its trailing newline to stay a valid patch.
+  // 5. Capture the diff to a file and partition it. Written as UTF-8 text
+  //    decoded from the capture (an invalid byte sequence becomes U+FFFD):
+  //    the decode performs no CRLF normalisation — that would rewrite every
+  //    hunk of a CRLF file — and the diff keeps its trailing newline so it
+  //    stays a valid patch.
   const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
     remote,
     meta.baseRefName,
@@ -651,8 +653,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
   /** True when the FINAL published diff is the incremental delta. */
   let scopedDelta = false;
+  let ruling = { ok: true, unverified: false };
   if (anchor?.diffBase) {
-    const delta = readRange(anchor.diffBase);
+    // An anchor that resolved to the merge base names the range already in
+    // hand: re-running the identical `git diff` would spend the capture (and
+    // its timeout) twice on the same bytes. Reachable without adversary —
+    // commits older than the last round's head landing in the base.
+    const delta =
+      anchor.diffBase === mergeBaseSha ? fullText : readRange(anchor.diffBase);
     if (delta === null) {
       // Infrastructure, not anchor validity — but the report must not claim
       // an incremental scope the capture never produced.
@@ -672,7 +680,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // anchor. The base-FREE shape below is different and deliberate:
       // there is no PR diff to be contained in.
       demote('capture-failed');
-    } else if (fullText !== null && !containmentRuling(delta, fullText).ok) {
+    } else if (
+      fullText !== null &&
+      !(ruling = containmentRuling(delta, fullText)).ok
+    ) {
       // Two different facts, one refusal: the oracle DISPROVED containment,
       // or it could not rule at all (a path shape it does not model). Only
       // the first is what `hunks-outside-pr-diff` asserts; the second is an
@@ -688,9 +699,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // history, not content), so the delta is checked against the PR's
       // diff before it is allowed to be the review's scope.
       demote(
-        containmentRuling(delta, fullText).unverified
-          ? 'containment-unverified'
-          : 'hunks-outside-pr-diff',
+        ruling.unverified ? 'containment-unverified' : 'hunks-outside-pr-diff',
       );
     } else {
       publish(delta);
@@ -754,7 +763,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // an `incremental: {effective: true}` over a full-range (or diff-less)
     // plan would send Agent 7 to a delta base while every other reader uses
     // the merge base — one round, two scopes.
-    if (anchor?.incremental.effective) demote('partition-failed');
+    // NOT on an upToDate round: `upToDate` is a fact about the anchor, its
+    // stop flow consumes no plan, and the rationale for demoting (Agent 7's
+    // welded `--base` reading `diffBase`) cannot apply — an upToDate ruling
+    // never carries one. Stripping it published "the anchor is invalid" for
+    // an anchor that IS the head.
+    if (anchor?.incremental.effective && !anchor.incremental.upToDate) {
+      demote('partition-failed');
+    }
   }
   // Every refusal that ends with NO diff at all reports the planless reason,
   // whatever refused the anchor first. The contract downstream reads is "one
@@ -764,7 +780,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // while the skill's per-reason bullet said the full range was in hand. The
   // original refusal is not lost: the status line below names it.
   const anchorRefusal = anchor?.incremental.reason;
-  if (anchor && !anchor.incremental.effective && diffPath === null) {
+  // Only when NOTHING was captured — which is what the reason names. A
+  // refusal whose ranges captured but would not tile keeps `partition-failed`
+  // (deterministic: the same text re-fails identically, so SKILL's same-sha
+  // retry must keep excluding it), and a validity refusal keeps the reason
+  // that names the anchor's fault. Planless-ness is already on the report as
+  // `diffPath: null`; the reason exists to classify the CAUSE, and renaming
+  // deterministic refusals into the retryable class is what let a re-run be
+  // spent on a re-refusal that could not come out differently.
+  if (
+    anchor &&
+    !anchor.incremental.effective &&
+    diffPath === null &&
+    fullText === null
+  ) {
     demote('full-range-unavailable');
   }
   // The incremental status line is emitted AFTER planning, so it describes
@@ -901,7 +930,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // advertised full-PR stat; a delta-scoped diff is a different quantity on
     // one side only. An incremental delta is always far smaller than the
     // advertised stat, so the collapse ratio would fire on every incremental
-    // review — both flags are full-range facts and are skipped on a delta.
+    // review — both flags are full-range facts, so both read `fullText` on
+    // EVERY round, delta-scoped or not.
     ...(isCollapsedFromUpstream({
       diffText: fullText ?? '',
       baseFetchFailed,
