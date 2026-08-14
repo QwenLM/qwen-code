@@ -147,6 +147,19 @@ describe('subpath exports entries are probed', () => {
     root = undefined;
   });
 
+  it('probes main entries spelled without a leading ./', () => {
+    root = buildFixtureRoot();
+    writeFileSync(
+      path.join(root, 'packages/core', 'package.json'),
+      JSON.stringify({ name: 'fake-core', main: 'dist/index.js' }),
+    );
+    rmSync(path.join(root, 'packages/core/dist/index.js'));
+
+    const missing = findMissingPrerequisites('packages/core', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('has not been built');
+  });
+
   it('skips wildcard pattern entries instead of treating them as files', () => {
     root = buildFixtureRoot();
     writeFileSync(
@@ -224,25 +237,47 @@ describe('checkAndReport', () => {
   });
 });
 
+function registryChannelEntries() {
+  const registryPath = fileURLToPath(
+    new URL(
+      '../../packages/cli/src/commands/channel/channel-registry.ts',
+      import.meta.url,
+    ),
+  );
+  const source = readFileSync(registryPath, 'utf8');
+  // npm package names may contain digits; the class must tolerate them or a
+  // future builtin channel silently escapes this drift check.
+  const specifiers = [
+    ...source.matchAll(/import\('@qwen-code\/(channel-[a-z0-9-]+)'\)/g),
+  ].map((match) => match[1]);
+  return specifiers.map(
+    (name) => `packages/channels/${name.replace('channel-', '')}`,
+  );
+}
+
 describe('DIST_PREREQUISITES stays in sync with channel-registry', () => {
   it('every builtin channel dynamically imported by channel-registry.ts is listed', () => {
-    const registryPath = fileURLToPath(
-      new URL(
-        '../../packages/cli/src/commands/channel/channel-registry.ts',
-        import.meta.url,
-      ),
-    );
-    const source = readFileSync(registryPath, 'utf8');
-    const specifiers = [
-      ...source.matchAll(/import\('@qwen-code\/(channel-[a-z-]+)'\)/g),
-    ].map((match) => match[1]);
-    expect(specifiers.length).toBeGreaterThan(0);
+    const entries = registryChannelEntries();
+    expect(entries.length).toBeGreaterThan(0);
     const listed = DIST_PREREQUISITES['packages/cli'];
-    for (const name of specifiers) {
+    for (const entry of entries) {
+      expect(listed, `missing prerequisite entry for ${entry}`).toContain(
+        entry,
+      );
+    }
+  });
+
+  it('every listed packages/channels/* entry maps back to a registry import', () => {
+    const imported = new Set(registryChannelEntries());
+    // channel-base is a build dependency of the channel packages even though
+    // the registry never imports it directly.
+    imported.add('packages/channels/base');
+    for (const entry of DIST_PREREQUISITES['packages/cli']) {
+      if (!entry.startsWith('packages/channels/')) continue;
       expect(
-        listed,
-        `missing prerequisite entry for @qwen-code/${name}`,
-      ).toContain(`packages/channels/${name.replace('channel-', '')}`);
+        imported,
+        `stale prerequisite entry ${entry}: no matching channel-registry import`,
+      ).toContain(entry);
     }
   });
 });

@@ -87,13 +87,12 @@ export function distEntryFiles(packageDir) {
   const files = [];
   const collect = (target) => {
     // Wildcard pattern entries (`"./dist/*": "./dist/*"`) name no individual
-    // file and cannot be enumerated here; skip them.
-    if (
-      typeof target === 'string' &&
-      target.startsWith('./dist/') &&
-      !target.includes('*')
-    ) {
-      files.push(path.join(packageDir, target));
+    // file and cannot be enumerated here; skip them. Normalize targets without
+    // a leading `./` — all guarded manifests spell `"main": "dist/index.js"`.
+    if (typeof target !== 'string' || target.includes('*')) return;
+    const normalized = target.startsWith('./') ? target : `./${target}`;
+    if (normalized.startsWith('./dist/')) {
+      files.push(path.join(packageDir, normalized));
     }
   };
   for (const entry of Object.values(manifest.exports ?? {})) {
