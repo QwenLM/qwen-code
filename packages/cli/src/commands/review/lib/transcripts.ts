@@ -398,6 +398,25 @@ export function readTranscripts(
     );
   }
 
+  return recordsIn(dir, names, since, diffPath);
+}
+
+/**
+ * The files-to-records pipeline, in ONE place.
+ *
+ * Both readers below walk it — the current session's directory and each
+ * prior session's — so a record-level filter or validation added here cannot
+ * apply to live evidence while silently bypassing recovered evidence, which
+ * is precisely the evidence a fabrication concern is about. The callers keep
+ * only the policy that genuinely differs between them: throw versus skip on
+ * an unreadable directory.
+ */
+function recordsIn(
+  dir: string,
+  names: string[],
+  since: number | undefined,
+  diffPath: string | undefined,
+): AgentRecord[] {
   const out: AgentRecord[] = [];
   for (const name of names) {
     const rec = parseTranscript(join(dir, name), diffPath);
@@ -517,10 +536,7 @@ export function readRunTranscripts(
     } catch {
       continue; // Earlier attempt's evidence invisible → its work is re-owed.
     }
-    for (const name of names) {
-      const rec = parseTranscript(join(dir, name), diffPath);
-      if (!rec) continue;
-      if (since !== undefined && rec.mtimeMs < since) continue;
+    for (const rec of recordsIn(dir, names, since, diffPath)) {
       rec.fromPriorSession = true;
       out.push(rec);
     }
