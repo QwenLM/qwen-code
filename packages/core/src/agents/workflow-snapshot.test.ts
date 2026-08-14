@@ -327,6 +327,19 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     await expect(fs.readFile(canary, 'utf8')).resolves.toBe('keep');
   });
 
+  it('rejects malformed run ids without deleting another snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_abcd';
+    await writeWorkflowSnapshot(config, task({ runId }));
+    const snapshotPath = config.storage.getWorkflowRunSnapshotPath(runId);
+
+    await expect(deleteWorkflowSnapshot(config, `${runId}.json`)).resolves.toBe(
+      false,
+    );
+
+    await expect(fs.access(snapshotPath)).resolves.toBeUndefined();
+  });
+
   it('prunes the oldest beyond MAX_RETAINED_SNAPSHOTS, journal dirs too', async () => {
     const config = fakeConfig(projectDir);
     const dir = config.storage.getWorkflowRunsDir();

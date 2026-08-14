@@ -177,7 +177,8 @@ export async function listWorkflowSnapshots(
 
 /**
  * Delete one persisted run summary and its resume journal. The run id must be
- * a single path segment because both targets live below the project runs dir.
+ * a well-formed workflow run id because both targets live below the project
+ * runs dir.
  * Returns true when the safe target is absent after this call.
  */
 export async function deleteWorkflowSnapshot(
@@ -185,7 +186,7 @@ export async function deleteWorkflowSnapshot(
   runId: string,
 ): Promise<boolean> {
   const storage = config.storage;
-  if (!storage || !isSafeRunIdSegment(runId)) return false;
+  if (!storage || !/^wf_[0-9a-f]+$/.test(runId)) return false;
   try {
     await fs.rm(`${storage.getWorkflowRunsDir()}/${runId}`, {
       recursive: true,
@@ -204,16 +205,6 @@ export async function deleteWorkflowSnapshot(
     }
   }
   return true;
-}
-
-function isSafeRunIdSegment(runId: string): boolean {
-  return (
-    runId.length > 0 &&
-    runId !== '.' &&
-    runId !== '..' &&
-    !runId.includes('/') &&
-    !runId.includes('\\')
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
