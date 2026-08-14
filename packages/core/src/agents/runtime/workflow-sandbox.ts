@@ -155,21 +155,33 @@ export interface WorkflowMeta {
  * Implementation:
  *   1. `findMetaBlockBounds` (shared with `stripExportMeta`) locates the
  *      object-literal source range via the brace-walker.
- *   2. The literal source is evaluated as `(${metaSource})` inside a fresh
- *      vm context whose globalThis is a null-prototyped object — no
- *      bridge to the host realm, no access to host primitives like
- *      `process` / `require` / the workflow-sandbox bridge globals
- *      (`args` / `agent` / `phase` / `log` / etc.). The vm realm DOES
- *      provide its own intrinsics (`Object`, `Array`, `Math`, `Date`,
- *      `JSON`, …) which is fine: meta extraction is a one-shot at tool-
- *      invocation time, not replayed during resume, so non-determinism in
- *      the meta literal (a `Date.now()` call in `meta.name`) does not
- *      break the resume contract that the script body honors.
- *   3. The vm result is walked field-by-field and copied into a new
- *      host-realm plain object. No JSON round-trip is needed because every
- *      contract field is a primitive — strings and arrays of plain
- *      objects with string fields — so prototype identity on the
- *      intermediate values is irrelevant.
+ *   2. The literal source is evaluated inside a fresh vm context whose
+ *      globalThis is a null-prototyped object — no bridge to the host
+ *      realm, no access to host primitives like `process` / `require` /
+ *      the workflow-sandbox bridge globals (`args` / `agent` / `phase` /
+ *      `log` / etc.). The vm realm DOES provide its own intrinsics
+ *      (`Object`, `Array`, `Math`, `Date`, `JSON`, …) which is fine: meta
+ *      extraction is a one-shot at tool-invocation time, not replayed
+ *      during resume, so non-determinism in the meta literal (a
+ *      `Date.now()` call in `meta.name`) does not break the resume
+ *      contract that the script body honors.
+ *   3. A SECOND vm script walks that value and serialises it to JSON, and
+ *      the host parses the result into host-realm plain objects.
+ *
+ * Both scripts run under `META_EVAL_TIMEOUT_MS`, and the split between them
+ * is what makes that bound real. The literal is model-authored source, so it
+ * can defer arbitrary work to property-read time — `{ get phases() { while
+ * (true) {} } }` evaluates instantly and only spins when something
+ * reads `.phases`. Walking the value on the host would run that getter on the
+ * host thread, where no timeout can reach it and a synchronous loop blocks
+ * the event loop outright. Doing the walk inside the vm puts the getter back
+ * under the timeout.
+ *
+ * The two scripts must stay separate programs for a second reason: the copy
+ * helper's source is fixed and interpolates nothing, so the model's literal
+ * never shares a lexical scope with it. Interpolating the literal into the
+ * helper's own scope would let it read and overwrite the helper's bindings —
+ * including the flag that decides whether a thenable was found.
  *
  * Returns `{ stripped, meta: null }` when no meta declaration is present
  * (callers treat this as "no meta"). Throws when meta is present but
@@ -193,9 +205,20 @@ export function extractAndStripMeta(source: string): {
   // provides its own intrinsics, but that's intentional — see the
   // docstring above.
   const metaContext = vm.createContext(Object.create(null));
-  let raw: unknown;
+  let serialized: unknown;
   try {
-    raw = new vm.Script(`(${metaSource})`).runInContext(metaContext);
+    // Script 1 — the model's literal, as its own program. Property reads are
+    // deferred: a getter defined here closes over THIS scope, so it cannot
+    // see script 2's bindings when it later runs.
+    new vm.Script(
+      `globalThis[${JSON.stringify(META_SLOT)}] = (${metaSource});`,
+    ).runInContext(metaContext, { timeout: META_EVAL_TIMEOUT_MS });
+    // Script 2 — fixed source, zero interpolation. Getters fire here, inside
+    // the vm, under the timeout.
+    serialized = new vm.Script(META_SERIALIZE_SOURCE).runInContext(
+      metaContext,
+      { timeout: META_EVAL_TIMEOUT_MS },
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(
@@ -203,65 +226,28 @@ export function extractAndStripMeta(source: string): {
     );
   }
 
+  const walked = JSON.parse(String(serialized)) as {
+    hasThenable: boolean;
+    value: unknown;
+  };
+
   // P4a R3 (wenshao): a Promise (e.g. `import('node:fs')`) used as a
   // value in the meta literal would otherwise leave a dangling rejection
-  // behind — `runInContext` returns synchronously with the Promise scheduled
+  // behind — evaluation returns synchronously with the Promise scheduled
   // to reject on the next tick, validateMeta drops the non-contract field
   // silently, and the run completes successfully. Then Node's default
   // `--unhandled-rejections=throw` terminates the host process, decoupled
-  // from the run that triggered it. Walk `raw`, neutralise any thenables
-  // with `.catch(() => {})` so the rejection is marked handled, and reject
-  // the meta literal up front.
-  rejectThenablesInMeta(raw);
-
-  const meta = validateMeta(raw);
-  return { stripped, meta };
-}
-
-/**
- * Recursively scan a vm-eval'd value, marking any thenable as handled
- * (so its rejection cannot terminate the host on the next tick) and
- * throwing an explicit "meta values must not be Promises" so the
- * malformed meta is reported clearly.
- *
- * Recurses through plain objects and arrays — `phases[]` entries may
- * embed an `import()` below the top level.
- */
-function rejectThenablesInMeta(
-  value: unknown,
-  seen: WeakSet<object> = new WeakSet(),
-): void {
-  if (value === null || typeof value !== 'object') return;
-  // P4 Round 4 (wenshao): a cyclic meta literal built via spread of a
-  // self-referential object would otherwise overflow the call stack on
-  // this walk — the walker exists to reject Promises before they leave
-  // a dangling rejection, but the walk itself must terminate on any
-  // shape vm-eval can return. Track visited nodes in a WeakSet so cycles
-  // and shared subgraphs both early-return without re-walking.
-  if (seen.has(value as object)) return;
-  seen.add(value as object);
-  const maybeThen = (value as { then?: unknown }).then;
-  if (typeof maybeThen === 'function') {
-    // Mark handled so Node's unhandled-rejection trap does not later kill
-    // the process. `.catch` on a non-Promise thenable would synchronously
-    // throw if the implementation is non-standard, so swallow defensively.
-    try {
-      (value as Promise<unknown>).catch(() => {});
-    } catch {
-      /* non-standard thenable — already rejecting below */
-    }
+  // from the run that triggered it. The serializer marks any thenable it
+  // reaches as handled inside the vm; reject the meta literal up front.
+  if (walked.hasThenable) {
     throw new Error(
       'extractAndStripMeta: meta values must not be Promises ' +
         '(no async / dynamic import allowed in meta literal)',
     );
   }
-  if (Array.isArray(value)) {
-    for (const v of value) rejectThenablesInMeta(v, seen);
-    return;
-  }
-  for (const v of Object.values(value as Record<string, unknown>)) {
-    rejectThenablesInMeta(v, seen);
-  }
+
+  const meta = validateMeta(walked.value);
+  return { stripped, meta };
 }
 
 /**
@@ -378,6 +364,96 @@ const MAX_PHASE_ENTRIES = 10_000;
 // Max nesting depth for args; defends against stack-overflow on deeply
 // nested model-authored input.
 const ARGS_MAX_DEPTH = 64;
+
+// Wall-clock bound on each of the two vm scripts that evaluate and serialise
+// the `meta` literal. The literal is model-authored source, so a field value
+// that never returns — `{ name: (function(){ while(true){} })() }`, or the
+// lazier `{ get name() { while(true){} } }` — would otherwise wedge the
+// calling thread: the loop is synchronous, so no timer fires and no signal
+// handler runs. `vm`'s own timeout is the only mechanism that can interrupt
+// synchronous JS from inside the process. Generous for a contract object of
+// strings and small arrays; tight enough that a wedge is reported promptly.
+const META_EVAL_TIMEOUT_MS = 250;
+
+// Cap on the serialised meta payload. Bounds what a literal can force the
+// host to retain and re-parse — a 250ms budget is enough to allocate a very
+// large string, and the JSON round-trip would then copy it twice more.
+const META_SERIALIZED_MAX_CHARS = 64 * 1024;
+
+// Context slot that carries the evaluated literal from script 1 to script 2.
+const META_SLOT = '__qwenWorkflowMetaValue';
+
+/**
+ * Fixed source for the meta serializer. Interpolates NOTHING — the model's
+ * literal is evaluated by a separate program (see `extractAndStripMeta`), so
+ * it never shares a lexical scope with these bindings and cannot read or
+ * overwrite `hasThenable`, `copy`, or the visited set.
+ *
+ * Runs inside the vm so that property reads on the literal — getters, proxy
+ * traps — execute under the same timeout as the literal itself.
+ *
+ * Intrinsics are captured into locals up front and every call goes through
+ * `Reflect.apply`, so a literal that replaced a prototype method before this
+ * script ran cannot redirect the walk.
+ */
+const META_SERIALIZE_SOURCE = `(() => {
+  const apply = Reflect.apply;
+  const isArray = Array.isArray;
+  const objectKeys = Object.keys;
+  const objectCreate = Object.create;
+  const jsonStringify = JSON.stringify;
+  const push = Array.prototype.push;
+  const thenCall = Promise.prototype.then;
+  const setAdd = WeakSet.prototype.add;
+  const setHas = WeakSet.prototype.has;
+  const seen = new WeakSet();
+  let hasThenable = false;
+  let budget = ${META_SERIALIZED_MAX_CHARS};
+
+  function spend(n) {
+    budget -= n;
+    if (budget < 0) throw new Error('meta literal is too large');
+  }
+
+  function copy(value) {
+    const type = typeof value;
+    if (value === null) return null;
+    if (type === 'string') { spend(value.length); return value; }
+    if (type === 'number' || type === 'boolean') { spend(8); return value; }
+    // Functions, symbols and bigints are not contract values; drop them the
+    // same way the previous host-side walk did.
+    if (type !== 'object') return undefined;
+    // Cycles and shared subgraphs both terminate here.
+    if (apply(setHas, seen, [value])) return undefined;
+    apply(setAdd, seen, [value]);
+    if (typeof value.then === 'function') {
+      hasThenable = true;
+      // Mark handled so Node's unhandled-rejection trap cannot later kill the
+      // host process. A non-standard thenable may throw synchronously here.
+      try { apply(thenCall, value, [undefined, () => {}]); } catch (e) {}
+      return undefined;
+    }
+    if (isArray(value)) {
+      const out = [];
+      for (let i = 0; i < value.length; i++) {
+        spend(2);
+        apply(push, out, [copy(value[i])]);
+      }
+      return out;
+    }
+    const out = objectCreate(null);
+    const keys = objectKeys(value);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      spend(key.length + 4);
+      out[key] = copy(value[key]);
+    }
+    return out;
+  }
+
+  const value = copy(globalThis[${JSON.stringify(META_SLOT)}]);
+  return jsonStringify({ hasThenable: hasThenable, value: value });
+})()`;
 
 /**
  * WorkflowAgentOpts — structured options for the `agent()` global.

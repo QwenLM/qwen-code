@@ -266,6 +266,92 @@ describe('extractAndStripMeta', () => {
     expect(() => extractAndStripMeta(src)).toThrow(/unbalanced/i);
   });
 
+  // The meta literal is model-authored source, and every caller reaches it on
+  // a path where a wedged thread is unrecoverable: the run path (before the
+  // sandbox's own 30s body timeout is armed) and, in follow-up work, the tool
+  // confirmation dialog and the saved-workflow palette. A field value that
+  // never returns must surface as an ordinary malformed-meta error.
+  //
+  // Each case asserts a generous wall-clock bound rather than a precise one,
+  // so the assertion stays stable on a loaded CI runner. Without the bound
+  // these hang the worker until vitest's own timeout kills it.
+  describe('bounded evaluation', () => {
+    const BOUND_MS = 5_000;
+
+    function timed(fn: () => unknown): number {
+      const startedAt = Date.now();
+      try {
+        fn();
+      } catch {
+        /* the throw is asserted separately */
+      }
+      return Date.now() - startedAt;
+    }
+
+    it('bounds a field value that loops on evaluation', () => {
+      const src = `export const meta = { name: (function () { while (true) {} })(), description: 'd' }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    // The case a timeout on the literal's own evaluation does NOT catch: a
+    // getter defers its work to property-read time, so the literal itself
+    // evaluates instantly and only spins when the value is walked. Walking on
+    // the host would run it on the host thread, unbounded.
+    it('bounds a getter that loops when the value is walked', () => {
+      const src = `export const meta = { name: 'x', description: 'd', get phases() { while (true) {} } }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    it('bounds a getter nested inside phases', () => {
+      const src = `export const meta = { name: 'x', description: 'd', phases: [{ get title() { while (true) {} } }] }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+      expect(timed(() => extractAndStripMeta(src))).toBeLessThan(BOUND_MS);
+    });
+
+    it('refuses a meta literal that exceeds the serialized size cap', () => {
+      const src = `export const meta = { name: 'x'.repeat(200000), description: 'd' }\nreturn 1`;
+      expect(() => extractAndStripMeta(src)).toThrow(
+        /failed to evaluate meta object literal/,
+      );
+    });
+
+    it('leaves a well-formed meta literal unaffected', () => {
+      const src = `export const meta = { name: 'w', description: 'd', phases: [{ title: 'One' }] }\nreturn 1`;
+      const { meta } = extractAndStripMeta(src);
+      expect(meta).toEqual({
+        name: 'w',
+        description: 'd',
+        phases: [{ title: 'One' }],
+      });
+    });
+  });
+
+  // The literal is evaluated as its own program, so it never shares a lexical
+  // scope with the serializer that walks it. Interpolating it into the
+  // serializer's scope would let it read the helpers and overwrite the flag
+  // that decides whether a thenable was found — i.e. disarm the check that
+  // keeps a stray rejected Promise from killing the host process.
+  it('meta source cannot observe or mutate the serializer scope', () => {
+    const src = `export const meta = { name: String(typeof copy) + ':' + String(typeof hasThenable), description: 'd' }\nreturn 1`;
+    const { meta } = extractAndStripMeta(src);
+    expect(meta?.name).toBe('undefined:undefined');
+  });
+
+  it('a thenable stays rejected even when the literal predefines the flag name', () => {
+    const src = `export const meta = { name: 'x', description: 'd', phases: Promise.resolve(1) }\nreturn 1`;
+    expect(() => extractAndStripMeta(src)).toThrow(
+      /meta values must not be Promises/,
+    );
+  });
+
   // P4a adversarial review (HIGH × 3 lenses): the docstring at
   // workflow-sandbox.ts:283-294 promises the returned meta is HOST-realm —
   // a per-field copy that defends against T1/T8/T14-style vm-realm escape
