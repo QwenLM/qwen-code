@@ -77,6 +77,7 @@ import {
   buildMcpServers,
   buildModelEntries,
   buildPermissionsData,
+  computeModelDialogInitialKey,
   deletePermissionRule,
   getMcpServerTools,
 } from './dialog-data.js';
@@ -90,6 +91,12 @@ export interface OpenTuiDialogMountProps {
   onClose: () => void;
   /** Switch the mounted dialog (settings → theme/model sub-dialogs). */
   onNavigate: (dialog: MountedDialog) => void;
+  /**
+   * Re-resolve the rendering palette for a theme name (settings `ui.theme`
+   * face): highlight previews, selections and cancels in the /theme dialog
+   * route through here so the change is visible immediately.
+   */
+  onThemeChanged: (themeName: string | undefined) => void;
   /** Append a command-style message to the chat history. */
   notify: (text: string) => void;
   onApprovalModeChanged: (mode: ApprovalMode) => void;
@@ -103,7 +110,7 @@ function HelpDialogHost(props: {
   const [tab, setTab] = useState<HelpTab>('general');
   const [scroll, setScroll] = useState(0);
   const renderer = useRenderer();
-  const { height } = useTerminalDimensions();
+  const { width, height } = useTerminalDimensions();
   // Plain raw Escape, consumed at the renderer level before parsed-key
   // dispatch: closes the overlay even though the composer still owns focus
   // while the dialog is mounted. Ctrl+C (\x03) and every other sequence fall
@@ -129,10 +136,13 @@ function HelpDialogHost(props: {
       return;
     }
     if (tab === 'general') return;
+    // Same width the overlay hands the line builders, so the scroll bounds
+    // match the lines that actually render.
+    const linesWidth = Math.max(72, width - 4);
     const lines =
       tab === 'commands'
-        ? buildHelpCommandsLines(commands)
-        : buildHelpCustomCommandLines(commands);
+        ? buildHelpCommandsLines(commands, linesWidth)
+        : buildHelpCustomCommandLines(commands, linesWidth);
     const maxScroll = helpScrollMax(lines);
     if (original.name === 'up') setScroll((s) => Math.max(0, s - 1));
     if (original.name === 'down') setScroll((s) => Math.min(maxScroll, s + 1));
@@ -143,6 +153,7 @@ function HelpDialogHost(props: {
       tab={tab}
       scroll={scroll}
       bodyRows={computeHelpBodyRows(height)}
+      width={width - 4}
     />
   );
 }
@@ -151,15 +162,22 @@ function ThemeDialogHost(props: {
   settings: LoadedSettings;
   onClose: () => void;
   notify: (text: string) => void;
+  onThemeChanged: (themeName: string | undefined) => void;
 }) {
   // Parity of useThemeCommand: Esc cancels and restores the pre-dialog theme.
-  const themeBeforeOpen = useRef(themeManager.getActiveTheme().name);
+  // The restore source is the CONFIGURED theme (undefined = adaptive), not the
+  // manager's resolved active name, so cancelling an Auto session restores
+  // Auto instead of pinning whatever the probe resolved.
+  const themeBeforeOpen = useRef<string | undefined>(
+    props.settings.merged.ui?.theme,
+  );
   return (
     <OpenTuiThemeDialog
       settings={props.settings}
       onSelect={(themeName, scope) => {
         if (themeName === undefined) {
           themeManager.setActiveTheme(themeBeforeOpen.current);
+          props.onThemeChanged(themeBeforeOpen.current);
           props.onClose();
           return;
         }
@@ -169,10 +187,12 @@ function ThemeDialogHost(props: {
         } else if (result.applied) {
           props.notify(`Theme set to ${result.applied}.`);
         }
+        props.onThemeChanged(themeName);
         props.onClose();
       }}
       onHighlight={(themeName) => {
         themeManager.setActiveTheme(themeName);
+        props.onThemeChanged(themeName);
       }}
     />
   );
@@ -234,9 +254,22 @@ function ModelDialogHost(props: {
   onClose: () => void;
   notify: (text: string) => void;
 }) {
+  const { height } = useTerminalDimensions();
   const entries = useMemo(
     () => buildModelEntries(props.config, props.mode),
     [props.config, props.mode],
+  );
+  // Highlight the current model on open (ink ModelDialog `preferredKey`
+  // parity) instead of always starting on the first row.
+  const initialKey = useMemo(
+    () =>
+      computeModelDialogInitialKey({
+        config: props.config,
+        settings: props.settings,
+        entries,
+        mode: props.mode,
+      }),
+    [props.config, props.settings, entries, props.mode],
   );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   return (
@@ -245,6 +278,8 @@ function ModelDialogHost(props: {
       mode={props.mode}
       authType={props.config?.getAuthType()}
       persistScope={props.persistScope}
+      initialKey={initialKey}
+      availableTerminalHeight={height}
       errorMessage={errorMessage}
       onSelect={(selectionKey) => {
         setErrorMessage(null);
@@ -330,6 +365,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           settings={settings}
           onClose={onClose}
           notify={notify}
+          onThemeChanged={props.onThemeChanged}
         />
       )}
       {dialog.dialog === 'settings' && (

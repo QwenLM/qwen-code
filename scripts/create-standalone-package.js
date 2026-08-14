@@ -98,6 +98,12 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'review-sources.sha256',
   'locales',
   'examples',
+  // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
+  // web-tree-sitter wasm, native render library) relocated by
+  // copy_bundle_assets.js; the bundled renderer sets OTUI_ASSET_ROOT to this
+  // directory for code-block syntax highlighting. copyOpenTuiAddon syncs the
+  // target's native library into it.
+  'opentui-assets',
   // Web Shell SPA served at the daemon root by `qwen serve` (index.html +
   // assets/). Copied into dist/web-shell/ by copy_bundle_assets.js when the
   // web-shell workspace has been built; optional, so it's allowed but not
@@ -499,6 +505,11 @@ function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
     opentuiModulesDir || path.join(rootDir, 'node_modules'),
   );
   const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  // The relocated OpenTUI asset root written by copy_bundle_assets.js carries
+  // only the BUILD host's native library; sync this TARGET's libraries into
+  // it so the runtime's OTUI_ASSET_ROOT completeness check (which includes
+  // the native library) passes inside the archive.
+  const assetRoot = path.join(packageRoot, 'lib', 'opentui-assets');
   const copyOpts = {
     recursive: true,
     dereference: true,
@@ -507,13 +518,13 @@ function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
 
   for (const packageName of packageNames) {
     const packageSrc = path.join(modulesSrc, packageName);
-    const hasNativeLibrary =
-      fs.existsSync(path.join(packageSrc, 'package.json')) &&
-      fs
-        .readdirSync(packageSrc)
-        .some((entry) => /\.(dylib|so|dll)$/.test(entry));
+    const nativeLibraries = fs.existsSync(path.join(packageSrc, 'package.json'))
+      ? fs
+          .readdirSync(packageSrc)
+          .filter((entry) => /\.(dylib|so|dll)$/.test(entry))
+      : [];
 
-    if (!hasNativeLibrary) {
+    if (nativeLibraries.length === 0) {
       const message = `OpenTUI platform package ${packageName} for ${target} is missing from ${modulesSrc}`;
       if (opentuiModulesDir) {
         fail(`Required ${message}`);
@@ -523,6 +534,15 @@ function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
     }
 
     fs.cpSync(packageSrc, path.join(modulesDest, packageName), copyOpts);
+
+    for (const library of nativeLibraries) {
+      const assetDestDir = path.join(assetRoot, packageName);
+      fs.mkdirSync(assetDestDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(packageSrc, library),
+        path.join(assetDestDir, library),
+      );
+    }
   }
 
   assertNoSymlinks(

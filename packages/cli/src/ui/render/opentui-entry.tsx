@@ -1,4 +1,3 @@
- 
 /** @jsxImportSource @opentui/react */
 /**
  * @license
@@ -18,6 +17,11 @@
  * flicker-free cell-diff renderer. The real agent-loop event source replaces the
  * backend's scripted demo events in a later phase (P1d).
  */
+
+// MUST stay the first import: configures OTUI_ASSET_ROOT for bundled builds
+// before '@opentui/core' evaluates its module scope (the native-library path
+// is resolved once, at module load). See ../opentui/opentui-assets.ts.
+import '../opentui/opentui-assets.js';
 
 import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';

@@ -136,6 +136,72 @@ export function resolveModelPersistScope(
   return getPersistScopeForModelSelection(settings);
 }
 
+/**
+ * The selection key to highlight when the `/model` dialog opens (ink
+ * ModelDialog `preferredKey` parity): the active runtime snapshot or the
+ * current auth/model/baseUrl row in primary mode, and the entry owning the
+ * persisted selector in the auxiliary modes (fast/voice/vision/compaction/
+ * image). Returns undefined when nothing matches (the dialog then starts on
+ * the first row, as in ink's `initialIndex === -1 → 0` fallback).
+ */
+export function computeModelDialogInitialKey(params: {
+  config: Config | null | undefined;
+  settings: LoadedSettings;
+  entries: readonly OpenTuiModelEntry[];
+  mode: ModelDialogMode;
+}): string | undefined {
+  const { config, settings, entries, mode } = params;
+  if (entries.length === 0) return undefined;
+  const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+
+  if (mode === 'primary') {
+    const snapshotId = config?.getActiveRuntimeModelSnapshot?.()?.id?.trim();
+    if (snapshotId && byKey.has(snapshotId)) return snapshotId;
+
+    const rawModel = config?.getModel();
+    const modelId =
+      typeof rawModel === 'string'
+        ? rawModel
+        : ((rawModel as { id?: string } | undefined)?.id ?? undefined);
+    if (!modelId) return undefined;
+    const baseUrl = config?.getContentGeneratorConfig?.()?.baseUrl;
+    const authType = String(config?.getAuthType?.() ?? '');
+    const exact = buildModelSelectionKey(authType, modelId, baseUrl);
+    if (byKey.has(exact)) return exact;
+    // No same-provider row (e.g. baseUrl drift): any same-id row beats
+    // defaulting to the list head.
+    return entries.find((entry) => entry.modelId === modelId)?.key;
+  }
+
+  const rawSetting =
+    mode === 'fast'
+      ? settings.merged.fastModel
+      : mode === 'voice'
+        ? settings.merged.voiceModel
+        : mode === 'vision'
+          ? settings.merged.visionModel
+          : mode === 'compaction'
+            ? settings.merged.compactionModel
+            : settings.merged.imageModel;
+  if (typeof rawSetting !== 'string' || !rawSetting.trim()) return undefined;
+  const trimmed = rawSetting.trim();
+  if (byKey.has(trimmed)) return trimmed;
+  const parsed = parseVisionModelSetting(trimmed);
+  if (!parsed) return undefined;
+  const selector = parsed.selector;
+  const colonIdx = selector.indexOf(':');
+  const selectorAuth = colonIdx >= 0 ? selector.slice(0, colonIdx) : undefined;
+  const selectorModelId =
+    colonIdx >= 0 ? selector.slice(colonIdx + 1) : selector;
+  const match = entries.find((entry) => {
+    if (entry.modelId !== selectorModelId) return false;
+    if (selectorAuth && entry.authType !== selectorAuth) return false;
+    if (parsed.baseUrl && entry.baseUrl !== parsed.baseUrl) return false;
+    return true;
+  });
+  return match?.key ?? entries.find((e) => e.modelId === selectorModelId)?.key;
+}
+
 function persistScopeSuffix(persistScope?: 'workspace' | 'user'): string {
   return persistScope === 'workspace'
     ? t(' (this project)')
