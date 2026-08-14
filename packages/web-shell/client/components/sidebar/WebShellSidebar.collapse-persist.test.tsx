@@ -403,7 +403,11 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     });
     await flushSidebar();
 
-    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    const menu = document.querySelector<HTMLElement>('[role="menu"]');
+    expect(menu).not.toBeNull();
+    expect(menu?.style.zIndex).toBe(
+      'calc(var(--web-shell-popover-z-index, 1000) + 1)',
+    );
     expect(switcher?.dataset.state).toBe('open');
   });
 

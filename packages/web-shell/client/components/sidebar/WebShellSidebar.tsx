@@ -128,6 +128,9 @@ const IDLE_SESSION_POLL_INTERVAL_MS = 30_000;
 const DIALOG_SESSION_LABEL_MAX_LENGTH = 96;
 const RECENT_SESSION_SECTION_ID = 'recent';
 const GROUP_MENU_WIDTH = 240;
+const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
+  zIndex: 'calc(var(--web-shell-popover-z-index, 1000) + 1)',
+};
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
@@ -538,6 +541,7 @@ function SidebarSessionSurface({
   width,
   open,
   onOpenChange,
+  isCloseBlocked,
   children,
 }: {
   collapsed: boolean;
@@ -545,12 +549,20 @@ function SidebarSessionSurface({
   width: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  isCloseBlocked: () => boolean;
   children: ReactNode;
 }) {
   const closeTimerRef = useRef<number | undefined>(undefined);
   const pointerOpenRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const changeOpen = useCallback(
+    (nextOpen: boolean) => {
+      if (!nextOpen && isCloseBlocked()) return;
+      onOpenChange(nextOpen);
+    },
+    [isCloseBlocked, onOpenChange],
+  );
 
   useEffect(() => () => window.clearTimeout(closeTimerRef.current), []);
 
@@ -570,15 +582,12 @@ function SidebarSessionSurface({
         );
       window.clearTimeout(closeTimerRef.current);
       if (!insideSurface && !insideNestedOverlay) {
-        closeTimerRef.current = window.setTimeout(
-          () => onOpenChange(false),
-          150,
-        );
+        closeTimerRef.current = window.setTimeout(() => changeOpen(false), 150);
       }
     };
     document.addEventListener('pointermove', handlePointerMove);
     return () => document.removeEventListener('pointermove', handlePointerMove);
-  }, [collapsed, onOpenChange, open]);
+  }, [changeOpen, collapsed, open]);
 
   if (!collapsed) {
     return <div className={styles.sessionList}>{children}</div>;
@@ -587,12 +596,12 @@ function SidebarSessionSurface({
   const cancelClose = () => window.clearTimeout(closeTimerRef.current);
   const closeAfterDelay = () => {
     cancelClose();
-    closeTimerRef.current = window.setTimeout(() => onOpenChange(false), 150);
+    closeTimerRef.current = window.setTimeout(() => changeOpen(false), 150);
   };
 
   return (
     <div className={styles.sessionList}>
-      <Popover open={open} onOpenChange={onOpenChange}>
+      <Popover open={open} onOpenChange={changeOpen}>
         <PopoverTrigger asChild>
           <button
             ref={triggerRef}
@@ -603,7 +612,7 @@ function SidebarSessionSurface({
             onPointerEnter={() => {
               pointerOpenRef.current = true;
               cancelClose();
-              onOpenChange(true);
+              changeOpen(true);
             }}
             onPointerLeave={closeAfterDelay}
             onPointerDown={() => {
@@ -611,7 +620,7 @@ function SidebarSessionSurface({
             }}
             onClick={(event) => {
               event.preventDefault();
-              onOpenChange(true);
+              changeOpen(true);
             }}
             onKeyDown={() => {
               pointerOpenRef.current = false;
@@ -999,6 +1008,11 @@ export function WebShellSidebar({
   const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuPointerDismissRef = useRef(false);
+  const sessionMenuOpenRef = useRef(false);
+  const handleSessionMenuOpenChange = useCallback((open: boolean) => {
+    sessionMenuOpenRef.current = open;
+  }, []);
+  const isSessionMenuOpen = useCallback(() => sessionMenuOpenRef.current, []);
   const previousRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
   >({ default: null, channel: null });
@@ -3278,7 +3292,7 @@ export function WebShellSidebar({
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                 >
-                  <DropdownMenu>
+                  <DropdownMenu onOpenChange={handleSessionMenuOpenChange}>
                     <DropdownMenuTrigger asChild>
                       <button
                         className={styles.sessionActionButton}
@@ -3292,6 +3306,7 @@ export function WebShellSidebar({
                     <DropdownMenuContent
                       align="end"
                       className="w-auto min-w-40"
+                      style={SESSION_MENU_PORTAL_STYLE}
                       onPointerDownOutside={() => {
                         sessionMenuPointerDismissRef.current = true;
                       }}
@@ -3581,7 +3596,9 @@ export function WebShellSidebar({
                         canOrganizeSession(session, 'group') ||
                         (showExport && !inlineActionItems.has('export')) ||
                         (showDelete && !inlineActionItems.has('delete')) ? (
-                          <DropdownMenu>
+                          <DropdownMenu
+                            onOpenChange={handleSessionMenuOpenChange}
+                          >
                             <DropdownMenuTrigger asChild>
                               <button
                                 className={styles.sessionActionButton}
@@ -3595,6 +3612,7 @@ export function WebShellSidebar({
                             <DropdownMenuContent
                               align="end"
                               className="w-auto min-w-40"
+                              style={SESSION_MENU_PORTAL_STYLE}
                               onPointerDownOutside={() => {
                                 sessionMenuPointerDismissRef.current = true;
                               }}
@@ -3725,6 +3743,7 @@ export function WebShellSidebar({
       handleExportSession,
       handleLoadSession,
       handleRenameFromMenu,
+      handleSessionMenuOpenChange,
       handleTogglePin,
       handleUnarchive,
       isCurrentSession,
@@ -4480,6 +4499,7 @@ export function WebShellSidebar({
             width={sidebarWidth}
             open={collapsedSessionsOpen}
             onOpenChange={setCollapsedSessionsOpen}
+            isCloseBlocked={isSessionMenuOpen}
           >
             {sourceMetadataEnabled && (
               <Tabs
@@ -4792,7 +4812,9 @@ export function WebShellSidebar({
                                   </>
                                 )}
                                 {canRemove && (
-                                  <DropdownMenu>
+                                  <DropdownMenu
+                                    onOpenChange={handleSessionMenuOpenChange}
+                                  >
                                     <DropdownMenuTrigger asChild>
                                       <button
                                         className={styles.workspaceHeaderAction}
@@ -4815,6 +4837,7 @@ export function WebShellSidebar({
                                     <DropdownMenuContent
                                       align="end"
                                       className="w-auto min-w-40"
+                                      style={SESSION_MENU_PORTAL_STYLE}
                                     >
                                       <DropdownMenuItem
                                         variant="destructive"
