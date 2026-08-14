@@ -409,6 +409,36 @@ describe('GoalsDialog', () => {
     expect(document.querySelector('textarea')).toBeNull();
   });
 
+  it('submits an edit with the latest polled goal revision', async () => {
+    await mount([baseGoal()]);
+
+    click(document.querySelector('button[aria-label="Edit goal"]'));
+    setTextarea('updated objective');
+    actions.listGoals.mockResolvedValue({
+      goals: [
+        baseGoal({
+          snapshot: {
+            ...baseGoal().snapshot,
+            goal: { ...baseGoal().snapshot.goal, revision: 2 },
+          },
+        }),
+      ],
+      droppedCount: 0,
+    });
+    click(findButton('Refresh'));
+    await flush();
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.controlGoal).toHaveBeenCalledWith('sess-1', {
+      action: 'edit',
+      objective: 'updated objective',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 2,
+    });
+  });
+
   it('never lets a slow /goals poll overlap itself', async () => {
     // `GET /goals` fans out one probe per live session and a wedged child can
     // hold it for the bridge's ext-method timeout, which is the same order as

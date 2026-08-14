@@ -144,6 +144,7 @@ export function QueuedPromptDisplay({
   prompts,
   t,
   canMutateMidTurn = false,
+  canInsertMidTurn = true,
   onDelete,
   onInsert,
   onEdit,
@@ -153,6 +154,7 @@ export function QueuedPromptDisplay({
   prompts: readonly QueuedPrompt[];
   t: ReturnType<typeof getTranslator>;
   canMutateMidTurn?: boolean;
+  canInsertMidTurn?: boolean;
   onDelete: (id: number) => void;
   onInsert: (id: number) => void;
   onEdit: (id: number) => void;
@@ -175,6 +177,7 @@ export function QueuedPromptDisplay({
     latestPrompt.serverState !== 'running' &&
     !latestPrompt.isEditing &&
     !latestPrompt.isRemoving &&
+    !latestPrompt.isInserting &&
     latestPrompt.payloadCompleteness !== 'summary-only' &&
     latestPrompt.admissionOutcome !== 'unknown';
   const mayContainDuplicateAdmission =
@@ -213,10 +216,12 @@ export function QueuedPromptDisplay({
         const isInserting = prompt.isInserting === true;
         const canInsert =
           canMutateMidTurn &&
+          canInsertMidTurn &&
           prompt.serverState === undefined &&
           prompt.serverPromptId === undefined &&
           !isMidTurnPending &&
-          imageCount === 0;
+          imageCount === 0 &&
+          (prompt.inputAnnotations?.length ?? 0) === 0;
         const hasStateSpinner =
           isSubmitting ||
           prompt.midTurnState === 'submitting' ||

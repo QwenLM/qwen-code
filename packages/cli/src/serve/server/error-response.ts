@@ -642,6 +642,13 @@ export function sendBridgeError(
         });
         return;
       }
+      if (kind === 'untrusted_workspace') {
+        res.status(403).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
       if (
         kind === 'goal_conflict' ||
         kind === 'goal_invalid_transition' ||

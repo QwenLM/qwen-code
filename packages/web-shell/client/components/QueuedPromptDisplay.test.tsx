@@ -109,6 +109,45 @@ describe('QueuedPromptDisplay', () => {
     ).toBeNull();
   });
 
+  it('hides insert when there is no running turn', () => {
+    const { container } = setup({
+      prompts: [{ id: 1, text: '等待主动插入' }],
+      canInsertMidTurn: false,
+    });
+    expect(
+      container.querySelector(`[aria-label="${t('queue.insert')}"]`),
+    ).toBeNull();
+  });
+
+  it('hides insert for prompts with input annotations', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: 'inspect this file',
+          inputAnnotations: [
+            {
+              type: 'reference',
+              start: 8,
+              end: 17,
+              text: 'this file',
+              reference: {
+                id: 'file-1',
+                kind: 'data-table',
+                label: 'File',
+                value: '/tmp/a.ts',
+                serialized: 'this file',
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(
+      container.querySelector(`[aria-label="${t('queue.insert')}"]`),
+    ).toBeNull();
+  });
+
   it('allows deleting but not editing a summary-only server row', () => {
     const { container } = setup({
       prompts: [

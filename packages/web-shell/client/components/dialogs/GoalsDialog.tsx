@@ -157,10 +157,13 @@ export function GoalsDialog({
     setFormError(null);
     try {
       if (editingGoal) {
-        const goal = editingGoal.snapshot.goal;
+        const currentEditingGoal =
+          goals?.find((item) => item.sessionId === editingGoal.sessionId) ??
+          editingGoal;
+        const goal = currentEditingGoal.snapshot.goal;
         if (!goal) throw new Error(t('goals.error.goalUnavailable'));
         await actions.controlGoal(
-          editingGoal.sessionId,
+          currentEditingGoal.sessionId,
           versionedRequest(goal, 'edit', trimmed),
         );
       } else {
@@ -177,6 +180,7 @@ export function GoalsDialog({
         onError(err, t('goals.error.saveFailed'));
         return;
       }
+      if (editingGoal) await reload();
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
       if (mountedRef.current) setSubmitting(false);
@@ -185,6 +189,7 @@ export function GoalsDialog({
     actions,
     condition,
     editingGoal,
+    goals,
     onCreateGoal,
     onError,
     reload,

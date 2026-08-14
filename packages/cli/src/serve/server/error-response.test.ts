@@ -122,4 +122,19 @@ describe('sendBridgeError session writer errors', () => {
       errorKind: 'session_writer_unavailable',
     });
   });
+
+  it('maps an untrusted workspace bridge error to 403', () => {
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('Workspace is not trusted'), {
+      data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(403);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace is not trusted',
+      code: 'untrusted_workspace',
+    });
+  });
 });

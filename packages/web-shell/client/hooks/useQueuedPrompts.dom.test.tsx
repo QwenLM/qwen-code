@@ -211,7 +211,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
 
     expect(actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
       'wait for explicit insert',
-      {},
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(latest.queuedPrompts).toMatchObject([
       {
@@ -220,6 +220,118 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
         midTurnMessageId: 'inserted-1',
       },
     ]);
+  });
+
+  it('does not insert a held prompt between turns', async () => {
+    const { actions } = createActions();
+    mount('idle', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('wait for a running turn'));
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'wait for a running turn' },
+    ]);
+  });
+
+  it('does not insert a held prompt with input annotations', async () => {
+    const { actions } = createActions();
+    mount('responding', actions, true, false, false, true);
+
+    act(() =>
+      latest.enqueuePrompt('inspect this file', undefined, undefined, [
+        {
+          type: 'reference',
+          start: 8,
+          end: 17,
+          text: 'this file',
+          reference: {
+            id: 'file-1',
+            kind: 'data-table',
+            label: 'File',
+            value: '/tmp/a.ts',
+            serialized: 'this file',
+          },
+        },
+      ]),
+    );
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toHaveLength(1);
+  });
+
+  it('preserves an accepted explicit insert across a session switch', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('stay with session one'));
+    let insertPromise: Promise<void> | undefined;
+    act(() => {
+      insertPromise = latest.insertQueuedPrompt(1);
+    });
+    render('responding', 'session-2', true, false, true);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'mid-1' });
+      await insertPromise;
+    });
+    render('responding', 'session-1', true, false, true);
+
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'stay with session one',
+        midTurnState: 'queued',
+        midTurnMessageId: 'mid-1',
+        isInserting: false,
+      },
+    ]);
+  });
+
+  it('locks edit and clear while an explicit insert is in flight', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    const { editor } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('in flight'));
+    act(() => {
+      void latest.insertQueuedPrompt(1);
+    });
+    await act(async () => latest.editQueuedPrompt(1));
+    let consumed = false;
+    let cleared = false;
+    act(() => {
+      consumed = latest.editLastQueuedPrompt();
+      cleared = latest.clearQueuedPrompts();
+    });
+
+    expect(consumed).toBe(true);
+    expect(cleared).toBe(false);
+    expect(editor.setText).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'in flight', isInserting: true },
+    ]);
+  });
+
+  it('aborts an explicit insert when the turn becomes idle', () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
+      new Promise(() => undefined),
+    );
+    const { render } = mount('responding', actions, true, false, false, true);
+
+    act(() => latest.enqueuePrompt('in flight'));
+    act(() => {
+      void latest.insertQueuedPrompt(1);
+    });
+    const signal = vi.mocked(actions.enqueueMidTurnMessage).mock.calls[0]?.[1]
+      ?.signal;
+    render('idle', 'session-1', false, false, true);
+
+    expect(signal?.aborted).toBe(true);
   });
 
   it('submits locally held Goal follow-ups after the Goal stops', () => {

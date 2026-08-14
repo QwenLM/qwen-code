@@ -5312,6 +5312,10 @@ export function App({
   } | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
+  const strandedGoalSessionRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (mainView !== 'goals') strandedGoalSessionRef.current = undefined;
+  }, [mainView]);
   const ensureSessionForPrompt = useCallback(() => {
     const currentSessionId = connectionRef.current.sessionId;
     if (createSessionPromiseRef.current) {
@@ -11684,10 +11688,17 @@ export function App({
                   <div className={styles.fullPageBody}>
                     <GoalsDialog
                       onCreateGoal={async (condition) => {
-                        const created = await createNewSession(undefined, {
-                          keepView: true,
-                        });
-                        if (!created) return false;
+                        const stranded = strandedGoalSessionRef.current;
+                        const canReuseStranded =
+                          stranded !== undefined &&
+                          connectionRef.current.sessionId === stranded;
+                        if (!canReuseStranded) {
+                          strandedGoalSessionRef.current = undefined;
+                          const created = await createNewSession(undefined, {
+                            keepView: true,
+                          });
+                          if (!created) return false;
+                        }
                         const allocatedSessionId =
                           await ensureSessionForPrompt();
                         if (
@@ -11696,14 +11707,22 @@ export function App({
                         ) {
                           return false;
                         }
-                        if (allocatedSessionId) {
-                          await createGoalForAllocatedSession(
-                            allocatedSessionId,
-                            condition,
-                          );
-                        } else {
-                          await controlCurrentGoal('create', condition);
+                        try {
+                          if (allocatedSessionId) {
+                            await createGoalForAllocatedSession(
+                              allocatedSessionId,
+                              condition,
+                            );
+                          } else {
+                            await controlCurrentGoal('create', condition);
+                          }
+                        } catch (error) {
+                          strandedGoalSessionRef.current =
+                            allocatedSessionId ??
+                            connectionRef.current.sessionId;
+                          throw error;
                         }
+                        strandedGoalSessionRef.current = undefined;
                         onSessionIdChange?.(undefined);
                         setMainView('chat');
                       }}
@@ -12206,6 +12225,7 @@ export function App({
                               prompts={queuedPrompts}
                               t={t}
                               canMutateMidTurn={canMutateMidTurn}
+                              canInsertMidTurn={streamingState !== 'idle'}
                               onDelete={removeQueuedPrompt}
                               onInsert={insertQueuedPrompt}
                               onEdit={editQueuedPrompt}

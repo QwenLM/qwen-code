@@ -18890,6 +18890,39 @@ describe('App /goal command', () => {
     ).not.toBeNull();
   });
 
+  it('reuses the empty session left by a rejected canonical creation', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.controlGoal.mockRejectedValueOnce(
+      new Error('daemon says no'),
+    );
+
+    await act(async () => {
+      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
+        'daemon says no',
+      );
+    });
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await onCreateGoal('all tests pass');
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.controlGoal).toHaveBeenLastCalledWith({
+      action: 'create',
+      objective: 'all tests pass',
+    });
+  });
+
   it("opens a goal's session in the chat view", async () => {
     // The goal's session transcript IS its history, so the Goals page has to be
     // able to hand off to it. Nothing exercised this wiring before.
