@@ -323,40 +323,6 @@ function fileLineCount(ref: string, path: string): number {
 }
 
 /**
- * Every hunk of `inner` falls inside a hunk of `outer`, per file, on the NEW
- * side — both diffs end at the same head commit, so their post-image line
- * numbers are directly comparable.
- *
- * This is the containment an ancestry clamp cannot give. An anchor can be a
- * proper ancestor of the head and still produce a delta whose hunks are
- * absent from the PR's own diff: an "undo per feedback" commit reverts some
- * of the previous round's lines back to base content, so those lines are
- * changed in `anchor..head` and unchanged in `base..head`. A comment
- * anchored on such a hunk 422s the whole Create Review call.
- */
-export function hunksContainedIn(inner: string, outer: string): boolean {
-  const innerSections = diffSections(inner);
-  const outerSections = diffSections(outer);
-  // A section this parser could not name (a path with spaces, a shape it
-  // does not model) is not a section it may vouch for: fail closed to the
-  // full range rather than scope on an unparsed diff.
-  if (innerSections === null || outerSections === null) return false;
-  for (const [file, hunks] of innerSections) {
-    const covering = outerSections.get(file);
-    // The PATH check, not just the hunk check: a section with no hunks at
-    // all — a mode change, a binary replacement, a pure rename — carries no
-    // range to compare, and a deletion carries none on the new side. Each
-    // used to pass vacuously, which is how a delta whose only content is a
-    // file the PR's own diff never mentions became the review's scope.
-    if (!covering) return false;
-    for (const [start, end] of hunks) {
-      if (!covering.some(([s, e]) => s <= start && end <= e)) return false;
-    }
-  }
-  return true;
-}
-
-/**
  * The containment ruling as the caller needs it: DISPROVED containment and an
  * oracle that could not rule are different facts, and only the first is what
  * `hunks-outside-pr-diff` asserts. A path this parser cannot name (a shape it
@@ -371,7 +337,50 @@ export function containmentRuling(
   if (innerSections === null || outerSections === null) {
     return { ok: false, unverified: true };
   }
-  return { ok: hunksContainedIn(inner, outer), unverified: false };
+  return {
+    ok: sectionsContained(innerSections, outerSections),
+    unverified: false,
+  };
+}
+
+/**
+ * Every hunk of `inner` falls inside a hunk of `outer`, per file, on the NEW
+ * side — both diffs end at the same head commit, so their post-image line
+ * numbers are directly comparable.
+ *
+ * This is the containment an ancestry clamp cannot give. An anchor can be a
+ * proper ancestor of the head and still produce a delta whose hunks are
+ * absent from the PR's own diff: an "undo per feedback" commit reverts some
+ * of the previous round's lines back to base content, so those lines are
+ * changed in `anchor..head` and unchanged in `base..head`. A comment
+ * anchored on such a hunk 422s the whole Create Review call.
+ *
+ * The string form is the one tests read; the handler goes through
+ * `containmentRuling`, which needs the parse-failure fact as well — both
+ * share `sectionsContained` so a ruling parses each diff exactly once.
+ */
+export function hunksContainedIn(inner: string, outer: string): boolean {
+  return containmentRuling(inner, outer).ok;
+}
+
+/** The containment loop over already-parsed sections. */
+function sectionsContained(
+  inner: Map<string, Array<[number, number]>>,
+  outer: Map<string, Array<[number, number]>>,
+): boolean {
+  for (const [file, hunks] of inner) {
+    const covering = outer.get(file);
+    // The PATH check, not just the hunk check: a section with no hunks at
+    // all — a mode change, a binary replacement, a pure rename — carries no
+    // range to compare, and a deletion carries none on the new side. Each
+    // used to pass vacuously, which is how a delta whose only content is a
+    // file the PR's own diff never mentions became the review's scope.
+    if (!covering) return false;
+    for (const [start, end] of hunks) {
+      if (!covering.some(([s, e]) => s <= start && end <= e)) return false;
+    }
+  }
+  return true;
 }
 
 /**
