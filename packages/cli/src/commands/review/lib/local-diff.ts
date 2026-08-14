@@ -91,6 +91,8 @@ export interface LocalDiffCapture {
   skipped: SkippedFile[];
   /** True when HEAD does not exist yet (a repo with no commits). */
   unbornHead: boolean;
+  /** The repo root every path in the capture is relative to. */
+  repoRoot: string;
 }
 
 /**
@@ -506,5 +508,11 @@ export function captureLocalDiff(opts: {
     }
   }
 
-  return { diff: Buffer.concat(parts), untracked, skipped, unbornHead };
+  return {
+    diff: Buffer.concat(parts),
+    untracked,
+    skipped,
+    unbornHead,
+    repoRoot,
+  };
 }

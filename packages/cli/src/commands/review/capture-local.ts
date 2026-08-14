@@ -17,8 +17,8 @@
 // new file reported "no changes to review".
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
@@ -31,6 +31,19 @@ import {
   stringifyPlanReport,
   type PlanReport,
 } from './lib/report.js';
+import { gitOpt } from './lib/git.js';
+import {
+  hashWorktreeFiles,
+  readLocalCache,
+  stateIdOf,
+  sliceDiffByLines,
+  type LocalCacheCandidate,
+} from './lib/local-anchor.js';
+import {
+  dependentsOfChanged,
+  discoverWorkspacePackages,
+} from './lib/import-graph.js';
+import type { IncrementalScope } from './lib/incremental.js';
 
 interface CaptureLocalArgs {
   out: string;
@@ -38,6 +51,8 @@ interface CaptureLocalArgs {
   target: string;
   untracked: boolean;
   effort?: ReviewEffort;
+  cache?: string;
+  model?: string;
 }
 
 type CaptureLocalResult = PlanReport & {
@@ -49,6 +64,10 @@ type CaptureLocalResult = PlanReport & {
   untrackedFiles: string[];
   /** Untracked files that were NOT reviewed. Named, never silently dropped. */
   skippedFiles: SkippedFile[];
+  /** Present only when `--cache` scoped this capture incrementally. */
+  incremental?: IncrementalScope;
+  /** Where this round's content anchor landed — Step 8 promotes it on a clean run. */
+  cacheCandidatePath: string;
 };
 
 /**
@@ -67,6 +86,35 @@ function display(path: string): string {
   return CONTROL.test(path) ? JSON.stringify(path) : path;
 }
 
+/**
+ * Why the previous round's anchor cannot scope this capture — or null when it
+ * can. Every reason is said out loud: an anchor silently ignored looks
+ * exactly like an anchor honoured over a full-size diff.
+ */
+function anchorRefusalReason(
+  cache: ReturnType<typeof readLocalCache>,
+  model: string | undefined,
+  headSha: string | null,
+): string | null {
+  if (!cache) return 'the cache is missing or unreadable';
+  if (!model) {
+    // The same-model contract cannot be verified without knowing who is
+    // reviewing; an unverifiable contract is a failed one.
+    return '--cache was given without --model';
+  }
+  if (cache.lastModelId !== model) {
+    return `the previous local round was reviewed by ${
+      cache.lastModelId ?? 'an unrecorded model'
+    }, not ${model}`;
+  }
+  if (cache.headSha !== headSha) {
+    // The captured diff is HEAD-vs-worktree: under a moved HEAD the same
+    // worktree bytes describe a different change under review.
+    return 'HEAD moved since the last local round';
+  }
+  return null;
+}
+
 function runCaptureLocal(args: CaptureLocalArgs): void {
   const { out, file, target } = args;
 
@@ -74,7 +122,6 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     file,
     includeUntracked: args.untracked,
   });
-  const diffText = capture.diff.toString('utf8');
 
   // Two directories, and they are not the same one. The diff always lands in
   // `.qwen/tmp` (its path is ours to choose), but `--out` is the caller's — and
@@ -82,12 +129,102 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // dir turned into an ENOENT from `writeFileSync`.
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
   mkdirSync(dirname(resolve(out)), { recursive: true });
+
+  const fullPlan = buildDiffPlan(capture.diff.toString('utf8'));
+
+  // The content anchor for the NEXT round: hash every captured file's current
+  // bytes (`hash-object` without `-w` — computes, writes nothing) plus the
+  // HEAD this diff was based against. Written on every run, incremental or
+  // not, full-capture fallback or not: the candidate records what THIS round
+  // reviewed, and Step 8 promotes it to `.qwen/review-cache/` only on a clean
+  // high-effort end — the same division of labour as the PR cache.
+  const headSha = capture.unbornHead
+    ? null
+    : gitOpt('-C', capture.repoRoot, 'rev-parse', 'HEAD');
+  const planPaths = fullPlan.files.map((f) => f.path);
+  const hashes = hashWorktreeFiles(capture.repoRoot, planPaths);
+  const candidate: LocalCacheCandidate = {
+    v: 1,
+    target,
+    headSha,
+    files: hashes,
+    stateId: stateIdOf(headSha, hashes),
+  };
+  const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
+  writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
+
+  // Incremental scoping, when the caller brought the previous round's anchor.
+  let diffBytes = capture.diff;
+  let plan = fullPlan;
+  let incremental: IncrementalScope | undefined;
+  if (args.cache) {
+    const cache = readLocalCache(args.cache);
+    const refusal = anchorRefusalReason(cache, args.model, headSha);
+    if (refusal !== null) {
+      writeStderrLine(
+        `Incremental anchor not used — ${refusal}. Running the full local review.`,
+      );
+    } else {
+      const changed = planPaths.filter((p) => cache!.files[p] !== hashes[p]);
+      const changedSet = new Set(changed);
+      // One import hop over the still-clean SOURCE files, read from the LIVE
+      // working tree — the same tree the local review runs against.
+      const candidates = fullPlan.files
+        .filter(
+          (f) => f.kind === 'source' && !f.binary && !changedSet.has(f.path),
+        )
+        .map((f) => f.path);
+      const readTree = (rel: string): string | null => {
+        try {
+          return readFileSync(join(capture.repoRoot, rel), 'utf8');
+        } catch {
+          return null;
+        }
+      };
+      const interaction = dependentsOfChanged(
+        changedSet,
+        candidates,
+        readTree,
+        discoverWorkspacePackages(planPaths, readTree),
+      );
+      const keep = new Set([...changed, ...interaction.keys()]);
+      const fullDiffPath = tmpFile(target, 'diff-full.txt');
+      writeFileSync(fullDiffPath, capture.diff);
+      diffBytes = sliceDiffByLines(
+        capture.diff,
+        fullPlan.files
+          .filter((f) => keep.has(f.path))
+          .map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
+      );
+      plan = buildDiffPlan(diffBytes.toString('utf8'));
+      incremental = {
+        anchor: cache!.stateId,
+        deltaFiles: changed,
+        interaction: [...interaction.entries()].map(
+          ([path, importsChanged]) => ({ path, importsChanged }),
+        ),
+        contextFileCount: candidates.filter((p) => !interaction.has(p))
+          .length,
+        fullDiffPath,
+      };
+      writeStderrLine(
+        changed.length === 0
+          ? `No changes since the last local review round (same model, same ` +
+              `HEAD, same content) — nothing to re-review.`
+          : `Incremental scope since state ${cache!.stateId.slice(0, 12)}: ` +
+              `${changed.length} changed file(s), ${interaction.size} ` +
+              `interaction file(s) (one import hop), ` +
+              `${incremental.contextFileCount} clean file(s) left out of ` +
+              `scope.`,
+      );
+    }
+  }
+
   const diffPath = tmpFile(target, 'diff.txt');
   // Write the bytes, not the string: a re-encode would rewrite the content of
   // every hunk touching a file git handed us in a non-UTF-8 encoding.
-  writeFileSync(diffPath, capture.diff);
+  writeFileSync(diffPath, diffBytes);
 
-  const plan = buildDiffPlan(diffText);
   const result: CaptureLocalResult = {
     diffPath,
     diffPathAbsolute: resolve(diffPath),
@@ -97,6 +234,8 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     ...buildPlanReport(plan, null),
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
+    ...(incremental ? { incremental } : {}),
+    cacheCandidatePath,
     ...planEffortField(args.effort),
   };
 
@@ -125,13 +264,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         `${display(s.reason)}. List it under "Not reviewed" in the review output.`,
     );
   }
-  if (plan.diffLines === 0) {
+  if (plan.diffLines === 0 && !incremental) {
     // "Nothing to review" and "nothing was reviewable" are different sentences,
     // and only one of them is a clean tree. An oversized blob or an embedded repo
     // as the *only* change lands here with an empty diff and a non-empty skip
     // list, and calling that clean would hand the review a green verdict over
     // work it explicitly could not read — the whole failure this command exists
     // to end, arriving through the front door.
+    //
+    // The incremental no-changes case is deliberately NOT this branch: its 0
+    // chunks mean "identical to the state the last round reviewed", which the
+    // scoping block already said in its own words — "the working tree is
+    // clean" would be false, and false in the direction that certifies.
     writeStderrLine(
       capture.skipped.length > 0
         ? `WARNING: 0 chunks — nothing reviewable was captured, but ` +
@@ -186,6 +330,22 @@ export const captureLocalCommand: CommandModule = {
           'personas from the required roster; recorded in the plan so ' +
           'check-coverage, agent-prompt --roster and compose-review all read ' +
           'one value. Omit for the full (high) roster.',
+      })
+      .option('cache', {
+        type: 'string',
+        describe:
+          "The previous local round's review cache " +
+          '(`.qwen/review-cache/<target>.json`). When its anchor validates — ' +
+          'same model, same HEAD — the capture is scoped to files whose ' +
+          'content changed since that round, widened by one import hop; on ' +
+          'any refusal it degrades to the full capture and says why.',
+      })
+      .option('model', {
+        type: 'string',
+        describe:
+          'The model running this review. Required for `--cache` to take ' +
+          'effect: an anchor is honoured only under the model whose clean ' +
+          'verdict certified it.',
       }),
   handler: (argv) => {
     runCaptureLocal(argv as unknown as CaptureLocalArgs);

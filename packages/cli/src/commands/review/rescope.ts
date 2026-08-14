@@ -59,6 +59,9 @@ import {
   dependentsOfChanged,
   discoverWorkspacePackages,
 } from './lib/import-graph.js';
+import type { IncrementalScope } from './lib/incremental.js';
+
+export type { IncrementalScope } from './lib/incremental.js';
 
 /** Exit codes the skill branches on. Named so the prose and the code agree. */
 export const RESCOPE_EXIT_FULL_RANGE = 2;
@@ -80,39 +83,6 @@ interface FetchedPlan {
   diffPath?: unknown;
   files?: unknown;
   incremental?: unknown;
-}
-
-/**
- * The block the rescoped plan carries. Chunk briefs and the roster read it;
- * absence means a full-range plan, which is every plan rescope did not write.
- */
-export interface IncrementalScope {
-  /** Full sha of the previous clean round's head — the range's left side. */
-  anchor: string;
-  /**
-   * Files changed in `anchor..head`. The interdiff decides only WHICH files
-   * these are; their hunks in the composite are the full `mergeBase..head`
-   * change. Since-anchor hunks were tried first and reverted: a fix round
-   * that RESTORES lines the previous round changed produces interdiff hunks
-   * that exist in no hunk of the PR's own diff, and an inline comment
-   * anchored on one 422s the whole posted review, all-or-nothing. Full-range
-   * hunks are a subset of the PR diff by construction, so every anchor a
-   * chunk agent produces stays anchorable.
-   */
-  deltaFiles: string[];
-  /**
-   * Still-clean files pulled back in by the one-hop widening, each with the
-   * changed files it imports — the seam its brief directs the agent at.
-   */
-  interaction: Array<{ path: string; importsChanged: string[] }>;
-  /**
-   * How many still-clean source files this scope leaves out. A count, not a
-   * list: nothing downstream reads the names, and on a large PR the list
-   * alone measured 23 KB against the plan's one-read budget.
-   */
-  contextFileCount: number;
-  /** Where the full-range diff still is, for a reader who needs the whole PR. */
-  fullDiffPath: string | null;
 }
 
 function fail(code: number, message: string): void {
