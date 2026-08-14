@@ -247,7 +247,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   ): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
-    await conn.loadSession({
+    await conn.unstable_resumeSession({
       sessionId,
       cwd,
       mcpServers: [],

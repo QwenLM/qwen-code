@@ -45,6 +45,12 @@ export interface CompactionEngine {
   seedReplayEvents(events: BridgeEvent[]): void;
   snapshot(): SessionReplaySnapshot;
   close(): void;
+  /**
+   * Current live-journal caps — may exceed the configured baseline when
+   * adaptive growth raised them mid-turn. Optional: engines without a
+   * journal concept simply omit it.
+   */
+  journalLimits?(): { maxEvents: number; maxBytes: number };
 }
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
@@ -394,6 +400,21 @@ export class EventBus {
       return { ...snapshot, degraded: true };
     }
     return snapshot;
+  }
+
+  /**
+   * The engine's current live-journal caps — may have grown past the
+   * configured baseline under adaptive growth. Read by the bridge's
+   * growth policy to account granted headroom across its live sessions
+   * and by daemon status for the per-session effective limits.
+   */
+  journalLimits(): { maxEvents: number; maxBytes: number } | undefined {
+    return this.compactionEngine?.journalLimits?.();
+  }
+
+  /** The byte half of `journalLimits()`; the growth-policy hot path. */
+  journalLimitBytes(): number | undefined {
+    return this.journalLimits()?.maxBytes;
   }
 
   private markCompactionDegraded(err: unknown): void {
