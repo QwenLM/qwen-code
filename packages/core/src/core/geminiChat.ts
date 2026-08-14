@@ -1805,6 +1805,17 @@ export class GeminiChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  /**
+   * Text of degraded-placeholder-prefix chunks the pipeline held back and then
+   * dropped on a stream error. They were never yielded, so the send loop's
+   * delivery accounting misses them; the loop folds this into the attempt's
+   * catch so the continuation gate resumes from the held prefix instead of
+   * replaying fresh — a fresh replay would let a placeholder split across the
+   * cut (e.g. '(request ' + 'timeout)') slip through as the harmless-looking
+   * fragment. Reset at the start of every `processStreamResponse`.
+   */
+  private pendingHeldPlaceholderText = '';
+
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
   /**
@@ -2858,6 +2869,17 @@ export class GeminiChat {
             // than per chunk keeps the overlap scan anchored at the attempt
             // boundary, which is the only place a replay can occur.
             foldTransportAttemptText();
+            // The pipeline holds back degraded-placeholder-prefix chunks and
+            // never yields them; on a stream error it discards them. The model
+            // still delivered that text, so fold the staged handoff into the
+            // same buffer — otherwise the continuation gate sees nothing
+            // delivered and replays fresh, letting a placeholder split across
+            // the cut slip through as a harmless-looking fragment.
+            if (self.pendingHeldPlaceholderText) {
+              transportAttemptText += self.pendingHeldPlaceholderText;
+              self.pendingHeldPlaceholderText = '';
+              foldTransportAttemptText();
+            }
 
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
@@ -4525,6 +4547,8 @@ export class GeminiChat {
     let yieldedAnyChunk = false;
     let deferredFirstChunk: GenerateContentResponse | null = null;
     let pendingDegradedPlaceholderChunks: GenerateContentResponse[] = [];
+    // Fresh attempt: clear any handoff a previous attempt's error path staged.
+    this.pendingHeldPlaceholderText = '';
     const isDegradedPlaceholderPrefixChunk = (
       chunk: GenerateContentResponse,
     ) => {
@@ -4783,6 +4807,22 @@ export class GeminiChat {
         yield deferredFirstChunk;
       }
       deferredFirstChunk = null;
+      // Hand the held placeholder-prefix text to the send loop before
+      // discarding the chunks: the model did deliver it, but it was never
+      // yielded, so the loop's delivery accounting would otherwise see nothing
+      // and replay fresh — letting a placeholder split across the cut slip
+      // through as a fragment. Folded into the continuation buffer, the next
+      // attempt resumes from it and the reassembled text can still be
+      // rejected as a completed placeholder. A COMPLETED placeholder is the
+      // exception: there is nothing honest to resume from, so the honest
+      // recovery stays a fresh replay (no handoff).
+      const heldText = pendingDegradedPlaceholderChunks
+        .map((chunk) =>
+          getPlainTextFromParts(chunk.candidates?.[0]?.content?.parts),
+        )
+        .join('');
+      this.pendingHeldPlaceholderText =
+        heldText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER ? '' : heldText;
       pendingDegradedPlaceholderChunks = [];
     }
 
