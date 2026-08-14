@@ -870,6 +870,14 @@ describe('fileUtils', () => {
       expect(await detectFileType('file.png')).toBe('image');
     });
 
+    it('should keep empty image files classified as images', async () => {
+      const emptyImagePath = path.join(tempRootDir, 'empty.png');
+      actualNodeFs.writeFileSync(emptyImagePath, '');
+      mockMimeGetType.mockReturnValueOnce('image/png');
+
+      expect(await detectFileType(emptyImagePath)).toBe('image');
+    });
+
     it('should detect image type by extension (jpeg)', async () => {
       mockMimeGetType.mockReturnValueOnce('image/jpeg');
       expect(await detectFileType('file.jpg')).toBe('image');
