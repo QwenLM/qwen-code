@@ -16,9 +16,10 @@
 
 import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, SessionListItem } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { toOriginalKey } from './key-map.js';
+import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
 import { C } from './theme.js';
 
 function useEsc(onClose: () => void) {
@@ -76,7 +77,17 @@ const Row = ({ label, value }: { label: string; value: string }) => (
   </box>
 );
 
-type P = { config?: Config; settings: LoadedSettings; onClose: () => void };
+type P = {
+  config?: Config;
+  settings: LoadedSettings;
+  onClose: () => void;
+  /** Delete/Resume report their outcome as a command-style message. */
+  notify?: (text: string) => void;
+  /** Resume: sessions pre-filtered by the command (multiple title matches). */
+  matchedSessions?: SessionListItem[];
+  /** Resume: selection runs the real session switch (host.handleResume). */
+  onSelect?: (sessionId: string) => void;
+};
 
 export function OpenTuiEditorDialog({ config, onClose }: P) {
   useEsc(onClose);
@@ -123,31 +134,147 @@ export function OpenTuiTrustDialog({ config, onClose }: P) {
   );
 }
 
-export function OpenTuiDeleteDialog({ onClose }: P) {
+/**
+ * Real session deletion (audit 01 G-10): a session picker over
+ * `SessionService.listSessions` (the current session is disabled, ink
+ * parity) whose Enter runs `removeSession` + the SessionDelete hook —
+ * the same services ink's useDeleteCommand drives.
+ */
+export function OpenTuiDeleteDialog({ config, onClose, notify }: P) {
   useEsc(onClose);
-  const [confirm, setConfirm] = useState(false);
+  const [rows, setRows] = useState<SessionListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [cursor, setCursor] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const currentSessionId = config?.getSessionId?.() ?? '';
+  useEffect(() => {
+    let alive = true;
+    const svc = config?.getSessionService?.();
+    if (!svc) {
+      setLoading(false);
+      return;
+    }
+    svc
+      .listSessions({ size: 20 })
+      .then((res) => {
+        if (!alive) return;
+        setRows(res.items ?? []);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [config]);
+  const isDisabled = (row: SessionListItem) =>
+    row.sessionId === currentSessionId;
+  const move = (dir: 1 | -1) => {
+    setCursor((prev) => {
+      let next = prev;
+      for (let i = 0; i < rows.length; i++) {
+        next = (next + dir + rows.length) % rows.length;
+        const row = rows[next];
+        if (row && !isDisabled(row)) return next;
+      }
+      return prev;
+    });
+  };
   useKeyboard((key) => {
     const o = toOriginalKey(key);
-    if (o.name === 'y') setConfirm(true);
-    if (o.name === 'n') onClose();
+    if (busy || loading) return;
+    if (o.name === 'up') {
+      move(-1);
+      return;
+    }
+    if (o.name === 'down') {
+      move(1);
+      return;
+    }
+    if (o.name === 'return') {
+      const row = rows[cursor];
+      if (!row || isDisabled(row) || !config) return;
+      setBusy(true);
+      const svc = config.getSessionService();
+      void svc
+        .removeSession(row.sessionId)
+        .then((success) => {
+          if (success) {
+            fireSessionDeleteHook(config, row.sessionId);
+            notify?.('Session deleted successfully.');
+          } else {
+            notify?.('Failed to delete session. Session not found.');
+          }
+          onClose();
+        })
+        .catch(() => {
+          notify?.('Failed to delete session.');
+          setBusy(false);
+        });
+    }
   });
   return (
     <Shell title="Delete Session" onClose={onClose}>
       <box flexDirection="column" marginTop={1}>
-        <text fg={C.text}>{'Delete the current session history?'}</text>
-        <text fg={confirm ? C.green : C.dim}>
-          {confirm ? 'deleting…' : 'press y to confirm · n / esc to cancel'}
+        <text fg={C.dim}>
+          {'Select a session to delete · enter to delete · esc to cancel'}
         </text>
+        <scrollbox height={12} marginTop={1} stickyScroll={false}>
+          {loading ? (
+            <text fg={C.dim}>{'loading sessions…'}</text>
+          ) : rows.length === 0 ? (
+            <text fg={C.dim}>{'no previous sessions'}</text>
+          ) : (
+            rows.map((r, i) => {
+              const disabled = isDisabled(r);
+              const selected = i === cursor;
+              const title = r.customTitle || r.prompt || '(untitled)';
+              return (
+                <box key={r.sessionId} flexDirection="row">
+                  <text fg={selected ? C.accent : C.dim}>
+                    {selected ? '› ' : '  '}
+                  </text>
+                  <text fg={disabled ? C.dim : selected ? C.accent : C.text}>
+                    {title.length > 40 ? `${title.slice(0, 40)}…` : title}
+                  </text>
+                  <text fg={C.dim}>{`  ${r.sessionId.slice(0, 8)}${
+                    disabled ? ' (current)' : ''
+                  }`}</text>
+                </box>
+              );
+            })
+          )}
+        </scrollbox>
+        {busy && <text fg={C.dim}>{'deleting…'}</text>}
       </box>
     </Shell>
   );
 }
 
-export function OpenTuiResumeDialog({ config, onClose }: P) {
+/**
+ * Interactive resume picker (audit 01 G-5 / 05 G-04): ↑↓ navigation + Enter
+ * selects, running the real session switch through `onSelect`
+ * (host.handleResume). `matchedSessions` is the command's pre-filtered list
+ * (`/resume <fuzzy-title>` with multiple matches); without it the 10 most
+ * recent sessions are listed, like ink's SessionPicker default.
+ */
+export function OpenTuiResumeDialog({
+  config,
+  onClose,
+  matchedSessions,
+  onSelect,
+}: P) {
   useEsc(onClose);
-  const [rows, setRows] = useState<Array<{ id: string; label: string }>>([]);
-  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState<SessionListItem[]>(matchedSessions ?? []);
+  const [loading, setLoading] = useState(!matchedSessions);
+  const [cursor, setCursor] = useState(0);
   useEffect(() => {
+    if (matchedSessions) {
+      setRows(matchedSessions);
+      setLoading(false);
+      return;
+    }
     let alive = true;
     const svc = config?.getSessionService?.();
     if (!svc) {
@@ -158,22 +285,7 @@ export function OpenTuiResumeDialog({ config, onClose }: P) {
       .listSessions({ size: 10 })
       .then((res) => {
         if (!alive) return;
-        const list = (
-          res as {
-            sessions?: Array<Record<string, unknown>>;
-          }
-        ).sessions;
-        setRows(
-          (list ?? []).map((s) => ({
-            id: String(s['sessionId'] ?? s['id'] ?? ''),
-            label: String(
-              s['title'] ??
-                s['summary'] ??
-                s['firstUserMessage'] ??
-                '(untitled)',
-            ),
-          })),
-        );
+        setRows(res.items ?? []);
         setLoading(false);
       })
       .catch(() => {
@@ -182,24 +294,58 @@ export function OpenTuiResumeDialog({ config, onClose }: P) {
     return () => {
       alive = false;
     };
-  }, [config]);
+  }, [config, matchedSessions]);
+  useKeyboard((key) => {
+    const o = toOriginalKey(key);
+    if (loading) return;
+    if (o.name === 'up') {
+      setCursor((prev) => Math.max(0, prev - 1));
+      return;
+    }
+    if (o.name === 'down') {
+      setCursor((prev) => Math.min(rows.length - 1, prev + 1));
+      return;
+    }
+    if (o.name === 'return') {
+      const row = rows[cursor];
+      if (!row) return;
+      onClose();
+      onSelect?.(row.sessionId);
+    }
+  });
   return (
     <Shell title="Resume" onClose={onClose}>
-      <scrollbox height={12} marginTop={1} stickyScroll={false}>
-        {loading ? (
-          <text fg={C.dim}>{'loading sessions…'}</text>
-        ) : rows.length === 0 ? (
-          <text fg={C.dim}>{'no previous sessions'}</text>
-        ) : (
-          rows.map((r) => (
-            <box key={r.id} flexDirection="row">
-              <text fg={C.green}>{'• '}</text>
-              <text fg={C.text}>{r.label}</text>
-              <text fg={C.dim}>{`  ${r.id.slice(0, 8)}`}</text>
-            </box>
-          ))
-        )}
-      </scrollbox>
+      <box flexDirection="column" marginTop={1}>
+        <text fg={C.dim}>
+          {'↑↓ to navigate · enter to resume · esc to cancel'}
+        </text>
+        <scrollbox height={12} marginTop={1} stickyScroll={false}>
+          {loading ? (
+            <text fg={C.dim}>{'loading sessions…'}</text>
+          ) : rows.length === 0 ? (
+            <text fg={C.dim}>{'no previous sessions'}</text>
+          ) : (
+            rows.map((r, i) => {
+              const selected = i === cursor;
+              const title = r.customTitle || r.prompt || '(untitled)';
+              const when = r.startTime ? r.startTime.slice(0, 10) : '';
+              return (
+                <box key={r.sessionId} flexDirection="row">
+                  <text fg={selected ? C.accent : C.dim}>
+                    {selected ? '› ' : '  '}
+                  </text>
+                  <text fg={selected ? C.accent : C.text}>
+                    {title.length > 40 ? `${title.slice(0, 40)}…` : title}
+                  </text>
+                  <text fg={C.dim}>{`  ${r.sessionId.slice(0, 8)}${
+                    when ? ` · ${when}` : ''
+                  }`}</text>
+                </box>
+              );
+            })
+          )}
+        </scrollbox>
+      </box>
     </Shell>
   );
 }

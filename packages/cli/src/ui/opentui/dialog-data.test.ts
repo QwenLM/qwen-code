@@ -20,13 +20,18 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
-import { AuthType } from '@qwen-code/qwen-code-core';
-import type { AvailableModel, Config } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  MCPServerStatus,
+  type AvailableModel,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { themeManager } from '../themes/theme-manager.js';
 import {
   addPermissionRule,
+  applyMcpServerAction,
   applyModelSelection,
   applyThemeSelection,
   buildExtensionRows,
@@ -34,8 +39,11 @@ import {
   buildModelEntries,
   buildPermissionsData,
   deletePermissionRule,
+  enrichMcpOAuthState,
+  getMcpServerResources,
   getMcpServerTools,
 } from './dialog-data.js';
+import type { McpServerInfo } from './dialogs-mcp.js';
 import {
   buildModelSelectionKey,
   type OpenTuiModelEntry,
@@ -954,5 +962,244 @@ describe('mcp and extension feeds', () => {
       { key: 'ext-one', label: 'ext-one', meta: '/x/ext-one', enabled: true },
       { key: 'ext-two', label: 'ext-two', meta: '/x/ext-two', enabled: false },
     ]);
+  });
+
+  it('feeds the resource list for one server', () => {
+    const config = stubConfig({
+      getResourceRegistry: (() => ({
+        getResourcesByServer: (name: string) =>
+          name === 'docs'
+            ? [{ uri: 'file:///a.md', name: 'a', title: 'Doc A' }]
+            : [],
+      })) as unknown as Config['getResourceRegistry'],
+    } as Partial<Config>);
+    expect(getMcpServerResources(config, 'docs')).toEqual([
+      { uri: 'file:///a.md', name: 'a', title: 'Doc A' },
+    ]);
+    expect(getMcpServerResources(config, 'other')).toEqual([]);
+  });
+});
+
+describe('MCP OAuth enrichment (real token state)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function serverInfo(name: string): McpServerInfo {
+    return {
+      name,
+      status: MCPServerStatus.DISCONNECTED,
+      source: 'user',
+      toolCount: 0,
+      invalidToolCount: 0,
+      promptCount: 0,
+      resourceCount: 0,
+      isDisabled: false,
+      hasOAuthTokens: false,
+      requiresAuth: false,
+    };
+  }
+
+  it('reads hasOAuthTokens from the token storage and derives requiresAuth', async () => {
+    const { MCPOAuthTokenStorage } = await import('@qwen-code/qwen-code-core');
+    vi.spyOn(
+      MCPOAuthTokenStorage.prototype,
+      'getCredentials',
+    ).mockImplementation(async (name: string) =>
+      name === 'with-token' ? ({} as never) : null,
+    );
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        'with-token': { oauth: { enabled: true } },
+        'no-token-oauth': { oauth: { enabled: true } },
+        plain: {},
+      })) as unknown as Config['getMcpServers'],
+    } as Partial<Config>);
+    const enriched = await enrichMcpOAuthState(config, [
+      serverInfo('with-token'),
+      serverInfo('no-token-oauth'),
+      serverInfo('plain'),
+    ]);
+    expect(enriched[0]).toMatchObject({
+      hasOAuthTokens: true,
+      requiresAuth: false,
+    });
+    expect(enriched[1]).toMatchObject({
+      hasOAuthTokens: false,
+      requiresAuth: true,
+    });
+    expect(enriched[2]).toMatchObject({
+      hasOAuthTokens: false,
+      requiresAuth: false,
+    });
+  });
+});
+
+vi.mock('../../config/mcpApprovals.js', () => ({
+  loadMcpApprovals: () => ({ setState: vi.fn() }),
+}));
+
+describe('applyMcpServerAction (real server actions)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function serverInfo(overrides: Partial<McpServerInfo>): McpServerInfo {
+    return {
+      name: 'srv',
+      status: MCPServerStatus.DISCONNECTED,
+      source: 'user',
+      toolCount: 0,
+      invalidToolCount: 0,
+      promptCount: 0,
+      resourceCount: 0,
+      isDisabled: false,
+      hasOAuthTokens: false,
+      requiresAuth: false,
+      ...overrides,
+    };
+  }
+
+  it('reconnect rediscovers the server tools', async () => {
+    const discoverToolsForServer = vi.fn(async () => {});
+    const config = stubConfig({
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({}),
+      'reconnect',
+    );
+    expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
+    expect(result.changed).toBe(true);
+  });
+
+  it('disable writes mcp.excluded to the user scope and disables the server', async () => {
+    const disableMcpServer = vi.fn(async () => {});
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: {},
+      })) as unknown as Config['getMcpServers'],
+      getToolRegistry: (() => ({
+        disableMcpServer,
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings, written } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({}),
+      'toggle-disable',
+    );
+    expect(disableMcpServer).toHaveBeenCalledWith('srv');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'mcp.excluded',
+      value: ['srv'],
+    });
+    expect(result.message).toContain('Disabled');
+  });
+
+  it('project-scoped servers disable into the workspace scope', async () => {
+    const disableMcpServer = vi.fn(async () => {});
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: { scope: 'project' },
+      })) as unknown as Config['getMcpServers'],
+      getToolRegistry: (() => ({
+        disableMcpServer,
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings, written } = createFakeSettings();
+    await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ source: 'project' }),
+      'toggle-disable',
+    );
+    expect(
+      written.some(
+        (w) => w.scope === SettingScope.Workspace && w.key === 'mcp.excluded',
+      ),
+    ).toBe(true);
+  });
+
+  it('enable removes the exclusion and rediscovers', async () => {
+    const discoverToolsForServer = vi.fn(async () => {});
+    const setExcludedMcpServers = vi.fn();
+    const config = stubConfig({
+      getMcpServers: (() => ({
+        srv: {},
+      })) as unknown as Config['getMcpServers'],
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+      getExcludedMcpServers: (() => [
+        'srv',
+      ]) as unknown as Config['getExcludedMcpServers'],
+      setExcludedMcpServers,
+    } as Partial<Config>);
+    const { settings, written } = createFakeSettings({
+      user: { mcp: { excluded: ['srv'] } } as Settings,
+    });
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ isDisabled: true }),
+      'toggle-disable',
+    );
+    expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
+    expect(setExcludedMcpServers).toHaveBeenCalledWith([]);
+    expect(
+      written.some(
+        (w) => w.key === 'mcp.excluded' && (w.value as string[]).length === 0,
+      ),
+    ).toBe(true);
+    expect(result.message).toContain('Enabled');
+  });
+
+  it('clear-auth deletes stored tokens and disconnects', async () => {
+    const { MCPOAuthTokenStorage } = await import('@qwen-code/qwen-code-core');
+    const deleteCredentials = vi
+      .spyOn(MCPOAuthTokenStorage.prototype, 'deleteCredentials')
+      .mockResolvedValue(undefined);
+    const disconnectServer = vi.fn(async () => {});
+    const config = stubConfig({
+      getToolRegistry: (() => ({
+        disconnectServer,
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ hasOAuthTokens: true }),
+      'clear-auth',
+    );
+    expect(deleteCredentials).toHaveBeenCalledWith('srv');
+    expect(disconnectServer).toHaveBeenCalledWith('srv');
+    expect(result.changed).toBe(true);
+  });
+
+  it('reports failures instead of throwing', async () => {
+    const config = stubConfig({
+      getToolRegistry: (() => ({
+        discoverToolsForServer: async () => {
+          throw new Error('boom');
+        },
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({}),
+      'reconnect',
+    );
+    expect(result.message).toContain('boom');
   });
 });

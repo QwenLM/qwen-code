@@ -36,7 +36,6 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
-import { clearScreen } from '../../utils/stdioHelpers.js';
 
 /** Resolution of a shell-command confirmation dialog (ink ShellConfirmation). */
 export interface ShellConfirmationResolution {
@@ -102,8 +101,11 @@ export interface OpenTuiCommandServices {
 /**
  * Builds the `CommandContext` exactly like the ink processor's
  * `commandContext` useMemo (slashCommandProcessor.ts):
- *  - `ui.clear()` = cancelBtw → clearPendingState → clearItems → clearScreen
- *    → refreshStatic → setSessionName(null)
+ *  - `ui.clear()` = cancelBtw → clearPendingState → clearItems →
+ *    refreshStatic → setSessionName(null). The ink `clearScreen()` step is
+ *    intentionally skipped: the OpenTUI renderer owns the screen, and
+ *    `clearItems` already performs the renderer-level clear (writing raw
+ *    ANSI here would fight the cell-diff painter — audit 01 G-20).
  *  - a live `history` getter backed by the host
  *  - a fallback `ExtensionRefreshState` when the backend has none
  */
@@ -130,7 +132,6 @@ export function createOpenTuiCommandContext(
         host.cancelBtw();
         host.clearPendingState();
         host.clearItems();
-        clearScreen();
         host.refreshStatic();
         host.setSessionName(null);
       },

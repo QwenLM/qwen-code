@@ -13,26 +13,56 @@
  * translation layer between the two:
  *
  *  - `projectCommandItem` maps one ink command history item onto the neutral
- *    stream event the backend folds into its chat history;
+ *    stream event the backend folds into its chat history — the five basic
+ *    message kinds plus the special transcript items (about/tools/stats/
+ *    compression/summary/insight/goals/context/doctor/mcp/extensions/skills/
+ *    memory_saved/quit/btw) projected to text (item-projection.ts);
  *  - `resolveDispatchOutcome` decides what the backend does for one
  *    `OpenTuiDispatchOutcome` (open a mounted dialog, submit to the live
- *    client, quit, or report an explicitly unsupported capability);
+ *    client, schedule a client-initiated tool, quit, or report an explicitly
+ *    unsupported capability);
  *  - `resolveDialogRequest` classifies every dialog kind against the
  *    already-ported dialog family — unsupported kinds are represented
  *    explicitly, never silently dropped;
  *  - `createBackendCommandHost` builds the concrete `OpenTuiCommandHost` the
- *    dispatcher runs against, wired to the backend's event sink.
+ *    dispatcher runs against, wired to the backend's event sinks. Session
+ *    switching (/resume, /branch), confirmations, pending state, and the
+ *    session stats are REAL when the backend supplies the matching sinks /
+ *    options; without them (demo mode, unit tests) they report themselves
+ *    explicitly instead of pretending to succeed.
  */
 
-import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  ToolConfirmationOutcome,
+  type Config,
+  type SessionListItem,
+} from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
-import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import type {
+  HistoryItem,
+  HistoryItemBtw,
+  HistoryItemWithoutId,
+} from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
-import type { OpenTuiCommandHost } from './commands-context.js';
+import type {
+  OpenTuiCommandHost,
+  ShellConfirmationResolution,
+} from './commands-context.js';
 import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { ModelDialogMode } from './dialogs-model.js';
+import {
+  extractPromptText,
+  projectSpecialItemText,
+  type ItemProjectionContext,
+} from './item-projection.js';
+import {
+  handleBranchSession,
+  handleResumeSession,
+  type SessionSwitchHost,
+} from './session-switch.js';
 
 /** Dialogs the already-ported OpenTUI dialog family can mount. */
 export type MountedDialog =
@@ -52,7 +82,7 @@ export type MountedDialog =
   | { dialog: 'auth' }
   | { dialog: 'trust' }
   | { dialog: 'delete' }
-  | { dialog: 'resume' }
+  | { dialog: 'resume'; matchedSessions?: SessionListItem[] }
   | { dialog: 'branch' }
   | { dialog: 'hooks' }
   | { dialog: 'rewind' }
@@ -89,16 +119,31 @@ export type BackendAction =
       onComplete?: () => Promise<void>;
       modelOverride?: string;
     }
-  | { kind: 'quit' }
+  /**
+   * A client-initiated tool call (/restore, /setup-github). The backend
+   * schedules it through the real CoreToolScheduler (client-tool-run.ts);
+   * the result never feeds the model back (ink parity).
+   */
+  | {
+      kind: 'schedule_tool';
+      toolName: string;
+      toolArgs: Record<string, unknown>;
+    }
+  /** Quit; `messages` carry the farewell (session summary) to render first. */
+  | { kind: 'quit'; messages: HistoryItem[] }
   /** A capability this renderer does not implement yet. */
   | { kind: 'unsupported'; message: string };
 
 /**
  * Projects one ink command history item onto the neutral stream. Returns null
- * for item kinds the chat transcript does not render (dialog payloads, etc.).
+ * for item kinds the chat transcript does not render (dialog payloads, tool
+ * groups, …). `ctx` supplies the runtime state the special items read in ink
+ * (session stats, extensions, MCP status); without it they still project
+ * with service-level fallbacks where possible.
  */
 export function projectCommandItem(
   item: HistoryItemWithoutId,
+  ctx?: ItemProjectionContext,
 ): OpenTuiStreamEvent | null {
   switch (item.type) {
     case 'user':
@@ -108,8 +153,10 @@ export function projectCommandItem(
     case 'warning':
     case 'error':
       return { type: 'text', delta: item.text };
-    default:
-      return null;
+    default: {
+      const text = projectSpecialItemText(item, ctx ?? {});
+      return text ? { type: 'text', delta: text } : null;
+    }
   }
 }
 
@@ -165,7 +212,15 @@ export function resolveDialogRequest(
     case 'delete':
       return { kind: 'mount', dialog: { dialog: 'delete' } };
     case 'resume':
-      return { kind: 'mount', dialog: { dialog: 'resume' } };
+      return {
+        kind: 'mount',
+        dialog: {
+          dialog: 'resume',
+          ...(request.matchedSessions
+            ? { matchedSessions: request.matchedSessions }
+            : {}),
+        },
+      };
     case 'branch':
       return { kind: 'mount', dialog: { dialog: 'branch' } };
     case 'hooks':
@@ -214,11 +269,12 @@ export function resolveDispatchOutcome(
           : {}),
       };
     case 'quit':
-      return { kind: 'quit' };
+      return { kind: 'quit', messages: outcome.messages };
     case 'schedule_tool':
       return {
-        kind: 'unsupported',
-        message: `Tool scheduling for '${outcome.toolName}' is not yet available in the OpenTUI renderer.`,
+        kind: 'schedule_tool',
+        toolName: outcome.toolName,
+        toolArgs: outcome.toolArgs,
       };
     default: {
       const unhandled: never = outcome;
@@ -239,6 +295,31 @@ export interface BackendCommandSinks {
   setProcessing: (processing: boolean) => void;
   /** Rebuilds the command registry (commands that mutate the surface). */
   reloadCommands?: () => void;
+  /**
+   * Replaces the visible transcript with one replay (resume/branch UI swap).
+   * The backend folds the events in a single commit (the mount-time replay
+   * showed that burst setState drops items).
+   */
+  resetTranscript?: (events: OpenTuiStreamEvent[]) => void;
+  /** UI-side session reset (SessionStats/session-id refresh; /clear). */
+  startNewSession?: (sessionId: string) => void;
+  setSessionName?: (name: string | null) => void;
+  setDebugMessage?: (message: string) => void;
+  setGeminiMdFileCount?: (count: number) => void;
+  /** Real session stats (uiTelemetryService + real session start time). */
+  getSessionStats?: () => SessionStatsState;
+  /** Real shell-command confirmation dialog (y / always / n). */
+  presentShellConfirmation?: (
+    commands: readonly string[],
+  ) => Promise<ShellConfirmationResolution>;
+  /** Real yes/no action confirmation dialog. */
+  presentActionConfirmation?: (promptText: string) => Promise<boolean>;
+}
+
+/** Product context the backend lends the host for real session operations. */
+export interface BackendCommandHostOptions {
+  config?: Config | null;
+  settings?: LoadedSettings;
 }
 
 /**
@@ -249,19 +330,34 @@ export interface BackendCommandSinks {
  */
 export function createBackendCommandHost(
   sinks: BackendCommandSinks,
+  options?: BackendCommandHostOptions,
 ): OpenTuiCommandHost {
   const history: HistoryItem[] = [];
   let nextId = 0;
   const sessionShellAllowlist = new Set<string>();
+  let pendingItem: HistoryItemWithoutId | null = null;
+  let btwItem: HistoryItemBtw | null = null;
+  const btwAbortControllerRef: { current: AbortController | null } = {
+    current: null,
+  };
+  // Vim keybindings are not implemented in the OpenTUI renderer; the state
+  // tracks reality (always off) so /vim reports faithfully.
+  const vimEnabled = false;
   const emit = (text: string) =>
     sinks.applyEvent({ type: 'text', delta: text });
+
+  const projectionContext = (): ItemProjectionContext => ({
+    config: options?.config ?? null,
+    stats: sinks.getSessionStats?.(),
+    extensionsUpdateState: host.extensionsUpdateState,
+  });
 
   const host: OpenTuiCommandHost = {
     getHistory: () => history,
     addItem: (item, timestamp) => {
       const id = nextId++;
       history.push({ ...item, id, timestamp } as HistoryItem);
-      const event = projectCommandItem(item);
+      const event = projectCommandItem(item, projectionContext());
       if (event) sinks.applyEvent(event);
       return id;
     },
@@ -279,37 +375,97 @@ export function createBackendCommandHost(
     loadHistory: (items) => {
       history.length = 0;
       history.push(...items);
+      // Commands that bulk-reload history (e.g. /restore re-instating the
+      // rewound transcript) expect it to become visible. Project the items
+      // as one transcript commit; session switches override this right
+      // after with the authoritative replay.
+      if (sinks.resetTranscript) {
+        const events: OpenTuiStreamEvent[] = [];
+        for (const item of items) {
+          const event = projectCommandItem(item, projectionContext());
+          if (event) events.push(event);
+        }
+        events.push({ type: 'done' });
+        sinks.resetTranscript(events);
+      }
     },
     refreshStatic: () => {},
-    clearPendingState: () => {},
-    cancelBtw: () => {},
-    btwItem: null,
-    setBtwItem: () => {},
-    btwAbortControllerRef: { current: null },
-    pendingItem: null,
-    setPendingItem: () => {},
-    setDebugMessage: () => {},
-    toggleVimEnabled: async () => false,
-    setGeminiMdFileCount: () => {},
+    clearPendingState: () => {
+      pendingItem = null;
+    },
+    cancelBtw: () => {
+      btwAbortControllerRef.current?.abort();
+      btwAbortControllerRef.current = null;
+      btwItem = null;
+    },
+    get btwItem() {
+      return btwItem;
+    },
+    setBtwItem: (item) => {
+      btwItem = item;
+      // Make the side-question answer visible in the transcript once it
+      // completes (ink pins it in a bottom box; the pending placeholder is
+      // not surfaced — only the finished answer is).
+      if (item && !item.btw.isPending) {
+        const event = projectCommandItem(
+          { type: 'btw', btw: item.btw },
+          projectionContext(),
+        );
+        if (event) sinks.applyEvent(event);
+      }
+    },
+    btwAbortControllerRef,
+    get pendingItem() {
+      return pendingItem;
+    },
+    setPendingItem: (item) => {
+      pendingItem = item;
+      if (item) {
+        // Make the pending work visible (compression guard parity also
+        // requires the item to be non-null while it runs).
+        const event = projectCommandItem(item, projectionContext());
+        if (event) sinks.applyEvent(event);
+      }
+    },
+    setDebugMessage: (message) => {
+      if (sinks.setDebugMessage) {
+        sinks.setDebugMessage(message);
+      } else if (message) {
+        emit(message);
+      }
+    },
+    // Faithful: vim mode does not exist in this renderer, so the toggle
+    // never enables it and reports the actual (off) state. The dispatcher
+    // replaces the resulting message with an explicit unsupported notice.
+    toggleVimEnabled: async () => vimEnabled,
+    setGeminiMdFileCount: (count) => sinks.setGeminiMdFileCount?.(count),
     reloadCommands: () => sinks.reloadCommands?.(),
-    setSessionName: () => {},
+    setSessionName: (name) => sinks.setSessionName?.(name),
     isIdle: () => sinks.isIdle(),
     extensionsUpdateState: new Map(),
     dispatchExtensionStateUpdate: () => {},
     addConfirmUpdateExtensionRequest: () => {},
-    sessionStats: {
-      sessionId: '',
-      sessionStartTime: new Date(),
-      metrics: {},
-      lastPromptTokenCount: 0,
-      promptCount: 0,
-    } as unknown as SessionStatsState,
+    get sessionStats() {
+      const live = sinks.getSessionStats?.();
+      if (live) return live;
+      return {
+        sessionId: '',
+        sessionStartTime: new Date(),
+        metrics: {},
+        lastPromptTokenCount: 0,
+        promptCount: 0,
+      } as unknown as SessionStatsState;
+    },
     sessionShellAllowlist,
     addSessionShellAllowlist: (commands) => {
       for (const command of commands) sessionShellAllowlist.add(command);
     },
+    startNewSession: (sessionId) => sinks.startNewSession?.(sessionId),
     setIsProcessing: (processing) => sinks.setProcessing(processing),
     presentShellConfirmation: async (commands) => {
+      if (sinks.presentShellConfirmation) {
+        return sinks.presentShellConfirmation(commands);
+      }
       emit(
         `Shell command confirmation (${[...commands].join(', ')}) is not yet ` +
           'available in the OpenTUI renderer; the command was cancelled.',
@@ -317,7 +473,12 @@ export function createBackendCommandHost(
       return { outcome: ToolConfirmationOutcome.Cancel };
     },
     presentActionConfirmation: async (prompt) => {
-      const text = typeof prompt === 'string' ? prompt : '';
+      const text = extractPromptText(prompt);
+      if (sinks.presentActionConfirmation) {
+        return sinks.presentActionConfirmation(
+          text || 'Do you want to proceed?',
+        );
+      }
       emit(
         `Action confirmation${text ? ` (${text})` : ''} is not yet available ` +
           'in the OpenTUI renderer; the action was cancelled.',
@@ -325,15 +486,70 @@ export function createBackendCommandHost(
       return false;
     },
     handleResume: async (sessionId) => {
+      if (options?.config && options.settings) {
+        await handleResumeSession(
+          buildSessionSwitchHost(sinks, options.config, options.settings, {
+            addItem: (item, timestamp) => host.addItem(item, timestamp),
+            clearItems: () => host.clearItems(),
+            loadHistory: (items) => host.loadHistory(items),
+            clearPendingState: () => host.clearPendingState(),
+          }),
+          sessionId,
+        );
+        return;
+      }
       emit(
         `Resuming session ${sessionId} is not yet available in the OpenTUI renderer.`,
       );
     },
     handleBranch: async (name) => {
+      if (options?.config && options.settings) {
+        await handleBranchSession(
+          buildSessionSwitchHost(sinks, options.config, options.settings, {
+            addItem: (item, timestamp) => host.addItem(item, timestamp),
+            clearItems: () => host.clearItems(),
+            loadHistory: (items) => host.loadHistory(items),
+            clearPendingState: () => host.clearPendingState(),
+          }),
+          name,
+        );
+        return;
+      }
       emit(
         `Session branching${name ? ` ('/${name}')` : ''} is not yet available in the OpenTUI renderer.`,
       );
     },
   };
   return host;
+}
+
+/** Adapts the backend sinks to the session-switch host surface. */
+function buildSessionSwitchHost(
+  sinks: BackendCommandSinks,
+  config: Config,
+  settings: LoadedSettings,
+  historyOps: {
+    addItem(item: HistoryItemWithoutId, timestamp: number): number;
+    clearItems(): void;
+    loadHistory(items: HistoryItem[]): void;
+    clearPendingState(): void;
+  },
+): SessionSwitchHost {
+  return {
+    config,
+    settings,
+    addItem: historyOps.addItem,
+    clearItems: historyOps.clearItems,
+    loadHistory: historyOps.loadHistory,
+    startNewSession: (sessionId) => sinks.startNewSession?.(sessionId),
+    setSessionName: (name) => sinks.setSessionName?.(name),
+    clearPendingState: historyOps.clearPendingState,
+    resetTranscript: (events) => {
+      if (sinks.resetTranscript) {
+        sinks.resetTranscript(events);
+        return;
+      }
+      for (const event of events) sinks.applyEvent(event);
+    },
+  };
 }

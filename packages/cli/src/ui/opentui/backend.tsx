@@ -33,8 +33,11 @@ import {
 import { formatDuration } from '../utils/displayUtils.js';
 import {
   ApprovalMode,
+  Logger,
+  MessageSenderType,
   ToolConfirmationOutcome,
   type Config,
+  type ToolCallConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import {
@@ -62,10 +65,18 @@ import {
 import { OpenTuiSlashGateway, type SlashSettlement } from './slash-gateway.js';
 import {
   createBackendCommandHost,
+  projectCommandItem,
   resolveDispatchOutcome,
   type BackendAction,
   type MountedDialog,
 } from './command-bridge.js';
+import type { ShellConfirmationResolution } from './commands-context.js';
+import { clientToolEvents } from './client-tool-run.js';
+import {
+  isRewindableTurn,
+  type RestoreOption,
+  type RewindTurn,
+} from './session-rewind.js';
 import { OpenTuiDialogMount } from './dialog-mount.js';
 import { loadSettings } from '../../config/settings.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -756,26 +767,106 @@ function App({
     streamingRef.current = streaming;
   }, [streaming]);
 
+  // ── host-provided session surfaces (audit 01 G-10/G-12/G-21, 05 G-08) ──
+  const sessionStartRef = useRef<Date>(new Date());
+  const promptCountRef = useRef(0);
+  const loggerRef = useRef<Logger | null>(null);
+  const [sessionName, setSessionNameState] = useState<string | null>(null);
+  const [debugMessage, setDebugMessageState] = useState<string | null>(null);
+  const [mdFileCount, setMdFileCount] = useState(0);
+  const [diskHistory, setDiskHistory] = useState<string[]>([]);
+  // Real confirmation dialogs for confirm_action / confirm_shell_commands
+  // command flows (/init overwrite, /cd untrusted dir, extension commands).
+  const [actionConfirmReq, setActionConfirmReq] = useState<{
+    prompt: string;
+    resolve: (confirmed: boolean) => void;
+  } | null>(null);
+  const [shellConfirmReq, setShellConfirmReq] = useState<{
+    commands: string[];
+    resolve: (resolution: ShellConfirmationResolution) => void;
+  } | null>(null);
+  const [shellConfirmSel, setShellConfirmSel] = useState(0);
+
+  // Disk-backed input history (ink AppContainer getPreviousUserMessages):
+  // one Logger per live config, merged with the current session below.
+  useEffect(() => {
+    if (!config) return;
+    let cancelled = false;
+    const logger = new Logger(config.getSessionId(), config.storage);
+    void logger
+      .initialize()
+      .then(() => {
+        if (cancelled) return;
+        loggerRef.current = logger;
+        return logger.getPreviousUserMessages();
+      })
+      .then((messages) => {
+        if (!cancelled && messages) setDiskHistory(messages);
+      })
+      .catch(() => {
+        /* no project log yet */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config]);
+
   const dispatcherRef = useRef<OpenTuiSlashDispatcher | null>(null);
   const gatewayRef = useRef<OpenTuiSlashGateway | null>(null);
   if (!gatewayRef.current) gatewayRef.current = new OpenTuiSlashGateway();
   const gateway = gatewayRef.current;
   const host = useMemo(
     () =>
-      createBackendCommandHost({
-        applyEvent,
-        clearItems: () => setItems([]),
-        isIdle: () => !streamingRef.current,
-        setProcessing: (processing) => {
-          commandProcessingRef.current = processing;
-          setCommandProcessing(processing);
+      createBackendCommandHost(
+        {
+          applyEvent,
+          clearItems: () => setItems([]),
+          isIdle: () => !streamingRef.current,
+          setProcessing: (processing) => {
+            commandProcessingRef.current = processing;
+            setCommandProcessing(processing);
+          },
+          reloadCommands: () =>
+            void dispatcherRef.current
+              ?.loadCommands()
+              .then(() => setCommands(dispatcherRef.current?.commands ?? [])),
+          // Single-commit transcript replacement (resume/branch UI swap).
+          resetTranscript: (events) =>
+            setItems(
+              events.reduce<LiveHistoryItem[]>(
+                (acc, ev) => foldLiveEvent(acc, ev),
+                [],
+              ),
+            ),
+          startNewSession: () => {
+            sessionStartRef.current = new Date();
+            promptCountRef.current = 0;
+            setSessionNameState(null);
+            setDebugMessageState(null);
+          },
+          setSessionName: (name) => setSessionNameState(name),
+          setDebugMessage: (message) => setDebugMessageState(message || null),
+          setGeminiMdFileCount: (count) => setMdFileCount(count),
+          getSessionStats: () => ({
+            sessionId: config?.getSessionId?.() ?? '',
+            sessionStartTime: sessionStartRef.current,
+            metrics: uiTelemetryService.getMetrics(),
+            lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+            promptCount: promptCountRef.current,
+          }),
+          presentShellConfirmation: (commands) =>
+            new Promise<ShellConfirmationResolution>((resolve) => {
+              setShellConfirmSel(0);
+              setShellConfirmReq({ commands: [...commands], resolve });
+            }),
+          presentActionConfirmation: (promptText) =>
+            new Promise<boolean>((resolve) => {
+              setActionConfirmReq({ prompt: promptText, resolve });
+            }),
         },
-        reloadCommands: () =>
-          void dispatcherRef.current
-            ?.loadCommands()
-            .then(() => setCommands(dispatcherRef.current?.commands ?? [])),
-      }),
-    [applyEvent],
+        { config: config ?? null, settings },
+      ),
+    [applyEvent, config, settings],
   );
 
   useEffect(() => {
@@ -783,7 +874,10 @@ function App({
     createOpenTuiSlashDispatcher(host, {
       config: config ?? null,
       settings,
-      logger: null,
+      // Real logger once initialized (cross-session prompt history).
+      get logger() {
+        return loggerRef.current;
+      },
     })
       .then((dispatcher) => {
         if (cancelled) return;
@@ -816,7 +910,19 @@ function App({
   useEffect(() => {
     if (config && !events) {
       const replay = resumeEventsFromConfig(config);
-      if (replay) for (const ev of replay) applyEvent(ev);
+      if (replay && replay.length > 0) {
+        // --resume/--continue (audit 05 G-01): fold the whole transcript in
+        // ONE commit. Bursting hundreds of setItems inside the mount effect
+        // dropped every item on the concurrent root; the demo/live paths
+        // deliver across frames/ticks and were never affected.
+        setItems(
+          replay.reduce<LiveHistoryItem[]>(
+            (acc, ev) => foldLiveEvent(acc, ev),
+            [],
+          ),
+        );
+        setStreaming(false);
+      }
       return; // live mode: wait for user input
     }
     setItems(
@@ -933,6 +1039,58 @@ function App({
       } else if (key.name === 'n' || key.name === 'escape') {
         confirmReq.resolve(false);
         setConfirmReq(null);
+      }
+      return;
+    }
+    if (actionConfirmReq) {
+      // confirm_action parity (ConsentPrompt): Yes / No.
+      if (key.name === 'y') {
+        actionConfirmReq.resolve(true);
+        setActionConfirmReq(null);
+      } else if (key.name === 'n' || key.name === 'escape') {
+        actionConfirmReq.resolve(false);
+        setActionConfirmReq(null);
+      }
+      return;
+    }
+    if (shellConfirmReq) {
+      // confirm_shell_commands parity (ShellConfirmationDialog): once /
+      // always / cancel. y/a/n shortcuts + ↑↓ and Enter.
+      const options = [
+        ToolConfirmationOutcome.ProceedOnce,
+        ToolConfirmationOutcome.ProceedAlways,
+        ToolConfirmationOutcome.Cancel,
+      ];
+      const resolveWith = (outcome: ToolConfirmationOutcome) => {
+        shellConfirmReq.resolve(
+          outcome === ToolConfirmationOutcome.Cancel
+            ? { outcome }
+            : { outcome, approvedCommands: shellConfirmReq.commands },
+        );
+        setShellConfirmReq(null);
+      };
+      if (key.name === 'y') {
+        resolveWith(ToolConfirmationOutcome.ProceedOnce);
+        return;
+      }
+      if (key.name === 'a') {
+        resolveWith(ToolConfirmationOutcome.ProceedAlways);
+        return;
+      }
+      if (key.name === 'n' || key.name === 'escape') {
+        resolveWith(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+      if (key.name === 'up') {
+        setShellConfirmSel((s) => Math.max(0, s - 1));
+        return;
+      }
+      if (key.name === 'down') {
+        setShellConfirmSel((s) => Math.min(options.length - 1, s + 1));
+        return;
+      }
+      if (key.name === 'return') {
+        resolveWith(options[shellConfirmSel] ?? ToolConfirmationOutcome.Cancel);
       }
       return;
     }
@@ -1074,9 +1232,68 @@ function App({
     }
   });
 
-  const userPrompts = items
-    .filter((i) => i.kind === 'user')
-    .map((i) => (i.kind === 'user' ? i.text : ''));
+  // Cross-session input history (ink AppContainer getPreviousUserMessages):
+  // current-session prompts (newest first) + disk history (newest first),
+  // deduped newest-wins, then flipped oldest-first for the ↑/Ctrl+R walk.
+  const userPrompts = useMemo(() => {
+    const current = items
+      .filter((i) => i.kind === 'user')
+      .map((i) => (i.kind === 'user' ? i.text : ''));
+    const combined = [...[...current].reverse(), ...diskHistory];
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const message of combined) {
+      if (!message || seen.has(message)) continue;
+      seen.add(message);
+      deduped.push(message);
+    }
+    return deduped.reverse();
+  }, [items, diskHistory]);
+
+  // Scheduler awaiting_approval parity, shared by the live turn and the
+  // client-initiated command tools (/restore, /setup-github).
+  const handleSchedulerWaitingCall = useCallback(
+    (call: {
+      name: string;
+      confirmationDetails: ToolCallConfirmationDetails;
+    }) => {
+      const { name, confirmationDetails } = call;
+      if (confirmationDetails.type === 'ask_user_question') {
+        const details = confirmationDetails;
+        qAnswersRef.current = {};
+        setQNav({
+          q: 0,
+          opt: 0,
+          other: false,
+          otherText: '',
+          multi: [],
+        });
+        setQuestionReq({
+          questions: details.questions,
+          resolve: (answers) => {
+            void details.onConfirm(
+              answers
+                ? ToolConfirmationOutcome.ProceedOnce
+                : ToolConfirmationOutcome.Cancel,
+              answers ? { answers } : undefined,
+            );
+          },
+        });
+      } else {
+        setConfirmReq({
+          names: `${name} needs approval`,
+          resolve: (ok) => {
+            void confirmationDetails.onConfirm(
+              ok
+                ? ToolConfirmationOutcome.ProceedOnce
+                : ToolConfirmationOutcome.Cancel,
+            );
+          },
+        });
+      }
+    },
+    [],
+  );
 
   const startLiveTurn = useCallback(
     (
@@ -1115,41 +1332,7 @@ function App({
                   }
                 : {}),
               drainSteering,
-              onWaitingCall: ({ name, confirmationDetails }) => {
-                if (confirmationDetails.type === 'ask_user_question') {
-                  const details = confirmationDetails;
-                  qAnswersRef.current = {};
-                  setQNav({
-                    q: 0,
-                    opt: 0,
-                    other: false,
-                    otherText: '',
-                    multi: [],
-                  });
-                  setQuestionReq({
-                    questions: details.questions,
-                    resolve: (answers) => {
-                      void details.onConfirm(
-                        answers
-                          ? ToolConfirmationOutcome.ProceedOnce
-                          : ToolConfirmationOutcome.Cancel,
-                        answers ? { answers } : undefined,
-                      );
-                    },
-                  });
-                } else {
-                  setConfirmReq({
-                    names: `${name} needs approval`,
-                    resolve: (ok) => {
-                      void confirmationDetails.onConfirm(
-                        ok
-                          ? ToolConfirmationOutcome.ProceedOnce
-                          : ToolConfirmationOutcome.Cancel,
-                      );
-                    },
-                  });
-                }
-              },
+              onWaitingCall: handleSchedulerWaitingCall,
             },
           ))
             applyEvent(ev);
@@ -1180,9 +1363,199 @@ function App({
         }
       })();
     },
-    [config, applyEvent, drainSteering],
+    [config, applyEvent, drainSteering, handleSchedulerWaitingCall],
   );
   startLiveTurnRef.current = startLiveTurn;
+
+  /** Prompt logger (disk history feed) + telemetry prompt count. */
+  const logSubmittedPrompt = useCallback((text: string) => {
+    promptCountRef.current += 1;
+    try {
+      loggerRef.current?.logMessage(MessageSenderType.USER, text);
+    } catch {
+      /* best-effort history */
+    }
+  }, []);
+
+  /** One-shot client-initiated tool run (schedule_tool: /restore, …). */
+  const scheduleClientTool = useCallback(
+    (toolName: string, toolArgs: Record<string, unknown>) => {
+      if (!config) {
+        applyEvent({
+          type: 'text',
+          delta:
+            'Tool scheduling requires a live client, which is not available in demo mode.',
+        });
+        applyEvent({ type: 'done' });
+        return;
+      }
+      liveAbortRef.current?.abort();
+      const controller = new AbortController();
+      liveAbortRef.current = controller;
+      setStreaming(true);
+      void (async () => {
+        try {
+          for await (const ev of clientToolEvents(
+            config,
+            toolName,
+            toolArgs,
+            controller.signal,
+            {
+              onWaitingCall: ({ name, confirmationDetails }) =>
+                handleSchedulerWaitingCall({ name, confirmationDetails }),
+            },
+          )) {
+            applyEvent(ev);
+          }
+        } catch (err) {
+          if (!controller.signal.aborted) {
+            applyEvent({
+              type: 'text',
+              delta: `\n[tool error] ${String(err)}`,
+            });
+          }
+          setItems((prev) =>
+            settleOpenTools(
+              prev,
+              controller.signal.aborted ? 'interrupted' : 'error',
+            ),
+          );
+          applyEvent({ type: 'done' });
+        } finally {
+          if (liveAbortRef.current === controller) liveAbortRef.current = null;
+          setStreaming(false);
+        }
+      })();
+    },
+    [config, applyEvent, handleSchedulerWaitingCall],
+  );
+
+  // ── /rewind (audit 01 G-8 / 05 G-07): data + confirm handler ────────────
+  const rewindTurns = useMemo<RewindTurn[]>(
+    () =>
+      items
+        .filter((i) => i.kind === 'user')
+        .map((i) => ({ id: i.id, text: i.kind === 'user' ? i.text : '' })),
+    [items],
+  );
+
+  const handleRewind = useCallback(
+    async (turn: RewindTurn, option: RestoreOption) => {
+      if (!config || option === 'cancel') return;
+      try {
+        const needsConversation =
+          option === 'conversation' || option === 'both';
+        // File restore first ('both' validates conversation below).
+        let hasRestoreFailure = false;
+        if (option === 'code' || option === 'both') {
+          const fileHistoryService = config.getFileHistoryService?.();
+          if (fileHistoryService && turn.promptId) {
+            const result = await fileHistoryService.rewind(
+              turn.promptId,
+              option === 'both',
+            );
+            hasRestoreFailure = result.filesFailed.length > 0;
+            applyEvent({
+              type: 'text',
+              delta:
+                result.filesChanged.length > 0
+                  ? `Restored ${result.filesChanged.length} file(s).`
+                  : 'No files needed to be restored.',
+            });
+          } else {
+            hasRestoreFailure = true;
+            applyEvent({
+              type: 'text',
+              delta:
+                'Cannot restore files: this turn predates file checkpointing in the OpenTUI renderer.',
+            });
+          }
+          if (option === 'code') {
+            applyEvent({ type: 'done' });
+            return;
+          }
+        }
+        if (!needsConversation || (option === 'both' && hasRestoreFailure)) {
+          applyEvent({ type: 'done' });
+          return;
+        }
+        // Conversation rewind: truncate the transcript before the turn.
+        const turnItemIndex = items.findIndex((i) => i.id === turn.id);
+        setItems((prev) => {
+          const idx = prev.findIndex((p) => p.id === turn.id);
+          return idx >= 0 ? prev.slice(0, idx) : prev;
+        });
+        // Truncate the API history at the user content matching this turn
+        // (N-th occurrence — duplicate prompts stay unambiguous).
+        const rewindable = rewindTurns.filter((t) => isRewindableTurn(t));
+        const rewindIndex = rewindable.findIndex((t) => t.id === turn.id);
+        const client = config.getGeminiClient?.();
+        const apiHistory = client?.getHistoryShallow?.() ?? [];
+        const occurrence = rewindIndex + 1;
+        let seen = 0;
+        let cut = -1;
+        apiHistory.forEach((content, idx) => {
+          if (content.role !== 'user' || cut >= 0) return;
+          const text = (content.parts ?? [])
+            .map((p) => (typeof p.text === 'string' ? p.text : ''))
+            .join('');
+          if (text.trim() === turn.text.trim()) {
+            seen += 1;
+            if (seen === occurrence) cut = idx;
+          }
+        });
+        if (cut >= 0) client?.truncateHistory(cut);
+        // Re-root the recording chain (best-effort) so resume skips the
+        // abandoned branch, then pre-populate the composer like ink.
+        try {
+          const snapshots = config
+            .getFileHistoryService?.()
+            ?.getSnapshots()
+            .slice(0, Math.max(0, rewindIndex) + 1);
+          config
+            .getChatRecordingService()
+            ?.rewindRecording(
+              Math.max(0, rewindIndex),
+              { truncatedCount: Math.max(0, turnItemIndex) },
+              snapshots,
+            );
+        } catch {
+          /* recording rewind is best-effort */
+        }
+        composerHandle.current?.setText(turn.text);
+        applyEvent({
+          type: 'text',
+          delta:
+            'Conversation rewound. Edit your prompt and press Enter to continue.',
+        });
+        applyEvent({ type: 'done' });
+      } catch (err) {
+        applyEvent({
+          type: 'text',
+          delta: `Rewind failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+        applyEvent({ type: 'done' });
+      }
+    },
+    [config, items, rewindTurns, applyEvent],
+  );
+
+  const rewindData = useMemo(
+    () =>
+      config
+        ? {
+            turns: rewindTurns,
+            fileCheckpointingEnabled:
+              config.getFileCheckpointingEnabled?.() ?? false,
+            getDiffStats: (promptId: string) =>
+              config.getFileHistoryService?.()?.getDiffStats(promptId),
+            onRewind: handleRewind,
+          }
+        : undefined,
+    [config, rewindTurns, handleRewind],
+  );
 
   const applySlashAction = useCallback(
     (action: BackendAction) => {
@@ -1227,18 +1600,34 @@ function App({
           });
           return;
         }
-        case 'quit':
+        case 'schedule_tool':
+          scheduleClientTool(action.toolName, action.toolArgs);
+          return;
+        case 'quit': {
+          // Render the farewell (session summary + resume hint) before
+          // tearing down (audit 01 G-17); the user-echo item is skipped —
+          // the invocation already echoed.
+          for (const message of action.messages) {
+            if (message.type === 'user') continue;
+            const event = projectCommandItem(message, {
+              config,
+              stats: host.sessionStats,
+              extensionsUpdateState: host.extensionsUpdateState,
+            });
+            if (event) applyEvent(event);
+          }
           applyEvent({ type: 'done' });
           renderer.destroy();
-          setTimeout(() => process.exit(0), 100);
+          setTimeout(() => process.exit(0), 400);
           return;
+        }
         case 'unsupported':
           applyEvent({ type: 'text', delta: action.message });
           applyEvent({ type: 'done' });
           return;
       }
     },
-    [applyEvent, config, renderer, startLiveTurn],
+    [applyEvent, config, renderer, startLiveTurn, scheduleClientTool, host],
   );
 
   const submitText = useCallback(
@@ -1287,6 +1676,8 @@ function App({
           text: imageParts.length > 0 ? `${text} 📎${imageParts.length}` : text,
         });
         if (config) {
+          // Disk history feed (ink logs submitted prompts via the Logger).
+          logSubmittedPrompt(text);
           startLiveTurn(
             imageParts.length > 0 ? [{ text }, ...imageParts] : text,
           );
@@ -1303,6 +1694,7 @@ function App({
       startLiveTurn,
       startStream,
       enqueuePrompt,
+      logSubmittedPrompt,
     ],
   );
   submitTextRef.current = submitText;
@@ -1340,10 +1732,14 @@ function App({
       : null;
   const footerLine1 =
     `→ ${footerProject}` +
+    (sessionName ? ` · ${sessionName}` : '') +
     (footerBranch ? ` · git:(${footerBranch})` : '') +
     (footerModel ? ` · ${footerModel}` : '') +
     (contextWindowSize ? ` · ${fmtTokens(contextWindowSize)} Context` : '') +
-    (contextPct ? ` ${contextPct}% used` : '');
+    (contextPct ? ` ${contextPct}% used` : '') +
+    (mdFileCount > 0
+      ? ` · ${mdFileCount} context file${mdFileCount === 1 ? '' : 's'}`
+      : '');
   const modeName = approvalModeLabel(String(approvalMode ?? ''));
   const modeColor =
     modeName === 'YOLO'
@@ -1544,6 +1940,52 @@ function App({
               <text fg={C.dim}>{'press y to approve · n / esc to cancel'}</text>
             </box>
           )}
+          {actionConfirmReq && (
+            <box
+              flexDirection="column"
+              border
+              borderColor={C.yellow}
+              paddingLeft={1}
+              paddingRight={1}
+              marginTop={1}
+            >
+              <text fg={C.text}>{actionConfirmReq.prompt}</text>
+              <text fg={C.dim}>{'press y to confirm · n / esc to cancel'}</text>
+            </box>
+          )}
+          {shellConfirmReq && (
+            <box
+              flexDirection="column"
+              border
+              borderColor={C.yellow}
+              paddingLeft={1}
+              paddingRight={1}
+              marginTop={1}
+            >
+              <text fg={C.yellow} attributes={1}>
+                {'Shell Command Execution'}
+              </text>
+              <text fg={C.text}>
+                {'A custom command wants to run the following shell commands:'}
+              </text>
+              {shellConfirmReq.commands.map((command) => (
+                <text key={command} fg={C.accent}>{`  ${command}`}</text>
+              ))}
+              {['Yes, allow once', 'Always allow in this session', 'No'].map(
+                (label, i) => (
+                  <text
+                    key={label}
+                    fg={shellConfirmSel === i ? C.accent : C.dim}
+                  >
+                    {`${shellConfirmSel === i ? '> ' : '  '}${label}`}
+                  </text>
+                ),
+              )}
+              <text fg={C.dim}>
+                {'y once · a always · n / esc cancel · ↑↓ + enter to choose'}
+              </text>
+            </box>
+          )}
           {queuedPrompts.length > 0 && (
             <box flexDirection="column" marginTop={1} paddingLeft={2}>
               {queuedPrompts.slice(0, 3).map((m, i) => (
@@ -1579,13 +2021,16 @@ function App({
               setStreaming(false);
             }}
             placeholder="Type your message or @path/to/file"
-            focus={!dialog && !questionReq}
+            focus={
+              !dialog && !questionReq && !actionConfirmReq && !shellConfirmReq
+            }
             composerHandle={composerHandle}
           />
         </box>
         {/* footer */}
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
           <text fg={C.dim}>{footerLine1}</text>
+          {debugMessage && <text fg={C.dim}>{debugMessage}</text>}
           <box flexDirection="row">
             {(streaming || commandProcessing) && (
               <text fg={C.dim}>{'Enter to steer · Ctrl+Q to queue · '}</text>
@@ -1616,6 +2061,8 @@ function App({
             applyEvent({ type: 'done' });
           }}
           onApprovalModeChanged={setApprovalMode}
+          onResume={(sessionId) => void host.handleResume(sessionId)}
+          rewind={rewindData}
         />
       )}
     </box>

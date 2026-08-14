@@ -406,11 +406,20 @@ export class OpenTuiSlashDispatcher {
                   toolName: result.toolName,
                   toolArgs: result.toolArgs,
                 };
-              case 'message':
+              case 'message': {
+                let messageContent = result.content;
+                // The OpenTUI renderer has no vim key mode; the toggle host
+                // reports the real (off) state, and the ink command would
+                // render that as "Exited Vim mode." — actively misleading.
+                // Replace it with the faithful notice (audit 01 G-11b).
+                if (commandToExecute.name === 'vim') {
+                  messageContent =
+                    'Vim mode is not yet available in the OpenTUI renderer.';
+                }
                 if (result.messageType === 'info') {
                   this.addMessage({
                     type: MessageType.INFO,
-                    content: result.content,
+                    content: messageContent,
                     timestamp: new Date(),
                   });
                 } else if (result.messageType === 'warning') {
@@ -427,6 +436,7 @@ export class OpenTuiSlashDispatcher {
                   });
                 }
                 return { kind: 'handled' };
+              }
               case 'goal_control': {
                 const rendersHere =
                   result.cause === undefined || this.host.isIdle();

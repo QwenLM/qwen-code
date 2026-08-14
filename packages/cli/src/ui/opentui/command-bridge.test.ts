@@ -40,11 +40,96 @@ describe('projectCommandItem', () => {
     }
   });
 
-  it('does not project non-transcript item kinds', () => {
+  it('projects the about item to its Status text block (G-1)', () => {
     const item = {
       type: 'about',
-      systemInfo: {},
+      systemInfo: {
+        cliVersion: '0.21.12',
+        osPlatform: 'darwin',
+        osArch: 'arm64',
+        osRelease: '24.0.0',
+        nodeVersion: 'v22.0.0',
+        npmVersion: '10.0.0',
+        sandboxEnv: 'none',
+        modelVersion: 'qwen3-max',
+        selectedAuthType: 'api-key',
+        ideClient: 'none',
+        sessionId: 'sid-1',
+        memoryUsage: '100MB',
+      },
     } as unknown as HistoryItemWithoutId;
+    const event = projectCommandItem(item);
+    expect(event?.type).toBe('text');
+    if (event?.type === 'text') {
+      expect(event.delta).toContain('Status');
+      expect(event.delta).toContain('Qwen Code: 0.21.12');
+      expect(event.delta).toContain('Model: qwen3-max');
+      expect(event.delta).toContain('Session ID: sid-1');
+      expect(event.delta).toContain('Auth: API Key - api-key');
+    }
+  });
+
+  it('projects tools_list items (G-2)', () => {
+    const item = {
+      type: 'tools_list',
+      tools: [
+        { name: 'read_file', displayName: 'Read File' },
+        { name: 'write_file', displayName: 'Write File' },
+      ],
+      showDescriptions: true,
+    } as unknown as HistoryItemWithoutId;
+    const event = projectCommandItem(item);
+    if (event?.type === 'text') {
+      expect(event.delta).toContain('Available Qwen Code CLI tools:');
+      expect(event.delta).toContain(' - Read File (read_file)');
+    } else {
+      throw new Error('expected a text event');
+    }
+  });
+
+  it('projects compression items with real token counts (G-12)', () => {
+    const item = {
+      type: 'compression',
+      compression: {
+        isPending: false,
+        originalTokenCount: 1000,
+        newTokenCount: 200,
+        compressionStatus: 1, // CompressionStatus.COMPRESSED
+      },
+    } as unknown as HistoryItemWithoutId;
+    const event = projectCommandItem(item);
+    if (event?.type === 'text') {
+      expect(event.delta).toBe(
+        'Chat history compressed from 1000 to 200 tokens.',
+      );
+    } else {
+      throw new Error('expected a text event');
+    }
+  });
+
+  it('projects memory_saved and insight_progress items', () => {
+    const saved = projectCommandItem({
+      type: 'memory_saved',
+      writtenCount: 2,
+    } as unknown as HistoryItemWithoutId);
+    if (saved?.type === 'text') {
+      expect(saved.delta).toBe('Saved 2 memories');
+    } else {
+      throw new Error('expected a text event');
+    }
+    const progress = projectCommandItem({
+      type: 'insight_progress',
+      progress: { stage: 'Analyzing', progress: 100, isComplete: true },
+    } as unknown as HistoryItemWithoutId);
+    if (progress?.type === 'text') {
+      expect(progress.delta).toBe('✓ Analyzing');
+    } else {
+      throw new Error('expected a text event');
+    }
+  });
+
+  it('does not project non-transcript item kinds', () => {
+    const item = { type: 'help' } as unknown as HistoryItemWithoutId;
     expect(projectCommandItem(item)).toBeNull();
   });
 });
@@ -120,12 +205,14 @@ describe('resolveDispatchOutcome', () => {
     expect(resolveDispatchOutcome(false)).toEqual({ kind: 'passthrough' });
   });
 
-  it('keeps handled/quit outcomes as-is', () => {
+  it('keeps handled outcomes and carries quit farewell messages', () => {
     expect(resolveDispatchOutcome({ kind: 'handled' })).toEqual({
       kind: 'handled',
     });
-    expect(resolveDispatchOutcome({ kind: 'quit', messages: [] })).toEqual({
+    const messages = [{ type: 'quit', duration: '1m 2s', id: 1 }] as never;
+    expect(resolveDispatchOutcome({ kind: 'quit', messages })).toEqual({
       kind: 'quit',
+      messages,
     });
   });
 
@@ -216,17 +303,28 @@ describe('resolveDispatchOutcome', () => {
     });
   });
 
-  it('reports schedule_tool as an explicit unsupported capability', () => {
+  it('routes schedule_tool to the real client-tool scheduler (G-6b)', () => {
     expect(
       resolveDispatchOutcome({
         kind: 'schedule_tool',
-        toolName: 'restore_session',
-        toolArgs: {},
+        toolName: 'run_shell_command',
+        toolArgs: { command: 'gh auth status' },
       }),
     ).toEqual({
-      kind: 'unsupported',
-      message: `Tool scheduling for 'restore_session' is not yet available in the OpenTUI renderer.`,
+      kind: 'schedule_tool',
+      toolName: 'run_shell_command',
+      toolArgs: { command: 'gh auth status' },
     });
+  });
+
+  it('carries matchedSessions through the resume dialog request (G-5)', () => {
+    const matchedSessions = [{ sessionId: 's1', prompt: 'hello' }] as never;
+    expect(resolveDialogRequest({ dialog: 'resume', matchedSessions })).toEqual(
+      {
+        kind: 'mount',
+        dialog: { dialog: 'resume', matchedSessions },
+      },
+    );
   });
 });
 
@@ -292,6 +390,26 @@ describe('createBackendCommandHost', () => {
     host.loadHistory([{ type: 'info', text: 'y', id: 9 }] as never);
     expect(host.getHistory()).toHaveLength(1);
     expect(host.getHistory()[0]).toMatchObject({ text: 'y', id: 9 });
+  });
+
+  it('projects loadHistory items onto the transcript as one commit', () => {
+    const captured = createCapturedSinks();
+    const resets: OpenTuiStreamEvent[][] = [];
+    const sinks: BackendCommandSinks = {
+      ...captured.sinks,
+      resetTranscript: (events) => resets.push(events),
+    };
+    const host = createBackendCommandHost(sinks);
+    host.loadHistory([
+      { type: 'user', text: 'hello', id: 1 } as never,
+      { type: 'info', text: 'world', id: 2 } as never,
+    ]);
+    expect(resets).toHaveLength(1);
+    expect(resets[0]).toEqual([
+      { type: 'user', text: 'hello' },
+      { type: 'text', delta: 'world' },
+      { type: 'done' },
+    ]);
   });
 
   it('isIdle and setIsProcessing route through the sinks', () => {
@@ -371,5 +489,125 @@ describe('createBackendCommandHost', () => {
     );
     host.updateItem(id, { sentToModel: true });
     expect(host.getHistory()[0]).toMatchObject({ sentToModel: true });
+  });
+
+  it('tracks pendingItem for the compression re-entrancy guard (G-12)', () => {
+    const captured = createCapturedSinks();
+    const host = createBackendCommandHost(captured.sinks);
+    expect(host.pendingItem).toBeNull();
+    const pending = {
+      type: 'compression',
+      compression: { isPending: true },
+    } as never;
+    host.setPendingItem(pending);
+    expect(host.pendingItem).toBe(pending);
+    // The pending work is visible immediately.
+    const event = captured.events.at(-1);
+    if (event?.type === 'text') {
+      expect(event.delta).toBe('Compressing chat history');
+    } else {
+      throw new Error('expected a text event');
+    }
+    host.setPendingItem(null);
+    expect(host.pendingItem).toBeNull();
+    host.setPendingItem(pending);
+    host.clearPendingState();
+    expect(host.pendingItem).toBeNull();
+  });
+
+  it('surfaces completed btw answers in the transcript (G-14)', () => {
+    const captured = createCapturedSinks();
+    const host = createBackendCommandHost(captured.sinks);
+    // Pending side-question: stored but not surfaced.
+    host.setBtwItem({
+      type: 'btw',
+      btw: { question: 'q?', answer: '', isPending: true },
+    } as never);
+    expect(captured.events).toHaveLength(0);
+    expect(host.btwItem).not.toBeNull();
+    // Completed answer becomes visible.
+    host.setBtwItem({
+      type: 'btw',
+      btw: { question: 'q?', answer: 'the answer', isPending: false },
+    } as never);
+    const event = captured.events.at(-1);
+    if (event?.type === 'text') {
+      expect(event.delta).toContain('/btw q?');
+      expect(event.delta).toContain('the answer');
+    } else {
+      throw new Error('expected a text event');
+    }
+    // cancelBtw aborts and clears the side question.
+    host.cancelBtw();
+    expect(host.btwItem).toBeNull();
+  });
+
+  it('reports vim as faithfully unavailable (G-11b)', async () => {
+    const captured = createCapturedSinks();
+    const host = createBackendCommandHost(captured.sinks);
+    // The renderer has no vim mode: the toggle never enables it.
+    expect(await host.toggleVimEnabled()).toBe(false);
+    expect(await host.toggleVimEnabled()).toBe(false);
+  });
+
+  it('routes session-name/debug/md-count/startNewSession through sinks', () => {
+    const captured = createCapturedSinks();
+    const sessionNames: Array<string | null> = [];
+    const debugMessages: string[] = [];
+    const mdCounts: number[] = [];
+    const newSessions: string[] = [];
+    const sinks: BackendCommandSinks = {
+      ...captured.sinks,
+      setSessionName: (name) => sessionNames.push(name),
+      setDebugMessage: (message) => debugMessages.push(message),
+      setGeminiMdFileCount: (count) => mdCounts.push(count),
+      startNewSession: (sessionId) => newSessions.push(sessionId),
+    };
+    const host = createBackendCommandHost(sinks);
+    host.setSessionName('My session');
+    host.setDebugMessage('resetting');
+    host.setGeminiMdFileCount(3);
+    host.startNewSession?.('new-id');
+    expect(sessionNames).toEqual(['My session']);
+    expect(debugMessages).toEqual(['resetting']);
+    expect(mdCounts).toEqual([3]);
+    expect(newSessions).toEqual(['new-id']);
+  });
+
+  it('delegates confirmations to the backend sinks when provided', async () => {
+    const captured = createCapturedSinks();
+    const sinks: BackendCommandSinks = {
+      ...captured.sinks,
+      presentShellConfirmation: async (commands) => ({
+        outcome: ToolConfirmationOutcome.ProceedAlways,
+        approvedCommands: [...commands],
+      }),
+      presentActionConfirmation: async () => true,
+    };
+    const host = createBackendCommandHost(sinks);
+    const resolution = await host.presentShellConfirmation(['git status']);
+    expect(resolution.outcome).toBe(ToolConfirmationOutcome.ProceedAlways);
+    expect(resolution.approvedCommands).toEqual(['git status']);
+    expect(await host.presentActionConfirmation('Overwrite?')).toBe(true);
+  });
+
+  it('exposes live session stats from the sink (G-21)', () => {
+    const captured = createCapturedSinks();
+    const start = new Date('2026-08-14T00:00:00Z');
+    const sinks: BackendCommandSinks = {
+      ...captured.sinks,
+      getSessionStats: () =>
+        ({
+          sessionId: 'live-session',
+          sessionStartTime: start,
+          metrics: {},
+          lastPromptTokenCount: 42,
+          promptCount: 2,
+        }) as never,
+    };
+    const host = createBackendCommandHost(sinks);
+    expect(host.sessionStats.sessionId).toBe('live-session');
+    expect(host.sessionStats.lastPromptTokenCount).toBe(42);
+    expect(host.sessionStats.sessionStartTime).toBe(start);
   });
 });
