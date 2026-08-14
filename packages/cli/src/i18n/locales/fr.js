@@ -139,7 +139,7 @@ export default {
     'Aucune compétence ne correspond à la recherche.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
-  '(+{{count}} locked)': '(+{{count}} verrouillé(s))',
+  '(+{{count}} locked)': '(+{{count}} verrouillée(s))',
   'higher scope': 'portée supérieure',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [verrouillée : {{scope}}]',

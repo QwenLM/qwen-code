@@ -140,7 +140,7 @@ export default {
   'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
   'Locked by higher-scope settings (cannot toggle here):':
     "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
-  '(+{{count}} locked)': '(+{{count}} bloquejat(s))',
+  '(+{{count}} locked)': '(+{{count}} bloquejada(s))',
   'higher scope': 'àmbit superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloquejada: {{scope}}]',

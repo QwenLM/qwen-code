@@ -186,6 +186,7 @@ describe('SkillsManagerDialog', () => {
     expect(lastFrame()).toContain(
       'Locked by higher-scope settings (cannot toggle here):',
     );
+    expect(lastFrame()).not.toContain('(+12 locked)');
   });
 
   it('keeps the translated title on one row at narrow widths', async () => {

@@ -140,6 +140,7 @@ describe('statusLinePresets', () => {
   it.each([
     ['/repo/pro\nject', '/repo/pro ject'],
     ['/repo/pro\vject\ftory', '/repo/pro ject tory'],
+    ['/repo/pro\rject', '/repo/pro ject'],
   ])(
     'collapses line-breaking whitespace in dynamic fields',
     (currentDir, expected) => {
