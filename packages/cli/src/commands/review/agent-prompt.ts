@@ -136,6 +136,52 @@ interface PlanReport {
   mergeBaseSha?: unknown;
   repositoryContext?: unknown;
   budget?: { agentToolBudget?: unknown };
+  /** Present only on a plan `rescope` rewrote — see incrementalScopeOf. */
+  incremental?: unknown;
+}
+
+/**
+ * The `incremental` block a rescoped plan carries, re-validated field by
+ * field: the plan is parsed off disk with an unchecked cast, and a malformed
+ * block must degrade to "not an incremental round" (full-scope briefs, which
+ * are always safe) rather than render `undefined` into an agent's contract.
+ */
+interface IncrementalScope {
+  anchor: string;
+  deltaFiles: string[];
+  interaction: Array<{ path: string; importsChanged: string[] }>;
+}
+
+function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
+  const raw = report.incremental as
+    | {
+        anchor?: unknown;
+        deltaFiles?: unknown;
+        interaction?: unknown;
+      }
+    | undefined
+    | null;
+  if (!raw || typeof raw.anchor !== 'string' || raw.anchor === '') return null;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+  const interaction = Array.isArray(raw.interaction)
+    ? raw.interaction
+        .filter(
+          (e): e is { path: string; importsChanged?: unknown } =>
+            !!e &&
+            typeof (e as { path?: unknown }).path === 'string' &&
+            (e as { path: string }).path.length > 0,
+        )
+        .map((e) => ({
+          path: e.path,
+          importsChanged: strings(e.importsChanged),
+        }))
+    : [];
+  return {
+    anchor: raw.anchor,
+    deltaFiles: strings(raw.deltaFiles),
+    interaction,
+  };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -521,6 +567,54 @@ export function buildChunkAgentPrompt(
     );
   }
 
+  // Incremental rounds carry two scopes in one diff, and the difference is
+  // the agent's whole brief for the second kind: an interaction file's diff
+  // was already reviewed clean once, and re-litigating it from scratch is how
+  // an incremental round quietly costs what it saved — or worse, re-reports
+  // findings the previous round already ruled on.
+  const incremental = incrementalScopeOf(report);
+  if (incremental) {
+    const chunkPaths = new Set(
+      (Array.isArray(chunk.files) ? chunk.files : [])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string'),
+    );
+    const deltaHere = incremental.deltaFiles.filter((p) => chunkPaths.has(p));
+    const seamHere = incremental.interaction.filter((e) =>
+      chunkPaths.has(e.path),
+    );
+    const lines = [
+      '',
+      `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
+        `previous clean review round (anchor \`${incremental.anchor.slice(0, 12)}\`), ` +
+        `plus still-clean files one import hop from a change. Your files' scopes:`,
+    ];
+    if (deltaHere.length > 0) {
+      lines.push(
+        ...deltaHere.map(
+          (p) =>
+            `- ${inertPath(p)} — **changed since the last round**: its hunks here are ` +
+            `the change under review; review them in full, as usual.`,
+        ),
+      );
+    }
+    if (seamHere.length > 0) {
+      lines.push(
+        ...seamHere.map(
+          (e) =>
+            `- ${inertPath(e.path)} — **unchanged, cleared by the previous round**, back in ` +
+            `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}, which ` +
+            `changed. Review the INTERACTION only: do this file's uses of what it imports ` +
+            `still hold — signatures, argument contracts, invariants, error behaviour — ` +
+            `now that the imported side moved? Read the changed side from the worktree to ` +
+            `answer that. Do not re-review the rest of this file's diff from scratch, and ` +
+            `do not report defects in it that the change it imports does not affect.`,
+        ),
+      );
+    }
+    parts.push(...lines);
+  }
+
   parts.push(
     '',
     'You may also `read_file` the **full source files** above from the worktree whenever a ' +
@@ -823,9 +917,27 @@ function diffReadingBlock(
     (c) => c.maxLineChars > READ_FILE_CHAR_CAP,
   );
 
+  // Whole-diff readers (dimension agents, auditors) get the incremental frame
+  // once, up front: without it, "the diff" reads as the whole PR, and an agent
+  // that notices most of the PR is absent invents its own explanation — or
+  // walks the worktree re-reviewing scope the previous round already cleared.
+  const incremental = incrementalScopeOf(report);
+
   const parts = [
     '## The diff',
     '',
+    ...(incremental
+      ? [
+          `**Incremental round.** This diff is scoped to what changed since the previous ` +
+            `clean review round (anchor \`${incremental.anchor.slice(0, 12)}\`), plus ` +
+            `still-clean files one import hop from a change — each of those is in scope ` +
+            `only for its interaction with what it imports. The rest of the PR was ` +
+            `reviewed clean last round and is deliberately absent; do not go find it. ` +
+            `A defect in absent code is reportable only when a change IN this diff is ` +
+            `what makes it wrong now.`,
+          '',
+        ]
+      : []),
     scoped
       ? `Your territory is **chunk ${chunkId}** of the diff. It is a file on disk — ` +
         'nothing in this prompt contains the code. Read your chunk:'

@@ -45,6 +45,7 @@ describe('reviewCommand', () => {
       'fetch-pr',
       'capture-local',
       'plan-diff',
+      'rescope',
       'repo-context',
       'pr-context',
       'comment-status',

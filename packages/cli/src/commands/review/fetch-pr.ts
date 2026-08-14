@@ -33,7 +33,14 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import type { ReviewEffort } from './parse-args.js';
-import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
+import {
+  fileLineCount,
+  git,
+  gitOpt,
+  gitRaw,
+  refExists,
+  releaseWorktree,
+} from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
@@ -138,20 +145,6 @@ type FetchPrResult = PlanReport & {
    */
   prDescriptionHasHan: boolean;
 };
-
-/** Count lines of `<ref>:<path>`, or 0 if it does not exist there. */
-function fileLineCount(ref: string, path: string): number {
-  try {
-    const buf = gitRaw('show', `${ref}:${path}`);
-    if (buf.length === 0) return 0;
-    let n = 0;
-    for (const b of buf) if (b === 0x0a) n++;
-    // A final line without a trailing newline still counts.
-    return buf[buf.length - 1] === 0x0a ? n : n + 1;
-  } catch {
-    return 0; // absent at this ref: created by the PR, or deleted by it
-  }
-}
 
 /** The real git surface `resolveMergeBase` runs against. */
 const gitProbe: GitProbe = {

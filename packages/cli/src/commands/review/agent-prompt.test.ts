@@ -4668,3 +4668,64 @@ describe('the verify gate — compose survives a budget stop', () => {
     expect(readRecordedPrompts(plan).size).toBe(1);
   });
 });
+
+describe('incremental-scope briefs', () => {
+  // A rescoped plan carries two scopes in one diff. The chunk brief must say
+  // which scope each of ITS files is in — an interaction file re-reviewed from
+  // scratch re-reports what the previous round already ruled on — and the
+  // whole-diff readers must be told the rest of the PR is absent on purpose,
+  // or they go find it in the worktree.
+  const chunk = (id: number, path: string, start: number) => ({
+    id,
+    startLine: start,
+    endLine: start + 9,
+    lines: 10,
+    chars: 400,
+    maxLineChars: 80,
+    oversized: false,
+    files: [{ path, newStart: 1, newEnd: 10 }],
+  });
+  const INCREMENTAL_PLAN = {
+    diffPathAbsolute: '/abs/.qwen/tmp/qwen-review-pr-7-diff-incremental.txt',
+    chunks: [chunk(1, 'src/changed.ts', 1), chunk(2, 'src/caller.ts', 11)],
+    incremental: {
+      anchor: 'abc1234def5678900000',
+      deltaFiles: ['src/changed.ts'],
+      interaction: [
+        { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+      ],
+      contextFiles: ['src/bystander.ts'],
+      fullDiffPath: '.qwen/tmp/qwen-review-pr-7-diff.txt',
+    },
+  };
+
+  it('a delta chunk is briefed to review in full, an interaction chunk at the seam', () => {
+    const delta = buildChunkAgentPrompt(INCREMENTAL_PLAN, 1);
+    expect(delta).toContain('INCREMENTAL round');
+    expect(delta).toContain('abc1234def56');
+    expect(delta).toContain('changed since the last round');
+    expect(delta).not.toContain('INTERACTION only');
+
+    const seam = buildChunkAgentPrompt(INCREMENTAL_PLAN, 2);
+    expect(seam).toContain('INCREMENTAL round');
+    expect(seam).toContain('cleared by the previous round');
+    expect(seam).toContain('INTERACTION only');
+    expect(seam).toContain('src/changed.ts');
+  });
+
+  it('whole-diff role briefs carry the frame once, up front', () => {
+    const p = buildRoleBrief(INCREMENTAL_PLAN, '2');
+    expect(p).toContain('Incremental round');
+    expect(p).toContain('deliberately absent');
+  });
+
+  it('a full-range plan renders no incremental framing at all', () => {
+    expect(buildChunkAgentPrompt(PLAN, 13)).not.toContain('INCREMENTAL');
+    expect(buildRoleBrief(PLAN, '2')).not.toContain('Incremental round');
+  });
+
+  it('a malformed incremental block degrades to full-scope briefs', () => {
+    const mangled = { ...INCREMENTAL_PLAN, incremental: { anchor: 42 } };
+    expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
+  });
+});

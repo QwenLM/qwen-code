@@ -202,6 +202,27 @@ export function gitRaw(...args: string[]): Buffer {
 }
 
 /**
+ * Count lines of `<ref>:<path>`, or 0 if it does not exist there.
+ *
+ * Shared by the plan builders that can name a post-image ref (`fetch-pr`,
+ * `rescope`): `buildPlanReport` derives heaviness from this count, and two
+ * counters that disagreed would classify the same file heavy in one plan and
+ * not the other.
+ */
+export function fileLineCount(ref: string, path: string): number {
+  try {
+    const buf = gitRaw('show', `${ref}:${path}`);
+    if (buf.length === 0) return 0;
+    let n = 0;
+    for (const b of buf) if (b === 0x0a) n++;
+    // A final line without a trailing newline still counts.
+    return buf[buf.length - 1] === 0x0a ? n : n + 1;
+  } catch {
+    return 0; // absent at this ref: created by the PR, or deleted by it
+  }
+}
+
+/**
  * Like `gitRaw`, but treats "the inputs differ" — exit 1 **with output** — as
  * success and returns the diff the child produced anyway.
  *
