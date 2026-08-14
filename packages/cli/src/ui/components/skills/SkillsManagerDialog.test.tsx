@@ -11,6 +11,7 @@ import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
 import { LoadedSettings } from '../../../config/settings.js';
+import { setLanguageAsync } from '../../../i18n/index.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { SkillsManagerDialog } from './SkillsManagerDialog.js';
 
@@ -219,6 +220,111 @@ describe('SkillsManagerDialog', () => {
       expect(lastFrame()).toContain('Hidden locked skills: 3'),
     );
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);
+  });
+
+  it('sheds chrome to fit budgets the fixed frame cannot', async () => {
+    // Budgets below the 11-row frame used to render 12 rows regardless
+    // (round-5 R5-1); compact mode drops border, paddingY, and footer so
+    // the always-rendered list row fits.
+    const unlocked = mixedSkills.slice(5);
+    for (const budget of [11, 10, 8]) {
+      const { lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SkillsManagerDialog
+            settings={createSettings([])}
+            config={createConfig(unlocked)}
+            addItem={vi.fn()}
+            onClose={vi.fn()}
+            reloadCommands={vi.fn()}
+            setInputBuffer={vi.fn()}
+            availableTerminalHeight={budget}
+          />
+        </KeypressProvider>,
+      );
+      await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(budget);
+      unmount();
+    }
+  });
+
+  it('surfaces locked matches at a budget the full frame cannot fit', async () => {
+    // Round-5 R5-1 secondary symptom: at residual === 0 a locked-only
+    // query left the list area blank while the subtitle advertised
+    // matches.
+    const { stdin, lastFrame, unmount } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <SkillsManagerDialog
+          settings={createSettings()}
+          config={createConfig(lockedSkills)}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          reloadCommands={vi.fn()}
+          setInputBuffer={vi.fn()}
+          availableTerminalHeight={11}
+        />
+      </KeypressProvider>,
+    );
+
+    await vi.waitFor(() =>
+      expect(lastFrame()).toContain('Hidden locked skills: 3'),
+    );
+    act(() => {
+      stdin.write('two');
+    });
+    await vi.waitFor(() => expect(lastFrame()).toContain('two skill'));
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(11);
+    unmount();
+  });
+
+  it('notes locked skills in the subtitle when no locked row fits', async () => {
+    // Round-5 R5-6: at residual === 1 (budget 12) in the mixed layout the
+    // locked block used to vanish without a trace; the subtitle now
+    // carries the count.
+    const skills = [...lockedSkills.slice(0, 2), ...mixedSkills.slice(5, 8)];
+    const { lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <SkillsManagerDialog
+          settings={createSettings(['one', 'two'])}
+          config={createConfig(skills)}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          reloadCommands={vi.fn()}
+          setInputBuffer={vi.fn()}
+          availableTerminalHeight={12}
+        />
+      </KeypressProvider>,
+    );
+
+    await vi.waitFor(() => expect(lastFrame()).toContain('(+2 locked)'));
+    expect(lastFrame()).not.toContain('Hidden locked skills');
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);
+  });
+
+  it('keeps the translated title on one row at narrow widths', async () => {
+    // ca's 23-cell title wraps below ~27 columns and pushed the dialog one
+    // row past its budget (round-5 R5-2); wrap="truncate" caps it.
+    await setLanguageAsync('ca');
+    try {
+      const { lastFrame, unmount } = renderNarrow(
+        26,
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SkillsManagerDialog
+            settings={createSettings(['one'])}
+            config={createConfig(mixedSkills)}
+            addItem={vi.fn()}
+            onClose={vi.fn()}
+            reloadCommands={vi.fn()}
+            setInputBuffer={vi.fn()}
+            availableTerminalHeight={12}
+          />
+        </KeypressProvider>,
+      );
+      await vi.waitFor(() => expect(lastFrame()).toContain('Gestiona'));
+      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);
+      unmount();
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 
   it('fits mixed locked and unlocked skills within the height budget', async () => {

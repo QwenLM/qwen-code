@@ -164,6 +164,34 @@ describe('statusLinePresets', () => {
     expect(lines[0]).toContain('/repo/pro ject');
   });
 
+  it('collapses vertical-tab and form-feed from dynamic fields', () => {
+    // \v and \f are legal in POSIX paths and execute as line feeds on
+    // VT100-class terminals, so they break the one-row invariant exactly
+    // like \n (round-5 R5-4).
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      currentDir: '/repo/pro\vject\ftory',
+      branch: undefined,
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 1200,
+      totalOutputTokens: 340,
+      totalLinesAdded: 12,
+      totalLinesRemoved: 3,
+      streamingState: StreamingState.Idle,
+    });
+
+    const lines = buildStatusLinePresetLines(
+      { type: 'preset', items: ['current-dir'] },
+      data,
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toMatch(/[\n\v\f\r]/);
+    expect(lines[0]).toContain('/repo/pro ject tory');
+  });
+
   it('renders every preset item with representative data', () => {
     const data = buildStatusLinePresetData({
       sessionId: 'session-123',

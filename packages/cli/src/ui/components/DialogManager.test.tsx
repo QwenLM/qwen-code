@@ -73,7 +73,7 @@ describe('DialogManager', () => {
           <UIStateContext.Provider value={uiState}>
             <UIActionsContext.Provider value={uiActions}>
               <KeypressProvider kittyProtocolEnabled={false}>
-                <DialogManager addItem={vi.fn()} terminalWidth={60} />
+                <DialogManager addItem={vi.fn()} terminalWidth={120} />
               </KeypressProvider>
             </UIActionsContext.Provider>
           </UIStateContext.Provider>
