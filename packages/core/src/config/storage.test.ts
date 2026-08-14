@@ -864,6 +864,20 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
   });
 
+  it('recovers cwds from `}{`-glued records (crash mid-append)', () => {
+    const chats = path.join(projectsDir, '-glued', 'chats');
+    actualFs.mkdirSync(chats, { recursive: true });
+    actualFs.writeFileSync(
+      path.join(chats, 'session-1.jsonl'),
+      JSON.stringify({ cwd: path.join(baseDir, 'gone-a') }) +
+        JSON.stringify({ cwd: path.join(baseDir, 'gone-b') }) +
+        '\n',
+    );
+    ageEntry('-glued');
+    Storage.cleanOrphanProjectDirs('current');
+    expect(actualFs.existsSync(path.join(projectsDir, '-glued'))).toBe(false);
+  });
+
   it('keeps stale entries with files but no readable cwd records', () => {
     const entry = path.join(projectsDir, '-unparsable');
     actualFs.mkdirSync(path.join(entry, 'chats'), { recursive: true });

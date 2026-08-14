@@ -14,7 +14,6 @@ import {
   sanitizeCwd,
   isTempDirPath,
 } from '../utils/paths.js';
-import { parseLineTolerant } from '../utils/jsonl-utils.js';
 import { FatalConfigError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
@@ -490,10 +489,10 @@ export class Storage {
         Storage.scanDirForCwds(entryPath, cwds, depth + 1);
       } else if (dirent.name.endsWith('.jsonl')) {
         const head = Storage.readLineHead(entryPath);
-        if (head) Storage.addRecordedCwd(head, entryPath, cwds);
+        if (head) Storage.addRecordedCwd(head, cwds);
         const tail = Storage.readLineTail(entryPath);
         if (tail && tail !== head) {
-          Storage.addRecordedCwd(tail, entryPath, cwds);
+          Storage.addRecordedCwd(tail, cwds);
         }
       } else if (dirent.name.endsWith('.runtime.json')) {
         const cwd = Storage.readJsonStringField(entryPath, 'work_dir');
@@ -505,15 +504,55 @@ export class Storage {
     }
   }
 
-  private static addRecordedCwd(
-    line: string,
-    filePath: string,
-    cwds: Set<string>,
-  ): void {
-    for (const record of parseLineTolerant<{ cwd?: unknown }>(line, filePath)) {
-      if (typeof record.cwd === 'string' && record.cwd) {
-        cwds.add(record.cwd);
+  private static addRecordedCwd(line: string, cwds: Set<string>): void {
+    // Parsing stays local to storage.ts: jsonl-utils' parseLineTolerant
+    // would be the natural reuse, but its import chain (atomicFileWrite
+    // -> debugLogger) cycles back into this module.
+    try {
+      Storage.takeCwdFromJson(line, cwds);
+      return;
+    } catch {
+      // Possibly `}{`-glued records (crash mid-append): walk balanced
+      // top-level objects and parse each fragment individually.
+    }
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let start = -1;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (escape) {
+        escape = false;
+        continue;
       }
+      if (inString) {
+        if (c === '\\') escape = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') {
+        inString = true;
+      } else if (c === '{') {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (c === '}') {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          try {
+            Storage.takeCwdFromJson(line.slice(start, i + 1), cwds);
+          } catch {
+            // Fragment is not valid JSON — skip it.
+          }
+          start = -1;
+        }
+      }
+    }
+  }
+
+  private static takeCwdFromJson(text: string, cwds: Set<string>): void {
+    const record = JSON.parse(text) as { cwd?: unknown };
+    if (typeof record.cwd === 'string' && record.cwd) {
+      cwds.add(record.cwd);
     }
   }
 
