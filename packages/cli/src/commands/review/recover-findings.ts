@@ -33,7 +33,9 @@ import {
 import {
   promptRecordDir,
   readRecordedPrompts,
-  wasDeliveredVerbatim,
+  deliveredVerbatimLines,
+  flattenPrompt,
+  promptLines,
   briefPath,
 } from './lib/prompt-record.js';
 import { priorSessionIds } from './lib/run-ledger.js';
@@ -67,6 +69,13 @@ export interface RecoverFindingsResult {
   budgetStop: BudgetStop | null;
   /** How many earlier sessions the run ledger names. */
   priorSessions: number;
+  /**
+   * The errno when the prompt-record directory could not be listed, else
+   * null. An empty recovery and an unreadable one must not print alike: the
+   * first says the interrupted attempt achieved nothing, the second says
+   * this run cannot tell.
+   */
+  recordDirUnreadable: string | null;
 }
 
 const ROUND_IN_KEY_RE = /--round-(\d+)(?:--|$)/;
@@ -76,7 +85,13 @@ const ROUND_IN_KEY_RE = /--round-(\d+)(?:--|$)/;
  * holds a live launch to: the CLI-built prompt arrived verbatim, and the
  * agent demonstrably opened its brief or the diff. Prose proves nothing.
  */
+const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
+
 function meetsBar(rec: AgentRecord, planPath: string, key: string): boolean {
+  // The same veto coverage applies: a return that declares a chunk
+  // unreachable is a disclosed gap, not a result to hand the resumed run as
+  // recovered work.
+  if (UNCOVERABLE_RE.test(rec.finalText)) return false;
   const briefNeedle = JSON.stringify(briefPath(planPath, key));
   const openedBrief = rec.successfulCallArgs.some((a) =>
     a.includes(briefNeedle),
@@ -120,12 +135,20 @@ export function recoverFindings(
   // injectivity rule is retirement's: a transcript that matches MORE THAN ONE
   // built prompt certifies none of them — "one agent taking a stack of
   // chunks" must not resurface on the recovery path.
+  // Flatten each launch once and split each built prompt once: the pairing
+  // is N×M, and `wasDeliveredVerbatim` would otherwise redo both halves of
+  // that work on every pair (the helper family exists for exactly this).
+  const builtLines = new Map<string, string[]>();
+  for (const [key, prompt] of built) {
+    if (prompt.trim() === '') continue;
+    builtLines.set(key, promptLines(prompt));
+  }
   const matchesOf = new Map<AgentRecord, string[]>();
   for (const rec of records) {
+    const launch = flattenPrompt(rec.launchPrompt);
     const keys: string[] = [];
-    for (const [key, prompt] of built) {
-      if (prompt.trim() === '') continue;
-      if (wasDeliveredVerbatim(rec.launchPrompt, prompt)) keys.push(key);
+    for (const [key, lines] of builtLines) {
+      if (deliveredVerbatimLines(launch, lines)) keys.push(key);
     }
     matchesOf.set(rec, keys);
   }
@@ -155,10 +178,18 @@ export function recoverFindings(
   const recordDir = promptRecordDir(planPath);
   const findingsFiles: FindingsFileEntry[] = [];
   let names: string[] = [];
+  let recordDirUnreadable: string | null = null;
   try {
     names = readdirSync(recordDir).sort();
-  } catch {
+  } catch (err) {
     names = [];
+    // "Could not look" and "there was nothing" print identically otherwise:
+    // an empty recovery on a run whose records are unreachable would read as
+    // an interrupted attempt that had simply achieved nothing.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== 'ENOENT') {
+      recordDirUnreadable = code ?? (err as Error).message;
+    }
   }
   for (const name of names) {
     if (!name.endsWith('.findings.md')) continue;
@@ -168,10 +199,20 @@ export function recoverFindings(
     } catch {
       continue;
     }
+    const path = join(recordDir, name);
+    // The run-epoch fence every reader here applies: nothing clears the
+    // record dir, so a PREVIOUS review of the same PR leaves its rounds'
+    // findings lists behind, and handing one to a resumed run would restore
+    // a foreign attempt's state as this one's.
+    try {
+      if (statSync(path).mtimeMs < sinceMs) continue;
+    } catch {
+      continue;
+    }
     const m = ROUND_IN_KEY_RE.exec(key);
     findingsFiles.push({
       key,
-      path: join(recordDir, name),
+      path,
       round: m ? Number(m[1]) : null,
     });
   }
@@ -210,6 +251,7 @@ export function recoverFindings(
     findingsFiles,
     latestReverseAuditRound,
     budgetStop: readBudgetStop(planPath),
+    recordDirUnreadable,
     priorSessions: priorSessionIds(planPath, env).length,
   };
 }
@@ -240,6 +282,13 @@ export const recoverFindingsCommand: CommandModule = {
         `recover-findings: ${result.recoveredKeys.length} agent result(s) recovered, ` +
           `${result.missingKeys.length} still owed; wrote ${result.out}`,
       );
+      if (result.recordDirUnreadable !== null) {
+        writeStderrLine(
+          `WARNING: the prompt-record directory could not be read ` +
+            `(${result.recordDirUnreadable}); this recovery is a floor, not a ` +
+            `complete account of the interrupted attempt.`,
+        );
+      }
     } catch (err) {
       if (err instanceof TranscriptsUnavailableError) {
         writeStderrLine(`recover-findings: ${err.message}`);

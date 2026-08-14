@@ -12,6 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
+  chmodSync,
   mkdtempSync,
   realpathSync,
   rmSync,
@@ -263,5 +264,125 @@ describe('recover-findings', () => {
     expect(readFileSync(out(), 'utf8')).toContain(
       'Recovered through the parsed flags.',
     );
+  });
+});
+
+describe('recover-findings — the guarantees, made falsifiable', () => {
+  it('refuses a launch that diverged from the recorded prompt', () => {
+    // The verbatim-delivery check is the core of the certification; no
+    // fixture diverged from it before, so dropping it shipped green.
+    const prompt = built('1a');
+    transcript('S0', 'a0', prompt.replace('You are', 'You were'), {
+      opens: [briefPath(plan, '1a')],
+      finalText: 'Rewritten launch, plausible prose.',
+    });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([]);
+    expect(r.missingKeys).toEqual(['1a']);
+  });
+
+  it('does not recover an agent whose final text is empty', () => {
+    const prompt = built('1a');
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, '1a')],
+      finalText: '   ',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
+  });
+
+  it('vetoes a return that declares a chunk uncoverable', () => {
+    const prompt = built('chunk-1');
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, 'chunk-1')],
+      finalText: 'Uncoverable: chunk 1 — a line exceeds the read limit',
+    });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([]);
+  });
+
+  it('fences findings files by the run epoch', () => {
+    // Nothing clears the record dir: a PREVIOUS review of the same PR leaves
+    // its rounds' lists behind, and restoring one would hand a resumed run a
+    // foreign attempt's state.
+    const recordDir = promptRecordDir(plan);
+    const key = 'reverse-audit--round-1--abc123def456';
+    const stale = join(recordDir, `${encodeURIComponent(key)}.findings.md`);
+    writeFileSync(stale, '- from a previous review');
+    const old = new Date(2019, 0, 1);
+    utimesSync(stale, old, old);
+    expect(recoverFindings({ plan, out: out() }, ENV).findingsFiles).toEqual(
+      [],
+    );
+  });
+
+  it('decodes a key whose file name is percent-encoded', () => {
+    const recordDir = promptRecordDir(plan);
+    const key = 'invariant-a--packages/cli/src/x.ts';
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(key)}.findings.md`),
+      '- entry',
+    );
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.findingsFiles.map((f) => f.key)).toEqual([key]);
+  });
+
+  it('reports the budget stop the interrupted attempt left standing', () => {
+    writeFileSync(
+      join(promptRecordDir(plan), 'budget-stop.json'),
+      JSON.stringify({
+        cause: 'round-cap',
+        cap: 5,
+        entry: 'the audit stopped at the round cap',
+        entryZh: '审计在轮数上限停止',
+        round: 5,
+        remainingSeconds: 900,
+        reserveSeconds: 1200,
+        atMs: Date.now(),
+      }),
+    );
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.budgetStop?.cause).toBe('round-cap');
+  });
+
+  it('counts only CERTIFIED rounds toward latestReverseAuditRound', () => {
+    const k1 = 'reverse-audit--round-1--abc123def456';
+    const k2 = 'reverse-audit--round-2--abc123def456';
+    const p1 = built(k1);
+    built(k2); // built, but its agent never opened anything
+    transcript('S0', 'ra1', p1, {
+      opens: [briefPath(plan, k1)],
+      finalText: 'Round 1: no new issues after a full walk.',
+    });
+    transcript('S0', 'ra2', `You are ${k2}.`, {
+      opens: [],
+      finalText: 'Round 2: nothing.',
+    });
+    expect(
+      recoverFindings({ plan, out: out() }, ENV).latestReverseAuditRound,
+    ).toBe(1);
+  });
+
+  it('discloses an unreadable record dir instead of printing as empty', () => {
+    const recordDir = promptRecordDir(plan);
+    chmodSync(recordDir, 0o000);
+    try {
+      const r = recoverFindings({ plan, out: out() }, ENV);
+      expect(r.recordDirUnreadable).not.toBeNull();
+    } finally {
+      chmodSync(recordDir, 0o755);
+    }
+  });
+
+  it('exits 1 when the transcript infrastructure is missing entirely', () => {
+    const handler = recoverFindingsCommand.handler as (a: unknown) => void;
+    const saved = process.exitCode;
+    try {
+      handler({ plan, out: out() });
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = saved;
+    }
   });
 });

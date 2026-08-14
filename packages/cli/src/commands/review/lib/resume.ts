@@ -24,14 +24,15 @@ export type ResumeRefusal =
   | 'no-diff-hash' // the previous run predates diffSha256 (or captured no diff)
   | 'worktree-gone' // the interrupted attempt's worktree no longer exists
   | 'worktree-sha-mismatch' // the worktree is not checked out at fetchedSha
+  | 'worktree-dirty' // the worktree holds uncommitted changes
+  | 'diff-unreadable' // the captured diff is gone or cannot be read
   | 'diff-hash-mismatch' // the diff file changed since it was captured
   | 'head-moved' // the PR head advanced — the once-per-review restart case
   | 'resume-cap'; // this review has already resumed RESUME_MAX times
 
-export interface ResumeAssessment {
-  ok: boolean;
-  reason?: ResumeRefusal;
-}
+export type ResumeAssessment =
+  | { ok: true }
+  | { ok: false; reason: ResumeRefusal };
 
 /** What the previous fetch report claims. All fields as parsed, unvalidated. */
 export interface PreviousReport {
@@ -50,6 +51,15 @@ export interface ResumeProbes {
   worktreeHeadSha: string | null;
   /** sha256 of the diff file's bytes on disk, or null when unreadable. */
   diffSha256OnDisk: string | null;
+  /**
+   * `git status --porcelain` on the worktree reported no changes. A tree at
+   * the right HEAD can still hold uncommitted edits — this pipeline's own
+   * probe and build/test agents mutate worktrees by design, and a death
+   * between an apply and its revert leaves exactly that. Resuming there
+   * would review code that is not in the PR. Null when the probe could not
+   * run, which is treated as dirty: an unverifiable tree is not a clean one.
+   */
+  worktreeClean: boolean | null;
   /** The PR's live head OID from the forge, or null when unavailable. */
   liveHeadSha: string | null;
   /**
@@ -112,6 +122,15 @@ export function assessResume(
   }
   if (probes.worktreeHeadSha !== prev.fetchedSha) {
     return { ok: false, reason: 'worktree-sha-mismatch' };
+  }
+  if (probes.worktreeClean !== true) {
+    return { ok: false, reason: 'worktree-dirty' };
+  }
+  // Absent local state and changed upstream input are different facts and
+  // get different names: one says this run lost its own capture, the other
+  // says what it captured is no longer what it captured.
+  if (probes.diffSha256OnDisk === null) {
+    return { ok: false, reason: 'diff-unreadable' };
   }
   if (probes.diffSha256OnDisk !== prev.diffSha256) {
     return { ok: false, reason: 'diff-hash-mismatch' };
