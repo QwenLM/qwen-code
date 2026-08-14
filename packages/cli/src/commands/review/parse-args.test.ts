@@ -1432,4 +1432,16 @@ describe('--resume', () => {
     expect(r.effort).toBe('high'); // the PR default, not a resume effect
     expect(r.effortSource).toBe('default');
   });
+
+  it('an IGNORED --resume must not change the effort either', () => {
+    // The sibling `--comment` has this test because the bug shipped once:
+    // a flag ignored for the target still forced the level.
+    const r = parseReviewArgs('--resume --effort low');
+    expect(r.resume).toEqual({ requested: true, effective: false });
+    expect(r.effort).toBe('low');
+    expect(r.effortSource).toBe('explicit');
+    const d = parseReviewArgs('--resume');
+    expect(d.effort).toBe('medium'); // the local default, untouched
+    expect(d.effortSource).toBe('default');
+  });
 });

@@ -107,10 +107,12 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
       [
         '#!/bin/bash',
         'n=$(( $(cat "$ATT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATT"',
-        // The full argv, one line per attempt: the retry loop's one behavioral
-        // change is WHICH prompt each attempt carries, and a stub that discards
-        // argv cannot see a broken `--resume` wiring.
-        'echo "$*" >> "$PRM"',
+        // The full argv, one line per attempt, with the boundaries INTACT:
+        // `$*` would join on spaces and render `--prompt "/review x --resume"`
+        // identically to `--prompt "/review x" --resume`, which are different
+        // wirings — the second reaches the root CLI's own session-resume flag
+        // and the skill never sees it.
+        'printf "%s\\n" "$(printf "<%s>" "$@")" >> "$PRM"',
         'r(){ printf \'{"type":"result","subtype":"%s","is_error":%s,"result":"%s"}\\n\' "$1" "$2" "$3"; }',
         'case "$SCENARIO" in',
         '  success) r success false "Reviewed — no blockers." ;;',
@@ -2624,11 +2626,14 @@ describe('qwen pr review retry --resume wiring', () => {
     const r = runScenario('transient_then_success');
     expect(r.attempts).toBe(2);
     expect(r.prompts).toHaveLength(2);
-    expect(r.prompts[0]).toContain('--prompt /review x --output-format');
+    // One argv element per <>, so `--resume` INSIDE the prompt value is
+    // distinguishable from `--resume` as its own token after it — the second
+    // would reach the root CLI's session-resume flag and the skill would
+    // never see it.
+    expect(r.prompts[0]).toContain('<--prompt></review x>');
     expect(r.prompts[0]).not.toContain('--resume');
-    expect(r.prompts[1]).toContain(
-      '--prompt /review x --resume --output-format',
-    );
+    expect(r.prompts[1]).toContain('<--prompt></review x --resume>');
+    expect(r.prompts[1]).not.toContain('<--resume>');
   });
 
   it('a single successful attempt never carries --resume', () => {
