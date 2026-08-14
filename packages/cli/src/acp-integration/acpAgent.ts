@@ -173,7 +173,10 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
-import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
+import {
+  ACP_EVENT_LOOP_STALL_RESTART_MS,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -342,6 +345,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
@@ -5742,10 +5746,14 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    const suppliedChannelPrompt = meta[CHANNEL_PROMPT_META_KEY];
+    const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    delete meta[CHANNEL_PROMPT_META_KEY];
+    delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     // The user-facing display projection is caller-controlled metadata; honor
     // it only for trusted parents (the daemon bridge re-injects the trusted
     // channel-worker value here). A plain delete would drop that re-injection.
@@ -5754,6 +5762,26 @@ class QwenAgent implements Agent {
       typeof suppliedPromptDisplayText === 'string'
     ) {
       meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] = suppliedPromptDisplayText;
+    }
+    // Channel classification is trusted-parent metadata: only the channel
+    // bridges and the daemon bridge hold the private parent capability. An
+    // untrusted caller must not be able to mark its own prompt as a channel
+    // turn — that opts the turn out of loop-detected rejection and the
+    // repeated-failure guard.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelPrompt === true
+    ) {
+      meta[CHANNEL_PROMPT_META_KEY] = true;
+    }
+    // Channel delivery is a daemon-managed side effect (the prompt route
+    // injects it from the trusted context); an untrusted direct-ACP caller
+    // must not self-schedule its own response delivery through the key.
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedChannelDelivery !== undefined
+    ) {
+      meta[DAEMON_CHANNEL_DELIVERY_META_KEY] = suppliedChannelDelivery;
     }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;

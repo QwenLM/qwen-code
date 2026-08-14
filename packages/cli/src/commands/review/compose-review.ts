@@ -1771,11 +1771,14 @@ function composeReviewBody(
 /**
  * The public subject for an agent-derived disclosure label. A `chunk N`
  * label stays bare — the chunk collapse translates it into the author's
- * units. Any other label is the truncated first line of a launch prompt:
- * prose. Rendered bare it reads as a claim about the PR itself —
- * #8811's posted body carried "Not reviewed: This PR narrows the
- * daemon-marker check from a truthy tes..." — not as the name of the agent
- * that failed. Quoted, it reads as a name. The INTERNAL subject stays the
+ * units. Any other label is usually a parsed codename (`agent security`,
+ * `agent reverse-audit (round 2)` — coverage's `label()` prefers the
+ * identity line), falling back to the truncated first line of a launch
+ * prompt: prose. The quoting serves both: prose rendered bare reads as a
+ * claim about the PR itself — #8811's posted body carried "Not reviewed:
+ * This PR narrows the daemon-marker check from a truthy tes..." — and
+ * quoted, either shape reads as a name. Short codename labels pass
+ * `compressSummary`'s cap untouched. The INTERNAL subject stays the
  * unquoted label: the dedup and certification checks key on it.
  */
 function publicAgentSubject(label: string): string | undefined {

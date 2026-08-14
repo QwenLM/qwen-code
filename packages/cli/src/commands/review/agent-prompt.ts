@@ -434,7 +434,11 @@ function toolBudgetBlock(
       'counted in. It is a soft ceiling. At the ceiling: stop exploring, write ' +
       'your findings from the evidence already in hand, and disclose each ' +
       'unfinished check on its own line, exactly as `Budget gap: <the check>` — ' +
-      'the coverage tool reads those lines, so the format is load-bearing. The ' +
+      'the coverage tool reads those lines, so the format is load-bearing. If ' +
+      'nothing was cut short, write NO `Budget gap:` line at all — the format ' +
+      'is only for checks the ceiling stopped: a "none" put there is at best ' +
+      'filtered out, and any wording the filter does not recognize is ' +
+      'published in the review body as a phantom coverage gap. The ' +
       'budget never suppresses a finding: a candidate you can already name goes ' +
       'in your return regardless (at `Confidence: low` if the budget stopped ' +
       'you before verifying it).',

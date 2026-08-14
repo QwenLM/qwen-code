@@ -2190,6 +2190,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen-code/private-parent-capability': 'must-not-propagate',
         'qwen.daemon.modelPrompt': 'trusted model-only prompt',
         'qwen.daemon.promptDisplayText': 'trusted display text',
+        'qwen.channel.prompt': true,
+        'qwen.daemon.channelDelivery': {
+          deliveryId: 'delivery-trusted',
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+        },
       },
     });
 
@@ -2200,12 +2205,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         _meta: {
           keep: true,
           'qwen.daemon.promptDisplayText': 'trusted display text',
+          'qwen.channel.prompt': true,
+          'qwen.daemon.channelDelivery': {
+            deliveryId: 'delivery-trusted',
+            target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+          },
         },
       },
       invocation,
       expect.any(AbortSignal),
       'trusted model-only prompt',
     );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('strips channel classification from untrusted callers', async () => {
+    // `qwen.channel.prompt` marks a turn as a channel turn, opting it out
+    // of loop-detected rejection and the repeated-failure guard, and
+    // `qwen.daemon.channelDelivery` schedules the response delivery. Only
+    // trusted parents (the channel bridges and the daemon bridge) may set
+    // them; an untrusted client marking its own prompt must not reach the
+    // session. A plain `qwen --acp` child has no expected capability and
+    // initializes untrusted.
+    await setupSessionMocks('untrusted-session');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await agent.prompt({
+      sessionId: 'untrusted-session',
+      prompt: [{ type: 'text', text: 'hello' }],
+      _meta: {
+        keep: true,
+        'qwen.channel.prompt': true,
+        'qwen.daemon.channelDelivery': {
+          deliveryId: 'delivery-forged',
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+        },
+      },
+    });
+
+    expect(lastSessionMock?.prompt).toHaveBeenCalledWith(
+      {
+        sessionId: 'untrusted-session',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: { keep: true },
+      },
+      undefined,
+      expect.any(AbortSignal),
+      undefined,
+    );
+
     mockConnectionState.resolve();
     await agentPromise;
   });
