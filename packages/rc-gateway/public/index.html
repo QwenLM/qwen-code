@@ -791,6 +791,17 @@
           localStorage.setItem(TOKEN_KEY, data.token);
           idbPutToken(data.token);
           $('code').value = ''; // single-use; clear it once redeemed
+          // The directory picker's initial browseTo() (fired at script load,
+          // before any token exists on a fresh device/QR pair) bails on
+          // !token() and never re-triggers on its own — so #dir-list would
+          // otherwise show "(loading…)" forever until a manual reload. Now
+          // that a token exists, populate it (this covers BOTH the QR
+          // auto-pair and the manual code+Pair-button path, since both call
+          // doPair). renderRecentWorkspaces + browseTo are function
+          // declarations defined later in this script but hoisted, so both
+          // are callable here regardless of source order.
+          renderRecentWorkspaces();
+          void browseTo();
           pairFeedback(
             '✓ paired — scopes: ' + (data.scopes || []).join(', '),
             true,
@@ -1116,10 +1127,18 @@
         }
       }
 
+      // Strip a single trailing slash so '/foo/bar' and '/foo/bar/' dedup as
+      // the same recent entry; root stays '/' (never stripped to '').
+      function normalizeWorkspacePath(path) {
+        if (path === '/') return path;
+        return path.replace(/\/$/, '');
+      }
+
       // Most-recent-first, deduped, capped at MAX_RECENT. Called on every
       // successful session creation (see the new-session handler below).
       function pushRecentWorkspace(path) {
         if (!path) return;
+        path = normalizeWorkspacePath(path);
         const list = loadRecentWorkspaces().filter((p) => p !== path);
         list.unshift(path);
         try {
@@ -1164,7 +1183,7 @@
           row.onclick = () => browseTo(childPath);
           list.appendChild(row);
         }
-        if (entries.length === 0 && !curDirParent) {
+        if (entries.length === 0) {
           const none = document.createElement('div');
           none.textContent = '(no subfolders)';
           list.appendChild(none);
