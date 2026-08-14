@@ -335,6 +335,15 @@ jobs:
           )
         )
       }}
+    # Serialize publish per release tag: the pre-push re-validation in the
+    # push step is only sound while at most one run pushes and publishes a
+    # given version at a time, and --force removed the non-fast-forward
+    # rejection that used to serialize the push itself. Queued, not
+    # cancelled, so a retry that waits out a failed run still gets to
+    # replace its stale branch.
+    concurrency:
+      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}'
+      cancel-in-progress: false
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
@@ -395,8 +404,10 @@ jobs:
       - name: 'Commit and Conditionally Push package versions'
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          GITHUB_TOKEN: '${{ github.token }}'
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         run: |-
           git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/external-context/package.json
           if git diff --staged --quiet; then
@@ -405,12 +416,39 @@ jobs:
             git commit -m "chore(release): ${RELEASE_TAG}"
           fi
           if [[ "${IS_DRY_RUN}" == "false" ]]; then
-            echo "Pushing release branch to remote..."
             # Force: a failed earlier attempt may have left this branch on an
             # older head, and its divergent bump commit would fail a plain
-            # retry push as non-fast-forward. Replacing it is safe because a
-            # computed version with no npm package, tag, or release behind it
-            # cannot have shipped, so the stale tip is only a prior bump.
+            # retry push as non-fast-forward. Replacing it is safe only while
+            # nothing for this version has shipped. prepare checked that once,
+            # but the validation jobs and the production-release approval gate
+            # separate that check from this push by minutes to hours, so
+            # re-validate prepare's invariant (doesVersionExist in
+            # scripts/get-release-version.js) at push time: a concurrent
+            # same-version run that shipped in between would otherwise have
+            # its branch tip — and the tag and merge-to-main anchored to it —
+            # silently replaced.
+            for pkg in \
+              @qwen-code/qwen-code \
+              @qwen-code/audio-capture \
+              @qwen-code/channel-base \
+              @qwen-code/channel-dingtalk \
+              @qwen-code/channel-feishu \
+              @qwen-code/channel-github \
+              @qwen-code/channel-qqbot \
+              @qwen-code/channel-telegram \
+              @qwen-code/channel-wecom \
+              @qwen-code/channel-weixin; do
+              if npm view "${pkg}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+                echo "::error::${pkg}@${RELEASE_VERSION} is already published; refusing to force-push ${BRANCH_NAME} over a shipped release"
+                exit 1
+              fi
+            done
+            if git ls-remote --exit-code origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1 \
+              || gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+              echo "::error::tag or release ${RELEASE_TAG} already exists; refusing to force-push ${BRANCH_NAME} over a shipped release"
+              exit 1
+            fi
+            echo "Pushing release branch to remote..."
             git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags
           else
             echo "Dry run enabled. Skipping push."

@@ -64,10 +64,39 @@ describe('release workflow', () => {
     // A failed attempt leaves release/<tag> on an older head, and the
     // retry's divergent bump commit makes a plain push fail as
     // non-fast-forward, blocking every retry of the release. Force is safe
-    // here: a computed version with no npm package, tag, or release behind
-    // it cannot have shipped.
-    expect(workflow).toContain(
-      'git push --force --set-upstream origin "${BRANCH_NAME}" --follow-tags',
+    // only while nothing for this version has shipped, so the push is
+    // pinned INSIDE the dry-run guard: the dry-run contract (release.yml's
+    // dispatch input) promises no branch is created, and no other test
+    // pins this guard — a force push outside it would turn a dry run into
+    // a destructive overwrite of the remote branch.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags\n {10}else\n {12}echo "Dry run enabled\. Skipping push\."/,
+    );
+  });
+
+  it('serializes publish jobs per release tag', () => {
+    // The pre-push re-validation below is only sound while at most one
+    // publish job pushes and publishes a given version at a time; --force
+    // removed the non-fast-forward rejection that used to serialize the
+    // push itself. The group must sit on the publish job (a queued, not
+    // cancelled, second run still gets to replace or refuse the stale
+    // branch), and it must be keyed by the computed tag, which only exists
+    // as a prepare output.
+    expect(workflow).toMatch(
+      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.release_tag \}\}'\n {6}cancel-in-progress: false[\s\S]*?environment:\n {6}name: 'production-release'/,
+    );
+  });
+
+  it('re-validates that the version is still unshipped right before force-pushing', () => {
+    // prepare computed and validated the version minutes to hours before
+    // this push (the validation jobs and the production-release approval
+    // gate sit in between). A concurrent same-version run can ship in that
+    // window; the force push would then replace the branch tip that the
+    // shipped npm packages, tag, and merge to main anchor to. Pin the
+    // re-validation of prepare's invariant — every published package, the
+    // tag, and the release, aborting on a hit — directly before the push.
+    expect(workflow).toMatch(
+      /for pkg in \\[\s\S]*?@qwen-code\/qwen-code \\[\s\S]*?@qwen-code\/channel-weixin; do[\s\S]*?npm view "\$\{pkg\}@\$\{RELEASE_VERSION\}" version[\s\S]*?exit 1[\s\S]*?git ls-remote --exit-code origin "refs\/tags\/\$\{RELEASE_TAG\}"[\s\S]*?exit 1[\s\S]*?git push --force --set-upstream origin "\$\{BRANCH_NAME\}" --follow-tags/,
     );
   });
 
