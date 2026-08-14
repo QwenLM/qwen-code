@@ -44,7 +44,7 @@ import {
   textOf,
 } from './lib/transcripts.js';
 import { labelFromIdentityLine } from './lib/agent-identity.js';
-import { priorSessionEntries } from './lib/run-ledger.js';
+import { currentSessionEntry, priorSessionEntries } from './lib/run-ledger.js';
 
 interface CostLedgerArgs {
   plan: string;
@@ -82,6 +82,11 @@ interface Ledger {
    * than it was.
    */
   priorSessions: number;
+  /**
+   * Streams that exist but could not be read (a stat, read or parse failure).
+   * A silent skip would present a lower total as a complete one.
+   */
+  missingStreams: number;
 }
 
 interface UsageEvent {
@@ -333,8 +338,12 @@ export function computeLedger(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Ledger {
-  const floorMs = planFloorMs(planPath);
+  const planMs = planFloorMs(planPath);
   const { projectDir, sessionId, dir } = transcriptPaths(env);
+  // A review that starts inside an EXISTING session must not bill that
+  // session's earlier turns; its ledger entry says when it became an attempt.
+  const own = currentSessionEntry(planPath, env);
+  const floorMs = own === null ? planMs : Math.max(planMs, own.atMs);
 
   const chatFile = join(projectDir, 'chats', `${sessionId}.jsonl`);
   let mainEvents: UsageEvent[];
@@ -370,10 +379,14 @@ export function computeLedger(
 
   const agents: StreamCost[] = [];
   const agentEvents: UsageEvent[] = [];
+  // Streams that exist but could not be read: a silent skip would present a
+  // lower total as a complete one.
+  let missingStreams = 0;
   const readAgentDir = (
     agentDir: string,
     names: string[],
     ceilingMs?: number,
+    streamFloorMs?: number,
   ): number => {
     let streams = 0;
     for (const f of names) {
@@ -382,17 +395,19 @@ export function computeLedger(
       try {
         mtimeMs = statSync(full).mtimeMs;
       } catch {
+        missingStreams++;
         continue; // Gone between listing and stat.
       }
       // The transcript dir is session-scoped and never pruned: files from
       // earlier reviews this session predate the floor, and a file whose last
       // write predates it cannot hold an above-floor record — the same
       // membership test `readTranscripts` applies. Skip it without opening.
-      if (mtimeMs < floorMs) continue;
+      if (mtimeMs < (streamFloorMs ?? floorMs)) continue;
       let read: { events: UsageEvent[]; launch: string };
       try {
-        read = readUsage(full, floorMs, ceilingMs);
+        read = readUsage(full, streamFloorMs ?? floorMs, ceilingMs);
       } catch {
+        missingStreams++;
         continue; // This agent's record is lost; the rest still count.
       }
       if (read.events.length === 0) continue;
@@ -430,7 +445,10 @@ export function computeLedger(
       events = readUsage(
         paths?.chatFile ??
           join(projectDir, 'chats', `${entry.sessionId}.jsonl`),
-        floorMs,
+        // Floored at the moment THIS attempt began — the plan floor plus
+        // that session's own start. NOT the current attempt's floor, which is
+        // later and would erase the prior attempt entirely.
+        Math.max(planMs, entry.atMs),
         entry.endsAtMs ?? undefined,
       ).events;
       priorMainEvents.push(...events);
@@ -449,6 +467,7 @@ export function computeLedger(
           // operator kept working would otherwise fold unrelated subagent
           // cost into this review.
           entry.endsAtMs ?? undefined,
+          Math.max(planMs, entry.atMs),
         );
       } catch (err) {
         // Absent is the legitimate state (the attempt died before launching
@@ -528,6 +547,7 @@ export function computeLedger(
     main,
     agents,
     priorSessions,
+    missingStreams,
   };
 }
 
@@ -551,6 +571,11 @@ export function renderLedger(ledger: Ledger): string {
   if (ledger.priorSessions > 0) {
     lines.push(
       `  resumed run: totals include ${plural(ledger.priorSessions, 'earlier session')} of this review`,
+    );
+  }
+  if (ledger.missingStreams > 0) {
+    lines.push(
+      `  ⚠️ ${plural(ledger.missingStreams, 'stream')} could not be read; this ledger is a floor`,
     );
   }
   if (ledger.agents.length > 0) {

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { layerAuditGate } from './layer-audit-gate.js';
 import { appendRunSession, recordResume } from './run-ledger.js';
+import { briefPath, promptRecordDir, recordPrompt } from './prompt-record.js';
 import { MODELED_SYSTEM_DOMAIN } from './audit-layers.js';
 
 /** A valid RepositoryContext (strict schema) with the given domains. */
@@ -230,15 +231,54 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
   /** A corroborated reverse auditor in `session`: identity line, a baked
    *  territory read it actually performed, and receipts for `covered`. */
   function auditorTranscript(session: string, covered: string[]): void {
+    // The CLI's own record plus the brief it points at: a receipt only
+    // counts from an auditor that got THIS prompt and opened that brief.
+    const key = 'reverse-audit';
+    const brief = briefPath(plan, key);
     const launch =
       'You are review agent `reverse-audit` — hunt the gaps.\n' +
+      `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${diff}", offset=0, limit=100)`;
-    const base = { agentId: `ra-${session}`, agentName: 'general-purpose' };
+    mkdirSync(promptRecordDir(plan), { recursive: true });
+    writeFileSync(brief, 'The reverse-audit brief.');
+    recordPrompt(plan, key, launch);
+    const base = {
+      agentId: `ra-${session}`,
+      agentName: 'general-purpose',
+      sessionId: session,
+    };
     const lines = [
       JSON.stringify({
         ...base,
         type: 'user',
         message: { role: 'user', parts: [{ text: launch }] },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { name: 'read_file', args: { file_path: brief } },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        ...base,
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'brief' },
+              },
+            },
+          ],
+        },
       }),
       JSON.stringify({
         ...base,

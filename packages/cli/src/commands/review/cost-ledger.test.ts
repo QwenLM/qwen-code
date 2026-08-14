@@ -1521,6 +1521,90 @@ describe('cost-ledger — prior-session bounds, faults and wall time', () => {
     );
   }
 
+  it('renders the resumed-run line, singular and plural, and not otherwise', () => {
+    const one = renderLedger({
+      totals: {
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+        wallSeconds: 60,
+      },
+      main: {
+        id: 'main',
+        label: 'main loop',
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+      },
+      agents: [],
+      priorSessions: 1,
+      missingStreams: 0,
+    });
+    expect(one).toContain('resumed run: totals include 1 earlier session ');
+    const two = renderLedger({
+      totals: {
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+        wallSeconds: 60,
+      },
+      main: {
+        id: 'main',
+        label: 'main loop',
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+      },
+      agents: [],
+      priorSessions: 2,
+      missingStreams: 0,
+    });
+    expect(two).toContain('2 earlier sessions');
+    const none = renderLedger({
+      totals: {
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+        wallSeconds: 60,
+      },
+      main: {
+        id: 'main',
+        label: 'main loop',
+        calls: 1,
+        inputTokens: 10,
+        cachedTokens: 0,
+        outputTokens: 1,
+        thoughtsTokens: 0,
+        firstAt: null,
+        lastAt: null,
+      },
+      agents: [],
+      priorSessions: 0,
+      missingStreams: 0,
+    });
+    expect(none).not.toContain('resumed run');
+  });
+
   it("clamps a prior session's chat to the moment the next attempt began", () => {
     // The interrupted CLI session went on serving unrelated turns after the
     // review died; billing those as review cost is the mirror of the

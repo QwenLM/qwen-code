@@ -15,7 +15,7 @@ import {
   utimesSync,
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import {
@@ -409,8 +409,31 @@ export function runRepoContext(
   // restored after it; letting it advance re-keyed the epoch mid-run and
   // silently orphaned everything recorded before this command ran.
   const planStat = statSync(planPath);
-  atomicWriteFileSync(planPath, stringifyPlanReport(plan));
-  utimesSync(planPath, planStat.atime, planStat.mtime);
+  const serialized = stringifyPlanReport(plan);
+  // The cheapest way to keep the epoch is not to move it: an enrichment that
+  // changes nothing (the common case on a resumed run, where the plan
+  // already carries its context) skips the write entirely, so the
+  // commit-then-restore window cannot open at all.
+  let planUnchanged = false;
+  try {
+    planUnchanged = readFileSync(planPath, 'utf8') === serialized;
+  } catch {
+    planUnchanged = false;
+  }
+  if (!planUnchanged) {
+    atomicWriteFileSync(planPath, serialized);
+    utimesSync(planPath, planStat.atime, planStat.mtime);
+    // The rename commits a new mtime before the restore lands. Verify it:
+    // an unrestored epoch fences out this run's own evidence, and a silent
+    // one is worse than a loud one.
+    if (statSync(planPath).mtimeMs !== planStat.mtimeMs) {
+      writeStderrLine(
+        `WARNING: could not restore the plan's timestamp at ${planPath}; ` +
+          `the run epoch has moved, and evidence recorded before this ` +
+          `command may no longer be visible to this run.`,
+      );
+    }
+  }
   writeStdoutLine(
     context === null
       ? `Wrote null repository context to ${outPath}`

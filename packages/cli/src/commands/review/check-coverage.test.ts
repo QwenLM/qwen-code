@@ -2259,6 +2259,36 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
   });
 });
 
+describe('verificationGaps — a resumed run reads the prior attempt', () => {
+  it('accepts Step 4/5 evidence that exists only in a prior session', () => {
+    // The zero-launch continuation, pinned at the verification floor rather
+    // than inferred from its coverage sibling: a current-session-only reader
+    // regressing here would report the steps as never run.
+    const p = plan();
+    for (const name of readdirSync(join(dir, 'subagents', 'S1'))) {
+      mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
+      const from = join(dir, 'subagents', 'S1', name);
+      writeFileSync(
+        join(dir, 'subagents', 'S0', name),
+        readFileSync(from, 'utf8').replaceAll(
+          '"sessionId":"S1"',
+          '"sessionId":"S0"',
+        ),
+      );
+      rmSync(from, { force: true });
+    }
+    const now = Date.now();
+    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S0' }, now);
+    appendRunSession(p, { QWEN_CODE_SESSION_ID: 'S1' }, now + 1500);
+    recordResume(p, ENV, now + 1500);
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.gaps.map((g) => g.subject)).not.toContain('verification');
+    expect(r.gaps.map((g) => g.subject)).not.toContain('reverse audit');
+  });
+});
+
 describe('coverage — a stale Uncoverable declaration cannot cap live coverage', () => {
   function ledger(planPath: string, ...ids: string[]): void {
     const d = promptRecordDir(planPath);

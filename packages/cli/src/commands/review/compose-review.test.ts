@@ -579,12 +579,24 @@ describe('composeReview — modeled-system defect-layer cap', () => {
     ids.map((id) => `Layer walked: ${id} — clear.`).join('\n');
   // A genuine reverse-audit auditor: the identity line, a real diff read
   // (so `diffToolCalls > 0`), and the given receipts as its final text.
-  const auditor = (id: string, receipts: string) =>
-    transcript(id, `${IDENTITY}\nread_file(file_path="${DIFF}")`, {
+  // A GENUINE auditor: launched with the prompt the CLI recorded for the
+  // role, and it opened the brief that prompt points at. A receipt only
+  // counts from one of these — otherwise a compliant sibling's floor could
+  // carry a hand-written auditor's claims.
+  const auditor = (id: string, receipts: string) => {
+    const planPath = join(dir, 'plan.json');
+    const brief = briefPath(planPath, 'reverse-audit');
+    const launch =
+      'You are review agent `reverse-audit`.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    transcript(id, launch, {
       toolCalls: 1,
       range: [0, 100],
+      opens: [brief],
       text: receipts,
     });
+  };
   const markedPlan = (domains: string[]) =>
     coveredPlan(['verify', 'reverse-audit'], {
       repositoryContext: sentinel(domains),

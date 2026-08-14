@@ -229,6 +229,26 @@ export function priorSessionIds(
  * entry and the current session's own start is not recorded here).
  */
 /**
+ * This session's own ledger entry, if it wrote one.
+ *
+ * Needed for the cost floor: a review that starts inside an EXISTING CLI
+ * session must not bill that session's earlier, unrelated turns, and the
+ * plan floor alone cannot tell them apart. No authorization gate here — a
+ * session reading its own entry is not reading anyone else's evidence.
+ */
+export function currentSessionEntry(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { sessionId: string; atMs: number } | null {
+  const current = env['QWEN_CODE_SESSION_ID']?.trim().toLowerCase();
+  if (!current) return null;
+  return (
+    readSessions(planPath).find((e) => e.sessionId.toLowerCase() === current) ??
+    null
+  );
+}
+
+/**
  * Did the CURRENT session actually earn the right to read prior evidence?
  *
  * The ledger is an address book; it does not say a resume was authorized.

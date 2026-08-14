@@ -58,6 +58,11 @@ import { statSync, readFileSync } from 'node:fs';
 import { readRunTranscripts } from './transcripts.js';
 import { bakedRanges, openedTheTerritory } from './retirement.js';
 import {
+  readRecordedPrompts,
+  wasDeliveredVerbatim,
+  briefPath,
+} from './prompt-record.js';
+import {
   repositoryContextOf,
   type RepositoryContext,
 } from './repository-context.js';
@@ -103,10 +108,25 @@ function readReverseAuditReturns(
     const auditors = readRunTranscripts(planPath, since, env, diffPath, {
       currentDirOptional: true,
     }).filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_IDENTITY));
+    // A receipt only counts from an auditor that got the CLI's own prompt
+    // and opened the brief it points at. Territory alone let a compliant
+    // sibling satisfy the floor while a hand-written auditor supplied the
+    // receipt — the launch is exactly what the built record proves.
+    const built = readRecordedPrompts(planPath);
+    const delivered = (t: (typeof auditors)[number]): boolean => {
+      for (const [key, prompt] of built) {
+        if (prompt.trim() === '') continue;
+        if (!wasDeliveredVerbatim(t.launchPrompt, prompt)) continue;
+        const needle = JSON.stringify(briefPath(planPath, key));
+        if (t.successfulCallArgs.some((a) => a.includes(needle))) return true;
+      }
+      return false;
+    };
     const corroborated = auditors
       .filter(
         (t) =>
           t.diffToolCalls > 0 &&
+          delivered(t) &&
           openedTheTerritory(
             t.diffReads,
             bakedRanges(t.launchPrompt, diffPath),
