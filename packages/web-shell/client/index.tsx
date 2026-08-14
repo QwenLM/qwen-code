@@ -153,6 +153,11 @@ export type {
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';
 export type {
+  WebShellHostSettingItem,
+  WebShellHostSettingsCategory,
+  WebShellHostSettingValue,
+} from './hostSettings';
+export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,
 } from './utils/commandDisplay';

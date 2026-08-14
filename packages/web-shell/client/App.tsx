@@ -324,6 +324,7 @@ import {
   type WebShellComposerTagIconMap,
   type WebShellBottomStatusItem,
 } from './customization';
+import type { WebShellHostSettingsCategory } from './hostSettings';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
 import styles from './App.module.css';
@@ -865,6 +866,8 @@ export interface WebShellProps {
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
+  /** Application-owned settings shown only when supplied by an embedding host. */
+  hostSettings?: readonly WebShellHostSettingsCategory[];
   /** Additional CSS class name appended to the root element. */
   className?: string;
   /** Inline styles applied to the root element. */
@@ -1794,6 +1797,7 @@ export function App({
   onThemeChange,
   language: providedLanguage,
   onLanguageChange,
+  hostSettings,
   className: externalClassName,
   style: externalStyle,
   shadowDom,
@@ -11549,6 +11553,7 @@ export function App({
                       {activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={targetedWorkspaceSettingsState}
+                        hostSettings={hostSettings}
                         embedded
                         onLanguageChange={handleSettingsLanguageChange}
                         onThemeChange={handleThemeChange}

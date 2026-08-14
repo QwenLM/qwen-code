@@ -1,0 +1,60 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+html,
+body,
+#surface {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+#pet {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  cursor: grab;
+  background-image: url('./qwen-spritesheet.webp');
+  background-repeat: no-repeat;
+  filter: drop-shadow(0 3px 6px rgb(0 0 0 / 35%));
+  image-rendering: auto;
+}
+
+#pet:active {
+  cursor: grabbing;
+}
+
+#menu {
+  position: absolute;
+  z-index: 2;
+  min-width: 142px;
+  padding: 3px;
+  border: 1px solid rgb(212 212 212 / 90%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 94%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
+  backdrop-filter: blur(12px);
+}
+
+#menu button {
+  width: 100%;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 5px;
+  color: #262626;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+#menu button:hover,
+#menu button:focus-visible {
+  background: #eeeeee;
+  outline: none;
+}

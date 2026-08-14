@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Qwen Pet</title>
+    <link rel="stylesheet" href="./pet.css" />
+  </head>
+  <body>
+    <main id="surface">
+      <div id="pet" data-pet-interactive title="Qwen desktop companion"></div>
+      <div id="menu" data-pet-interactive hidden>
+        <button id="close-pet" type="button">Close desktop pet</button>
+      </div>
+    </main>
+    <script type="module" src="./pet.js"></script>
+  </body>
+</html>

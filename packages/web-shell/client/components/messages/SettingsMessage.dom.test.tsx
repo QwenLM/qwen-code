@@ -15,6 +15,7 @@ import {
 } from './SettingsMessage';
 import type { ModelManagementProps } from './ModelManagementSection';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
+import type { WebShellHostSettingsCategory } from '../../hostSettings';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -155,6 +156,7 @@ function renderPanel(
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
     modelManagement: ModelManagementProps;
+    hostSettings: readonly WebShellHostSettingsCategory[];
   }> = {},
 ): HTMLElement {
   return render(
@@ -168,6 +170,7 @@ function renderPanel(
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagement={overrides.modelManagement}
+        hostSettings={overrides.hostSettings}
       />
     </I18nProvider>,
   );
@@ -196,6 +199,45 @@ function switchButton(container: HTMLElement): HTMLButtonElement {
   if (!el) throw new Error('boolean switch not found');
   return el;
 }
+
+describe('SettingsMessage host settings', () => {
+  it('renders application-owned settings without writing daemon settings', async () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({} as DaemonSettingUpdateResult),
+    );
+    const onChange = vi.fn(async () => {});
+    const container = renderPanel(makeState([boolSetting()], setValue), {
+      hostSettings: [
+        {
+          id: 'desktop',
+          label: 'Desktop',
+          scopeLabel: 'Application',
+          onChange,
+          items: [
+            {
+              key: 'pet.enabled',
+              label: 'Desktop pet',
+              kind: 'boolean',
+              value: true,
+            },
+          ],
+        },
+      ],
+    });
+
+    const desktop = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.includes('Desktop'));
+    act(() => desktop?.click());
+
+    expect(container.textContent).toContain('Application');
+    await act(async () => {
+      switchButton(container).click();
+    });
+    expect(onChange).toHaveBeenCalledWith('pet.enabled', false);
+    expect(setValue).not.toHaveBeenCalled();
+  });
+});
 
 describe('SettingsMessage user-scope editing', () => {
   it('persists a boolean toggle to the user scope from the User tab', async () => {

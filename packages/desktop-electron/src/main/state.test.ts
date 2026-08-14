@@ -5,7 +5,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { initialWindowBounds, normalizeDesktopState } from './state';
+import {
+  defaultPetSettings,
+  initialWindowBounds,
+  normalizeDesktopState,
+  normalizePetSettings,
+} from './state';
 
 describe('Electron desktop state', () => {
   it('drops malformed persisted fields', () => {
@@ -64,6 +69,32 @@ describe('Electron desktop state', () => {
       width: 1280,
       height: 820,
       maximized: false,
+    });
+  });
+
+  it('normalizes persisted pet settings and position', () => {
+    expect(
+      normalizeDesktopState({
+        pet: {
+          enabled: false,
+          size: 999,
+          position: { x: 18.4, y: 27.7 },
+        },
+      }),
+    ).toEqual({
+      pet: {
+        enabled: false,
+        size: 240,
+        position: { x: 18, y: 28 },
+      },
+    });
+  });
+
+  it('uses safe defaults for a new pet configuration', () => {
+    expect(defaultPetSettings()).toEqual({ enabled: true, size: 96 });
+    expect(normalizePetSettings({ size: 'large' })).toEqual({
+      enabled: true,
+      size: 96,
     });
   });
 });

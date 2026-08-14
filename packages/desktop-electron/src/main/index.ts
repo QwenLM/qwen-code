@@ -10,6 +10,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   nativeTheme,
   screen,
@@ -17,16 +18,31 @@ import {
 } from 'electron';
 import { DesktopRuntime } from './runtime';
 import {
+  PetWindowController,
+  petRendererPath,
+  preloadPath,
+} from './pet-window';
+import {
   captureWindowState,
+  defaultPetSettings,
   initialWindowBounds,
+  normalizePetSize,
+  normalizePetSettings,
   readDesktopState,
   saveDesktopState,
   type DesktopState,
   type WindowState,
 } from './state';
+import {
+  DESKTOP_CHANNELS,
+  type HostSettingsCategory,
+  type PetSettings,
+  type SessionChangeReport,
+} from '../shared/desktop-api';
 
 let mainWindow: BrowserWindow | undefined;
 let runtime: DesktopRuntime | undefined;
+let petController: PetWindowController | undefined;
 let desktopState: DesktopState = {};
 let statePath = '';
 let hostLogPath = '';
@@ -81,6 +97,8 @@ app.on('before-quit', () => {
   try {
     flushDesktopState();
   } finally {
+    petController?.destroy();
+    petController = undefined;
     runtime?.stop();
     runtime = undefined;
   }
@@ -105,6 +123,17 @@ async function startApplication(): Promise<void> {
   statePath = path.join(app.getPath('userData'), 'desktop-state.json');
   hostLogPath = path.join(app.getPath('logs'), 'desktop-host.log');
   desktopState = readDesktopState(statePath);
+  desktopState.pet =
+    normalizePetSettings(desktopState.pet) ?? defaultPetSettings();
+  petController = new PetWindowController(desktopState.pet, {
+    preloadPath: preloadPath(__dirname),
+    rendererPath: petRendererPath(__dirname),
+    onPositionChange: (position) => {
+      desktopState.pet = { ...currentPetSettings(), position };
+      scheduleDesktopStateSave();
+    },
+  });
+  registerDesktopIpc();
 
   const workspace = await resolveWorkspace();
   if (!workspace) {
@@ -131,6 +160,7 @@ async function startApplication(): Promise<void> {
 
   installApplicationMenu();
   await showMainWindow(desktopState.window);
+  petController.applySettings(currentPetSettings());
 }
 
 async function showMainWindow(
@@ -173,6 +203,7 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
     title: 'Qwen Code',
     titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
     webPreferences: {
+      preload: preloadPath(__dirname),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -201,6 +232,7 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
   window.on('close', flushDesktopState);
   window.on('closed', () => {
     if (mainWindow === window) mainWindow = undefined;
+    if (process.platform !== 'darwin' && !quitting) app.quit();
   });
   window.webContents.on('will-navigate', (event, url) => {
     if (isRuntimeUrl(url)) return;
@@ -300,6 +332,157 @@ function flushDesktopState(): void {
     desktopState.window = captureWindowState(mainWindow);
   }
   if (statePath) saveDesktopState(statePath, desktopState);
+}
+
+function currentPetSettings(): PetSettings {
+  return desktopState.pet ?? defaultPetSettings();
+}
+
+function updatePetSettings(update: Partial<PetSettings>): void {
+  desktopState.pet = { ...currentPetSettings(), ...update };
+  petController?.applySettings(desktopState.pet);
+  flushDesktopState();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(DESKTOP_CHANNELS.hostSettingsChanged);
+  }
+}
+
+function hostSettings(language: string): HostSettingsCategory[] {
+  const chinese = language.toLowerCase().startsWith('zh');
+  const pet = currentPetSettings();
+  return [
+    {
+      id: 'desktop',
+      label: chinese ? '桌面端' : 'Desktop',
+      scopeLabel: chinese ? '应用' : 'Application',
+      items: [
+        {
+          key: 'pet.enabled',
+          label: chinese ? '桌面小宠物' : 'Desktop pet',
+          description: chinese
+            ? '在其他窗口上方显示 Qwen 水豚，并跟随任务状态变化。'
+            : 'Show the Qwen capybara above other windows and reflect task activity.',
+          kind: 'boolean',
+          value: pet.enabled,
+        },
+        {
+          key: 'pet.size',
+          label: chinese ? '小宠物尺寸' : 'Pet size',
+          description: chinese
+            ? '宠物高度，支持 64 到 240 像素。'
+            : 'Pet height from 64 to 240 pixels.',
+          kind: 'number',
+          value: pet.size,
+          disabled: !pet.enabled,
+        },
+      ],
+    },
+  ];
+}
+
+function registerDesktopIpc(): void {
+  ipcMain.handle(
+    DESKTOP_CHANNELS.loadHostSettings,
+    (event, language: unknown) => {
+      requireMainSender(event.sender.id);
+      return hostSettings(typeof language === 'string' ? language : 'en');
+    },
+  );
+  ipcMain.handle(
+    DESKTOP_CHANNELS.setHostSetting,
+    (event, key: unknown, value: unknown) => {
+      requireMainSender(event.sender.id);
+      if (key === 'pet.enabled' && typeof value === 'boolean') {
+        updatePetSettings({ enabled: value });
+        return;
+      }
+      if (key === 'pet.size' && typeof value === 'number') {
+        updatePetSettings({ size: normalizePetSize(value) });
+        return;
+      }
+      throw new Error('Unsupported desktop setting.');
+    },
+  );
+  ipcMain.handle(DESKTOP_CHANNELS.petBootstrap, (event) => {
+    requirePetSender(event.sender.id);
+    return currentPetSettings();
+  });
+  ipcMain.on(DESKTOP_CHANNELS.streamingState, (event, state: unknown) => {
+    if (!isMainSender(event.sender.id) || typeof state !== 'string') return;
+    petController?.reportStreamingState(state);
+  });
+  ipcMain.on(
+    DESKTOP_CHANNELS.sessionChange,
+    (event, report: SessionChangeReport) => {
+      if (!isMainSender(event.sender.id)) return;
+      if (
+        !report ||
+        (report.type !== 'submit' && report.type !== 'turn_complete')
+      ) {
+        return;
+      }
+      petController?.reportSessionChange(report);
+    },
+  );
+  ipcMain.on(DESKTOP_CHANNELS.petIgnoreMouse, (event, ignore: unknown) => {
+    if (!petController?.owns(event.sender.id) || typeof ignore !== 'boolean') {
+      return;
+    }
+    petController.setIgnoreMouseEvents(ignore);
+  });
+  ipcMain.on(
+    DESKTOP_CHANNELS.petDragStart,
+    (event, screenX: unknown, screenY: unknown) => {
+      if (
+        !petController?.owns(event.sender.id) ||
+        !Number.isFinite(screenX) ||
+        !Number.isFinite(screenY)
+      ) {
+        return;
+      }
+      petController.beginDrag(screenX as number, screenY as number);
+    },
+  );
+  ipcMain.on(
+    DESKTOP_CHANNELS.petDragMove,
+    (event, screenX: unknown, screenY: unknown) => {
+      if (
+        !petController?.owns(event.sender.id) ||
+        !Number.isFinite(screenX) ||
+        !Number.isFinite(screenY)
+      ) {
+        return;
+      }
+      petController.moveDrag(screenX as number, screenY as number);
+    },
+  );
+  ipcMain.on(DESKTOP_CHANNELS.petDragEnd, (event) => {
+    if (petController?.owns(event.sender.id)) petController.endDrag();
+  });
+  ipcMain.on(DESKTOP_CHANNELS.petClose, (event) => {
+    if (petController?.owns(event.sender.id)) {
+      updatePetSettings({ enabled: false });
+    }
+  });
+}
+
+function isMainSender(webContentsId: number): boolean {
+  return (
+    mainWindow !== undefined &&
+    !mainWindow.isDestroyed() &&
+    mainWindow.webContents.id === webContentsId
+  );
+}
+
+function requireMainSender(webContentsId: number): void {
+  if (!isMainSender(webContentsId))
+    throw new Error('Untrusted desktop sender.');
+}
+
+function requirePetSender(webContentsId: number): void {
+  if (!petController?.owns(webContentsId)) {
+    throw new Error('Untrusted pet sender.');
+  }
 }
 
 function isRuntimeUrl(raw: string): boolean {

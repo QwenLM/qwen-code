@@ -14,6 +14,11 @@ import {
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { buildSessionPathname, parseSessionId } from './utils/sessionPath';
+import type { SessionChangeEvent } from './App';
+import type {
+  WebShellHostSettingsCategory,
+  WebShellHostSettingValue,
+} from './hostSettings';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
@@ -21,6 +26,65 @@ const DAEMON_BASE_URL = getDaemonBaseUrl();
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
+
+type HostSettingsDescriptor = Omit<WebShellHostSettingsCategory, 'onChange'>;
+
+interface StandaloneHostBridge {
+  loadSettings: (language: string) => Promise<HostSettingsDescriptor[]>;
+  setSetting: (key: string, value: WebShellHostSettingValue) => Promise<void>;
+  onSettingsChanged?: (callback: () => void) => () => void;
+  reportStreamingState?: (state: string) => void;
+  reportSessionChange?: (event: {
+    type: 'submit' | 'turn_complete';
+    failed?: boolean;
+  }) => void;
+}
+
+function standaloneHostBridge(): StandaloneHostBridge | undefined {
+  return (window as unknown as { qwenCodeHost?: StandaloneHostBridge })
+    .qwenCodeHost;
+}
+
+function useHostSettings(
+  bridge: StandaloneHostBridge | undefined,
+  language: WebShellLanguage,
+): readonly WebShellHostSettingsCategory[] {
+  const [categories, setCategories] = useState<
+    readonly WebShellHostSettingsCategory[]
+  >([]);
+  const reload = useCallback(async () => {
+    if (!bridge) {
+      setCategories([]);
+      return;
+    }
+    const loaded = await bridge.loadSettings(language);
+    setCategories(
+      loaded.map((category) => ({
+        ...category,
+        onChange: async (key, value) => {
+          await bridge.setSetting(key, value);
+          await reload();
+        },
+      })),
+    );
+  }, [bridge, language]);
+
+  useEffect(() => {
+    let disposed = false;
+    void reload().catch(() => {
+      if (!disposed) setCategories([]);
+    });
+    const unsubscribe = bridge?.onSettingsChanged?.(() => {
+      if (!disposed) void reload();
+    });
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [bridge, reload]);
+
+  return categories;
+}
 
 function parseTheme(value: string | null): WebShellTheme | undefined {
   if (value === WebShellThemeId.Dark || value === WebShellThemeId.Light) {
@@ -122,6 +186,8 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
     getWorkspaceIdFromUrl(),
   );
+  const [hostBridge] = useState(standaloneHostBridge);
+  const hostSettings = useHostSettings(hostBridge, language);
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
   // the React theme so mobile status bars / overscroll backgrounds stay
@@ -152,6 +218,19 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     },
     [],
   );
+  const handleSessionChange = useCallback(
+    (event: SessionChangeEvent) => {
+      if (event.type === 'submit') {
+        hostBridge?.reportSessionChange?.({ type: 'submit' });
+      } else if (event.type === 'turn_complete') {
+        hostBridge?.reportSessionChange?.({
+          type: 'turn_complete',
+          failed: Boolean(event.error),
+        });
+      }
+    },
+    [hostBridge],
+  );
 
   return (
     <ErrorBoundary
@@ -170,6 +249,11 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             language,
             onLanguageChange: handleLanguageChange,
             onSessionIdChange: handleSessionIdChange,
+            onSessionChange: hostBridge ? handleSessionChange : undefined,
+            onStreamingStateChange: hostBridge
+              ? (state) => hostBridge.reportStreamingState?.(state)
+              : undefined,
+            hostSettings: hostBridge ? hostSettings : undefined,
             sidebar: true,
             header: {
               items: ['title', 'environment', 'rightPanel'],
