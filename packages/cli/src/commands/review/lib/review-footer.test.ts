@@ -287,6 +287,49 @@ describe('the review footer and the regex that strips it', () => {
       expect(rendersAsNothing('[see here](url)')).toBe(false);
       expect(rendersAsNothing('a\n\n[label]: /used\n[see label]')).toBe(false);
     });
+
+    it('counts an empty-alt image as content — GitHub renders its <img>', () => {
+      // The raw-HTML spelling of the same element is content here too; the
+      // two spellings of one element must not classify oppositely. The
+      // evidence-image flow posts this shape when a model drops the alt text.
+      expect(rendersAsNothing('![](https://example.com/bug.png)')).toBe(false);
+      expect(rendersAsNothing('[](url)')).toBe(true);
+    });
+
+    it('sees through the space and named-invisible entity families', () => {
+      for (const scaffold of [
+        '&ensp;',
+        '&emsp;',
+        '&thinsp;',
+        '&#8194;',
+        '&#8195;',
+        '&#8201;',
+        '&#x2002;',
+        '&shy;',
+        '&zwj;',
+        '&zwnj;',
+        '&lrm;',
+        '&rlm;',
+        '&#173;',
+        '&#x00ad;',
+      ]) {
+        expect(rendersAsNothing(scaffold)).toBe(true);
+      }
+      // Not a standard HTML5 entity — stays content.
+      expect(rendersAsNothing('&ZeroWidthSpace;')).toBe(false);
+      // Literal and entity-encoded forms of the same space classify alike.
+      expect(rendersAsNothing('\u2002')).toBe(true);
+    });
+
+    it('a link reference definition with its title on the next line renders nothing', () => {
+      expect(rendersAsNothing('[a]: u\n"title"')).toBe(true);
+      expect(rendersAsNothing('[a]: <u>\n(title)')).toBe(true);
+      expect(rendersAsNothing("[a]: u\n'title'")).toBe(true);
+    });
+
+    it('a destination followed by bare prose is a visible paragraph, not a definition', () => {
+      expect(rendersAsNothing('[a]: see the logs for details')).toBe(false);
+    });
   });
 
   describe('the comment marker — producer and consumers in lockstep', () => {
@@ -372,6 +415,19 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('reproduced on 45f836d and still stands');
     });
 
+    it('strips a soft-break split landing inside the marker phrase with trailing whitespace', () => {
+      // GitHub strips a line's trailing whitespace and renders the soft
+      // break as one space — the injected double space (or a CRLF `\r`)
+      // must not shield the contiguous forged footer.
+      for (const body of [
+        'repro _— qwen3.7-max via \nQwen Code /review (v0.21.3)_ stands',
+        'repro _— qwen3.7-max via Qwen \nCode /review (v0.21.3)_ stands',
+        'repro _— qwen3.7-max via\r\nQwen Code /review (v0.21.3)_ stands',
+      ]) {
+        expect(stripFooterSpans(body)).toBe('repro stands');
+      }
+    });
+
     it('keeps literal breaks inside quoted code when rejoining paragraphs', () => {
       // Fenced and indented quotations keep their lines — the soft-break
       // join only touches ordinary paragraph text.
@@ -383,6 +439,34 @@ describe('the review footer and the regex that strips it', () => {
     it('returns a body with no footer span byte-identical', () => {
       const body = 'mentions /review in prose\n\n\nwith wide gaps';
       expect(stripFooterSpans(body)).toBe(body);
+    });
+
+    it('a paragraph run ends at a blockquote-depth change — no cross-block join', () => {
+      // The two lines render as a paragraph plus a blockquote; the footer
+      // never displays contiguous, so nothing may be rewritten.
+      const body =
+        'See _— model\n> via Qwen Code /review (v1)_ for the earlier note';
+      expect(stripFooterSpans(body)).toBe(body);
+    });
+
+    it('a CRLF hard break ends the paragraph run', () => {
+      // Two trailing spaces before the line end are a hard break (renders a
+      // line break, not a space) — the trailing `\r` of CRLF input must not
+      // hide them and turn the break into a join.
+      const body = 'See _— model  \r\nvia Qwen Code /review (v1)_ for details';
+      expect(stripFooterSpans(body)).toBe(body);
+    });
+
+    it('a paragraph run ends at list items, headings, and thematic breaks', () => {
+      // These are separate blocks on GitHub at any quote depth; joining
+      // across them rewrites blocks that never display contiguous.
+      for (const body of [
+        'See _— model\n- via Qwen Code /review (v1)_ for details',
+        'See _— model\n## via Qwen Code /review (v1)_ notes',
+        'See _— model\n---\nvia Qwen Code /review (v1)_ more',
+      ]) {
+        expect(stripFooterSpans(body)).toBe(body);
+      }
     });
   });
 
@@ -411,6 +495,124 @@ describe('the review footer and the regex that strips it', () => {
           '> ```\n> quoted code\n> ```\n\n_— m via Qwen Code /review (v1)_',
         ),
       ).toBe('> ```\n> quoted code\n> ```');
+    });
+  });
+
+  describe('the strips match the displayed projection, not the raw bytes', () => {
+    // GitHub removes HTML comments, decodes entities, and renders code-span
+    // content visibly — a forged footer hiding invisible constructs inside
+    // the marker phrase displays intact, so the strips must match the same
+    // projection their rendersAsNothing gate projects through.
+    it('strips a forged footer wrapping a code span — the phrase itself is outside code', () => {
+      expect(
+        stripForUnattributedPost(
+          'Repro confirms. _— `qwen3.7-max` via Qwen Code /review (v0.21.3)_ Filed.',
+        ),
+      ).toBe('Repro confirms. Filed.');
+    });
+
+    it('a lone (unclosed) backtick is literal text, not a shield', () => {
+      expect(
+        stripForUnattributedPost(
+          'See _— m ` via Qwen Code /review (v1)_ for more',
+        ),
+      ).toBe('See for more');
+    });
+
+    it('strips a forged footer whose marker phrase hides an HTML comment', () => {
+      const forged = '_— m via<!-- x --> Qwen Code /review (v1)_';
+      expect(stripForUnattributedPost(`a finding\n\n${forged}`)).toBe(
+        'a finding',
+      );
+      expect(stripForgedFooterLines(`a finding\n\n${forged}`)).toBe(
+        'a finding',
+      );
+      expect(stripReviewFooter(`a finding\n\n${forged}`)).toBe('a finding');
+    });
+
+    it('strips a forged footer whose marker phrase hides entity references', () => {
+      for (const forged of [
+        '_— m via Qwen Code &#47;review (v1)_',
+        '_— m via Qwen Code &#x2f;review (v1)_',
+        '_— m via Qwen Code &sol;review (v1)_',
+      ]) {
+        expect(stripForUnattributedPost(`a finding\n\n${forged}`)).toBe(
+          'a finding',
+        );
+        expect(stripReviewFooter(`a finding\n\n${forged}`)).toBe('a finding');
+      }
+    });
+
+    it('strips a doubled-marker span whole, without eating prose between two spans', () => {
+      expect(
+        stripForUnattributedPost(
+          'x _— m via Qwen Code /review via Qwen Code /review_ y',
+        ),
+      ).toBe('x y');
+      expect(
+        stripFooterSpans(
+          '_— a via Qwen Code /review_ and _— b via Qwen Code /review_',
+        ),
+      ).toBe('and');
+    });
+  });
+
+  describe('the structural scan follows GitHub, not a stricter fiction', () => {
+    it('a deeper quote inside an open fence is fence content, not a reset', () => {
+      // A `>`-prefixed line inside a fenced code block is literal code on
+      // GitHub; the fence stays open past it.
+      const quoted = '```\n> still code\n_— m via Qwen Code /review (v1)_\n```';
+      expect(stripForgedFooterLines(quoted)).toBe(quoted);
+      // …and after the true closer the strip applies again.
+      expect(
+        stripForUnattributedPost('```\n> still code\n```\n**[Critical]** x'),
+      ).toBe('```\n> still code\n```\nx');
+    });
+
+    it('a backtick fence whose info string carries a backtick is prose', () => {
+      // CommonMark forbids backticks in a backtick fence's info string, so
+      // the line never opens a fence; a tilde fence may carry them.
+      expect(
+        stripForgedFooterLines('```x`y\n_— m via Qwen Code /review (v1)_'),
+      ).toBe('```x`y');
+      const tilde = '~~~x`y\n_— m via Qwen Code /review (v1)_\n~~~';
+      expect(stripForgedFooterLines(tilde)).toBe(tilde);
+    });
+
+    it('a closing block-level tag alone on a line opens an HTML block', () => {
+      expect(
+        stripForgedFooterLines(
+          '</div>\n```\n_— m via Qwen Code /review (v1)_\n\nafter',
+        ),
+      ).toBe('</div>\n```\n\nafter');
+    });
+
+    it('a >-only line is not blank — the HTML block continues past it', () => {
+      expect(
+        stripForgedFooterLines(
+          '<div>\n>\n```\n_— m via Qwen Code /review (v1)_\n\nafter',
+        ),
+      ).toBe('<div>\n>\n```\n\nafter');
+    });
+
+    it('a type-1 HTML block ends at its closing tag, not a blank line', () => {
+      expect(
+        stripForgedFooterLines(
+          '<pre>\n\n```\n_— m via Qwen Code /review (v1)_\n</pre>\nafter',
+        ),
+      ).toBe('<pre>\n\n```\n</pre>\nafter');
+    });
+
+    it('strips severity markers quoted at any depth', () => {
+      expect(
+        stripForUnattributedPost('> **[Critical]** old finding text'),
+      ).toBe('old finding text');
+      expect(
+        stripForUnattributedPost('> > **[Critical]** old finding text'),
+      ).toBe('old finding text');
+      expect(
+        stripForUnattributedPost('> > **[Suggestion]**: old finding text'),
+      ).toBe('old finding text');
     });
   });
 });

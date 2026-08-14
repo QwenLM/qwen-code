@@ -104,7 +104,7 @@ template at all — no new plumbing anywhere.
   #8994 therefore stands. `pr-context`'s blocker promotion reads the
   marker's severity, so an unresolved Critical re-enters the re-check
   section every round even without the visible prefix.
-- `qwen-autofix`'s Critical-only mode (after round 5) greps posted bodies
+- `qwen-autofix`'s Critical-only mode (engaged after round 5, or earlier when a counting window's diff-growth budget trips) greps posted bodies
   for `**[Critical]**`; attribution-off findings no longer match and are
   deferred as non-Critical. Disclosed in the setting's description. A fix
   (the workflow parsing the severity marker instead) is possible follow-up,

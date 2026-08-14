@@ -34,6 +34,19 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     ).toBe('x');
   });
 
+  it('skips render-nothing residue between stacked markers', () => {
+    // An HTML comment or a Cf run between two markers is invisible on the
+    // rendered post; the iteration must not converge with the second marker
+    // intact because the residue hides it from the classifier.
+    expect(
+      stripSeverityPrefix('**[Critical]**<!-- x -->**[Suggestion]** text'),
+    ).toBe('text');
+    expect(
+      stripSeverityPrefix('**[Critical]**\u200B**[Suggestion]** text'),
+    ).toBe('text');
+    expect(stripSeverityPrefix('<!-- x -->**[Critical]** text')).toBe('text');
+  });
+
   it('a marker-only body strips to the empty string — the submit gate refuses it first', () => {
     expect(stripSeverityPrefix('**[Critical]**')).toBe('');
     expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe('');

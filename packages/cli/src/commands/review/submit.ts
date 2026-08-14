@@ -362,7 +362,7 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
       );
     }
 
-    // A body that is nothing but its marker is the empty case wearing one.
+    // A body that renders as nothing is the empty case wearing scaffolding.
     // The check runs the FULL post-transform chain (plus the canonical
     // footer that normalize may have appended) and projects through
     // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
@@ -374,8 +374,8 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
         rendersAsNothing(stripReviewFooter(stripForUnattributedPost(c.body)))
       ) {
         problems.push(
-          `${at} is nothing but its severity marker — redraft it with the ` +
-            `finding's description; a marker alone is not a comment`,
+          `${at} renders as nothing (marker-only, empty comment, or ` +
+            `otherwise invisible) — redraft it with the finding's description`,
         );
       }
     }

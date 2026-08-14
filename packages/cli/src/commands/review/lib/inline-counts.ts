@@ -59,6 +59,15 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
 }
 
 /**
+ * Leading render-nothing residue: whitespace, HTML comments, and Cf runs —
+ * what the render-nothing projection already removes. Invisible BETWEEN
+ * stacked markers on the rendered post, so the strip iteration skips it
+ * when re-classifying; otherwise it hides the second marker from the
+ * classifier and the loop converges with a bare machine marker intact.
+ */
+const LEADING_INVISIBLE_RE = /^(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})+/u;
+
+/**
  * The body with its leading severity markers removed — the shape an
  * attribution-off (`review.attribution: false`) run POSTS, applied by
  * `submit` after the verdict was counted from the marked payload.
@@ -74,11 +83,12 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
 export function stripSeverityPrefix(body: string): string {
   let current = body;
   for (;;) {
-    const severity = severityOf({ body: current });
+    const visible = current.replace(LEADING_INVISIBLE_RE, '');
+    const severity = severityOf({ body: visible });
     if (severity === null) return current;
     const prefix =
       severity === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-    const rest = current
+    const rest = visible
       .trimStart()
       .slice(prefix.length)
       .replace(/^[ \t]*:?[ \t]*/, '');
@@ -90,8 +100,8 @@ export function stripSeverityPrefix(body: string): string {
 /**
  * The indices of drafted comments that open with NEITHER severity marker.
  *
- * `countInlineFindings` counts such a comment as nothing at all — which for a
- * verdict computation means a blocker written without its marker weighs zero.
+ * `countInlineFindings` counts such a comment as nothing at all — which for
+ * a verdict computation means a blocker written without its marker weighs zero.
  * Both boundaries refuse these outright instead: `compose-review` because
  * Step 6 is where the draft is still cheap to fix, and `submit` because the
  * skill's own re-compose instruction expects the set to churn after Step 6 —

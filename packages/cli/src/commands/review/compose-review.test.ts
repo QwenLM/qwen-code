@@ -581,7 +581,7 @@ describe('composeReview — the C/S table', () => {
     expect(off.body).toContain('still unknown');
   });
 
-  it('refuses a body Critical that is nothing but its severity marker', () => {
+  it('refuses a body Critical that renders as nothing', () => {
     // Marker-only strips to nothing yet would still count toward
     // REQUEST_CHANGES — the inline path refuses this shape at submit's
     // gate; the body path refuses here, in both modes.
@@ -591,10 +591,10 @@ describe('composeReview — the C/S table', () => {
         '0.21.2',
         false,
       ),
-    ).toThrow(/nothing but its severity marker/);
+    ).toThrow(/renders as nothing/);
     expect(() =>
       composeReview(base({ bodyCriticals: ['**[Critical]**'] })),
-    ).toThrow(/nothing but its severity marker/);
+    ).toThrow(/renders as nothing/);
   });
 
   it('attribution off: a forged footer split across a soft break still strips', () => {
@@ -619,6 +619,35 @@ describe('composeReview — the C/S table', () => {
     expect(off.body).toContain('still unknown');
   });
 
+  it('refuses a cannot-tell entry that is only a forged footer split by a blank line', () => {
+    // The gate must project the same shape the render leg does: collapse
+    // FIRST, then strip. Uncollapsed, a blank-line-split footer escapes
+    // every line-anchored strip; the render leg then collapses it, strips
+    // it to nothing, and posts an empty bullet.
+    expect(() =>
+      composeReview(
+        base({ cannotTellCriticals: ['_— m\n\nvia Qwen Code /review (v1)_'] }),
+        '0.21.2',
+        false,
+      ),
+    ).toThrow(/renders as nothing/);
+  });
+
+  it('attribution off: a body Critical whose forged footer is split by a blank line strips after the collapse', () => {
+    const off = composeReview(
+      base({
+        bodyCriticals: [
+          'whole-PR blocker _— qwen3.7-max\n\nvia Qwen Code /review (v0.21.3)_ still stands',
+        ],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(off.body).not.toContain('via Qwen Code /review');
+    expect(off.body).toContain('whole-PR blocker');
+    expect(off.body).toContain('still stands');
+  });
+
   it('refuses an entry that strips to an unterminated HTML comment', () => {
     // '<!-- x' renders nothing once the appended marker closes it into one
     // type-2 HTML block — the body path refuses it like submit's gate, in
@@ -629,10 +658,10 @@ describe('composeReview — the C/S table', () => {
         '0.21.2',
         false,
       ),
-    ).toThrow(/nothing but its severity marker/);
+    ).toThrow(/renders as nothing/);
     expect(() =>
       composeReview(base({ bodyCriticals: ['**[Critical]** <!-- x'] })),
-    ).toThrow(/nothing but its severity marker/);
+    ).toThrow(/renders as nothing/);
   });
 
   it('attribution off: a same-line footer span and a blockquoted forged footer both strip', () => {

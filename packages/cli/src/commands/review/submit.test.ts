@@ -732,7 +732,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(inline).toContain('Update: also reproduced on the empty list');
   });
 
-  it('refuses a comment that is nothing but its severity marker', () => {
+  it('refuses a comment that renders as nothing', () => {
     const review = file('marker-only.json', {
       ...REVIEW,
       comments: [{ path: 'a.ts', line: 12, body: '**[Critical]**' }],
@@ -740,7 +740,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
     expect(() =>
       runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-    ).toThrow(/nothing but its severity marker/);
+    ).toThrow(/renders as nothing/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -754,7 +754,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     });
 
     expect(() => runSubmit(authorized({ review }), '0.21.3')).toThrow(
-      /nothing but its severity marker/,
+      /renders as nothing/,
     );
     expect(ghMock).not.toHaveBeenCalled();
   });
@@ -801,7 +801,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
 
     expect(() =>
       runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-    ).toThrow(/nothing but its severity marker/);
+    ).toThrow(/renders as nothing/);
     expect(ghMock).not.toHaveBeenCalled();
   });
 
@@ -878,7 +878,7 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       });
       expect(() =>
         runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
-      ).toThrow(/nothing but its severity marker/);
+      ).toThrow(/renders as nothing/);
     }
     expect(ghMock).not.toHaveBeenCalled();
   });

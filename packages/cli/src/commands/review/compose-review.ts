@@ -368,33 +368,15 @@ function formatCannotTell(
   attribution: boolean,
 ): Bi {
   const parsed = cannotTell.map((raw) => {
-    // Entries render as one-line list items: an unindented newline ends a
-    // list item (CommonMark), so a model-written entry spanning lines would
-    // leak its continuation out of the list — collapse FIRST, by split/join
-    // (not a `/\s*\n+\s*/g` replace: that regex backtracks quadratically
-    // on a long whitespace run with no newline in it, and these entries are
-    // model-written with no length cap — one such entry stalled a measured
-    // probe for seconds at 80k characters). Collapsing first also hands the
-    // sanitation the text GitHub renders: re-wrapping can split a forged
-    // footer or a marker across the entry's lines, where neither half
-    // strips, but the collapsed line carries it rejoined.
-    const collapsed = raw.includes('\n')
-      ? raw
-          .split('\n')
-          .map((seg) => seg.trim())
-          .filter((seg) => seg !== '')
-          .join(' ')
-      : raw;
-    // An unattributed entry goes through the full fixpoint sanitation —
-    // the entry is quoted into a body that carries no canonical footer, so
-    // a surviving footer or marker in any position would be the post's
-    // only attribution. The marker check goes through `severityOf` (trims
-    // first — a leading space used to leak the marker past this strip into
-    // the posted body), and the strip is iterative — a looping model drafts
-    // stacked markers and a single slice posts the second one.
-    const source = attribution
-      ? collapsed
-      : stripForUnattributedPost(collapsed);
+    // Entries arrive collapsed (one list item each); an unattributed entry
+    // goes through the full fixpoint sanitation — the entry is quoted into
+    // a body that carries no canonical footer, so a surviving footer or
+    // marker in any position would be the post's only attribution. The
+    // marker check goes through `severityOf` (trims first — a leading space
+    // used to leak the marker past this strip into the posted body), and
+    // the strip is iterative — a looping model drafts stacked markers and a
+    // single slice posts the second one.
+    const source = attribution ? raw : stripForUnattributedPost(raw);
     const unmarked =
       severityOf({ body: source }) === null
         ? source
@@ -585,6 +567,24 @@ function ledgerMarkerFor(
   }
 }
 
+// One model-written entry folded onto one line — the shape it renders as,
+// and the shape the gates and the render legs must share: a forged footer
+// or marker can split across the entry's lines where neither half strips,
+// but the collapsed line carries it rejoined. By split/join, not a
+// `/\s*\n+\s*/g` replace: that regex backtracks quadratically on a long
+// whitespace run with no newline in it, and these entries are model-written
+// with no length cap — one such entry stalled a measured probe for seconds
+// at 80k characters.
+function collapseEntry(entry: string): string {
+  return entry.includes('\n')
+    ? entry
+        .split('\n')
+        .map((seg) => seg.trim())
+        .filter((seg) => seg !== '')
+        .join(' ')
+    : entry;
+}
+
 function composeReviewBody(
   input: ComposeReviewInput,
   cliVersion: string,
@@ -600,42 +600,53 @@ function composeReviewBody(
   // relocated into one would post directly above the canonical footer —
   // the `$`-anchored regex only sees an entry's end, before the footer is
   // appended.
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
-    .map(stripReviewFooter)
+  // Collapsed ONCE at ingestion, before the gates: the entries render as
+  // single lines, and the gates and the render legs must project the same
+  // shape — line-anchored strips have no power on the raw multi-line form.
+  const bodyCriticalsCollapsed = toStringList(
+    input.bodyCriticals,
+    'bodyCriticals',
+  )
+    .map(collapseEntry)
     .filter((entry) => entry.trim() !== '');
   // A body Critical that is nothing but scaffolding renders nothing yet
   // would still count toward REQUEST_CHANGES — the inline-comment path
-  // refuses this shape at submit's gate; refuse it here too, projected
-  // through the same full chain the render applies plus the render-nothing
-  // test, while the draft is still cheap to fix.
-  for (const entry of bodyCriticals) {
+  // refuses this shape at submit's gate; refuse it here too, while the
+  // draft is still cheap to fix.
+  for (const entry of bodyCriticalsCollapsed) {
     if (rendersAsNothing(stripForUnattributedPost(entry))) {
       throw new Error(
-        'compose-review: a body Critical is nothing but its severity ' +
-          "marker — redraft it with the finding's description; a marker " +
-          'alone is not a comment',
+        'compose-review: a body Critical renders as nothing (marker-only, ' +
+          'empty comment, or otherwise invisible) — redraft it with the ' +
+          "finding's description",
       );
     }
   }
+  const bodyCriticals = bodyCriticalsCollapsed
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );
-  const cannotTell = toStringList(
+  const cannotTellCollapsed = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
   )
-    .map(stripReviewFooter)
+    .map(collapseEntry)
     .filter((entry) => entry.trim() !== '');
-  for (const entry of cannotTell) {
+  for (const entry of cannotTellCollapsed) {
     if (rendersAsNothing(stripForUnattributedPost(entry))) {
       throw new Error(
-        'compose-review: a cannot-tell entry is nothing but its severity ' +
-          "marker — redraft it with the finding's description; a marker " +
-          'alone is not a comment',
+        'compose-review: a cannot-tell entry renders as nothing ' +
+          '(marker-only, empty comment, or otherwise invisible) — ' +
+          "redraft it with the finding's description",
       );
     }
   }
+  const cannotTell = cannotTellCollapsed
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
