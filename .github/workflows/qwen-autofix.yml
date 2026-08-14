@@ -1852,7 +1852,14 @@ jobs:
               if [[ "${LBL_DEL_FAILED}" == "true" ]]; then
                 REMOVED_OK=false
               fi
-              echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
+              if [[ "${REMOVED_OK}" == "true" ]]; then
+                echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
+              else
+                # R7-7: the success claim must not fire when the DELETE did
+                # not land — the motivating fix for pr-self-report-label.yml
+                # in this very PR is precisely this lying-log shape.
+                echo "⚠️ #${PR}: ${TAKEOVER_LABEL} removal did not land — the next /takeover stop retries"
+              fi
               # Released means a human is driving — the escalation label is
               # stale. Remove it only when the release landed (REMOVED_OK)
               # AND the PR is not frozen by skip (a frozen PR must keep its

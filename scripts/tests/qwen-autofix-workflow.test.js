@@ -3273,14 +3273,19 @@ describe('qwen-autofix workflow', () => {
     ).toBe('0');
     expect(runRelAck([{ event: 'labeled' }], '2026-08-05T00:00:00Z')).toBe('0');
     // R4-24: the gate's control-flow nesting is replayed — the label POST
-    // must fire ONLY in the else arm (RELEASE_ACKED=0 or bot author), never
-    // in the released arm.
+    // must fire ONLY in the outer else arm (RELEASE_ACKED=0 or bot author),
+    // never in the released arm. R7-3: releasedIdx anchors on the released
+    // echo and elseIdx on the OUTER else (16-space indent — the inner else
+    // at 18 spaces introduces the released echo, not the POST arm).
     const gateBlock = reviewScanJob.match(
       /if \[\[ "\$\{SCAN_BOT_ACTOR\}" != "\$\{AUTOFIX_BOT\}" \]\]; then[\s\S]*?cap label\/notice skipped[\s\S]*?\n {16}fi/,
     )?.[0];
     expect(gateBlock).toBeTruthy();
     const releasedIdx = gateBlock.indexOf('cap label/notice skipped');
-    const elseIdx = gateBlock.indexOf('else', releasedIdx);
+    const elseIdx = gateBlock.indexOf(
+      '\n' + ' '.repeat(16) + 'else',
+      releasedIdx,
+    );
     const postIdx = gateBlock.indexOf(
       'gh api -X POST "repos/${REPO}/issues/${PR}/labels"',
     );
@@ -3638,6 +3643,10 @@ describe('qwen-autofix workflow', () => {
     expect(botSkipRelease.writes).toContain(
       'opts it out of standard bot management entirely',
     );
+    // R7-6: the skip veto keeps needs-human on a skip-frozen release —
+    // /takeover stop must NOT strip the only filterable escalation state
+    // from a PR nothing manages.
+    expect(botSkipRelease.writes).not.toContain('labels/autofix%2Fneeds-human');
     // remove + absent → explicit no-op, no writes at all.
     const removeAbsent = runToggle({ cmd: 'remove' });
     expect(removeAbsent.writes.trim()).toBe('');
@@ -5293,6 +5302,14 @@ exit 1
     expect(
       runAck({ ack: 'engaged', labels: [{ name: 'autofix/skip' }] }).calls,
     ).not.toContain(nhDelete);
+    // R6-5: assert the TOTAL DELETE count for engaged-with-skip too —
+    // `not.toContain` alone lets a mutant add an unrelated second DELETE.
+    expect(
+      runAck({
+        ack: 'engaged',
+        labels: [{ name: 'autofix/skip' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(0);
     expect(
       runAck({ ack: 'base-refused', base: 'release' }).calls,
     ).not.toContain(nhDelete);
@@ -5300,6 +5317,18 @@ exit 1
       runAck({ ack: 'base-refused', base: 'release' }).calls.match(
         /api -X DELETE/gm,
       ) ?? [],
+    ).toHaveLength(0);
+    // R7-6: the ack-job matrix's released-with-skip cell — a released PR
+    // frozen by skip must keep needs-human (narrowing the live-read gate to
+    // engaged-only would leave HAS_SKIP='' on released acks and strip it).
+    expect(
+      runAck({ ack: 'released', labels: [{ name: 'autofix/skip' }] }).calls,
+    ).not.toContain(nhDelete);
+    expect(
+      runAck({
+        ack: 'released',
+        labels: [{ name: 'autofix/skip' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
     ).toHaveLength(0);
   });
 

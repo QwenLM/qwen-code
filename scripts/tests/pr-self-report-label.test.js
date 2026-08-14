@@ -187,6 +187,10 @@ describe('pr-self-report-label', () => {
     });
     expect(race.removed).toBe(true);
     expect(race.out).not.toContain('::warning::');
+    // R7-5: a 404 race means the end state holds → the success claim fires,
+    // the "did not land" claim must not.
+    expect(race.out).toContain('removed');
+    expect(race.out).not.toContain('removal did not land');
     // Any other DELETE failure keeps the step green (the job only re-runs
     // on the next PR event) but MUST surface — a silent run would claim
     // "removed" while the label stays on the PR.
@@ -200,6 +204,10 @@ describe('pr-self-report-label', () => {
     expect(failed.out).toContain('::warning::');
     expect(failed.out).toContain('removal failed');
     expect(failed.out).toContain('HTTP 500');
+    // R7-5: the LBL_DEL_FAILED branching — a failed DELETE must NOT claim
+    // the label was removed (the lying-log shape this change exists to kill).
+    expect(failed.out).toContain('removal did not land');
+    expect(failed.out).not.toContain('removed');
     // POST carries NO tolerance: a label that fails to apply must fail the
     // step (the runBlock sets -e), not leave the PR unlabeled behind green.
     expect(() =>
