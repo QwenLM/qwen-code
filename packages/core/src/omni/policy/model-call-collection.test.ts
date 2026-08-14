@@ -7,7 +7,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../config/config.js';
 import type { PolicyArtifactBatch } from '../../core/turn.js';
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
@@ -18,6 +18,18 @@ import {
 } from '../../services/media-memory/index.js';
 import { OmniObjectStore } from '../storage.js';
 import { collectModelPolicyCall } from './model-call-collection.js';
+
+// The content sniff stays REAL (magic bytes, in-process) — only the
+// ffprobe SUBPROCESS is stubbed. Under CI load the real ffprobe hit its
+// 15s kill timer and the collection silently skipped per D12, reading
+// as "0 executions" (observed twice on the hk runners). Probing adds
+// nothing this suite asserts; the subprocess only adds a load
+// dependency.
+vi.mock('../ffmpeg.js', () => ({
+  probeMediaMetadata: vi
+    .fn()
+    .mockResolvedValue({ width: 1, height: 1 } as never),
+}));
 
 /** A 1x1 JPEG — recognizeMediaFile sniffs real bytes, so the artifact has
  * to be a genuine image. */
