@@ -286,17 +286,25 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   // the disclosure instead of the reassuring all-clear.
   const failed = (report.test ?? []).filter(
     (t) =>
-      !t.timedOut &&
-      (t.exitCode !== 0 ||
-        t.swallowedFailure === true ||
-        t.testsSuppressed === true ||
-        t.neverRan === true ||
-        t.evidenceCapped === true ||
-        // Exit 0 over fresh failing reports (a testFailureIgnore-style
-        // setting): no other flag fires for this shape, and without it the
-        // filter reports the all-clear over a run build-test marked
-        // ok:false — the exact opposite of that verdict.
-        t.swallowedReports === true),
+      (!t.timedOut &&
+        (t.exitCode !== 0 ||
+          t.swallowedFailure === true ||
+          t.testsSuppressed === true ||
+          t.neverRan === true ||
+          t.evidenceCapped === true ||
+          // Exit 0 over fresh failing reports (a testFailureIgnore-style
+          // setting): no other flag fires for this shape, and without it the
+          // filter reports the all-clear over a run build-test marked
+          // ok:false — the exact opposite of that verdict.
+          t.swallowedReports === true)) ||
+      // A deadline kill does not retroactively excuse the test failures
+      // Surefire already recorded: build-test marks the run ok:false and its
+      // note says "treat those as test failures", yet every exit-0 flag
+      // requires !timedOut, so the entry carries none and this filter would
+      // drop it — reporting the opposite of build-test's verdict. Route it
+      // into the disclosure: a Maven command never matches the rerun grammar
+      // and lands in skippedUnrecognised, named rather than silently lost.
+      (t.timedOut === true && /^\[maven-test-failure\] /m.test(t.output ?? '')),
   );
   if (failed.length === 0) {
     return empty(

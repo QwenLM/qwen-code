@@ -2770,6 +2770,28 @@ describe('maven toolchain adapter', () => {
     expect(report.test[0]?.output).not.toContain('TEST-Stale.xml');
   });
 
+  it('never collects a symlinked report FILE pointing outside the worktree', () => {
+    // The directory-symlink twin's file-level counterpart: a `*.xml` entry
+    // inside a REAL report dir that is itself a symlink is excluded only by
+    // the Dirent.isFile() conjunct — statSync freshness then follows the
+    // link, so an outside file a run never produced would otherwise read as
+    // fresh evidence (green or failing direction alike).
+    writeReactor();
+    const outsideFile = join(sandbox, 'outside-TEST-Forged.xml');
+    writeFileSync(
+      outsideFile,
+      '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="F" name="forged"/></testsuite>',
+    );
+    const dir = join(root, 'core', 'target', 'surefire-reports');
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(outsideFile, join(dir, 'TEST-Linked.xml'));
+
+    const report = runAdapter(['core/src/Main.java']);
+
+    expect(report.test[0]?.output).not.toContain('TEST-Linked.xml');
+    expect(report.test[0]?.output).not.toContain('forged');
+  });
+
   it('ignores a commented-out testsuite in a fresh report', () => {
     // The twin of the CDATA case: aggregate writers emit commented-out
     // markup, and scanning it fabricated phantom failure evidence.
@@ -3434,6 +3456,13 @@ describe('maven toolchain adapter', () => {
     expect(report.ok).toBe(true);
     expect(report.test[0]?.neverRan).toBeUndefined();
     expect(report.note).toContain(NOTE_MAVEN_TEST_PASSED);
+    // The green verdict over a diff-modified executed wrapper carries the
+    // trust caveat — pin it, or a later edit could silently drop it and
+    // let the green read unqualified.
+    expect(report.note).toContain(
+      'executed a Maven wrapper the diff itself changed',
+    );
+    expect(report.note).toContain('confirm the wrapper change is benign');
   });
 
   it('does not fail a green run when a test echoes a failing Surefire summary', () => {
@@ -4244,6 +4273,131 @@ describe('maven toolchain adapter', () => {
       expect(report.ok).toBe(true);
     },
   );
+
+  it('distrusts a bare exit 0 over an oversized maven.config it cannot tokenize', () => {
+    // R1-4: Maven reads the same file with no size cap and honors its
+    // exit-0-changing flags, so a config that exists but cannot be
+    // tokenized must set `ambiguous` and distrust a bare exit 0 — the
+    // cap's fail-closed intent, applied to the verdict path too. Green
+    // reports plus a framed source failure in stdout convict only when the
+    // config is ambiguous; the under-cap control stays green.
+    writeReactor();
+    const exec = (command: string) => {
+      const dir = join(root, 'core', 'target', 'surefire-reports');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, 'TEST-Core.xml'),
+        '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+      );
+      return result(command, {
+        exitCode: 0,
+        output: '[INFO] BUILD SUCCESS\n[ERROR] COMPILATION ERROR :',
+      });
+    };
+
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '--fail-never\n' + '#'.repeat(2 * 1024 * 1024 + 1),
+    );
+    const capped = runAdapter(['core/src/Main.java'], { exec });
+    expect(capped.ok).toBe(false);
+    expect(capped.test[0]?.swallowedFailure).toBe(true);
+  });
+
+  it('distrusts scope-altering flags in maven.config instead of reading them as inert', () => {
+    // R1-5: `-pl moduleA` in a PR-writable config makes Maven build only
+    // moduleA while the harness believes it ran the reactor — a RELEASE.
+    // Scope-altering flags therefore fail closed to ambiguous.
+    writeReactor();
+    const exec = (command: string) => {
+      const dir = join(root, 'core', 'target', 'surefire-reports');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, 'TEST-Core.xml'),
+        '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+      );
+      return result(command, {
+        exitCode: 0,
+        output: '[INFO] BUILD SUCCESS\n[ERROR] COMPILATION ERROR :',
+      });
+    };
+
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-pl moduleA\n');
+    const scoped = runAdapter(['core/src/Main.java'], { exec });
+    expect(scoped.ok).toBe(false);
+    expect(scoped.test[0]?.swallowedFailure).toBe(true);
+
+    // The valueless twin and a profile flag behave the same.
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-N\n');
+    expect(runAdapter(['core/src/Main.java'], { exec }).ok).toBe(false);
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-P ci\n');
+    expect(runAdapter(['core/src/Main.java'], { exec }).ok).toBe(false);
+  });
+
+  it('reads a -Dtest filter as exit-semantics-changing like skipTests', () => {
+    // R1-6: `-Dtest=…`/`-Dsurefire.failIfNoSpecifiedTests=false` can filter
+    // execution to zero tests and let the run exit 0 — classify them like
+    // skipTests so a zero-test run is not certified green.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(
+      join(root, '.mvn', 'maven.config'),
+      '-Dtest=___zzz___\n-Dsurefire.failIfNoSpecifiedTests=false\n',
+    );
+
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.testsSuppressed).toBe(true);
+  });
+
+  it('fires testsSuppressed on a module-local skip even when upstream reports exist', () => {
+    // R1-9: the marker must not be gated on the absence of reports — a
+    // module-local `<skipTests>` writes no reports while `-am` upstream
+    // modules do, and the changed module's "Tests are skipped." still means
+    // part of the scope was not tested.
+    writeReactor();
+    const report = runAdapter(['core/src/Main.java'], {
+      exec: (command) => {
+        const dir = join(root, 'upstream', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Up.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="U" name="ok"/></testsuite>',
+        );
+        return result(command, {
+          exitCode: 0,
+          output: '[INFO] Tests are skipped.\n[INFO] BUILD SUCCESS',
+        });
+      },
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.test[0]?.testsSuppressed).toBe(true);
+  });
+
+  it('exempts build-only runs from the skip and never-ran guards', () => {
+    // R1-31: a build-only (test-compile) run has no test phase, so a skip
+    // setting is irrelevant and the missing reports are structural — the
+    // guards must not misread a successful compile as suppressed/never-ran.
+    writeReactor();
+    mkdirSync(join(root, '.mvn'));
+    writeFileSync(join(root, '.mvn', 'maven.config'), '-DskipTests\n');
+
+    const report = runAdapter(['core/src/Main.java'], {
+      buildOnly: true,
+      exec: (command) => result(command, { exitCode: 0, output: '' }),
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.test.length).toBe(0);
+    expect(report.build[0]?.testsSuppressed).toBeUndefined();
+    expect(report.build[0]?.neverRan).toBeUndefined();
+  });
 
   it('exercises the wrapper-skip arm through the platform parameter', () => {
     // The arm that skips the OTHER platform's wrapper, reachable without

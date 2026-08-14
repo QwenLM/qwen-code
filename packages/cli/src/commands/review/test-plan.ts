@@ -230,6 +230,16 @@ const RUNNER_RE = new RegExp(
 
 const MAVEN_RUNNER_RE = new RegExp(`^(?:${MAVEN_RUNNER_SOURCE})(?=\\s|$)`, 'i');
 
+/**
+ * True when a tokenized command line names lifecycle work beyond its runner:
+ * any token after position 0 that is not a flag (flags start with `-`, and
+ * the neutral flags a claim may carry are all flags too). A runner followed
+ * only by flags — `./mvnw`, `./mvnw -q` — names no settleable work.
+ */
+function hasWorkBeyondRunner(tokens: string[]): boolean {
+  return tokens.slice(1).some((token) => !token.startsWith('-'));
+}
+
 /** `foo/bar.ts`, `packages/cli/src/x.tsx:42` — a path, not a sentence. */
 const PATH_RE = /^[\w.@-]+(?:\/[\w.@-]+)+\/?(?::\d+(?::\d+)?)?$/;
 
@@ -380,10 +390,15 @@ export function extractClaims(section: string): Array<{
     // FILENAME, not a command claim: the command reading can never settle
     // (no phase to compare against any recorded run) and it suppressed the
     // path verification the same token actually is — "added `./mvnw`" is a
-    // claim about the tree. Spans naming any work beyond the runner stay
-    // commands; a work this review never runs reads `unchecked` there.
+    // claim about the tree. Spans naming WORK beyond the runner stay
+    // commands; a work this review never runs reads `unchecked` there. A
+    // runner followed only by neutral flags (`./mvnw -q`) names no work, so
+    // it is not a command claim either — measuring token count, not work,
+    // once classified it a command that could never settle while suppressing
+    // the wrapper-existence path claim the span also is.
+    const spanTokens = span.split(/\s+/);
     const mavenCommand =
-      MAVEN_RUNNER_RE.test(span) && span.split(/\s+/).length > 1;
+      MAVEN_RUNNER_RE.test(span) && hasWorkBeyondRunner(spanTokens);
     if (RUNNER_RE.test(span) || mavenCommand) {
       push('command', span);
     }
@@ -426,6 +441,14 @@ export function extractClaims(section: string): Array<{
       .replace(/'[^']*'/g, '')
       .replace(/"[^"]*"/g, '')
       .split(/\s+/);
+    // `./mvnw` is a runner — not a path claim — only when it LEADS a Maven
+    // command line that names work: as an ARGUMENT of any other command
+    // (`chmod +x ./mvnw`, `bash ./mvnw`) it unambiguously names a file in
+    // the tree, and a runner with only neutral flags (`./mvnw -q`) carries
+    // no settleable work — in both cases the wrapper-existence claim must
+    // not be silently dropped.
+    const runnerHead =
+      MAVEN_RUNNER_RE.test(tokens[0] ?? '') && hasWorkBeyondRunner(tokens);
     for (let i = 0; i < tokens.length; i++) {
       // A token following a flag is that flag's VALUE (`--repo owner/repo`,
       // `-f infra/compose.yml`) — a claim about the tool's argument space,
@@ -439,9 +462,7 @@ export function extractClaims(section: string): Array<{
       )
         continue;
       const t = tokens[i].replace(/[.,;:)'"]+$/, '');
-      // The bare-runner guard above applies to argument tokens too: `./mvnw`
-      // as a command's runner token is the runner, not a path claim.
-      if (PATH_RE.test(t) && isPathClaim(t) && !MAVEN_RUNNER_RE.test(t)) {
+      if (PATH_RE.test(t) && isPathClaim(t) && !(i === 0 && runnerHead)) {
         push('path', base ? `${base}/${t}` : t);
       }
     }
@@ -710,7 +731,7 @@ const MAVEN_PHASE_RE =
  * out-of-vocabulary work is refused separately by claimFinalWork.
  */
 const MAVEN_UNRUN_WORK_RE =
-  /^(?:deploy|site|pre-site|post-site|pre-clean|post-clean|prepare-package|pre-integration-test|integration-test|post-integration-test|initialize|process-resources|process-classes|process-test-classes|generate-sources|process-sources|generate-resources|generate-test-sources|process-test-sources|generate-test-resources|process-test-resources)$/;
+  /^(?:deploy|site|site-deploy|pre-site|post-site|pre-clean|post-clean|prepare-package|pre-integration-test|integration-test|post-integration-test|initialize|process-resources|process-classes|process-test-classes|generate-sources|process-sources|generate-resources|generate-test-sources|process-test-sources|generate-test-resources|process-test-resources)$/;
 
 /**
  * Boolean flags that change no outcome the review measures — batch mode and
@@ -808,6 +829,19 @@ const MAVEN_SINGLE_DASH_LONGS = new Set([
   'help',
   'version',
   'show-version',
+  // The single-dash long spellings of the neutral flags the `--` set above
+  // models: without them a claim carrying `-quiet` reads as unknown work and
+  // never settles, while its `-q` twin settles — the docstring promise that
+  // a neutral-flag claim settles like the claim without it, broken.
+  'quiet',
+  'errors',
+  'debug',
+  'no-transfer-progress',
+  // The repository-layout flags: their single-dash long spellings start with
+  // `-l` and must not bypass the scope/value checks modeled on the `--`
+  // forms via the attached `-l` carve-out.
+  'legacy-local-repository',
+  'lax-checksums',
 ]);
 
 function normalizeMavenSingleDashLongTokens(tokens: string[]): string[] {
@@ -855,19 +889,21 @@ function shellTokens(text: string): string[] {
     // rules (unmodeled work reads `unchecked`) instead of never ruling.
     return text.split(/\s+/).filter((token) => token.length > 0);
   }
-  return parsed
-    .map((entry): string => {
-      // eslint-disable-next-line no-control-regex -- the dance sentinel is the character under test
-      if (typeof entry === 'string') return entry.replace(/\u0001/g, "'");
-      if (typeof entry === 'object' && entry !== null) {
-        if ('pattern' in entry && typeof entry.pattern === 'string') {
-          return entry.pattern;
-        }
-        if ('op' in entry && typeof entry.op === 'string') return entry.op;
+  return parsed.flatMap((entry): string[] => {
+    // A quoted-empty word (`''`/`""`) is a REAL argv slot — bash hands Maven
+    // `['test', '']` and Maven dies on `Unknown lifecycle phase ""`. Keeping
+    // it (instead of the old length filter) lets the positional reach the
+    // unknown-work check and refuse settlement, matching the shell.
+    // eslint-disable-next-line no-control-regex -- the dance sentinel is the character under test
+    if (typeof entry === 'string') return [entry.replace(/\u0001/g, "'")];
+    if (typeof entry === 'object' && entry !== null) {
+      if ('pattern' in entry && typeof entry.pattern === 'string') {
+        return [entry.pattern];
       }
-      return '';
-    })
-    .filter((token) => token.length > 0);
+      if ('op' in entry && typeof entry.op === 'string') return [entry.op];
+    }
+    return [];
+  });
 }
 
 /**
@@ -927,9 +963,15 @@ function mavenLifecycle(tokens: string[]): string | null {
   // The LAST phase token that is not a flag value: that reads a phase-first
   // spelling (`mvnw test -pl core`) correctly and never mistakes a
   // phase-named `-pl` VALUE (`-pl test`) for the command's lifecycle.
+  // Lowercased so a capitalized claim (`./mvnw TEST`) matches the
+  // lowercase-only phase vocabulary consistently with the case-insensitive
+  // runner extraction; the returned lifecycle is the canonical lowercase
+  // form the settlement comparisons and the adapter's recorded lifecycle
+  // use.
   let lifecycle: string | null = null;
   for (const token of mavenPositionalTokens(tokens)) {
-    if (MAVEN_PHASE_RE.test(token)) lifecycle = token;
+    const lower = token.toLowerCase();
+    if (MAVEN_PHASE_RE.test(lower)) lifecycle = lower;
   }
   return lifecycle;
 }
@@ -1168,6 +1210,14 @@ function ruleCommand(
     token === '--offline' ||
     token === '-U' ||
     token === '--update-snapshots' ||
+    // The repository-layout flags change resolution behavior (legacy local
+    // repository layout, lax checksums): a claim carrying one cannot settle
+    // on a run that never used it. They are NOT the neutral `-l` log-file
+    // family — the modeledMavenOption carve-out below must not swallow them,
+    // and the single-dash long spellings are normalized above.
+    token === '-llr' ||
+    token === '--legacy-local-repository' ||
+    token === '--lax-checksums' ||
     // fail-never makes Maven exit 0 over failures it would otherwise die
     // on: a claim carrying it cannot settle on a run that never used it —
     // the run's recorded exit codes are ones the claimed command cannot
@@ -1216,10 +1266,12 @@ function ruleCommand(
   // settling the trailing phase without disclosing the reduction would
   // overstate the evidence.
   const positionalTokens = mavenPositionalTokens(claimTokenList);
+  // Phase tests lowercase the token so a capitalized claim matches the
+  // lowercase-only vocabularies consistently with the runner extraction.
   const claimPhases = positionalTokens.filter(
     (token) =>
-      MAVEN_PHASE_RE.test(token) ||
-      MAVEN_UNRUN_WORK_RE.test(token) ||
+      MAVEN_PHASE_RE.test(token.toLowerCase()) ||
+      MAVEN_UNRUN_WORK_RE.test(token.toLowerCase()) ||
       (!token.startsWith('-') && token.includes(':')),
   );
   // Maven dies on 'Unknown lifecycle phase' for any bare positional outside
@@ -1250,8 +1302,8 @@ function ruleCommand(
     .some((token) =>
       token.startsWith('-')
         ? !modeledMavenOption(token)
-        : !MAVEN_PHASE_RE.test(token) &&
-          !MAVEN_UNRUN_WORK_RE.test(token) &&
+        : !MAVEN_PHASE_RE.test(token.toLowerCase()) &&
+          !MAVEN_UNRUN_WORK_RE.test(token.toLowerCase()) &&
           !token.includes(':'),
     );
   const claimScopesItself = claimTokens.some(
@@ -1268,9 +1320,12 @@ function ruleCommand(
   // phase alone would read undisclosed — unlike `mvn clean test`, which
   // discloses its phase reduction. Trailing flag tokens (`-B`, attached
   // `-D…`) name no work of their own.
+  // Lowercased to match the canonical lowercase lifecycle the settlement
+  // comparisons use (a capitalized claim's final work still compares equal).
   const claimFinalWork = positionalTokens
     .filter((token) => !token.startsWith('-'))
-    .at(-1);
+    .at(-1)
+    ?.toLowerCase();
   // A value flag missing its value (`mvn test -l`) dies in Maven's argument
   // parsing before any lifecycle work — the claim settles nothing, exactly
   // like unknown work.
@@ -1374,6 +1429,12 @@ function ruleCommand(
       const segments = rel.split('/');
       for (let depth = segments.length - 1; depth >= 0; depth -= 1) {
         const dir = segments.slice(0, depth).join('/');
+        // Match the adapter's ownership model: a POM beneath a `src/` tree
+        // is maven-invoker/archetype test data, not a reactor member, so it
+        // must not re-own a failure out of the real module — a PR could
+        // otherwise plant an unreferenced src-nested pom.xml to shift
+        // attribution and make the carve-out discard an in-claim failure.
+        if (/(?:^|\/)src\//.test(dir)) continue;
         try {
           if (statSync(join(worktree, dir, 'pom.xml')).isFile()) {
             return dir === '' ? '.' : dir;
@@ -1485,10 +1546,17 @@ function ruleCommand(
     // falsifies an `-am` claim too, so that direction stays settled.) The
     // exclusion yields when the run's own markers attribute a failure to a
     // module INSIDE the claimed set: that failure is in-scope evidence.
-    // Runs whose evidence was capped join the exclusion for the same
-    // reason: the capped arm treats their non-zero exit as definitive,
-    // which would contradict a differently scoped claim off failures in
-    // modules it never tests.
+    // For a CAPPED run the exclusion applies only when the failure location
+    // is POSITIVELY known to be outside the claim — it carries attribution
+    // markers and none names a claimed module. When the evidence was
+    // REJECTED (oversized/unreadable/malformed) the run emits no attribution
+    // markers at all, so `failureInsideClaim` is false by absence, not by
+    // knowledge — discarding it flipped `contradicted` to `unchecked` with a
+    // note that falsely said the command was not run. Keep such runs in
+    // `matches` and let the capped cascade rule the non-zero exit definitive.
+    const hasFailureAttribution = /^\[maven-test-failure\] /m.test(
+      c.output ?? '',
+    );
     return !(
       settledBySameScope(c) &&
       c.maven?.alsoMake === true &&
@@ -1504,7 +1572,8 @@ function ruleCommand(
       // command at any scope, so the exclusion must not discard them.
       !c.neverRan &&
       c.testsSuppressed !== true &&
-      !failureInsideClaim(c)
+      !failureInsideClaim(c) &&
+      (c.evidenceCapped !== true || hasFailureAttribution)
     );
   });
   // build-test records one scoped command per package and does not stop on
@@ -1550,6 +1619,13 @@ function ruleCommand(
   // identical wording when no sibling matches, so the verdict cannot flip
   // on which other runs the claim matched.
   const cappedDefinitiveRuling = (c: CommandResult): TestPlanClaim | null => {
+    // A run this review classified as an environmental acquisition failure
+    // must not settle a claim, capped or not — the same exclusion arms 1/2/4
+    // apply via `finished()` or an explicit check. Without this guard the
+    // non-zero-exit arm below settles such a run `contradicted` whenever it
+    // also carries `evidenceCapped`, laundering an environmental death into
+    // a definitive ruling.
+    if (c.infrastructure === true) return null;
     if (c.exitCode !== null && c.exitCode !== 0) {
       return {
         kind: 'command',
@@ -1558,8 +1634,8 @@ function ruleCommand(
         observed: `exit ${c.exitCode}`,
         note:
           `${runForm(c).howItRan}, and it failed — part of its ` +
-          'evidence was never read (rejected or unseen fresh reports, the ' +
-          'trim rescue cap, or a log-file redirect), but the non-zero exit is definitive',
+          'evidence was never read (rejected or unseen fresh reports, or the ' +
+          'trim rescue cap), but the non-zero exit is definitive',
       };
     }
     if (
@@ -1585,8 +1661,8 @@ function ruleCommand(
         observed,
         note:
           `${runForm(c).howItRan}, and ${cause} — part of its ` +
-          'evidence was never read (rejected or unseen fresh reports, the ' +
-          'trim rescue cap, or a log-file redirect), but that withholds ' +
+          'evidence was never read (rejected or unseen fresh reports, or the ' +
+          'trim rescue cap), but that withholds ' +
           'certification of a pass, it does not excuse what the run DID record',
       };
     }
@@ -1605,7 +1681,10 @@ function ruleCommand(
         )
       : interruptedWithFailures) ??
     matches.find(
-      (c) => c.evidenceCapped === true && cappedDefinitiveRuling(c) !== null,
+      (c) =>
+        !c.infrastructure &&
+        c.evidenceCapped === true &&
+        cappedDefinitiveRuling(c) !== null,
     ) ??
     matches.find(finished);
   if (ran) {
@@ -1730,7 +1809,7 @@ function ruleCommand(
         verdict: 'unchecked',
         note:
           `${runForm(capped).howItRan}; part of its evidence was never ` +
-          'read (rejected or unseen fresh reports, the trim rescue cap, or a log-file redirect), so the run was not certified',
+          'read (rejected or unseen fresh reports, or the trim rescue cap), so the run was not certified',
       };
     }
 

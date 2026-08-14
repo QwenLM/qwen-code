@@ -107,15 +107,14 @@ export interface CommandResult {
   swallowedFailure?: boolean;
   /**
    * The command's verdict cannot stand on its evidence: fresh reports the
-   * parser rejected or a truncated sweep never saw, the output trim
-   * dropped failure-evidence lines past its rescue cap, or a
-   * `.mvn/maven.config` log-file setting redirected the build output away
-   * from every scan. The adapter refused to certify the run, and
-   * `test-plan` must not settle a Test Plan claim against it. Exit-code
-   * independent — on an exit-0 run it withholds a pass; on a non-zero exit
-   * the exit remains definitive. (Reports past the parse CAP are the
-   * opposite: disclosed in the note, because the parsed reports remain
-   * evidence.)
+   * parser rejected or a truncated sweep never saw, or the output trim
+   * dropped failure-evidence lines past its rescue cap. The adapter refused
+   * to certify the run, and `test-plan` must not settle a Test Plan claim
+   * against it. Exit-code independent — on an exit-0 run it withholds a
+   * pass; on a non-zero exit the exit remains definitive. (A `-l`/`--log-
+   * file` redirect is NOT a producer — it routes to `neverRan`. Reports
+   * past the parse CAP are the opposite: disclosed in the note, because the
+   * parsed reports remain evidence.)
    */
   evidenceCapped?: boolean;
   /**
@@ -516,12 +515,21 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
       // with zero evidence. The note discloses the Maven half so a green
       // npm run never certifies it.
       const report = npmToolchainAdapter.run(runArgs);
-      // npm's applies() held but run() can still concede WITHOUT executing
-      // (a cold yarn/pnpm/bun repo — the common case for a review worktree):
-      // nothing ran, so there is no npm half to disclose and the Maven half
-      // must run instead of certifying nothing. The Maven adapter's own
-      // mixed-root caveat discloses the unscopable npm side of this root.
-      if (report.toolchain === 'unsupported') {
+      // npm's applies() held but run() can still concede or return WITHOUT
+      // executing — a cold yarn/pnpm/bun repo concedes `unsupported`; a
+      // workspace-shaped diff that maps zero affected files, an install disk
+      // preflight, or an exhausted budget all return `toolchain: 'npm'` with
+      // zero commands executed. In every such shape nothing ran, so there is
+      // no npm half to disclose and the Maven half must run instead of
+      // certifying nothing (or appending a note that claims the npm
+      // toolchain ran). The Maven adapter's own mixed-root caveat discloses
+      // the unscopable npm side of this root.
+      if (
+        report.toolchain === 'unsupported' ||
+        (report.install === null &&
+          report.build.length === 0 &&
+          report.test.length === 0)
+      ) {
         return mavenToolchainAdapter.run(runArgs);
       }
       report.note +=

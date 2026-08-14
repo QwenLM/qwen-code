@@ -2946,6 +2946,29 @@ describe('runTestPlan', () => {
       );
     });
 
+    it('does not settle a claim off a capped run classified as infrastructure', () => {
+      // The capped-definitive ranking arm admits any non-zero exit unless
+      // guarded: an environmental acquisition failure that also carries
+      // evidenceCapped (a trim rescue overflow) would otherwise rule the
+      // claim `contradicted`, laundering the environmental death into a
+      // definitive ruling. Arms 1/2/4 all exclude infrastructure.
+      const bt = {
+        build: [],
+        test: [
+          mavenCmd({
+            infrastructure: true,
+            evidenceCapped: true,
+            exitCode: 1,
+            output: '[ERROR] Could not resolve dependencies',
+          }),
+        ],
+      } as unknown as BuildTestReport;
+      const r = run('## Test Plan\n\nRan `./mvnw test`', [], bt);
+      const claim = r.claims.find((c) => c.text === './mvnw test');
+      expect(claim?.verdict).toBe('unchecked');
+      expect(claim?.note).toContain('environmental');
+    });
+
     it('reads single-dash long option spellings like their -- twins', () => {
       // commons-cli accepts `mvn -projects core` (verified on real Maven
       // 3.8.7): normalized before parsing, or the claim bypassed the

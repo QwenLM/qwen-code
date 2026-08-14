@@ -299,6 +299,90 @@ describe('runBuildTest', () => {
     expect(rep.note).toContain('Mixed root: a root package.json exists');
   });
 
+  it('runs the Maven half when npm maps zero affected files at a workspace mixed root', () => {
+    // R1-22/R1-1: the fallback keyed only on `toolchain === 'unsupported'`
+    // missed npm's workspace-mode return for a diff that touches only Maven
+    // modules — `toolchain: 'npm'`, `ok: true`, but zero commands executed —
+    // so the changed modules were never compiled or tested and the note
+    // falsely claimed the npm toolchain ran. Fire the fallback on
+    // no-execution, not just on the unsupported concession.
+    pkg('.', {
+      name: 'polyglot',
+      workspaces: ['packages/*'],
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    mkdirSync(join(root, 'packages', 'a'), { recursive: true });
+    pkg('packages/a', {
+      name: 'a',
+      scripts: { build: 'exit 0', test: 'exit 0' },
+    });
+    writeFileSync(
+      join(root, 'pom.xml'),
+      '<project><modules><module>core</module></modules></project>',
+    );
+    mkdirSync(join(root, 'core'), { recursive: true });
+    writeFileSync(join(root, 'core', 'pom.xml'), '<project/>');
+    // The diff touches ONLY the Maven module — npm maps zero workspaces.
+    writePlan(['core/src/Main.java']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => {
+        const dir = join(root, 'core', 'target', 'surefire-reports');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(
+          join(dir, 'TEST-Core.xml'),
+          '<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="T" name="ok"/></testsuite>',
+        );
+        return {
+          command,
+          exitCode: 0,
+          seconds: 1,
+          timedOut: false,
+          output: '[INFO] BUILD SUCCESS',
+        };
+      },
+    });
+
+    expect(rep.toolchain).toBe('maven');
+    expect(rep.ok).toBe(true);
+    expect(rep.note).not.toContain('executed the npm toolchain only');
+  });
+
+  it('does not replace a failing-but-executed npm run at a mixed root', () => {
+    // R1-23: the fallback's negative boundary — an npm run that DID execute
+    // and failed must not be discarded under the Maven adapter's verdict. A
+    // reformulation like `!report.ok` would pass the positive mixed-root
+    // tests yet silently drop a genuine npm failure.
+    pkg('.', {
+      name: 'polyglot',
+      scripts: { build: 'exit 1', test: 'exit 0' },
+    });
+    writeFileSync(join(root, 'pom.xml'), '<project/>');
+    writePlan(['src/a.ts']);
+
+    const rep = runBuildTest({
+      plan: planPath,
+      worktree: root,
+      timeout: 60,
+      install: false,
+      exec: (command) => ({
+        command,
+        exitCode: command.includes('build') ? 1 : 0,
+        seconds: 1,
+        timedOut: false,
+        output: command.includes('build') ? 'error: build failed' : '',
+      }),
+    });
+
+    expect(rep.toolchain).toBe('npm');
+    expect(rep.ok).toBe(false);
+    expect(rep.note).toContain('Maven also applies');
+  });
+
   it('coerces fractional and zero deadlines at the spawn boundary', () => {
     // spawnSync validates `timeout` as an unsigned integer: a decimal
     // --timeout used to throw ERR_OUT_OF_RANGE out of the whole call (no
@@ -484,12 +568,14 @@ describe('runBuildTest', () => {
   });
 
   it('selects Maven when the npm half uses unmodeled workspace globs', () => {
-    // The guard exists for exactly this root: npm cannot scope `packages/**`,
-    // and applying anyway would block Maven selection into the same
-    // unsupported handoff this test's sibling pins. The fixture pairs the
-    // unmodeled glob with a modeled one resolving a real package: dropping
-    // the guard's conjunct then makes npm applicable and flips selection
-    // to the ambiguous handoff, turning this test red.
+    // The guard exists for exactly this root: npm cannot scope `packages/**`.
+    // The fixture pairs the unmodeled glob with a modeled one resolving a
+    // real package. The pin is on the SELECTION PATH, not just the outcome:
+    // `applies()` must refuse npm here, so npm's run() is never invoked and
+    // Maven is selected directly. (Asserting only that Maven ran would also
+    // pass via the concede-then-fallback path if the conjunct were dropped,
+    // because npm's run() concedes unsupported at its own unmodeled gate
+    // before executing.)
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({
@@ -509,6 +595,7 @@ describe('runBuildTest', () => {
     const runSpy = vi
       .spyOn(mavenToolchainAdapter, 'run')
       .mockReturnValue(sentinel);
+    const npmRunSpy = vi.spyOn(npmToolchainAdapter, 'run');
 
     const report = runBuildTest({
       plan: planPath,
@@ -520,7 +607,10 @@ describe('runBuildTest', () => {
 
     expect(report).toBe(sentinel);
     expect(runSpy).toHaveBeenCalledOnce();
+    // The applies() gate refused npm: its run() was never reached.
+    expect(npmRunSpy).not.toHaveBeenCalled();
     runSpy.mockRestore();
+    npmRunSpy.mockRestore();
   });
 
   it.skipIf(process.platform === 'win32')(

@@ -1273,7 +1273,7 @@ export function mavenExecutable(
  * flags. Mirror that reader; whitespace tokenizing recorded a truncated path
  * for spaced arguments and tokenized comments into inputs.
  */
-function mavenConfigTokens(root: string): string[] {
+function mavenConfigTokens(root: string): string[] | null {
   const configPath = join(root, '.mvn', 'maven.config');
   let config: string;
   try {
@@ -1283,10 +1283,17 @@ function mavenConfigTokens(root: string): string[] {
     // a symlink to /dev/zero or a FIFO reports size 0, passes the cap, and
     // hangs readFileSync forever.
     const stats = statSync(configPath);
-    if (!stats.isFile() || stats.size > MAX_CONFIG_BYTES) return [];
+    if (!stats.isFile() || stats.size > MAX_CONFIG_BYTES) return null;
     config = readFileSync(configPath, 'utf8');
-  } catch {
-    return [];
+  } catch (error) {
+    // No config file is a legitimate, readable state (no facts, no
+    // ambiguity). A config that EXISTS but cannot be tokenized (read error
+    // on a regular file under the cap) is the ambiguous state — Maven reads
+    // the same file with no cap and honors its exit-0-changing flags, so we
+    // must distrust a bare exit 0 over it. `statSync` threw for a missing
+    // path; distinguish via the code.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    return null;
   }
   return config
     .split(/\r?\n/)
@@ -1347,16 +1354,25 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
     '-global-settings',
   ]);
   const logFileFlags = new Set(['-l', '--log-file', '-log-file']);
-  const otherPairedFlags = new Set([
-    '-T',
-    '--threads',
-    '-P',
-    '--activate-profiles',
+  // Paired flags that do NOT change scope or exit-0 semantics (thread count
+  // only). Scope-altering paired flags are NOT consumed here — see the
+  // scope-altering sets below.
+  const otherPairedFlags = new Set(['-T', '--threads']);
+  // Scope-altering flags must not read as inert: `-pl moduleA` in a
+  // PR-writable config makes Maven build only `moduleA` while the harness
+  // believes it ran the reactor, certifying green over modules whose tests
+  // never ran — a RELEASE, inverting the invariant that imprecision can only
+  // be stricter. So any scope-altering flag makes the config ambiguous
+  // (fail closed).
+  const scopeAlteringPaired = new Set([
     '-pl',
     '--projects',
     '-rf',
     '--resume-from',
+    '-P',
+    '--activate-profiles',
   ]);
+  const scopeAlteringValueless = new Set(['-N', '--non-recursive']);
   // Valueless flags commons-cli knows: classified so they do not trip the
   // ambiguity fail-closed below. Not exhaustive — an unknown flag is
   // exactly the shape ambiguity exists to catch.
@@ -1386,6 +1402,10 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
     '-llr',
     '--legacy-local-repository',
     '-legacy-local-repository',
+    // commons-cli single-dash long spelling; starts with `-l` but redirects
+    // nothing, so it must not read as an attached log-file value.
+    '-lax-checksums',
+    '--lax-checksums',
   ]);
   const classifyDefine = (property: string): void => {
     // Maven 3.9's chained local repositories: EVERY entry is a local-
@@ -1416,8 +1436,29 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
       facts.skipTests = true;
       return;
     }
+    // Properties that can filter execution down to ZERO tests: `-Dtest=…` /
+    // `-Dit.test=…` select classes by pattern, and
+    // `-Dsurefire.failIfNoSpecifiedTests=false` suppresses the "no tests
+    // matched" failure — together they let a run execute nothing and exit 0.
+    // They change what exit 0 means exactly like skipTests, so classify them
+    // the same way (strict: distrust a bare exit 0 over a PR-writable test
+    // filter).
+    if (
+      /^(test|it\.test)=/.test(property) ||
+      /^surefire\.failIfNoSpecifiedTests(=false)?$/i.test(property)
+    ) {
+      facts.skipTests = true;
+      return;
+    }
   };
   const tokens = mavenConfigTokens(root);
+  // A config that EXISTS but cannot be tokenized (oversized, not a regular
+  // file, unreadable) is ambiguous: Maven reads it with no cap and honors
+  // its exit-0-changing flags, so we must distrust a bare exit 0 over it.
+  if (tokens === null) {
+    facts.ambiguous = true;
+    return facts;
+  }
   for (let i = 0; i < tokens.length; i += 1) {
     let token = tokens[i];
     // commons-cli pairs a value-less `-D` with the NEXT line exactly like
@@ -1435,6 +1476,24 @@ function analyzeMavenConfig(root: string): MavenConfigFacts {
     }
     if (failNeverFlags.has(token)) {
       facts.failNever = true;
+      continue;
+    }
+    // Scope-altering flags fail closed to ambiguous (see the sets above).
+    if (scopeAlteringPaired.has(token)) {
+      facts.ambiguous = true;
+      i += 1;
+      continue;
+    }
+    if (scopeAlteringValueless.has(token)) {
+      facts.ambiguous = true;
+      continue;
+    }
+    // Attached scope-altering spellings (`-pl<mod>`, `-P<profile>`,
+    // `-rf<mod>`, and the `--…=…` forms).
+    if (
+      /^(-pl|-P|-rf|--projects|--resume-from|--activate-profiles).+/.test(token)
+    ) {
+      facts.ambiguous = true;
       continue;
     }
     if (settingsFlags.has(token) || logFileFlags.has(token)) {
@@ -1857,8 +1916,17 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // reports. When reports exist the wording was echoed by test stdout, and
   // discarding the run would hide captured evidence (genuine failures, or
   // the very green the forged line claims to protect) behind an unsupported
-  // handoff.
-  if (rejected && summaries.length === 0) {
+  // handoff. The same holds when fresh reports exist but were REJECTED or
+  // the sweep/trim was capped: those are the evidence states the machine
+  // below fails closed on via `evidenceCapped`, and an echoed rejection line
+  // must not discard them into an unsupported handoff either.
+  if (
+    rejected &&
+    summaries.length === 0 &&
+    fresh.rejected === 0 &&
+    !fresh.truncated &&
+    result.rescueOverflow !== true
+  ) {
     return unsupportedReport(
       `Maven rejected the selected project(s) — ${rejected[1].trim()} — as not part of the active reactor. ` +
         'They are standalone or profile-inactive under the current profiles and JDK, so this run verified ' +
@@ -1890,9 +1958,13 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
   // framed errors the scrapers scan for — without this check a run that
   // tested nothing is certified green, and Test Plan count claims become
   // uncontradictable. The config spelling and the stdout marker both feed
-  // it; with reports present tests demonstrably ran, so neither applies.
+  // it. The marker is NOT gated on the absence of reports: a module-local
+  // skip writes no reports while `-am` upstream modules do, and any "Tests
+  // are skipped." line inside the run's own scope means part of that scope
+  // was not tested. Build-only runs have no test phase, so skip settings
+  // are irrelevant to them.
   const testsSuppressed =
-    !hasReports &&
+    !args.buildOnly &&
     (configFacts.skipTests ||
       result.output.split('\n').some((line) => isTestsSkippedLine(line)));
   const stdoutTestFailures = hasStdoutTestFailure(result.output);
@@ -1911,6 +1983,10 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     result.exitCode === 0 &&
     !result.timedOut &&
     !testsSuppressed &&
+    // A build-only run's evidence is the compile's exit code — it skips the
+    // report snapshot, so `hasReports` is structurally false; the
+    // quiet/log-file/wrapper signals must not misread it as "never ran".
+    !args.buildOnly &&
     !hasReports &&
     (executedWrapperChanged ||
       configFacts.quiet ||
@@ -1966,6 +2042,14 @@ function runMavenToolchain(args: ToolchainRunArgs): BuildTestReport {
     !ok &&
     !freshFailures &&
     !hasReports &&
+    // Capped evidence can launder a source failure into infrastructure:
+    // the trim's rescue cap drops lines positionally, so dependency-flavored
+    // lines can survive while a source-class line is lost — and the
+    // dependency arm below would then match. `ok` already refuses capped
+    // runs; the acquisition classification must not read them either. Fail
+    // toward over-attribution — the direction this machine's own comment
+    // mandates.
+    !evidenceCapped &&
     !isSourceFailure(result.output) &&
     // Executed failing tests record themselves in the stdout summaries even
     // when the sweep misses their XML: dependency-flavored assertion text

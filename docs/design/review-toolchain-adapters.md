@@ -172,7 +172,8 @@ P1 changes:
 
 - `packages/cli/src/commands/review/build-test.ts`
   - Widens the `toolchain` discriminant, registers the Maven adapter, and
-    fails closed on mixed-root ambiguity.
+    prefers npm on a mixed root with a Maven-unverified disclosure, falling
+    to the Maven adapter only when npm concedes without executing.
 - `packages/cli/src/commands/review/lib/toolchain.ts`
   - Widens the `install` contract's documented semantics to cover Maven's
     best-effort `dependency:go-offline` warm-up alongside `npm ci`.
@@ -306,15 +307,20 @@ Fastjson2 and Druid establish these requirements:
 
 ### Adapter selection
 
-P1 still uses root-level `applies(root)` detection and requires exactly one
-applicable adapter. A root where both npm and Maven apply fails closed to
-`toolchain: "unsupported"`, even when the current diff appears to touch only one
-side. P1 does not yet model nested toolchain roots or changed-file ownership
-across toolchains.
+P1 still uses root-level `applies(root)` detection. A root where both npm and
+Maven apply does NOT fail closed to `toolchain: "unsupported"`: build-test
+prefers npm — preserving what a review verified on this shape before the Maven
+adapter existed, since running nothing at all once shipped a broken JS build
+through review with zero evidence — and discloses the unverified Maven half in
+the note. When npm concedes or returns WITHOUT executing (an unsupported
+handoff, a workspace-shaped diff mapping zero affected files, an install disk
+preflight, or an exhausted budget), the Maven adapter runs instead and its own
+caveat discloses the unscopable npm side. P1 does not yet model nested
+toolchain roots or changed-file ownership across toolchains.
 
-This is intentionally conservative. P1 does not aggregate multiple toolchains,
-and refusing an ambiguous mixed root is safer than silently validating only the
-frontend or only the Java half.
+This is intentionally conservative. P1 does not aggregate multiple toolchains:
+whichever half runs, the other is named unverified rather than silently
+validated, so a green run on one side never certifies the other.
 
 ### Reactor and module ownership
 
@@ -433,7 +439,7 @@ Existing fields are generalized without changing their JSON shape:
 - `test`: contains the Maven `test` command in normal mode.
 - `timedOut`, `ok`, and `note`: retain their current cross-toolchain meaning.
 
-Command results carry five optional classification flags consumed by
+Command results carry six optional classification flags consumed by
 `test-plan`:
 
 - `CommandResult.infrastructure`: the adapter classified the failure as
@@ -467,6 +473,13 @@ Command results carry five optional classification flags consumed by
   wrapper caveat instead of silently trusting it. Either way the run is not
   certified on stdout alone, and a Test Plan claim must not be ruled
   reproduced against a never-ran run.
+- `CommandResult.swallowedReports`: the command exited 0 over fresh failing
+  Surefire/Failsafe reports (a `testFailureIgnore`-style setting swallowed
+  them). It is a FAILED run for ruling and count purposes: a Test Plan claim
+  must not be ruled reproduced against it, and its derived pass count must
+  not adjudicate a count claim. Distinct from `swallowedFailure` (which keys
+  on the output's framed wording) — this flag keys on the parsed reports
+  themselves.
 
 Command results additionally carry `maven` — the lifecycle phase, `-pl`
 module set, and `-am` flag the adapter rendered the command from — so
@@ -607,9 +620,9 @@ specifying this before two real adapters demonstrate the common boundary.
   config, a script-less docs site) does not apply, so the Maven adapter owns
   such a root alone. npm applies only when a declared `workspaces` field is
   fully modeled and resolves to at least one package, or — with no workspaces
-  declared — the root defines a build/test script (the shape that makes both
-  adapters apply and deliberately fails closed as a mixed root under the P1
-  selection rule). A root whose workspaces gate refuses npm (an unmodeled or
+  declared — the root defines a build/test script (the shape where both
+  adapters apply: build-test runs npm and discloses the unverified Maven
+  half, per the Adapter selection rule). A root whose workspaces gate refuses npm (an unmodeled or
   zero-package glob) falls to the Maven adapter ALONE with the mixed-root
   disclosure note, not the fail-closed handoff — all finer-grained support
   decisions remain in the one execution path whose existing tests already
@@ -621,6 +634,7 @@ None. P1 settled the report-schema widening it introduced (`toolchain`
 discriminant, `CommandResult.infrastructure`,
 `CommandResult.swallowedFailure`, `CommandResult.evidenceCapped`,
 `CommandResult.testsSuppressed`, `CommandResult.neverRan`,
+`CommandResult.swallowedReports`,
 `CommandResult.rescueOverflow`, `CommandResult.maven`);
 multi-toolchain aggregation remains a decision for the phase that introduces
 that behavior.
