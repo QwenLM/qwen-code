@@ -367,6 +367,14 @@ describe('fetch-pr report assembly', () => {
     return JSON.parse(String(call[1]));
   }
 
+  /** What `publish()` actually wrote to the diff file, or null. */
+  function writtenDiff(): string | null {
+    const call = producerMocks.writeFileSync.mock.calls.findLast(
+      ([path]: unknown[]) => String(path).endsWith('diff.txt'),
+    );
+    return call ? String(call[1]) : null;
+  }
+
   it('stamps fetchedAt as a real timestamp and host as null off-Enterprise', async () => {
     const before = Date.now();
     const report = await reportFor({});
@@ -457,7 +465,7 @@ describe('fetch-pr report assembly', () => {
     'diff --git a/a.ts b/a.ts',
     '--- a/a.ts',
     '+++ b/a.ts',
-    '@@ -1,60 +1,260 @@',
+    '@@ -1,3 +1,204 @@',
     ' line',
     '+added',
     ' line2',
@@ -517,6 +525,11 @@ describe('fetch-pr report assembly', () => {
       diffBase: ANCHOR,
     });
     expect(report.diffPath).not.toBeNull();
+    // The DISK payload, not just the report: a write unpaired from the text
+    // the report describes hands every agent a diff whose chunks and
+    // diffBase advertise something else — the same mismatch class as the
+    // diffPath leak this PR shipped and fixed.
+    expect(writtenDiff()).toBe(DELTA_DIFF);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
@@ -751,6 +764,9 @@ describe('fetch-pr report assembly', () => {
     const report = await reportFor({ since: ANCHOR });
     expect(report.diffPath).not.toBeNull();
     expect(report.diffLines).toBeGreaterThan(0);
+    // The rescue republished the FULL range — the file agents read must be
+    // the range the report now describes.
+    expect(writtenDiff()).toBe(FULL_DIFF);
     // The anchor cannot stay effective over a full-range plan — one round,
     // two scopes is what that would mean for Agent 7's welded --base — and
     // the reason names what actually happened, not a capture that worked.
@@ -876,26 +892,26 @@ describe('fetch-pr report assembly', () => {
     // The shipped Critical: the empty-delta capture set diffPath, the
     // merge-base fallback never ran (sha: null), and
     // isEmptyDiff({diffPath: non-null, baseFetchFailed: false, diffText: ''})
-    // recommended a LIVE PR for closure. The reset before the fallback and
-    // the upToDate demotion are both pinned here.
+    // recommended a LIVE PR for closure. Publishing only at the accepting
+    // site is what closes it.
     anchorIsValid();
     producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
     const report = await reportFor({ since: ANCHOR });
     expect(report.emptyDiff).toBeUndefined();
     expect(report.diffPath).toBeNull();
-    // upToDate without the full-range plan would overclaim; it demotes —
-    // under its own reason, because unlike every other refusal there is NO
-    // diff or plan to fall back to, and the stderr line must not claim one.
+    // `upToDate` SURVIVES the missing full range: it is a fact about the
+    // anchor, proven by the delta capture, and the flow it serves — "No new
+    // changes since last review" → cleanup, stop — consumes no plan. The
+    // continuing flows read `diffPath` like any other degraded round.
     expect(report.incremental).toEqual({
       since: ANCHOR,
-      effective: false,
-      reason: 'full-range-unavailable',
+      effective: true,
+      upToDate: true,
     });
-    const refusedLine = producerMocks.writeStderrLine.mock.calls
+    const line = producerMocks.writeStderrLine.mock.calls
       .map((c) => String(c[0]))
-      .find((l) => l.includes('refused'));
-    expect(refusedLine).toContain('no diff could be captured');
-    expect(refusedLine).not.toContain('reviewing the full diff');
+      .find((l) => l.includes('Incremental:'));
+    expect(line).toContain('up to date with the head');
   });
 
   it('stays silent on ENOENT (a genuine first attempt)', async () => {
@@ -1173,8 +1189,12 @@ describe('hunksContainedIn — the containment oracle', () => {
       `diff --git a/${file} b/${file}`,
       `--- a/${file}`,
       `+++ b/${file}`,
+      // A PURE ADDITION: zero old-side lines, `count` new ones. Declaring
+      // old-side lines the body never emits leaves the hunk unclosed, and
+      // the next `@@` header is swallowed as body content — a fixture that
+      // models a truncated diff while reading like a whole one.
       ...hunks.flatMap(([start, count]) => [
-        `@@ -${start},${count} +${start},${count} @@`,
+        `@@ -${start},0 +${start},${count} @@`,
         ...Array.from({ length: count }, (_, i) => `+line ${start + i}`),
       ]),
       '',
@@ -1195,6 +1215,38 @@ describe('hunksContainedIn — the containment oracle', () => {
     expect(hunksContainedIn(sec('a.ts', [[1, 3]]), outer)).toBe(false);
     // starts inside, ends PAST it
     expect(hunksContainedIn(sec('a.ts', [[12, 50]]), outer)).toBe(false);
+  });
+
+  it('records EVERY hunk of a section, not just the first', () => {
+    // The parser closes a hunk by its declared line counts; a fixture (or a
+    // parse) that leaves one open swallows the next `@@` header as body.
+    const two = sec('a.ts', [
+      [10, 3],
+      [50, 2],
+    ]);
+    expect(hunksContainedIn(two, sec('a.ts', [[10, 3]]))).toBe(false);
+    expect(hunksContainedIn(two, sec('a.ts', [[1, 100]]))).toBe(true);
+  });
+
+  it('consumes the no-newline marker without spending a body line', () => {
+    // `\ No newline at end of file` is a marker, not content: counting it
+    // as a body line closes the hunk early and the next header is read as
+    // content. The most common real-world diff artifact there is.
+    const withMarker = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,0 +1,2 @@',
+      '+first',
+      '+second',
+      '\\ No newline at end of file',
+      '@@ -50,0 +50,1 @@',
+      '+later',
+      '',
+    ].join('\n');
+    // Both hunks are seen: covered by a wide outer, refused by a narrow one.
+    expect(hunksContainedIn(withMarker, sec('a.ts', [[1, 100]]))).toBe(true);
+    expect(hunksContainedIn(withMarker, sec('a.ts', [[1, 10]]))).toBe(false);
   });
 
   it('keys coverage per FILE — a numerically-inside range in another file is not covered', () => {

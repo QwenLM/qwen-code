@@ -16,13 +16,23 @@
 /**
  * Config overrides that have no command-line equivalent.
  *
- * `diff.suppressBlankEmpty` is the only one so far: with it set, git prints a
- * blank context line as a physically empty record rather than a lone space, and
- * the parser's new-side cursor must know which it is getting.
+ * `diff.suppressBlankEmpty`: with it set, git prints a blank context line as a
+ * physically empty record rather than a lone space, and the parser's new-side
+ * cursor must know which it is getting.
+ *
+ * `core.quotePath=false`: git's DEFAULT is to C-style-quote any path with a
+ * non-ASCII byte — `"docs/\\346\\236\\266\\346\\236\\204.md"` — which every
+ * path-reading parser downstream then has to unquote or mis-key. The
+ * containment oracle in `fetch-pr` fails closed on a path it cannot name, so a
+ * single non-ASCII filename in the diff would refuse incremental scoping for
+ * the whole PR, permanently. Unquoted is the shape all of these parsers were
+ * written against.
  */
 export const PINNED_DIFF_CONFIG: readonly string[] = [
   '-c',
   'diff.suppressBlankEmpty=false',
+  '-c',
+  'core.quotePath=false',
 ];
 
 /**

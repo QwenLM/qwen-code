@@ -165,15 +165,22 @@ type FetchPrResult = PlanReport & {
    * an anchor. `effective: true` without `upToDate` means the diff and plan
    * in this report cover `since..fetchedSha` instead of the merge-base range.
    * `upToDate: true` means nothing has landed since the anchor (the anchor is
-   * the head, or the commits since it change no bytes) — the diff and plan
-   * then cover the FULL range, because the flows that continue past an
-   * up-to-date anchor (a model change, `--comment`) run a full review.
+   * the head, or the commits since it change no bytes) — a fact about the
+   * anchor, proven without consulting the base. The diff and plan then cover
+   * the FULL range, because the flows that continue past an up-to-date
+   * anchor (a model change, `--comment`) run a full review; when that range
+   * could not be captured, `diffPath` is null and those flows read the
+   * ordinary degraded state, while the flow that stops the round needs no
+   * plan at all.
    * `effective: false` carries the reason the anchor was refused — a rebase
    * or force-push (`not-an-ancestor`), a sha this history has never seen
    * (`unknown-commit`), an anchor older than the merge base that would
    * scope WIDER than the PR's diff (`behind-merge-base`), a delta carrying
    * hunks the PR's own diff does not contain (`hunks-outside-pr-diff` — an
    * "undo per feedback" revert makes an in-range anchor produce them), a
+   * diff whose paths the containment parser could not name, leaving the
+   * oracle unavailable rather than the delta disproved
+   * (`containment-unverified`), a
    * merge base too stale to rule the clamp on (`base-untrusted`), a delta
    * capture that failed (`capture-failed`), or a delta the partitioner
    * refused to tile (`partition-failed`) — and in every one of those the
@@ -196,6 +203,7 @@ export interface IncrementalDecision {
     | 'not-an-ancestor'
     | 'behind-merge-base'
     | 'hunks-outside-pr-diff'
+    | 'containment-unverified'
     | 'base-untrusted'
     | 'capture-failed'
     | 'partition-failed'
@@ -346,6 +354,24 @@ export function hunksContainedIn(inner: string, outer: string): boolean {
     }
   }
   return true;
+}
+
+/**
+ * The containment ruling as the caller needs it: DISPROVED containment and an
+ * oracle that could not rule are different facts, and only the first is what
+ * `hunks-outside-pr-diff` asserts. A path this parser cannot name (a shape it
+ * does not model) makes the oracle unavailable, not the delta guilty.
+ */
+export function containmentRuling(
+  inner: string,
+  outer: string,
+): { ok: boolean; unverified: boolean } {
+  const innerSections = diffSections(inner);
+  const outerSections = diffSections(outer);
+  if (innerSections === null || outerSections === null) {
+    return { ok: false, unverified: true };
+  }
+  return { ok: hunksContainedIn(inner, outer), unverified: false };
 }
 
 /**
@@ -637,7 +663,22 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // below for the flows that continue anyway (a model change,
       // --comment).
       anchor.incremental.upToDate = true;
-    } else if (fullText !== null && !hunksContainedIn(delta, fullText)) {
+    } else if (fullText === null && mergeBaseSha !== null) {
+      // The oracle was LOST, not absent: a base was resolved and its capture
+      // threw (the 120s git timeout on the large long-lived PR `--since`
+      // exists for). Scoping now would publish a delta no containment check
+      // ever ran against — the same unchecked scope this guard exists to
+      // refuse, arrived at by an infrastructure failure instead of a bad
+      // anchor. The base-FREE shape below is different and deliberate:
+      // there is no PR diff to be contained in.
+      demote('capture-failed');
+    } else if (fullText !== null && !containmentRuling(delta, fullText).ok) {
+      // Two different facts, one refusal: the oracle DISPROVED containment,
+      // or it could not rule at all (a path shape it does not model). Only
+      // the first is what `hunks-outside-pr-diff` asserts; the second is an
+      // unavailable oracle, reported as `containment-unverified` so the
+      // reason a reader keys on stays true.
+      //
       // Ancestry containment is not HUNK containment. An ordinary "undo per
       // feedback" commit reverts some of the anchor round's lines back to
       // base content: the delta then carries hunks the PR's own diff does
@@ -646,7 +687,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // other finding with it. The clamp cannot see this (it compares
       // history, not content), so the delta is checked against the PR's
       // diff before it is allowed to be the review's scope.
-      demote('hunks-outside-pr-diff');
+      demote(
+        containmentRuling(delta, fullText).unverified
+          ? 'containment-unverified'
+          : 'hunks-outside-pr-diff',
+      );
     } else {
       publish(delta);
       scopedDelta = true;
@@ -659,16 +704,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
   if (!scopedDelta) {
     if (fullText !== null) publish(fullText);
-    // `upToDate` promises the report carries the FULL-range diff and plan
-    // (the flows that continue past it — a model change, --comment — run
-    // full). A full-range capture that failed or never ran breaks that
-    // promise, so the ruling is demoted rather than left overclaiming — and
-    // under its own reason: `capture-failed` names a DELTA capture failure,
-    // and the degraded state here is a different fact (no plan exists at
-    // all, not a fallback to a full one).
-    if (anchor?.incremental.upToDate && diffPath === null) {
-      demote('full-range-unavailable');
-    }
+    // `upToDate` is NOT demoted when the full range is unavailable. It is a
+    // fact about the ANCHOR — nothing has landed since it — proven by the
+    // delta capture (or, for anchor-at-head, by arithmetic), and neither
+    // proof consults the base. The flow it primarily serves consumes no
+    // plan at all: "No new changes since last review" stops the round. The
+    // flows that DO continue past it read `diffPath` like every other
+    // degraded round. Conditioning the anchor fact on the unrelated
+    // full-range capture cost a PR whose base branch was deleted its stop
+    // branch on every same-sha retry, whose only possible answer was
+    // "up to date".
   }
   // `buildDiffPlan` throws when the chunks do not tile the diff — a coverage
   // hole. That must be loud, but it must not take the whole review with it: the
@@ -828,7 +873,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // reads when a base exists. Keying them on the published diff made a
     // delta round judge the wrong quantity twice: the collapse ratio fired
     // against GitHub's full-PR stat on every incremental round, and an
-    // emptied PR went unflagged because its own delta was not empty.
+    // emptied PR went unflagged because its own delta was not empty. Both
+    // are full-range facts, so both read `fullText` on EVERY round, delta
+    // -scoped or not.
     ...(isEmptyDiff({
       diffPath: fullText === null ? null : diffRel,
       baseFetchFailed,
