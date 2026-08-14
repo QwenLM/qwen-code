@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -460,8 +461,10 @@ function validateWorkspacePath(value: string, cwd: string): string | null {
     return WORKSPACE_PATH_HINT;
   }
   if (isAbsoluteWorkspaceInput(trimmed)) {
-    const root = resolveBoundWorkspaceRoot(path.resolve(cwd));
-    if (!isWithinRoot(path.resolve(trimmed), root)) {
+    const root = resolveForContainment(
+      resolveBoundWorkspaceRoot(path.resolve(cwd)),
+    );
+    if (!isWithinRoot(resolveForContainment(path.resolve(trimmed)), root)) {
       return '"workspacePath" must stay inside the workspace';
     }
     return null;
@@ -589,6 +592,27 @@ async function resolveExistingDir(dir: string): Promise<string> {
   }
 }
 
+/**
+ * Compare absolute locators against a realpath'd workspace root. `path.resolve`
+ * alone keeps macOS `/var` vs `/private/var` (and similar symlink roots) in
+ * different namespaces and false-rejects files that are inside the workspace.
+ */
+function resolveForContainment(absolutePath: string): string {
+  const resolved = path.resolve(absolutePath);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    try {
+      return path.join(
+        realpathSync(path.dirname(resolved)),
+        path.basename(resolved),
+      );
+    } catch {
+      return resolved;
+    }
+  }
+}
+
 async function resolveWorkspaceArtifactLocator(
   rawPath: string,
   config: Config,
@@ -615,7 +639,7 @@ function workspacePathCandidate(
   }
   if (isAbsoluteWorkspaceInput(locator)) {
     const absolute = path.resolve(locator);
-    if (!isWithinRoot(absolute, root)) {
+    if (!isWithinRoot(resolveForContainment(absolute), root)) {
       return locatorFailure(
         ToolErrorType.PATH_NOT_IN_WORKSPACE,
         `Failed to record artifact: "${locator}" is outside the workspace.\n${WORKSPACE_PATH_HINT}`,

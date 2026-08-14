@@ -227,6 +227,33 @@ describe('RecordArtifactTool', () => {
     });
   });
 
+  it('accepts an absolute path that names the workspace through a symlink prefix', async () => {
+    const ws = await workspace();
+    await ws.write('report.csv', 'a,b\n');
+    const aliasRoot = path.join(
+      os.tmpdir(),
+      `record-artifact-alias-${process.pid}-${Date.now()}`,
+    );
+    await symlink(ws.root, aliasRoot);
+    workspaces.push({
+      cleanup: async () => {
+        await rm(aliasRoot, { force: true });
+      },
+    });
+
+    const result = await ws.tool
+      .build({
+        title: 'Symlink prefix',
+        workspacePath: path.join(aliasRoot, 'report.csv'),
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: 'report.csv',
+    });
+  });
+
   it('rejects a wrong workspace-folder prefix instead of reporting success', async () => {
     const ws = await workspace();
     await ws.write('report.csv', 'a,b\n');
