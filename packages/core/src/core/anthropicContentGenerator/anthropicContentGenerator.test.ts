@@ -3358,6 +3358,33 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContentStream', () => {
+    const collectGeneratedStream = async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+      const chunks: GenerateContentResponse[] = [];
+      let error: unknown;
+      try {
+        for await (const chunk of stream) chunks.push(chunk);
+      } catch (caughtError) {
+        error = caughtError;
+      }
+      return { chunks, error };
+    };
+
     it.each([
       {
         case: 'multi-delta arguments',
@@ -3549,6 +3576,153 @@ describe('AnthropicContentGenerator', () => {
           args: { file_path: 'a.sql' },
         },
       ]);
+    });
+
+    it('releases closed valid tool calls before rethrowing an upstream stream error', async () => {
+      const networkError = Object.assign(
+        new Error('SSE connection reset by peer'),
+        { code: 'ECONNRESET' },
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* interruptedToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'read_file',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"file_path":"a.sql"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          throw networkError;
+        })(),
+      );
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        {
+          id: 'call-complete',
+          name: 'read_file',
+          args: { file_path: 'a.sql' },
+        },
+      ]);
+      expect(error).toBe(networkError);
+    });
+
+    it.each([
+      {
+        case: 'an HTTP provider error',
+        error: Object.assign(new Error('credit balance is too low'), {
+          status: 402,
+        }),
+      },
+      {
+        case: 'an abort',
+        error: Object.assign(new Error('aborted'), { name: 'AbortError' }),
+      },
+      {
+        case: 'a transport error outside the stream-retry allow-list',
+        error: Object.assign(new Error('connection refused'), {
+          code: 'ECONNREFUSED',
+        }),
+      },
+    ])(
+      'does not release a closed call before rethrowing $case',
+      async ({ error }) => {
+        anthropicState.createImpl.mockResolvedValue(
+          (async function* failedToolUseStream() {
+            yield {
+              type: 'content_block_start',
+              index: 0,
+              content_block: {
+                type: 'tool_use',
+                id: 'call-complete',
+                name: 'run_shell_command',
+                input: {},
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: '{"command":"pwd"}',
+              },
+            };
+            yield { type: 'content_block_stop', index: 0 };
+            throw error;
+          })(),
+        );
+        const result = await collectGeneratedStream();
+
+        expect(
+          result.chunks.flatMap((chunk) => chunk.functionCalls ?? []),
+        ).toEqual([]);
+        expect(result.error).toBe(error);
+      },
+    );
+
+    it('does not release a closed call when an upstream error leaves a sibling tool block open', async () => {
+      const networkError = Object.assign(
+        new Error('SSE connection reset by peer'),
+        { code: 'ECONNRESET' },
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* interruptedParallelToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-truncated',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"rm -rf /tmp/scra',
+            },
+          };
+          throw networkError;
+        })(),
+      );
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+      expect(error).toBe(networkError);
     });
 
     it('routes an unterminated tool call through max-token recovery without emitting the batch', async () => {
@@ -3961,10 +4135,21 @@ describe('AnthropicContentGenerator', () => {
       ).toBe(FinishReason.STOP);
     });
 
-    it('rejects an open tool-use block at end of stream', async () => {
+    it('rejects an open tool-use block after assistant payload at end of stream', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
         (async function* openToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: { type: 'text', text: '' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: { type: 'text_delta', text: 'partial response' },
+          };
+          yield { type: 'content_block_stop', index: 1 };
           yield {
             type: 'content_block_start',
             index: 0,
@@ -4017,10 +4202,81 @@ describe('AnthropicContentGenerator', () => {
       expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
     });
 
+    it('rejects a confirmed turn with an open tool-use block without releasing closed siblings', async () => {
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* openParallelToolUseStream() {
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-complete',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"pwd"}',
+            },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'content_block_start',
+            index: 1,
+            content_block: {
+              type: 'tool_use',
+              id: 'call-open',
+              name: 'run_shell_command',
+              input: {},
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 1,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: '{"command":"whoami"}',
+            },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'tool_use' },
+            usage: { output_tokens: 100 },
+          };
+        })(),
+      );
+      const { chunks, error } = await collectGeneratedStream();
+
+      expect(error).toMatchObject({
+        name: 'InvalidStreamError',
+        type: 'MALFORMED_TOOL_CALL',
+      });
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([]);
+    });
+
     it.each([
       {
         case: 'an empty argument buffer without a finish reason',
         partialJson: '',
+        stopReason: undefined,
+      },
+      {
+        case: 'an empty argument buffer confirmed by end_turn',
+        partialJson: '',
+        stopReason: 'end_turn',
+      },
+      {
+        case: 'a malformed argument buffer without a finish reason',
+        partialJson: '{"command":',
+        stopReason: undefined,
+      },
+      {
+        case: 'a non-object argument root without a finish reason',
+        partialJson: '[]',
         stopReason: undefined,
       },
       {
@@ -4821,6 +5077,48 @@ describe('AnthropicContentGenerator', () => {
         undefined,
       );
     });
+
+    it.each([
+      { case: 'an empty buffer', partialJson: '' },
+      { case: 'a partial buffer', partialJson: '{"file_path":' },
+    ])(
+      'falls back to non-streaming when an unconfirmed tool block with $case is the only stream payload',
+      async ({ partialJson }) => {
+        anthropicState.createImpl
+          .mockResolvedValueOnce(
+            (async function* unconfirmedToolUseStream() {
+              yield {
+                type: 'content_block_start',
+                index: 0,
+                content_block: {
+                  type: 'tool_use',
+                  id: 'call-open',
+                  name: 'read_file',
+                  input: {},
+                },
+              };
+              yield {
+                type: 'content_block_delta',
+                index: 0,
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: partialJson,
+                },
+              };
+            })(),
+          )
+          .mockRejectedValueOnce(new Error('402 credit balance is too low'));
+        const { chunks, error } = await collectGeneratedStream();
+
+        expect(error).toMatchObject({
+          message: '402 credit balance is too low',
+        });
+        expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual(
+          [],
+        );
+        expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      },
+    );
 
     it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
       const { AnthropicContentGenerator } = await importGenerator();

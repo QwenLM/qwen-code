@@ -50,6 +50,8 @@ import {
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { parseToolCallArguments } from '../tool-call-arguments.js';
+import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { RETRYABLE_STREAM_TRANSPORT_CODES } from '../stream-transport-retry.js';
 import {
   reportAnthropicEvent,
   reportAnthropicFollowingRequest,
@@ -1214,6 +1216,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let hasEmptyToolCall = false;
     let hasMalformedToolCall = false;
     let hasNonObjectToolCall = false;
+    let upstreamStreamFailed = false;
+    let upstreamStreamError: unknown;
     const collectedResponses: GenerateContentResponse[] = [];
     const throwMalformedToolCall = (detail: string): never => {
       throw new InvalidStreamError(
@@ -1235,7 +1239,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
       });
     };
 
-    for await (const event of stream) {
+    const capturedStream = (async function* () {
+      try {
+        yield* stream;
+      } catch (error) {
+        upstreamStreamFailed = true;
+        upstreamStreamError = error;
+      }
+    })();
+
+    for await (const event of capturedStream) {
       reportAnthropicEvent(telemetryAttempt, event);
       switch (event.type) {
         case 'message_start': {
@@ -1438,7 +1451,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 hasOpenToolCall
                   ? 'tool-use block did not close before the stop reason'
                   : hasMalformedToolCall
-                    ? 'completed argument buffer was not a JSON object'
+                    ? 'completed argument buffer was not valid JSON'
                     : 'empty argument buffer lacked a tool-use stop reason',
               );
             } else if (deferredToolCalls.length > 0) {
@@ -1542,11 +1555,50 @@ export class AnthropicContentGenerator implements ContentGenerator {
       }
     }
 
+    const hasOpenToolCall = [...blocks.values()].some(
+      (block) => block.type === 'tool_use',
+    );
+    if (upstreamStreamFailed) {
+      const upstreamErrorClassification =
+        classifyRetryError(upstreamStreamError);
+      // Match GeminiChat's replay boundary: only known mid-SSE socket cuts
+      // may release an already closed batch before the error is propagated.
+      if (
+        upstreamErrorClassification.kind === 'transport' &&
+        upstreamErrorClassification.transportCode !== undefined &&
+        RETRYABLE_STREAM_TRANSPORT_CODES.has(
+          upstreamErrorClassification.transportCode,
+        ) &&
+        deferredToolCalls.length > 0 &&
+        !hasEmptyToolCall &&
+        !hasMalformedToolCall &&
+        !hasNonObjectToolCall &&
+        !hasOpenToolCall
+      ) {
+        for (const chunk of deferredToolCalls.splice(0)) {
+          collectedResponses.push(chunk);
+          yield chunk;
+        }
+      }
+      throw upstreamStreamError;
+    }
+
+    const hasAssistantPayload = collectedResponses.some((response) =>
+      response.candidates?.some((candidate) =>
+        candidate.content?.parts?.some(
+          (part) =>
+            part.text ||
+            part.thought ||
+            part.thoughtSignature ||
+            part.functionCall,
+        ),
+      ),
+    );
     if (
       hasMalformedToolCall ||
       hasNonObjectToolCall ||
       deferredToolCalls.length > 0 ||
-      [...blocks.values()].some((block) => block.type === 'tool_use')
+      (hasOpenToolCall && hasAssistantPayload)
     ) {
       throwMalformedToolCall(
         hasMalformedToolCall
