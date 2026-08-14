@@ -64,15 +64,14 @@ import {
   SUGGESTION_PREFIX,
   countInlineFindings,
   severityOf,
-  stripSeverityPrefix,
 } from './lib/inline-counts.js';
 import {
   COMMENT_MARKER,
   commentMarker,
   footerVersion,
   reviewFooter,
-  stripCommentMarkerLines,
   stripForgedFooterLines,
+  stripForUnattributedPost,
   stripReviewFooter,
 } from './lib/review-footer.js';
 
@@ -364,12 +363,14 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
     }
 
     // A body that is nothing but its marker is the empty case wearing one.
-    // The check must see past BOTH additions the post path can make — the
-    // canonical footer (attribution on) and any markers stacked by a looping
-    // draft — so it strips iteratively and through the footer: nothing left
-    // means nothing was ever there but scaffolding.
+    // The check runs the FULL post-transform chain (plus the canonical
+    // footer that normalize may have appended): nothing left means nothing
+    // was ever there but scaffolding — a prefix over a bare marker line
+    // posts an empty visible comment carrying a live marker otherwise.
     if (c.body && severityOf(c) !== null) {
-      const remainder = stripReviewFooter(stripSeverityPrefix(c.body)).trim();
+      const remainder = stripReviewFooter(
+        stripForUnattributedPost(c.body),
+      ).trim();
       if (remainder === '') {
         problems.push(
           `${at} is nothing but its severity marker — redraft it with the ` +
@@ -548,7 +549,7 @@ export function runSubmit(
           const sev = severityOf(c);
           return {
             ...c,
-            body: `${stripCommentMarkerLines(stripSeverityPrefix(c.body))}\n\n${sev === null ? COMMENT_MARKER : commentMarker(sev)}`,
+            body: `${stripForUnattributedPost(c.body)}\n\n${sev === null ? COMMENT_MARKER : commentMarker(sev)}`,
           };
         }),
   };

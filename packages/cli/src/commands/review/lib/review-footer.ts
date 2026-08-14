@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { stripSeverityPrefix } from './inline-counts.js';
+
 // The attribution footer every posted review carries, stated once.
 //
 // `compose-review` composes it into the verdict body and `submit` strips
@@ -66,12 +68,12 @@ export function commentMarkerSeverity(
  */
 export function stripCommentMarkerLines(body: string): string {
   if (!body.includes('<!-- qwen-review')) return body;
-  return filterLinesAware(
-    body,
-    (line) =>
-      !/^[ \t]{0,3}<!-- qwen-review (?:critical|suggestion)? -->[ \t]*\r?$/.test(
-        line,
-      ),
+  return mapLinesAware(body, (line) =>
+    /^[ \t]{0,3}<!-- qwen-review (?:critical|suggestion)? -->[ \t]*\r?$/.test(
+      line,
+    )
+      ? null
+      : line,
   );
 }
 
@@ -79,10 +81,12 @@ export function stripCommentMarkerLines(body: string): string {
  * A footer SPAN removed wherever it sits in a (single-line) string — the
  * sanitation for ledger titles, where a forged footer ending the first line
  * of a multi-line entry would otherwise survive the whole-line strips.
- * Bounded; the optional closing `_` covers the looping-model truncation.
+ * Bounded; the optional closing `_` and closing paren cover the looping-
+ * model truncation (most mid-character cuts land inside the version parens
+ * — they are the footer's final characters).
  */
 const FOOTER_SPAN_RE =
-  /_— [^\n]{0,400}? via Qwen Code \/review(?: \(v[^\n)]{0,200}\))?_?[ \t]*/g;
+  /_— [^\n]{0,400}? via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?[ \t]*/g;
 
 export function stripFooterSpans(text: string): string {
   return text.includes(FOOTER_MARKER)
@@ -111,10 +115,13 @@ export function reviewFooter(modelId: string, cliVersion: string): string {
  *
  * The closing `_` is optional because a looping model truncates the forged
  * footer it cuts off mid-character, and an unstripped unclosed copy would
- * post as a duplicate attribution line above the canonical one.
+ * post as a duplicate attribution line above the canonical one. The closing
+ * paren of the version group is optional for the same reason: most
+ * mid-character cuts land inside the parens — the footer's final ~10
+ * characters.
  */
 export const REVIEW_FOOTER_RE =
-  /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[^\n)]*\))?_?\s*)+$/;
+  /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[^\n)]*\)?)?_?\s*)+$/;
 
 /** The widest slice `stripReviewFooter` runs the strip regex over. */
 const STRIP_TAIL_LIMIT = 8192;
@@ -150,43 +157,56 @@ export function stripReviewFooter(body: string): string {
 }
 
 /**
- * Line-filter shared by the anywhere-strips. Tracks the markdown constructs
+ * Line-map shared by the anywhere-strips. Tracks the markdown constructs
  * under which a footer/marker-shaped line is a QUOTATION, not attribution:
  * fenced code (``` and ~~~, opened with at most three spaces of indent —
  * at four it is itself indented-code content and does not open a fence) and
  * indented code blocks. Lines inside a simple HTML block (`<div>`, `<pre>`,
- * … until the next blank line) are raw content and never toggle fence
- * state. A body from which nothing was removed is returned byte-identical.
+ * … until the next blank line) render VISIBLY on GitHub, so they are never
+ * a shield against the map — the state exists only to stop a fence-shaped
+ * line inside one from toggling fence state. `map` returns the replacement
+ * line, or null to drop it; a body where nothing changed is returned
+ * byte-identical.
  */
-function filterLinesAware(
+function mapLinesAware(
   body: string,
-  keep: (line: string) => boolean,
+  map: (line: string) => string | null,
 ): string {
   let inFence = false;
   let inHtml = false;
-  let removed = false;
-  const kept = body.split('\n').filter((line) => {
+  let changed = false;
+  const out: string[] = [];
+  for (const line of body.split('\n')) {
     const trimmed = line.trimStart();
     if (inHtml) {
       if (trimmed === '') inHtml = false;
-      return true;
+      out.push(line);
+      continue;
     }
     if (/^<[A-Za-z][^>]*>?[ \t]*\r?$/.test(trimmed) && !inFence) {
       inHtml = true;
-      return true;
+      out.push(line);
+      continue;
     }
     if (/^[ \t]{0,3}(```|~~~)/.test(line)) {
       inFence = !inFence;
-      return true;
+      out.push(line);
+      continue;
     }
-    if (!inFence && !/^[ \t]{4}/.test(line) && !keep(line)) {
-      removed = true;
-      return false;
+    if (inFence || /^[ \t]{4}/.test(line)) {
+      out.push(line);
+      continue;
     }
-    return true;
-  });
-  if (!removed) return body;
-  return kept
+    const mapped = map(line);
+    if (mapped === null) {
+      changed = true;
+      continue;
+    }
+    if (mapped !== line) changed = true;
+    out.push(mapped);
+  }
+  if (!changed) return body;
+  return out
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^\n+/, '')
@@ -214,11 +234,57 @@ function filterLinesAware(
  * whitespace rewriting.
  */
 const FORGED_FOOTER_LINE_RE =
-  /^[ \t]{0,3}_— [^\n]{0,400} via Qwen Code \/review(?: \(v[^\n)]*\))?_?[ \t]*\r?$/;
+  /^[ \t]{0,3}(?:>[ \t]*)?_— [^\n]{0,400} via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?[ \t]*\r?$/;
 
 export function stripForgedFooterLines(body: string): string {
   if (!body.includes(FOOTER_MARKER)) return body;
-  return filterLinesAware(body, (line) => !FORGED_FOOTER_LINE_RE.test(line));
+  return mapLinesAware(body, (line) =>
+    FORGED_FOOTER_LINE_RE.test(line) ? null : line,
+  );
+}
+
+/**
+ * Severity markers at the start of any PARAGRAPH, not just the body's —
+ * `stripSeverityPrefix` handles the leading run, but a looping draft can
+ * carry a second marker into a later paragraph (the shape a marker-line
+ * strip exposes), and a visible `**[Suggestion]**` mid-body contradicts the
+ * invisible marker the post carries. Quoted code is left alone, as with
+ * the other strips.
+ */
+const PARAGRAPH_MARKER_RE =
+  /^[ \t]{0,3}(?:>[ \t]*)?(?:\*\*\[Critical\]\*\*|\*\*\[Suggestion\]\*\*)[ \t]*:?[ \t]*/;
+
+export function stripParagraphMarkers(body: string): string {
+  if (!body.includes('**[')) return body;
+  return mapLinesAware(body, (line) => {
+    const stripped = line.replace(PARAGRAPH_MARKER_RE, '');
+    return stripped === line ? line : stripped;
+  });
+}
+
+/**
+ * The full attribution-off sanitation, iterated to a fixpoint: forged
+ * footer lines, severity prefixes, bare marker lines, and footer spans
+ * interleave arbitrarily in a looping model's draft (a marker line between
+ * two prefixes stops a single prefix pass; a footer span ahead of a marker
+ * defeats a marker-first chain), and only a chain that keeps running until
+ * nothing changes posts none of them. Every attribution-off leg — submit's
+ * post transform and gate, compose's body lists, the ledger titles — goes
+ * through here so the sites cannot drift.
+ */
+export function stripForUnattributedPost(body: string): string {
+  let current = body;
+  for (;;) {
+    const next = stripFooterSpans(
+      stripParagraphMarkers(
+        stripCommentMarkerLines(
+          stripSeverityPrefix(stripForgedFooterLines(current)),
+        ),
+      ),
+    );
+    if (next === current) return current;
+    current = next;
+  }
 }
 
 /**

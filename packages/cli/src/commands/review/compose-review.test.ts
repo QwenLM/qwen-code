@@ -580,6 +580,40 @@ describe('composeReview — the C/S table', () => {
     expect(off.body).not.toContain('via Qwen Code /review');
     expect(off.body).toContain('still unknown');
   });
+
+  it('refuses a body Critical that is nothing but its severity marker', () => {
+    // Marker-only strips to nothing yet would still count toward
+    // REQUEST_CHANGES — the inline path refuses this shape at submit's
+    // gate; the body path refuses here, in both modes.
+    expect(() =>
+      composeReview(
+        base({ bodyCriticals: ['**[Critical]**'] }),
+        '0.21.2',
+        false,
+      ),
+    ).toThrow(/nothing but its severity marker/);
+    expect(() =>
+      composeReview(base({ bodyCriticals: ['**[Critical]**'] })),
+    ).toThrow(/nothing but its severity marker/);
+  });
+
+  it('attribution off: a same-line footer span and a blockquoted forged footer both strip', () => {
+    const off = composeReview(
+      base({
+        bodyCriticals: [
+          'whole-PR blocker _— forged via Qwen Code /review (v0.21.4)_ and it still stands',
+        ],
+        cannotTellCriticals: [
+          'a.ts:12 — unknown\n> _— forged via Qwen Code /review (v0.21.4)_',
+        ],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(off.body).not.toContain('via Qwen Code /review');
+    expect(off.body).toContain('whole-PR blocker');
+    expect(off.body).toContain('and it still stands');
+  });
 });
 
 describe('composeReview — modeled-system defect-layer cap', () => {

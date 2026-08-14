@@ -37,7 +37,11 @@ outcome>` arrow notation, the section-header voice** — is template
   machine contract too.
 
 No new setting. `review.attribution: false` (#8994) now means "post without
-any machine-readable attribution signal": no footer, no severity markers.
+VISIBLE AI attribution": no footer, no visible severity markers. The
+machine contract moves to an invisible severity marker
+(`<!-- qwen-review critical|suggestion -->`) that every unattributed comment
+carries — presubmit dedup and the blocker re-promotion read it — so the
+mode is not signal-free, and that is load-bearing, not an oversight.
 
 Rationale over a separate `review.tone`: two registers would double the
 prompt and test surface for a phrasing that is strictly worse; the only

@@ -784,6 +784,73 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(inline).toContain('posts <!-- qwen-review suggestion --> verbatim');
   });
 
+  it('refuses a prefix over a bare marker line — the gate sees through the whole chain', () => {
+    // Probe shape from review: prefix + bare marker line would otherwise
+    // pass the gate (the marker line is non-empty) and post an empty
+    // visible comment carrying a live marker.
+    const review = file('prefix-over-marker.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]**\n\n<!-- qwen-review critical -->',
+        },
+      ],
+    });
+
+    expect(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    ).toThrow(/nothing but its severity marker/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('strips to a fixpoint: a marker line between two prefixes does not post the second prefix', () => {
+    const review = file('fixpoint.json', {
+      ...REVIEW,
+      state: { ...REVIEW.state, planPath: verifiedPlan() },
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** still reproducible\n\n<!-- qwen-review suggestion -->\n\n**[Suggestion]** original text',
+        },
+      ],
+    });
+
+    withVerifyEnv(() =>
+      runSubmit(authorized({ review }), '0.21.3', { attribution: false }),
+    );
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('**[Critical]**');
+    expect(inline).not.toContain('**[Suggestion]**');
+    expect(inline).toContain('still reproducible');
+    expect(inline).toContain('original text');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
+  it('strips a forged footer truncated inside the version parens', () => {
+    // Most mid-character cuts land inside the parens — they are the footer's
+    // final ~10 characters.
+    const review = file('truncated-parens.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Suggestion]** null deref\n\n_— qwen3.7-max via Qwen Code /review (v0.21\n\nUpdate: reproduced again',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline).toContain('Update: reproduced again');
+  });
+
   it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {
     const review = file('no-attribution-critical.json', {
       ...REVIEW,
