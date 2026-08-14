@@ -1,3 +1,0 @@
-# Gemini Code
-
-TBD
