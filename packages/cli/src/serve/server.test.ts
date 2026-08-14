@@ -9306,6 +9306,52 @@ describe('createServeApp', () => {
       expect(response.status).toBe(400);
     });
 
+    it('rejects SVG uploads', async () => {
+      // SVG can carry scripts and the bytes are served back to browsers on
+      // the same origin as the daemon API and Web Shell UI.
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/svg+xml')
+        .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
+
+      expect(response.status).toBe(415);
+      expect(response.body).toEqual({
+        error: 'SVG uploads are not supported',
+      });
+    });
+
+    it('serves stored media with download-safe headers', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+      const uploaded = await request(app)
+        .post('/session/s-1/media')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(bytes);
+      expect(uploaded.status).toBe(201);
+
+      const downloaded = await request(app)
+        .get('/session/s-1/media/media-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .buffer(true);
+      expect(downloaded.status).toBe(200);
+      expect(downloaded.headers['content-disposition']).toBe('attachment');
+      expect(downloaded.headers['x-content-type-options']).toBe('nosniff');
+    });
+
     it('reports the media route 8 MiB body limit accurately', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },

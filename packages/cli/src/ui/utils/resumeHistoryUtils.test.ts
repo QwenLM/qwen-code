@@ -634,6 +634,54 @@ describe('resumeHistoryUtils', () => {
     });
   });
 
+  it('restores media-reference mid-turn messages as an attachment placeholder', () => {
+    // Image-only mid-turn messages are recorded with an empty displayText and
+    // mediaReferences; resuming must not fall back to the raw internal prefix.
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          subtype: 'mid_turn_user_message',
+          message: {
+            parts: [
+              {
+                text: '\n[User message received during tool execution]: ',
+              } as Part,
+            ],
+          },
+          systemPayload: {
+            displayText: '',
+            mediaReferences: [
+              {
+                type: 'image',
+                mediaId: 'image-1',
+                mimeType: 'image/png',
+                size: 8,
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(
+      session,
+      makeConfig({ replace: mockTool }),
+      40,
+    );
+
+    expect(items).toContainEqual({
+      id: 41,
+      type: 'user',
+      text: '[User message with attachments]',
+      sentToModel: false,
+    });
+  });
+
   it('restores ordinary user messages from clean display text', () => {
     const conversation = {
       messages: [

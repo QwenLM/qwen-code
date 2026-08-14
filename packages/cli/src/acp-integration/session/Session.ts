@@ -1050,6 +1050,30 @@ function hasInlineMediaContentBlock(content: ContentBlock[]): boolean {
   return content.some((part) => part.type === 'image' || part.type === 'audio');
 }
 
+function stripReferencedInlineDataParts(
+  parts: Part[],
+  content: ContentBlock[],
+): Part[] {
+  const coveredByKey = new Map<string, number>();
+  for (const block of content) {
+    if (block.type !== 'image') continue;
+    const key = `${block.mimeType}\u0000${block.data}`;
+    coveredByKey.set(key, (coveredByKey.get(key) ?? 0) + 1);
+  }
+  if (coveredByKey.size === 0) return parts;
+  return parts.filter((part) => {
+    const inlineData = part.inlineData;
+    if (inlineData === undefined || typeof inlineData.data !== 'string') {
+      return true;
+    }
+    const key = `${inlineData.mimeType ?? ''}\u0000${inlineData.data}`;
+    const remaining = coveredByKey.get(key) ?? 0;
+    if (remaining === 0) return true;
+    coveredByKey.set(key, remaining - 1);
+    return false;
+  });
+}
+
 function capMidTurnDrainItems<T>(items: T[], fieldName: string): T[] {
   if (items.length <= MAX_MID_TURN_DRAIN_ITEMS) return items;
 
@@ -6597,12 +6621,10 @@ export class Session implements SessionContext {
       if (message.kind === 'structured' && message.mediaReferences) {
         const everyMediaBlockHasAReference =
           message.mediaReferences.length ===
-          message.content.filter(
-            (block) => block.type === 'image' || block.type === 'audio',
-          ).length;
+          message.content.filter((block) => block.type === 'image').length;
         if (everyMediaBlockHasAReference) {
           recorder?.recordMidTurnUserMessage(
-            built.filter((part) => part.inlineData === undefined),
+            stripReferencedInlineDataParts(built, message.content),
             displayText,
             undefined,
             message.mediaReferences,

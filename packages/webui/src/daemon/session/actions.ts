@@ -34,7 +34,7 @@ import {
   isDaemonTurnError,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus } from './httpErrors.js';
+import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
 import {
   mapReasoningControls,
   mapSessionContextReasoning,
@@ -1501,11 +1501,23 @@ export function createDaemonSessionActions({
         const targetClientId =
           getPersistedClientId(opts.sessionId) ??
           (mediaClientSessionId === opts.sessionId ? mediaClientId : undefined);
-        return targetClientId
-          ? await client.removeSessionMedia(opts.sessionId, mediaId, {
-              clientId: targetClientId,
-            })
-          : await client.removeSessionMedia(opts.sessionId, mediaId);
+        if (!targetClientId) {
+          return await client.removeSessionMedia(opts.sessionId, mediaId);
+        }
+        try {
+          return await client.removeSessionMedia(opts.sessionId, mediaId, {
+            clientId: targetClientId,
+          });
+        } catch (error) {
+          // Detach unregisters the persisted client id on the daemon, so a
+          // session switch can stale it before this cleanup lands. The daemon
+          // accepts an absent id — retry without it instead of orphaning the
+          // media behind a swallowed 400.
+          if (isInvalidClientIdError(error)) {
+            return await client.removeSessionMedia(opts.sessionId, mediaId);
+          }
+          throw error;
+        }
       }
       if (!session) return false;
       return await session.removeMedia(mediaId);

@@ -494,6 +494,60 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('keeps mid-turn injected echoes that look like status noise', () => {
+    // User content that merely starts like a filtered status line must not be
+    // dropped by the noise filter.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', 'Model switched: check this too', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: ['Model switched: check this too'],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: 'Model switched: check this too',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
+  it('keeps mid-turn injected echoes that start like plan JSON', () => {
+    // User content starting with the plan projection shape must not be
+    // misrendered as a plan card (which also drops the attached images).
+    const planLikeText =
+      'plan: {"sessionUpdate":"plan","entries":[{"content":"step"}]}';
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', planLikeText, 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [planLikeText],
+          items: [
+            {
+              content: [
+                { type: 'image', data: 'base64data', mimeType: 'image/png' },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: planLikeText,
+        source: 'mid_turn_message_injected',
+        images: [{ data: 'base64data', mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
   it('keeps replayed mid-turn user blocks as inserted messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('mid-1', 'user', 'with image', 1, false, {

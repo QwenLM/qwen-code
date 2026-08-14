@@ -1340,6 +1340,49 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  it('retries cross-session media removal without the client id when it is stale', async () => {
+    // Detach unregisters the persisted client id on the daemon; the cleanup
+    // must degrade to a no-clientId removal instead of orphaning the media.
+    vi.stubGlobal('window', {
+      sessionStorage: {
+        getItem: vi.fn(() => 'client-old'),
+      },
+    });
+    try {
+      const session = createMockSession('session-current', 'client-current');
+      session.client.removeSessionMedia = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new DaemonHttpError(
+            400,
+            { code: 'invalid_client_id' },
+            'invalid client id',
+          ),
+        )
+        .mockResolvedValueOnce(true);
+      const { actions } = createActionsHarness({ session });
+
+      await expect(
+        actions.removeMedia('media-old', { sessionId: 'session-old' }),
+      ).resolves.toBe(true);
+
+      expect(session.client.removeSessionMedia).toHaveBeenCalledTimes(2);
+      expect(session.client.removeSessionMedia).toHaveBeenNthCalledWith(
+        1,
+        'session-old',
+        'media-old',
+        { clientId: 'client-old' },
+      );
+      expect(session.client.removeSessionMedia).toHaveBeenNthCalledWith(
+        2,
+        'session-old',
+        'media-old',
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not restart the event stream when the admitted prompt is stale', async () => {
     const restartEventStream = vi.fn();
     const session = createMockSession('session-a');

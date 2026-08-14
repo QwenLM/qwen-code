@@ -166,6 +166,24 @@ function contentToImages(
   return images.length > 0 ? images : undefined;
 }
 
+// The SDK substitutes this text block for a media reference it could not
+// hydrate (DaemonSessionClient.hydrateBlock); keep in sync with the SDK.
+const MEDIA_UNAVAILABLE_PLACEHOLDER = '[Attached media is no longer available]';
+
+function contentHasDegradedMedia(
+  content: readonly PromptContentBlock[] | undefined,
+): boolean {
+  if (!content || content.length === 0) return false;
+  return content.some((block) => {
+    if (typeof block !== 'object' || block === null) return false;
+    const record = block as Record<string, unknown>;
+    return (
+      record['type'] === 'text' &&
+      record['text'] === MEDIA_UNAVAILABLE_PLACEHOLDER
+    );
+  });
+}
+
 export interface UseQueuedPromptsResult {
   queuedPrompts: QueuedPrompt[];
   queuedTexts: string[];
@@ -515,14 +533,19 @@ export function useQueuedPrompts({
         if (localIds.has(message.messageId)) continue;
         // Prefer the in-memory admission's images; after a refresh only the
         // snapshot's media blocks remain.
-        const images =
-          salvagedImages.get(message.messageId) ??
-          contentToImages(message.content);
+        const salvaged = salvagedImages.get(message.messageId);
+        const images = salvaged ?? contentToImages(message.content);
         restoredRows.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
           text: message.text,
           ...(images ? { images } : {}),
+          // A hydration-failure placeholder in the snapshot means the row's
+          // attachments are gone from the client; degrade it like a
+          // summary-only row so editing cannot silently discard them.
+          ...(salvaged === undefined && contentHasDegradedMedia(message.content)
+            ? { payloadCompleteness: 'summary-only' as const }
+            : {}),
           midTurnState: 'queued',
           midTurnMessageId: message.messageId,
         });

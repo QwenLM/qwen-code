@@ -773,6 +773,29 @@ export function transcriptBlocksToDaemonMessages(
       case 'debug': {
         const statusBlock = block;
         if (isUnrecognizedDaemonDebug(statusBlock)) break;
+        // Mid-turn injected echoes are user content, not daemon diagnostics:
+        // run them past no filter, or an injected message that merely starts
+        // like a status line ("Model switched: …") or plan JSON would be
+        // dropped or misrendered.
+        if (statusBlock.source === 'mid_turn_message_injected') {
+          const midTurnInjectedImages = getMidTurnInjectedImages(
+            statusBlock.data,
+          );
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: statusBlock.text,
+            variant: 'info',
+            timestamp: blockTime,
+            source: statusBlock.source,
+            ...(statusBlock.data !== undefined
+              ? { data: statusBlock.data }
+              : {}),
+            ...(midTurnInjectedImages ? { images: midTurnInjectedImages } : {}),
+          });
+          needsNewContentMessage = true;
+          break;
+        }
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
@@ -798,12 +821,6 @@ export function transcriptBlocksToDaemonMessages(
         // transcript avoids hiding global messages such as SSE lag warnings,
         // malformed-event debug lines, or shell result notices inside
         // whichever subAgent happened to be active.
-        // Mid-turn injected messages may carry image content blocks — extract
-        // them so the renderer can show thumbnails alongside the text echo.
-        const midTurnInjectedImages =
-          statusBlock.source === 'mid_turn_message_injected'
-            ? getMidTurnInjectedImages(statusBlock.data)
-            : undefined;
         messages.push({
           id: block.id,
           role: 'system',
@@ -812,7 +829,6 @@ export function transcriptBlocksToDaemonMessages(
           timestamp: blockTime,
           ...(statusBlock.source ? { source: statusBlock.source } : {}),
           ...(statusBlock.data !== undefined ? { data: statusBlock.data } : {}),
-          ...(midTurnInjectedImages ? { images: midTurnInjectedImages } : {}),
         });
         needsNewContentMessage = true;
         break;

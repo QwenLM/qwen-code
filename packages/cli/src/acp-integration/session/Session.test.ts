@@ -10547,7 +10547,19 @@ describe('Session', () => {
         );
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
-        ).toHaveBeenCalledWith(midTurnParts, 'please inspect this image');
+        ).toHaveBeenCalledWith(
+          [midTurnParts[0], midTurnParts[2]],
+          'please inspect this image',
+          undefined,
+          [
+            {
+              type: 'image',
+              mediaId: 'image-1',
+              mimeType: 'image/png',
+              size: 8,
+            },
+          ],
+        );
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
@@ -10566,6 +10578,212 @@ describe('Session', () => {
         expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
           'Unknown ContentBlock type: video',
         );
+      });
+
+      it('keeps uncovered audio bytes in the transcript record', async () => {
+        // References are image-only: a drain whose only media block is audio
+        // must NOT take the reference-recording path (the gate would strip
+        // the audio bytes the model is about to see).
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi
+          .fn()
+          .mockReturnValue({ audio: true });
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                { type: 'text', text: 'voice note' },
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+              ],
+              displayText: 'voice note',
+              mediaReferences: [
+                {
+                  type: 'image',
+                  mediaId: 'image-1',
+                  mimeType: 'image/png',
+                  size: 4,
+                },
+              ],
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: voice note',
+            },
+            {
+              inlineData: {
+                mimeType: 'audio/wav',
+                data: 'UklGRgAAAA==',
+              },
+            },
+          ],
+          'voice note',
+        );
+      });
+
+      it('keeps @-mentioned image bytes in the record when references cover only the drained image', async () => {
+        // The reference-recording path must strip only the inline bytes the
+        // references replace — never the extra inline parts #resolvePrompt
+        // adds for @-mentioned files, which the model also sees.
+        const tempDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-midturn-media-')),
+        );
+        const mentionedPath = path.join(tempDir, 'mentioned.png');
+        await fs.writeFile(mentionedPath, 'image');
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+          isPathWithinWorkspace: (pathSpec: string) =>
+            path.resolve(tempDir, pathSpec).startsWith(`${tempDir}${path.sep}`),
+        });
+        const readManyFilesSpy = vi
+          .spyOn(core, 'readManyFiles')
+          .mockResolvedValue({
+            contentParts: {
+              inlineData: { mimeType: 'image/png', data: 'bWVudGlvbmVk' },
+            },
+          } as Awaited<ReturnType<typeof core.readManyFiles>>);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                { type: 'text', text: `compare with @${mentionedPath}` },
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'iVBORw0KGgo=',
+                },
+              ],
+              displayText: 'compare with image',
+              mediaReferences: [
+                {
+                  type: 'image',
+                  mediaId: 'image-1',
+                  mimeType: 'image/png',
+                  size: 8,
+                },
+              ],
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+
+          expect(readManyFilesSpy).toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith(
+            expect.arrayContaining([
+              {
+                inlineData: { mimeType: 'image/png', data: 'bWVudGlvbmVk' },
+              },
+            ]),
+            'compare with image',
+            undefined,
+            [
+              {
+                type: 'image',
+                mediaId: 'image-1',
+                mimeType: 'image/png',
+                size: 8,
+              },
+            ],
+          );
+        } finally {
+          readManyFilesSpy.mockRestore();
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
       });
 
       it('keeps later structured mid-turn messages when one resolution fails', async () => {

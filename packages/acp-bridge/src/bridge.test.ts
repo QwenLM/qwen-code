@@ -13185,6 +13185,48 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it('still sweeps retained media when the session reaper is disabled', async () => {
+      // sessionReapIntervalMs: 0 turns off idle-session reaping, but the
+      // retained-media TTL sweep must keep running — it is the only runtime
+      // release path for detach-retained media.
+      vi.useFakeTimers();
+      try {
+        const bridge = makeBridge({
+          channelFactory: async () =>
+            makeChannel({ loadSessionImpl: () => ({}) }).channel,
+          sessionReapIntervalMs: 0,
+          sessionIdleTimeoutMs: 0,
+        });
+        const session = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        const reference = await bridge.storeSessionMedia(
+          session.sessionId,
+          Uint8Array.from([1, 2, 3]),
+          'image/png',
+          { clientId: session.clientId },
+        );
+
+        await bridge.detachClient(session.sessionId, session.clientId);
+        await vi.advanceTimersByTimeAsync(4 * 60 * 60_000);
+
+        const restored = await bridge.loadSession({
+          sessionId: session.sessionId,
+          workspaceCwd: WS_A,
+        });
+        expect(
+          await bridge.readSessionMedia(restored.sessionId, reference.mediaId, {
+            clientId: restored.clientId,
+          }),
+        ).toBeUndefined();
+
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('broadcasts prompt_cancelled with originator attribution on cancelSession', async () => {
       // Cross-client sync: a cancel must surface as a first-class event
       // so peer subscribers don't have to infer it from the absence of

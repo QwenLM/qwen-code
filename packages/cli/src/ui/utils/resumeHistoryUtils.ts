@@ -386,11 +386,16 @@ function convertToHistoryItems(
         }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
-            | { displayText?: string }
+            | { displayText?: string; mediaReferences?: unknown[] }
             | undefined;
+          const hasMediaReferences =
+            Array.isArray(payload?.mediaReferences) &&
+            payload.mediaReferences.length > 0;
           const text =
             payload?.displayText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+            (hasMediaReferences
+              ? '[User message with attachments]'
+              : extractTextFromParts(record.message?.parts as Part[]));
           if (text) {
             items.push({ type: MessageType.USER, text, sentToModel: false });
           }

@@ -2064,6 +2064,48 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('degrades a refresh-rebuilt row when media hydration failed', async () => {
+    // The SDK substitutes a placeholder text block for a media reference it
+    // could not hydrate. The rebuilt row must surface the loss (summary-only)
+    // instead of silently rendering as a complete, editable row.
+    sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+      messages: [
+        {
+          messageId: 'm-degraded',
+          text: 'degraded note',
+          content: [
+            {
+              type: 'text',
+              text: '[Attached media is no longer available]',
+            },
+          ],
+        },
+      ],
+      settledMessageIds: [],
+      promotedMessageIds: [],
+    });
+    const harness = createHarness();
+    try {
+      await harness.render({ streamingState: 'responding' });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const row = harness.result().queuedPrompts[0];
+      expect(row).toMatchObject({
+        text: 'degraded note',
+        midTurnState: 'queued',
+        midTurnMessageId: 'm-degraded',
+        payloadCompleteness: 'summary-only',
+      });
+      expect(row?.images).toBeUndefined();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('restores images from pending-prompt content after a refresh', async () => {
     // Page-refresh case for a promoted message: nothing was enqueued this
     // mount, so there is no pending admission to salvage from — the daemon's

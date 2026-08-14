@@ -3337,6 +3337,13 @@ export function registerSessionRoutes(
           ?.split(';', 1)[0]
           ?.trim()
           .toLowerCase();
+        // SVG can carry scripts; this origin also hosts the daemon API and
+        // Web Shell UI, and the bytes are served back to browsers, so an
+        // inline SVG would run same-origin. Raster formats only.
+        if (contentType === 'image/svg+xml') {
+          res.status(415).json({ error: 'SVG uploads are not supported' });
+          return;
+        }
         if (
           !contentType ||
           !contentType.startsWith('image/') ||
@@ -3394,6 +3401,8 @@ export function registerSessionRoutes(
         res.setHeader('Content-Type', media.mimeType);
         res.setHeader('Content-Length', String(media.data.byteLength));
         res.setHeader('Cache-Control', 'private, max-age=300');
+        res.setHeader('Content-Disposition', 'attachment');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
         res.status(200).send(media.data);
       },
     ),

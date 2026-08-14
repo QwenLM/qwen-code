@@ -2347,6 +2347,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
   );
   let sessionReaper: ReturnType<typeof setInterval> | undefined;
+  let mediaSweeper: ReturnType<typeof setInterval> | undefined;
 
   // Tracks the most recent "activity" event for idle-detection by
   // external schedulers. Updated on prompt start/end and session
@@ -2950,9 +2951,41 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  function sweepRetainedMedia(): void {
+    const now = Date.now();
+    for (const [id] of retainedMedia) {
+      if (byId.has(id)) continue;
+      const detachedAt = retainedMediaDetachedAt.get(id);
+      if (
+        detachedAt === undefined ||
+        now - detachedAt < RETAINED_SESSION_MEDIA_TTL_MS
+      ) {
+        continue;
+      }
+      void releaseSessionMedia(id).catch((error) => {
+        writeStderrLine(
+          `qwen serve: failed to release retained media for ${JSON.stringify(id)}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    }
+  }
+
   function startSessionReaper(): void {
     if (sessionReapIntervalMs <= 0) {
-      writeStderrLine('qwen serve: session reaper disabled');
+      // Idle-session reaping is off, but the retained-media TTL sweep must
+      // still run: it is the only runtime release path for detach-retained
+      // media, and detach-driven auto-close keeps producing it.
+      writeStderrLine(
+        'qwen serve: session reaper disabled; retained media sweep runs ' +
+          `every ${DEFAULT_SESSION_REAP_INTERVAL_MS}ms`,
+      );
+      mediaSweeper = setInterval(() => {
+        if (shuttingDown) return;
+        sweepRetainedMedia();
+      }, DEFAULT_SESSION_REAP_INTERVAL_MS);
+      mediaSweeper.unref();
       return;
     }
     writeStderrLine(
@@ -2992,23 +3025,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           closeReason: 'idle_timeout',
         });
       }
-      for (const [id] of retainedMedia) {
-        if (byId.has(id)) continue;
-        const detachedAt = retainedMediaDetachedAt.get(id);
-        if (
-          detachedAt === undefined ||
-          now - detachedAt < RETAINED_SESSION_MEDIA_TTL_MS
-        ) {
-          continue;
-        }
-        void releaseSessionMedia(id).catch((error) => {
-          writeStderrLine(
-            `qwen serve: failed to release retained media for ${JSON.stringify(id)}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        });
-      }
+      sweepRetainedMedia();
     }, sessionReapIntervalMs);
     sessionReaper.unref();
   }
@@ -3017,6 +3034,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (sessionReaper !== undefined) {
       clearInterval(sessionReaper);
       sessionReaper = undefined;
+    }
+    if (mediaSweeper !== undefined) {
+      clearInterval(mediaSweeper);
+      mediaSweeper = undefined;
     }
   }
 
