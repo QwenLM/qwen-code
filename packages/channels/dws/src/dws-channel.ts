@@ -789,7 +789,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     sessionId: string,
   ): Promise<void> {
     if (isNoReply(text)) return;
-    const taskId = this.todoTargets.get(chatId);
+    const threadId = this.getResponseThreadId(sessionId);
+    const taskId =
+      this.todoTargets.get(chatId) ??
+      (threadId && todoChatId(threadId) === chatId ? threadId : undefined);
     if (taskId) {
       if (!this.connected) {
         throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
@@ -813,7 +816,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (!this.connected) {
         throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
       }
-      const threadId = this.getResponseThreadId(sessionId);
       if (!threadId) {
         throw new Error(
           `[Channel:${this.name}] DWS document delivery requires a commentKey.`,

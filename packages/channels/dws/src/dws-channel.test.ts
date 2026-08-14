@@ -876,6 +876,44 @@ describe('DwsChannel', () => {
     expect(client.addTodoComment).toHaveBeenCalledWith('task-new', 'response');
   });
 
+  it('posts an in-flight todo response after the task leaves the open list', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-existing', 'Historical task')];
+    const { channel, bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+      'completed-todos',
+    );
+    await channel.poll();
+    let finishPrompt!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt.mockImplementation(
+      async () =>
+        new Promise<string>((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    client.todoTasks = [
+      ...client.todoTasks,
+      todoTask('task-in-flight', 'Finish after completion'),
+    ];
+
+    const delivery = channel.poll();
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+    client.todoTasks = client.todoTasks.filter(
+      (task) => task.taskId !== 'task-in-flight',
+    );
+    await channel.poll();
+    finishPrompt('final response');
+    await delivery;
+
+    expect(client.addTodoComment).toHaveBeenCalledWith(
+      'task-in-flight',
+      'final response',
+    );
+    expect(client.replyToImMessage).not.toHaveBeenCalled();
+  });
+
   it('continues polling after one todo detail fetch fails', async () => {
     const client = new FakeDwsClient();
     client.todoTasks = [todoTask('task-existing', 'Historical task')];
