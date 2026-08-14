@@ -2776,6 +2776,26 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('drops a retained in-flight skill-review window so it cannot re-arm after /clear', async () => {
+      client['pendingSkillReviewWindow'] = {
+        toolCallCount: 12,
+        userSteer: true,
+        signals: {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['run_shell_command']),
+        },
+      };
+
+      await client.resetChat();
+
+      expect(client['pendingSkillReviewWindow']).toBeNull();
+      // reArmSkillReviewWindow after the clear must be a no-op.
+      client['reArmSkillReviewWindow']();
+      expect(client['toolCallCount']).toBe(0);
+      expect(client['userSteeredSinceReview']).toBe(false);
+    });
+
     it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
       // resetChat() must call clearRevealedDeferredTools() — without
       // this, deferred tools revealed via ToolSearch in the previous
@@ -8742,7 +8762,135 @@ hello
         expect(client['pendingMemoryTaskPromises'].length).toBeGreaterThan(0);
 
         // Resolve promise so there are no dangling promises.
-        resolveFn({ metadata: { touchedSkillFiles: ['skill.md'] } });
+        resolveFn({
+          status: 'completed',
+          metadata: { touchedSkillFiles: ['skill.md'] },
+        });
+        await promise;
+      });
+
+      it('should keep the window reset when the dispatched review completes', async () => {
+        let resolveFn!: (v: unknown) => void;
+        const promise = new Promise<unknown>((r) => {
+          resolveFn = r;
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'scheduled',
+          taskId: 'task-1',
+          promise,
+        });
+
+        client['toolCallCount'] = 7;
+        client['userSteeredSinceReview'] = true;
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'trigger review' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-completed',
+          ),
+        );
+        expect(client['toolCallCount']).toBe(0);
+
+        resolveFn({ status: 'completed', metadata: {} });
+        await promise;
+        // Drain the .then continuation.
+        await Promise.resolve();
+
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['userSteeredSinceReview']).toBe(false);
+        expect(client['pendingSkillReviewWindow']).toBeNull();
+      });
+
+      it('should re-arm the retained window when the dispatched review is skipped without running', async () => {
+        let resolveFn!: (v: unknown) => void;
+        const promise = new Promise<unknown>((r) => {
+          resolveFn = r;
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'scheduled',
+          taskId: 'task-1',
+          promise,
+        });
+
+        client['toolCallCount'] = 12;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['run_shell_command']),
+        };
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'trigger review' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-pressure-skip',
+          ),
+        );
+        // Dispatched: window reset, snapshot retained.
+        expect(client['toolCallCount']).toBe(0);
+
+        // New work accumulates while the review is in flight.
+        client['toolCallCount'] = 3;
+
+        // The review settles as 'skipped' (e.g. memory pressure) without
+        // running: the retained window is re-armed on top of new work.
+        resolveFn({ status: 'skipped', metadata: {} });
+        await promise;
+        await Promise.resolve();
+
+        expect(client['toolCallCount']).toBe(15);
+        expect(client['userSteeredSinceReview']).toBe(true);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
+          true,
+        );
+        expect(
+          client['experienceSignalsSinceReview'].failedToolNames.has(
+            'run_shell_command',
+          ),
+        ).toBe(true);
+        expect(client['pendingSkillReviewWindow']).toBeNull();
+      });
+
+      it('should re-arm the retained window when the dispatched review fails', async () => {
+        let rejectFn!: (e: unknown) => void;
+        const promise = new Promise<unknown>((_r, reject) => {
+          rejectFn = reject;
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'scheduled',
+          taskId: 'task-1',
+          promise,
+        });
+
+        client['toolCallCount'] = 9;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(['edit']),
+        };
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'trigger review' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-failed',
+          ),
+        );
+        expect(client['toolCallCount']).toBe(0);
+
+        rejectFn(new Error('planner timeout'));
+        await promise.catch(() => {});
+        await Promise.resolve();
+
+        expect(client['toolCallCount']).toBe(9);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+        expect(
+          client['experienceSignalsSinceReview'].failedToolNames.has('edit'),
+        ).toBe(true);
+        expect(client['pendingSkillReviewWindow']).toBeNull();
       });
 
       it('should reset toolCallCount when review is already_running and count exceeds threshold', async () => {
@@ -8873,7 +9021,7 @@ hello
       });
 
       it('should reset the review window when a review is scheduled', async () => {
-        const promise = Promise.resolve({ metadata: {} });
+        const promise = Promise.resolve({ status: 'completed', metadata: {} });
         mockMemoryManager.scheduleSkillReview.mockReturnValue({
           status: 'scheduled',
           taskId: 'task-1',

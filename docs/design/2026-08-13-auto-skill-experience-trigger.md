@@ -28,11 +28,11 @@ different outcome"。触发器应当直接检测这些事件的确定性特征�
 
 ### 经验信号
 
-| 信号                 | 定义                                                                | 检测方式                                                                                                                                                                                            |
-| -------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `retryArc`           | 某工具失败后，同一工具出现成功结果——试错且被克服                    | 仅以 `functionResponse.response.error` 存在判定失败（shell 的真实失败由 shell.ts 附 `error` 键，grep 等退出码 1 不算失败；`[Operation Cancelled]`、中断修补等合成标记不计）；后续同一工具成功即成立 |
-| `userSteer`          | 用户在 agent 工作中途插话（steer 消息）——"用户期望不同的方法或结果" | 不由 history 推断；`GeminiClient` 在 `SendMessageType.Steer` 完成时，或被接受的 `ToolResult` 提交附带 steer 时置位                                                                                  |
-| `hasSubstantiveWork` | 窗口内有非只读工具调用（含 `mcp__*` 等动态命名工具）                | 仅用于兜底通道，排除纯读会话                                                                                                                                                                        |
+| 信号                 | 定义                                                                | 检测方式                                                                                                                                                                                                                                             |
+| -------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retryArc`           | 某工具失败后，同一工具出现成功结果——试错且被克服                    | 仅以 `functionResponse.response.error` 存在判定失败（shell 的真实失败由 shell.ts 附 `error` 键，grep 等退出码 1 不算失败；`[Operation Cancelled]`、中断修补、plan-mode 兄弟调用跳过、权限拒绝等从未执行的合成/策略标记不计）；后续同一工具成功即成立 |
+| `userSteer`          | 用户在 agent 工作中途插话（steer 消息）——"用户期望不同的方法或结果" | 不由 history 推断；`GeminiClient` 在 `SendMessageType.Steer` 完成时，或被接受的 `ToolResult` 提交附带 steer 时置位                                                                                                                                   |
+| `hasSubstantiveWork` | 窗口内有非只读工具调用（含 `mcp__*` 等动态命名工具）                | 仅用于兜底通道，排除纯读会话                                                                                                                                                                                                                         |
 
 > 曾设想过独立的 `testFlip`（测试红转绿）信号，但它为真时 `retryArc` 在同一次扫描中
 > 必然为真（转绿的那次成功同时闭合试错弧），对门控决策零增量，故合并进 `retryArc`，
@@ -42,9 +42,12 @@ different outcome"。触发器应当直接检测这些事件的确定性特征�
 
 `GeminiClient` 直接累计自上次评审以来的工具结果状态：`ToolResult`（含以 `Retry` 重提交
 被接受的 ToolResult）到达时更新 `retryArc` / `failedToolNames`，工具完成时更新
-`hasSubstantiveWork`（被取消的工具不计数），`Steer` 到达或被接受的 ToolResult 附带
-steer 时置位 `userSteer`。评审被调度（或本应触发但已有评审在跑）时，累计状态与
-`toolCallCount` 一起清零。累计器不依赖 history 数组下标，因此 history 压缩、摘要和重排
+`hasSubstantiveWork`（从未执行的调用不计数：`executionStatus === 'not_started'` 的策略
+拒绝与执行前取消；完成后才被取消的调用仍计数——其副作用已经落盘），`Steer` 到达或被
+接受的 ToolResult 附带 steer 时置位 `userSteer`。评审被调度（或本应触发但已有评审在跑）
+时，累计状态与 `toolCallCount` 一起清零。被调度的窗口会保留一份快照：若该评审最终以
+`skipped`（如内存压力）或 `failed` 收场而从未运行，快照会被重新并入当前窗口，试错证据
+不会随清零丢失。累计器不依赖 history 数组下标，因此 history 压缩、摘要和重排
 不会丢失尚未消费的信号。
 
 ### 门控逻辑（`MemoryManager.scheduleSkillReview`）
@@ -66,11 +69,15 @@ in-flight 去重检查在门控之后，因此 `already_running` 本身即代表
 
 - `packages/core/src/memory/experience-signals.ts`（新增）：纯函数检测器与跨片段累计器，可独立
   单测。
+- `packages/core/src/core/tool-result-markers.ts`（新增）：取消/策略拒绝标记的共享常量与
+  "调用是否真正产出工作"判定（`didToolCallProduceWork`），供 `coreToolScheduler`（生产侧）、
+  `experience-signals` 与各完成循环（消费侧）共用，避免措辞改动导致分类静默失配。
 - `packages/core/src/memory/manager.ts`：`ScheduleSkillReviewParams.experienceSignals`
   为**必填**（避免"声明了却没人传"的死开关）；新增 `AUTO_SKILL_EXPERIENCE_FLOOR` 与
   `no_experience_signal` 跳过原因。
 - `packages/core/src/core/client.ts`：维护窗口内的累计信号，在
-  `runManagedAutoMemoryBackgroundTasks` 中传给 manager；触发后重置窗口。
+  `runManagedAutoMemoryBackgroundTasks` 中传给 manager；触发后重置窗口（评审未运行则重新
+  武装），并记录门控决策日志。
 
 ## 明确不做
 

@@ -43,6 +43,7 @@ import {
   ToolConfirmationOutcome,
   ToolNames,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+  operationCancelledErrorMessage,
   createGoalRuntime,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
@@ -3537,6 +3538,89 @@ describe('runNonInteractive', () => {
     expect(
       recordToolResult.mock.calls.map((call) => call[1].executionStatus),
     ).toEqual(['success', 'not_started']);
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+  });
+
+  it('should not record a cancelled tool call toward the skill-review window', async () => {
+    // An interrupt mid-tool-execution resolves the call as cancelled; the
+    // headless finalize path must skip it so the cancelled call cannot
+    // inflate toolCallCount / hasSubstantiveWork.
+    setupMetricsMock();
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-cancelled',
+        providerCallId: 'tool-cancelled',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-cancelled',
+      },
+    };
+    mockCoreExecuteToolCall.mockImplementation(
+      async (
+        _config: unknown,
+        request: ToolCallRequestInfo,
+        _signal: AbortSignal,
+        options: {
+          onAllToolCallsComplete?: (
+            calls: Array<{
+              request: ToolCallRequestInfo;
+              response: ToolCallResponseInfo;
+              status: 'cancelled';
+            }>,
+          ) => Promise<void>;
+        },
+      ) => {
+        const response: ToolCallResponseInfo = {
+          callId: request.callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: {
+                  error: operationCancelledErrorMessage('user abort'),
+                },
+              },
+            },
+          ],
+          resultDisplay: undefined,
+          error: undefined,
+          errorType: undefined,
+          executionStatus: 'cancelled',
+        };
+        await options.onAllToolCallsComplete?.([
+          { request, response, status: 'cancelled' },
+        ]);
+        return response;
+      },
+    );
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Final answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-cancelled',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.recordCompletedToolCall).not.toHaveBeenCalled();
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 

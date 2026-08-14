@@ -13,6 +13,12 @@ import {
   type ExperienceSignals,
 } from './experience-signals.js';
 import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/geminiChat.js';
+import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from '../core/plan-mode-entry-policy.js';
+import {
+  operationCancelledErrorMessage,
+  PERMISSION_DECLINED_MESSAGE_PREFIX,
+} from '../core/tool-result-markers.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 function modelCall(name: string): Content {
   return { role: 'model', parts: [{ functionCall: { name, args: {} } }] };
@@ -79,7 +85,41 @@ function cancelledResult(name: string): Content {
         functionResponse: {
           id: 'c',
           name,
-          response: { error: '[Operation Cancelled] Reason: user abort' },
+          response: {
+            error: operationCancelledErrorMessage('user abort'),
+          },
+        },
+      },
+    ],
+  };
+}
+
+function planSiblingSkipResult(name: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id: 'c',
+          name,
+          response: { error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE },
+        },
+      },
+    ],
+  };
+}
+
+function permissionDeclinedResult(name: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          id: 'c',
+          name,
+          response: {
+            error: `${PERMISSION_DECLINED_MESSAGE_PREFIX} "${name}", but that permission was declined.`,
+          },
         },
       },
     ],
@@ -230,6 +270,28 @@ describe('accumulateExperienceSignals', () => {
     expect(signals).toEqual({ retryArc: false, hasSubstantiveWork: false });
   });
 
+  // Pin every member of the read-only set: dropping one would let a pure
+  // polling/research window satisfy the substantive-work backstop.
+  it.each([
+    ToolNames.READ_FILE,
+    ToolNames.ZOOM_IMAGE,
+    ToolNames.GREP,
+    ToolNames.GLOB,
+    ToolNames.LS,
+    ToolNames.WEB_FETCH,
+    ToolNames.WEB_SEARCH,
+    ToolNames.LSP,
+    ToolNames.TOOL_SEARCH,
+    ToolNames.READ_MCP_RESOURCE,
+    ToolNames.GET_GOAL,
+    ToolNames.LIST_AGENTS,
+    ToolNames.TASK_LIST,
+    ToolNames.CRON_LIST,
+    ToolNames.DISPLAY_IMAGE,
+  ])('treats %s as read-only (not substantive work)', (name) => {
+    expect(isSubstantiveToolCall(name)).toBe(false);
+  });
+
   it('resolves legacy aliases via canonicalToolName', () => {
     // `replace` is the legacy alias of `edit`.
     expect(isSubstantiveToolCall('replace')).toBe(true);
@@ -262,6 +324,58 @@ describe('accumulateExperienceSignals', () => {
     ]);
     expect(signals.retryArc).toBe(false);
   });
+
+  it.each([
+    ['plan-mode sibling skip', planSiblingSkipResult],
+    ['permission declined', permissionDeclinedResult],
+  ])(
+    'ignores never-executed policy denials (%s) instead of seeding a failure',
+    (_label, marker) => {
+      // The tool was never attempted, so the denial must not open a retry
+      // arc that the model's post-approval retry would close.
+      const signals = detect([
+        modelCall('write_file'),
+        marker('write_file'),
+        modelCall('write_file'),
+        toolOk('write_file'),
+      ]);
+      expect(signals.retryArc).toBe(false);
+    },
+  );
+
+  it.each([
+    ['plan-mode sibling skip', planSiblingSkipResult],
+    ['permission declined', permissionDeclinedResult],
+  ])(
+    'does not let a never-executed policy denial (%s) close a pending genuine failure arc',
+    (_label, marker) => {
+      const signals = detect([
+        modelCall('run_shell_command'),
+        shellError('npm run test', 2),
+        marker('run_shell_command'),
+        modelCall('run_shell_command'),
+        shellOk('npm run test'),
+      ]);
+      expect(signals.retryArc).toBe(true);
+    },
+  );
+
+  it.each([
+    ['plan-mode sibling skip', planSiblingSkipResult],
+    ['permission declined', permissionDeclinedResult],
+  ])(
+    'does not treat a never-executed policy denial (%s) as recovery from a genuine failure',
+    (_label, marker) => {
+      // The denial is unknown, not success: without a later real success
+      // the arc stays open and no retry signal is produced.
+      const signals = detect([
+        modelCall('run_shell_command'),
+        shellError('npm run test', 2),
+        marker('run_shell_command'),
+      ]);
+      expect(signals.retryArc).toBe(false);
+    },
+  );
 
   it('does not let a synthesized marker close a pending genuine failure arc', () => {
     // A cancelled/repair response is unknown, not success: the pending arc

@@ -363,6 +363,14 @@ export class GeminiClient {
     hasSubstantiveWork: false,
     failedToolNames: new Set(),
   };
+  /** Window retained while a dispatched skill review is in flight, so its
+   * signals can be re-armed when that review settles without running
+   * (memory-pressure skip or failure). */
+  private pendingSkillReviewWindow: {
+    toolCallCount: number;
+    userSteer: boolean;
+    signals: ExperienceSignalAccumulator;
+  } | null = null;
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
@@ -1074,7 +1082,10 @@ export class GeminiClient {
 
     this.initializedSessionId = undefined;
     // /clear starts a fresh session; the skill-review window must not leak.
+    // Drop any retained in-flight window too: it belongs to the cleared
+    // session, so it must not be re-armed into the new one.
     this.resetSkillReviewWindow();
+    this.pendingSkillReviewWindow = null;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
@@ -2094,7 +2105,25 @@ export class GeminiClient {
           experienceSignals,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
+        // Log the gate's deciding state: the window is destructively reset
+        // below (and on already_running and /clear), so without this the
+        // trigger decision is unrecoverable after the fact.
+        debugLogger.debug(
+          `[autoSkill] skill review gate: status=${skillReviewResult.status}` +
+            (skillReviewResult.skippedReason
+              ? `, reason=${skillReviewResult.skippedReason}`
+              : '') +
+            `, toolCallCount=${this.toolCallCount}` +
+            `, signals=${JSON.stringify(experienceSignals)}`,
+        );
         if (skillReviewResult.status === 'scheduled') {
+          // Retain the dispatched window until the review settles so its
+          // signals can be re-armed if the review never runs.
+          this.pendingSkillReviewWindow = {
+            toolCallCount: this.toolCallCount,
+            userSteer: this.userSteeredSinceReview,
+            signals: this.experienceSignalsSinceReview,
+          };
           // Reset the review window when a review is dispatched so the next
           // review requires a fresh window of tool calls and signals.
           this.resetSkillReviewWindow();
@@ -2102,10 +2131,20 @@ export class GeminiClient {
             this.pendingMemoryTaskPromises.push(
               skillReviewResult.promise
                 .then((record) => {
+                  if (record.status === 'completed') {
+                    this.pendingSkillReviewWindow = null;
+                  } else {
+                    // Terminal 'skipped' (e.g. memory pressure): the review
+                    // never ran, so the window's signals must not be lost.
+                    this.reArmSkillReviewWindow();
+                  }
                   const touched = record.metadata?.['touchedSkillFiles'];
                   return Array.isArray(touched) ? touched.length : 0;
                 })
                 .catch((error: unknown) => {
+                  // Terminal 'failed': the review never ran; re-arm the
+                  // retained window so its signals can re-trigger.
+                  this.reArmSkillReviewWindow();
                   debugLogger.warn(
                     'Failed to run managed skill review.',
                     error,
@@ -2209,6 +2248,29 @@ export class GeminiClient {
       retryArc: false,
       hasSubstantiveWork: false,
       failedToolNames: new Set(),
+    };
+  }
+
+  private reArmSkillReviewWindow(): void {
+    const pending = this.pendingSkillReviewWindow;
+    this.pendingSkillReviewWindow = null;
+    if (!pending) {
+      return;
+    }
+    // The dispatched review settled without running (skipped/failed): merge
+    // the retained window back so its signals can re-trigger a review
+    // instead of being lost. Signals accumulated after dispatch are kept.
+    this.toolCallCount += pending.toolCallCount;
+    this.userSteeredSinceReview ||= pending.userSteer;
+    const current = this.experienceSignalsSinceReview;
+    this.experienceSignalsSinceReview = {
+      retryArc: current.retryArc || pending.signals.retryArc,
+      hasSubstantiveWork:
+        current.hasSubstantiveWork || pending.signals.hasSubstantiveWork,
+      failedToolNames: new Set([
+        ...current.failedToolNames,
+        ...pending.signals.failedToolNames,
+      ]),
     };
   }
 

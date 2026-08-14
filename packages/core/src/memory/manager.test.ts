@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { globalMemoryManager, MemoryManager } from './manager.js';
+import {
+  AUTO_SKILL_EXPERIENCE_FLOOR,
+  globalMemoryManager,
+  MemoryManager,
+} from './manager.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   getAutoMemoryMetadataPath,
@@ -336,6 +340,50 @@ describe('MemoryManager', () => {
       const third = mgr.scheduleSkillReview(baseParams);
       expect(third.status).toBe('scheduled');
       expect(third.taskId).not.toBe(first.taskId);
+    });
+
+    it('reports below_threshold (not already_running) for a gate-failing window during an in-flight review', async () => {
+      // Pins the gate-before-in-flight ordering: the client's unconditional
+      // window reset on `already_running` is only correct because the
+      // trigger gate runs first — a below-floor window must NOT be
+      // classified as already_running (the client would wipe its signals).
+      let resolveReview!: (v: { touchedSkillFiles: string[] }) => void;
+      vi.mocked(runSkillReviewByAgent).mockReturnValueOnce(
+        new Promise<{ touchedSkillFiles: string[] }>((resolve) => {
+          resolveReview = resolve;
+        }),
+      );
+
+      const mgr = new MemoryManager();
+      const baseParams = {
+        projectRoot: '/project',
+        sessionId: 'sess',
+        history: [{ role: 'user' as const, parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        skillsModified: false,
+        experienceSignals: SUBSTANTIVE_WINDOW,
+        config: makeMockConfig(),
+      };
+
+      const first = mgr.scheduleSkillReview(baseParams);
+      expect(first.status).toBe('scheduled');
+
+      // A window below the fast-path floor cannot trigger even with a
+      // retry arc, so the gate must reject it before the in-flight check.
+      const second = mgr.scheduleSkillReview({
+        ...baseParams,
+        toolCallCount: AUTO_SKILL_EXPERIENCE_FLOOR - 1,
+        experienceSignals: {
+          retryArc: true,
+          userSteer: false,
+          hasSubstantiveWork: false,
+        },
+      });
+      expect(second.status).toBe('skipped');
+      expect(second.skippedReason).toBe('below_threshold');
+
+      resolveReview({ touchedSkillFiles: [] });
+      await first.promise;
     });
 
     it('schedules skill review at threshold', async () => {

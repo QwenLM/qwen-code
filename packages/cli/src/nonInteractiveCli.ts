@@ -56,6 +56,7 @@ import {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   ToolErrorType,
   finalizeToolResponses,
+  didToolCallProduceWork,
   clampInlineMediaPart,
   formatFullTurnVisionNotice,
   formatVisionBridgeNotice,
@@ -1968,12 +1969,25 @@ export async function runNonInteractive(
           adapter.emitToolResult(requestInfo, toolResponse);
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
-          config
-            .getGeminiClient()
-            .recordCompletedToolCall(
-              requestInfo.name,
-              requestInfo.args as Record<string, unknown>,
-            );
+          // Parity with the interactive completion loops: tools that never
+          // produced work (pre-completion cancellation, never-executed
+          // policy denial) must not inflate the skill-review window; an
+          // after-completion cancellation still counts because its side
+          // effects already landed.
+          if (
+            didToolCallProduceWork({
+              status: statusByResponse.get(toolResponse),
+              executionStatus: toolResponse.executionStatus,
+              responseParts: toolResponse.responseParts,
+            })
+          ) {
+            config
+              .getGeminiClient()
+              .recordCompletedToolCall(
+                requestInfo.name,
+                requestInfo.args as Record<string, unknown>,
+              );
+          }
 
           // Capture model override from skill tool results.
           // Use `in` so that undefined (from inherit/no-model skills)

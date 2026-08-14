@@ -7,6 +7,11 @@
 import type { Content } from '@google/genai';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/geminiChat.js';
+import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from '../core/plan-mode-entry-policy.js';
+import {
+  OPERATION_CANCELLED_PREFIX,
+  PERMISSION_DECLINED_MESSAGE_PREFIX,
+} from '../core/tool-result-markers.js';
 
 /**
  * Deterministic proxies for the skill-review prompt's own admission criteria
@@ -50,6 +55,13 @@ const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.LSP,
   ToolNames.TOOL_SEARCH,
   ToolNames.READ_MCP_RESOURCE,
+  // Read-only get/list/orchestration builtins; polling them in a loop must
+  // not turn a waiting agent's window into substantive work.
+  ToolNames.GET_GOAL,
+  ToolNames.LIST_AGENTS,
+  ToolNames.TASK_LIST,
+  ToolNames.CRON_LIST,
+  ToolNames.DISPLAY_IMAGE,
 ]);
 
 export function isSubstantiveToolCall(name: string): boolean {
@@ -63,13 +75,16 @@ function isFailedResponse(part: {
   if (!fr?.name || !fr.response) return null;
   const error = fr.response['error'];
   if (typeof error === 'string' && error.trim()) {
-    // Synthesized non-failure markers (per-tool cancellation, interrupted-
-    // turn orphan repair) carry `error` but are not genuine failures.
-    // Return `null` (unknown), not `false` — a `false` would close a
-    // pending genuine-failure arc for the same tool.
+    // Synthesized non-failure markers carry `error` but are not genuine
+    // failures: per-tool cancellation, interrupted-turn orphan repair, and
+    // never-executed policy denials (plan-mode sibling skip, permission
+    // declined). Return `null` (unknown), not `false` — a `false` would
+    // close a pending genuine-failure arc for the same tool.
     if (
-      error.startsWith('[Operation Cancelled]') ||
-      error === ORPHAN_TOOL_USE_REPAIR_REASON
+      error.startsWith(OPERATION_CANCELLED_PREFIX) ||
+      error === ORPHAN_TOOL_USE_REPAIR_REASON ||
+      error === PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE ||
+      error.startsWith(PERMISSION_DECLINED_MESSAGE_PREFIX)
     ) {
       return null;
     }

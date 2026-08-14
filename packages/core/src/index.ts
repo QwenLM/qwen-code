@@ -81,6 +81,15 @@ export {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   findPlanModeEntryBatchBoundaryIndex,
 } from './core/plan-mode-entry-policy.js';
+/** @internal */
+export {
+  didToolCallProduceWork,
+  operationCancelledErrorMessage,
+  OPERATION_CANCELLED_PREFIX,
+  PERMISSION_DECLINED_MESSAGE_PREFIX,
+  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+  TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE,
+} from './core/tool-result-markers.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/inlineMediaLimit.js';

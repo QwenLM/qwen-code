@@ -37,6 +37,9 @@ import {
   ToolConfirmationOutcome,
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
+  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+  PERMISSION_DECLINED_MESSAGE_PREFIX,
+  operationCancelledErrorMessage,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -5437,6 +5440,187 @@ describe('useGeminiStream', () => {
     await act(async () => {
       if (capturedOnComplete) {
         await capturedOnComplete([cancelledTool]);
+      }
+    });
+
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
+  it('records recordCompletedToolCall for a tool cancelled AFTER completion (side effects landed)', async () => {
+    // An after-completion cancellation means execute() already settled —
+    // e.g. a write_file under .qwen/skills/ whose file IS on disk — so the
+    // call must still count (and must be able to flip
+    // skillsModifiedInSession).
+    const afterCompletionCancelledTool = {
+      request: {
+        callId: 'call_after_completion_cancel',
+        name: 'write_file',
+        args: { file_path: '/tmp/skills/x/SKILL.md', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-after-completion-cancel',
+      },
+      status: 'cancelled',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_after_completion_cancel',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_after_completion_cancel',
+              name: 'write_file',
+              response: {
+                error: operationCancelledErrorMessage(
+                  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+                ),
+              },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        executionStatus: 'success',
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'cancelled write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCancelledToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // No history pairing: the tool flows through the main geminiTools loop.
+    client.getHistoryFunctionResponseIds = vi.fn().mockReturnValue(new Set());
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([afterCompletionCancelledTool]);
+      }
+    });
+
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'write_file',
+      expect.objectContaining({ file_path: '/tmp/skills/x/SKILL.md' }),
+    );
+  });
+
+  it('skips recordCompletedToolCall for never-executed policy denials (not_started)', async () => {
+    // A permission-denied tool never ran, so it must not inflate
+    // toolCallCount / hasSubstantiveWork for the skill-review window.
+    const deniedTool = {
+      request: {
+        callId: 'call_policy_denied',
+        name: 'write_file',
+        args: { file_path: '/tmp/denied.txt', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-policy-denied',
+      },
+      status: 'error',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_policy_denied',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_policy_denied',
+              name: 'write_file',
+              response: {
+                error: `${PERMISSION_DECLINED_MESSAGE_PREFIX} "write_file", but that permission was declined.`,
+              },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: new Error('permission declined'),
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'denied write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // No history pairing: the tool flows through the main geminiTools loop.
+    client.getHistoryFunctionResponseIds = vi.fn().mockReturnValue(new Set());
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([deniedTool]);
       }
     });
 

@@ -72,6 +72,7 @@ import {
   finalizeToolResponses,
   endInteractionSpan,
   getActiveInteractionSpan,
+  didToolCallProduceWork,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -4227,19 +4228,25 @@ export const useGeminiStream = (
         // filter to the same shape (non-client-initiated) so client
         // tools (which the original loop also skipped) stay skipped.
         //
-        // Cancelled tools are also skipped: `dedupedTools` includes
-        // anything in a terminal state (success | error | cancelled),
-        // but cancelled means the tool never actually ran end-to-end —
-        // the `allToolsCancelled` branch below would have surfaced
-        // them via `addHistory + reportCancelled` rather than the
-        // completed-call metric, and the metric should match. Without
-        // this filter, a deduped + cancelled tool would inflate
-        // `toolCallCount` for a call that never produced a result
-        // (and could also flip `skillsModifiedInSession` for a
-        // never-executed skill-write).
+        // Tools that never produced work are skipped: `dedupedTools`
+        // includes anything in a terminal state (success | error |
+        // cancelled), but a pre-completion cancellation or a never-executed
+        // policy denial (`not_started`) means the tool never actually ran,
+        // so it must not inflate `toolCallCount` or flip
+        // `skillsModifiedInSession`. An AFTER-completion cancellation still
+        // counts: its side effects already landed (e.g. a skill write that
+        // is on disk must flip `skillsModifiedInSession`).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (tc.status === 'cancelled') continue;
+          if (
+            !didToolCallProduceWork({
+              status: tc.status,
+              executionStatus: tc.response?.executionStatus,
+              responseParts: tc.response?.responseParts,
+            })
+          ) {
+            continue;
+          }
           geminiClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -4647,10 +4654,21 @@ export const useGeminiStream = (
       }
 
       for (const toolCall of geminiTools) {
-        // Skip cancelled tools, matching the dedup branch above: a cancelled
-        // tool never ran end-to-end, so it must not inflate `toolCallCount`
-        // or flip `hasSubstantiveWork` for the skill-review window.
-        if (toolCall.status === 'cancelled') continue;
+        // Skip tools that never produced work, matching the dedup branch
+        // above: a pre-completion cancellation or a never-executed policy
+        // denial must not inflate `toolCallCount` or flip
+        // `hasSubstantiveWork` for the skill-review window. An
+        // after-completion cancellation still counts — its side effects
+        // (e.g. a skill write) already landed.
+        if (
+          !didToolCallProduceWork({
+            status: toolCall.status,
+            executionStatus: toolCall.response?.executionStatus,
+            responseParts: toolCall.response?.responseParts,
+          })
+        ) {
+          continue;
+        }
         geminiClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
