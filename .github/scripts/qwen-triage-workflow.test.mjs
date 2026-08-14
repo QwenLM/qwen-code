@@ -835,6 +835,29 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       'diff must be against the merge base',
     );
     assert.match(
+      recordStep.run,
+      /git -c core\.quotePath=false diff --name-only/,
+      'non-ASCII filenames must not be C-quoted out of the gate list',
+    );
+    // The "two statements, not a pipeline" property is load-bearing: a git
+    // failure must fail the step loudly; only a no-match grep may yield an
+    // empty list. A `git diff ... | grep ... || true` pipeline would
+    // swallow the failure as "no changed test files" and certify the PR
+    // with an n/a gate.
+    assert.match(
+      recordStep.run,
+      /^\s*files="\$\(git [^|)]*\)"\s*$/m,
+      'git diff must run as a standalone assignment, not feed a pipeline',
+    );
+    assert.doesNotMatch(
+      recordStep.run
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n'),
+      /git diff[^\n]*\|/,
+      'a git failure must not be swallowable by a pipeline || true',
+    );
+    assert.match(
       flakeStep.run,
       /flake-gate-files/,
       'the gate must read the recorded list, not re-derive the diff',
@@ -878,6 +901,19 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       flakeStep.run,
       /set -euo/,
       'a gate bug must fail OPEN (verdict error), never abort the verify job',
+    );
+    // Repeated samples share one tree and one process table: without a
+    // per-round reset, a deterministic test fails on its own residue
+    // (mutated fixture, leftover daemon/port) and fakes a divergence.
+    assert.match(
+      flakeStep.run,
+      /^\s*git checkout -- \. \|\| true$/m,
+      'each round must restore tracked files before the next sample',
+    );
+    assert.match(
+      flakeStep.run,
+      /^\s*pkill -u node \|\| true$/m,
+      'each round must tear down leftover test-user processes',
     );
     assert.equal(
       flakeStep.if,
@@ -932,6 +968,16 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /cp -f "\$RUNNER_TEMP\/flake-gate\.log" "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"/,
       'staging must overwrite whatever the agent era left under that name',
     );
+    assert.match(
+      stageStep.run,
+      /rm -rf -- "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"/,
+      'staging must remove a planted destination BEFORE copying — cp would open a FIFO and block, or follow a symlink',
+    );
+    assert.match(
+      stageStep.run,
+      /pkill -KILL -u node/,
+      'staging must kill leftover build-user processes so nothing races the copy',
+    );
     assert.doesNotMatch(
       agentStep.run,
       /flake-gate\.log/,
@@ -944,8 +990,8 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
     assert.match(
       publishStep.run,
-      /emit_block 'Flakiness gate log' "\$FLAKE_LOG"/,
-      'the publisher must embed the gate log through the escaping emit_block',
+      /emit_block 'Flakiness gate log' "\$FLAKE_LOG" 10000/,
+      'the gate-log cap must leave headroom under GitHub 65,536-char comment limit next to the 45000 report block',
     );
   });
 
@@ -1011,8 +1057,10 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     '',
   ].join('\n');
   // npx/node stub: the last argument is the ./file operand; its scripted
-  // P/F sequence lives at $FLAKE_SEQ_DIR/<basename>, consumed one letter
-  // per invocation and cycled (missing sequence file = always pass).
+  // outcome sequence lives at $FLAKE_SEQ_DIR/<basename>, consumed one
+  // letter per invocation and cycled (missing sequence file = always
+  // pass). Letters: P=exit 0, F=exit 1, T=exit 124 (timeout), K=exit 137
+  // (signal kill) — T/K model infrastructure exits, not test failures.
   const STUB_TESTRUNNER = [
     '#!/bin/bash',
     'f="${@: -1}"',
@@ -1022,16 +1070,45 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     'echo $((n+1)) > "$n_file"',
     'seq="$(cat "$FLAKE_SEQ_DIR/$key" 2>/dev/null || echo P)"',
     'i=$((n % ${#seq}))',
-    '[ "${seq:$i:1}" = P ] && exit 0',
+    'm="${seq:$i:1}"',
+    '[ "$m" = P ] && exit 0',
+    '[ "$m" = T ] && exit 124',
+    '[ "$m" = K ] && exit 137',
     'echo "stub failure for $key run $((n+1))"',
     'exit 1',
     '',
   ].join('\n');
+  // GNU coreutils `timeout` exists on the Linux runner but not on stock
+  // macOS: without a stub every invocation exits 127 off-Linux and every
+  // scenario reads consistent-fail. Consume the gate's `-k 30 600` shape
+  // and exec the wrapped command.
+  const STUB_TIMEOUT = [
+    '#!/bin/bash',
+    'while [ $# -gt 0 ]; do',
+    '  case "$1" in',
+    '    -k|--kill-after) shift 2 ;;',
+    '    *) break ;;',
+    '  esac',
+    'done',
+    'shift',
+    'exec "$@"',
+    '',
+  ].join('\n');
+  // pkill is stubbed for the harness's sake, not the gate's: the real
+  // binary would kill processes owned by whoever runs these tests.
+  const STUB_PKILL = ['#!/bin/bash', 'exit 0', ''].join('\n');
 
   const scenarioRoot = mkdtempSync(join(tmpdir(), 'flake-behavioral-'));
   after(() => rmSync(scenarioRoot, { recursive: true, force: true }));
 
-  const runGate = ({ layout = {}, list, sequences = {} }) => {
+  const runGate = ({
+    layout = {},
+    list,
+    sequences = {},
+    stubs = {},
+    env: envOverrides = {},
+    git = false,
+  }) => {
     const root = mkdtempSync(join(scenarioRoot, 'case-'));
     const ws = join(root, 'ws');
     const rt = join(root, 'rt');
@@ -1046,11 +1123,35 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     for (const [k, v] of Object.entries(sequences)) {
       writeFileSync(join(seqDir, k), v);
     }
-    for (const [name, content] of [
-      ['runuser', STUB_RUNUSER],
-      ['npx', STUB_TESTRUNNER],
-      ['node', STUB_TESTRUNNER],
-    ]) {
+    if (git) {
+      // A committed tree, so the gate's between-round `git checkout -- .`
+      // reset has something to restore (round-state isolation scenarios).
+      for (const args of [
+        ['init', '-q'],
+        ['add', '-A'],
+        [
+          '-c',
+          'user.name=flake-gate',
+          '-c',
+          'user.email=flake@gate',
+          'commit',
+          '-qm',
+          'fixture',
+        ],
+      ]) {
+        const g = spawnSync('git', args, { cwd: ws, encoding: 'utf8' });
+        assert.equal(g.status, 0, `git ${args.join(' ')}: ${g.stderr}`);
+      }
+    }
+    const stubSet = {
+      runuser: STUB_RUNUSER,
+      npx: STUB_TESTRUNNER,
+      node: STUB_TESTRUNNER,
+      timeout: STUB_TIMEOUT,
+      pkill: STUB_PKILL,
+      ...stubs,
+    };
+    for (const [name, content] of Object.entries(stubSet)) {
       writeFileSync(join(bin, name), content);
       chmodSync(join(bin, name), 0o755);
     }
@@ -1059,20 +1160,26 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     const out = join(rt, 'github-output');
     writeFileSync(out, '');
     writeFileSync(join(rt, 'github-summary'), '');
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      RUNNER_TEMP: rt,
+      GITHUB_OUTPUT: out,
+      GITHUB_STEP_SUMMARY: join(rt, 'github-summary'),
+      FLAKE_ROUNDS: '5',
+      FLAKE_SEQ_DIR: seqDir,
+      ...envOverrides,
+    };
+    for (const [k, v] of Object.entries(env)) {
+      // An override of undefined deletes the variable (unset scenarios).
+      if (v === undefined) delete env[k];
+    }
     const res = spawnSync(
       'bash',
       ['--noprofile', '--norc', '-e', '-o', 'pipefail', gateFile],
       {
         cwd: ws,
-        env: {
-          ...process.env,
-          PATH: `${bin}:${process.env.PATH}`,
-          RUNNER_TEMP: rt,
-          GITHUB_OUTPUT: out,
-          GITHUB_STEP_SUMMARY: join(rt, 'github-summary'),
-          FLAKE_ROUNDS: '5',
-          FLAKE_SEQ_DIR: seqDir,
-        },
+        env,
         encoding: 'utf8',
         timeout: 60_000,
       },
@@ -1120,6 +1227,18 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(outputs.flake_verdict, 'flaky');
     assert.match(log, /a\.test\.js: FFFFF/);
     assert.match(log, /b\.test\.js: PFPFP/);
+    // Gate outputs are embedded UNESCAPED into the published comment: they
+    // must stay fixed text plus counters, never PR-controlled strings.
+    assert.match(
+      outputs.flake_summary,
+      /^\d+ of \d+ changed test file\(s\) returned different results across identical re-runs \(\d+ full round\(s\)\)$/,
+      'the summary must be fixed text plus counters',
+    );
+    assert.doesNotMatch(
+      outputs.flake_summary,
+      /a\.test\.js|b\.test\.js/,
+      'PR-controlled filenames must stay out of the outputs',
+    );
   });
 
   it('identical failure every round stays informational `consistent-fail`, exit 0', () => {
@@ -1130,6 +1249,62 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     });
     assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
     assert.equal(outputs.flake_verdict, 'consistent-fail');
+  });
+
+  it('timeout/signal exits are infrastructure, never F marks or fake flakiness', () => {
+    // A pass next to an exit-124 round used to publish `flaky`; an OOM
+    // kill (137) is the same class. Infra exits must stay out of P/F
+    // divergence and land the informational `timeout` verdict instead.
+    const { res, outputs, log } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
+      sequences: { 'a.test.js': 'PT', 'b.test.js': 'K' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'timeout');
+    assert.match(log, /a\.test\.js: PIPIP/);
+    assert.match(log, /b\.test\.js: IIIII/);
+    assert.match(log, /exit 124/);
+    assert.doesNotMatch(outputs.flake_summary, /a\.test\.js|b\.test\.js/);
+  });
+
+  it('real divergence still outranks an infra exit in another file', () => {
+    const { res, outputs } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
+      sequences: { 'a.test.js': 'PF', 'b.test.js': 'PT' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'flaky');
+  });
+
+  it('round-state reset keeps a tree-mutating deterministic test from faking flakiness', () => {
+    // The stub passes only while fixture.txt is pristine, then mutates it.
+    // Without the gate's between-round `git checkout -- .` reset, rounds
+    // 2-5 fail on round 1's residue (PFFFF -> false flaky); with it every
+    // round starts from the committed state again (PPPPP -> pass).
+    const STUB_STATEFUL = [
+      '#!/bin/bash',
+      'if ! grep -q pristine fixture.txt; then',
+      '  echo "fixture mutated by an earlier round"',
+      '  exit 1',
+      'fi',
+      'echo mutated > fixture.txt',
+      'exit 0',
+      '',
+    ].join('\n');
+    const { res, outputs, log } = runGate({
+      layout: {
+        'scripts/tests/stateful.test.js': '',
+        'fixture.txt': 'pristine\n',
+      },
+      list: 'scripts/tests/stateful.test.js\n',
+      stubs: { npx: STUB_STATEFUL },
+      git: true,
+    });
+    assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(log, /stateful\.test\.js: PPPPP/);
   });
 
   it('a missing recorded list degrades to the `error` verdict, exit 0', () => {
@@ -1160,6 +1335,66 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.match(log, /no vitest config \(unsupported runner family\)/);
   });
 
+  it('vite.config-only packages and root workspaces outside packages/** are RUN, not skipped', () => {
+    // packages/webui's only config is vite.config.ts (vitest resolves it),
+    // and integrations/external-context is a root npm workspace no path
+    // prefix covers — both are CI-tested, so the gate must re-run them
+    // through their owning package instead of logging them out of scope.
+    const { res, outputs, log } = runGate({
+      layout: {
+        'packages/webui/package.json': '{}',
+        'packages/webui/vite.config.ts': '',
+        'packages/webui/src/x.test.ts': '',
+        'integrations/external-context/package.json': '{}',
+        'integrations/external-context/vitest.config.ts': '',
+        'integrations/external-context/src/y.test.ts': '',
+      },
+      list: 'packages/webui/src/x.test.ts\nintegrations/external-context/src/y.test.ts\n',
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(
+      log,
+      /\(cd packages\/webui\) npx --no-install vitest run \.\/src\/x\.test\.ts/,
+      'a vite.config-only package must be entered and run',
+    );
+    assert.match(
+      log,
+      /\(cd integrations\/external-context\) npx --no-install vitest run \.\/src\/y\.test\.ts/,
+      'a root workspace outside packages/** must be entered and run',
+    );
+    assert.doesNotMatch(log, /, skipped:/);
+  });
+
+  it('scripts/tests files outside the pinned vitest include set are skipped, not mis-run', () => {
+    // The pinned config only includes *.test.{js,ts}: an admitted .spec.js
+    // or .test.mjs would fail collection EVERY round otherwise and publish
+    // a bogus consistent-fail.
+    const { res, outputs, log } = runGate({
+      layout: {
+        'scripts/tests/probe.spec.js': '',
+        'scripts/tests/probe.test.mjs': '',
+        'scripts/tests/probe.test.js': '',
+      },
+      list: 'scripts/tests/probe.spec.js\nscripts/tests/probe.test.mjs\nscripts/tests/probe.test.js\n',
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(
+      log,
+      /not in the scripts\/tests vitest include set \(\*\.test\.\{js,ts\}\), skipped: scripts\/tests\/probe\.spec\.js/,
+    );
+    assert.match(
+      log,
+      /not in the scripts\/tests vitest include set \(\*\.test\.\{js,ts\}\), skipped: scripts\/tests\/probe\.test\.mjs/,
+    );
+    assert.match(
+      log,
+      /\(cd \.\) npx --no-install vitest run --config \.\/scripts\/tests\/vitest\.config\.ts \.\/scripts\/tests\/probe\.test\.js/,
+      'the admitted .test.js file must still run',
+    );
+  });
+
   it('a nested-workspace file runs from its OWN package, and a leading-dash filename stays an operand', () => {
     const { res, outputs, log } = runGate({
       layout: {
@@ -1182,6 +1417,67 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       /\.\/scripts\/tests\/--config=evil\.test\.js/,
       'operands must be ./-prefixed so vitest cannot parse them as options',
     );
+  });
+
+  it('an abort before any verdict still fails open via the EXIT trap', () => {
+    // RUNNER_TEMP unset kills the script at ${RUNNER_TEMP:?} before a
+    // verdict exists; the trap must rewrite that ending into the fixed
+    // error outputs and a zero exit (fail-open, never a red step).
+    const { res, outputs } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\n',
+      env: { RUNNER_TEMP: undefined },
+    });
+    assert.equal(res.status, 0, `the trap must convert the abort to exit 0: ${res.stderr}`);
+    assert.equal(outputs.flake_verdict, 'error');
+    assert.match(outputs.flake_summary, /aborted before reaching a verdict/);
+  });
+
+  it('the .github/scripts node --test arm runs and is logged', () => {
+    const { res, outputs, log } = runGate({
+      layout: { '.github/scripts/foo.test.mjs': '' },
+      list: '.github/scripts/foo.test.mjs\n',
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(log, /node --test \.\/\.github\/scripts\/foo\.test\.mjs/);
+  });
+
+  it('FLAKE_ROUNDS is parsed and clamped (default 5, floor 2, cap 10)', () => {
+    const roundsInLog = ({ log }) => {
+      const m = log.match(/^rounds=(\d+)/m);
+      assert.ok(m, 'the gate log header must carry the rounds count');
+      return m[1];
+    };
+    for (const [env, expected] of [
+      [{ FLAKE_ROUNDS: undefined }, '5'],
+      [{ FLAKE_ROUNDS: 'abc' }, '5'],
+      [{ FLAKE_ROUNDS: '99' }, '10'],
+    ]) {
+      const r = runGate({
+        layout: UNIT,
+        list: 'scripts/tests/a.test.js\n',
+        env,
+      });
+      assert.equal(r.res.status, 0, r.res.stderr);
+      assert.equal(
+        roundsInLog(r),
+        expected,
+        `FLAKE_ROUNDS=${JSON.stringify(env)} must clamp to ${expected}`,
+      );
+    }
+    // The floor is load-bearing: classification needs at least two marks,
+    // so at rounds=1 divergence is impossible by construction and every
+    // flaky PR would read as pass.
+    const floored = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\n',
+      sequences: { 'a.test.js': 'PF' },
+      env: { FLAKE_ROUNDS: '1' },
+    });
+    assert.equal(floored.res.status, 0, floored.res.stderr);
+    assert.equal(roundsInLog(floored), '2');
+    assert.equal(floored.outputs.flake_verdict, 'flaky');
   });
 
   it('publisher demotion executes one-way: only `flaky` demotes, and it MUST demote', () => {

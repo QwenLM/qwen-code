@@ -2756,7 +2756,10 @@ jobs:
           # narrowing the gate to n/a. A git failure here is pre-build
           # infrastructure and must fail the step loudly; only a no-match
           # grep may produce an empty list.
-          files="$(git diff --name-only --diff-filter=ACMR 'HEAD^1' HEAD)"
+          # core.quotePath=false: with the default, a non-ASCII filename is
+          # emitted C-quoted and silently fails the extension grep below,
+          # narrowing the gate without a skip-log entry.
+          files="$(git -c core.quotePath=false diff --name-only --diff-filter=ACMR 'HEAD^1' HEAD)"
           printf '%s\n' "$files" \
             | grep -E '\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$' \
             > "${RUNNER_TEMP:?}/flake-gate-files" || true
@@ -3000,10 +3003,16 @@ jobs:
             return 1
           }
           has_vitest_config() {
-            local c
-            for c in vitest.config.ts vitest.config.mts vitest.config.js vitest.config.mjs vitest.workspace.ts; do
-              [ -f "$1/$c" ] && return 0
+            # Mirror vitest's own resolution: it accepts vitest.config AND
+            # vite.config in six extensions. A narrower probe skips runnable
+            # packages (packages/webui's only config is vite.config.ts).
+            local n e
+            for n in vitest.config vite.config; do
+              for e in ts mts cts js mjs cjs; do
+                [ -f "$1/$n.$e" ] && return 0
+              done
             done
+            [ -f "$1/vitest.workspace.ts" ] && return 0
             return 1
           }
           while IFS= read -r f; do
@@ -3027,17 +3036,27 @@ jobs:
                 ;;
             esac
             case "$f" in
-              scripts/tests/*)
+              scripts/tests/*.test.js|scripts/tests/*.test.ts)
                 group_labels+=("$f")
                 group_dirs+=('.')
                 group_cmds+=("npx --no-install vitest run --config ./scripts/tests/vitest.config.ts $(printf '%q' "./$f")")
+                ;;
+              scripts/tests/*)
+                # The pinned config's include set is narrower than the gate's
+                # intake regex; a file it rejects would fail collection every
+                # round and masquerade as a deterministic failure.
+                add_skip "$f" 'not in the scripts/tests vitest include set (*.test.{js,ts}), skipped'
                 ;;
               .github/scripts/*.test.mjs)
                 group_labels+=("$f")
                 group_dirs+=('.')
                 group_cmds+=("node --test $(printf '%q' "./$f")")
                 ;;
-              packages/*)
+              *)
+                # Generic vitest resolution keyed on the OWNING PACKAGE, not
+                # a path prefix: root npm workspaces outside packages/**
+                # (integrations/*) are CI-tested too and must be re-run
+                # through their own entry point like any nested workspace.
                 if ! pkg="$(owning_pkg_dir "$f")"; then
                   add_skip "$f" 'no owning package.json, skipped'
                   continue
@@ -3054,9 +3073,6 @@ jobs:
                 group_labels+=("$f")
                 group_dirs+=("$pkg")
                 group_cmds+=("npx --no-install vitest run $(printf '%q' "./${f#"$pkg"/}")")
-                ;;
-              *)
-                add_skip "$f" 'no runner mapped for this path, skipped'
                 ;;
             esac
           done < "$LIST"
@@ -3082,6 +3098,7 @@ jobs:
           deadline=$(( $(date +%s) + 900 ))
           rounds_done=0
           timed_out=false
+          infra_exits=0
           round=1
           while [ "$round" -le "$ROUNDS" ]; do
             for i in "${!group_labels[@]}"; do
@@ -3089,17 +3106,31 @@ jobs:
                 timed_out=true
                 break
               fi
+              # Fresh per-invocation temp/cache dir: samples must not share
+              # caches any more than they share the tree or processes.
+              inv_tmp="$RUNNER_TEMP/flake-inv-tmp"
+              rm -rf "$inv_tmp"
+              mkdir -p "$inv_tmp"
+              chown node:node "$inv_tmp"
               out="$RUNNER_TEMP/flake-gate-round-out"
               (
                 cd "${group_dirs[$i]}" &&
                 timeout -k 30 600 runuser -u node -- \
                   env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
-                  NODE_OPTIONS='--max-old-space-size=3072' CI=true \
+                  NODE_OPTIONS='--max-old-space-size=3072' CI=true TMPDIR="$inv_tmp" \
                   bash -c "${group_cmds[$i]}"
               ) > "$out" 2>&1
               status=$?
+              # Timeout/signal exits (124, 128+N) are infrastructure events —
+              # a runner cap or an OOM kill — not test outcomes: recorded as
+              # F they would publish a fake `flaky` next to any pass.
               mark='P'
-              [ "$status" -eq 0 ] || mark='F'
+              if [ "$status" -eq 124 ] || [ "$status" -gt 128 ]; then
+                mark='I'
+                infra_exits=$((infra_exits + 1))
+              elif [ "$status" -ne 0 ]; then
+                mark='F'
+              fi
               results[$i]="${results[$i]:-}${mark}"
               printf 'round %s · %s: %s (exit %s)\n' "$round" "${group_labels[$i]}" "$mark" "$status" >> "$LOG"
               if [ "$status" -ne 0 ]; then
@@ -3110,6 +3141,13 @@ jobs:
                 } >> "$LOG"
               fi
             done
+            # Round-state reset: repeated samples share this tree and its
+            # process table, so restore the equivalent of a clean checkout
+            # before the next sample — a deterministic test that mutates a
+            # fixture or leaves a daemon/port behind must not fail later
+            # rounds on its own residue and fake a divergence (PFF).
+            git checkout -- . || true
+            pkill -u node || true
             [ "$timed_out" = true ] && break
             rounds_done="$round"
             round=$((round + 1))
@@ -3124,7 +3162,7 @@ jobs:
               *F*) failing=$((failing + 1)) ;;
             esac
           done
-          printf '\nper-file results (P=pass F=fail, one letter per run):\n' >> "$LOG"
+          printf '\nper-file results (P=pass F=fail I=infra-exit, one letter per run):\n' >> "$LOG"
           for i in "${!group_labels[@]}"; do
             printf '  %s: %s\n' "${group_labels[$i]}" "${results[$i]:-}" >> "$LOG"
           done
@@ -3134,6 +3172,9 @@ jobs:
           fi
           if [ "$timed_out" = true ] && [ "$rounds_done" -lt 2 ]; then
             finish timeout "the 15-minute budget elapsed before two full rounds completed (${rounds_done} done) — no flakiness signal either way"
+          fi
+          if [ "$infra_exits" -gt 0 ]; then
+            finish timeout "${infra_exits} invocation(s) ended in a timeout/signal exit — infrastructure, not test nondeterminism, so these rounds carry no flakiness signal"
           fi
           if [ "$failing" -gt 0 ]; then
             finish consistent-fail "${failing} of ${total} changed test file(s) failed identically in every round — deterministic, so CI owns that signal"
@@ -3665,8 +3706,10 @@ jobs:
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec cp -r {} "$RUNNER_TEMP/verify-results/" \; 2>/dev/null || true
           # cp -r copies symlinks as symlinks (no deref), but
           # actions/upload-artifact FOLLOWS them — a node-planted link would
-          # exfiltrate whatever it points at into the artifact. Drop links.
-          find "$RUNNER_TEMP/verify-results" -type l -delete 2>/dev/null || true
+          # exfiltrate whatever it points at into the artifact; a planted
+          # FIFO would hang whoever opens it next. Drop every non-regular
+          # entry except directories (the collected artifact dirs).
+          find "$RUNNER_TEMP/verify-results" \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete 2>/dev/null || true
 
           # 137 is ambiguous: the watchdog escalating past --kill-after looks
           # identical to an OOM kill. Use the elapsed budget to tell them
@@ -3732,7 +3775,21 @@ jobs:
         run: |-
           set -euo pipefail
           if [ -f "${RUNNER_TEMP:?}/flake-gate.log" ]; then
+            # verify-results was chowned to the build user while PR code ran,
+            # and node daemons can outlive the agent step: kill leftover
+            # test-user processes first so nothing races this copy. Never
+            # OPEN a planted destination either — rm unlinks the entry
+            # itself, while `cp -f` would open a planted FIFO O_WRONLY and
+            # block until the job timeout, follow a symlink to rewrite a
+            # victim, or copy INTO a planted directory so the log vanishes
+            # from the pinned publisher path.
+            pkill -KILL -u node 2>/dev/null || true
+            if [ -L "$RUNNER_TEMP/verify-results" ] ||
+               { [ -e "$RUNNER_TEMP/verify-results" ] && [ ! -d "$RUNNER_TEMP/verify-results" ]; }; then
+              rm -rf -- "$RUNNER_TEMP/verify-results"
+            fi
             mkdir -p "$RUNNER_TEMP/verify-results"
+            rm -rf -- "$RUNNER_TEMP/verify-results/flake-gate.log"
             cp -f "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"
           fi
 
@@ -4605,7 +4662,10 @@ jobs:
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
               emit_report "$REPORT" 45000
-              emit_block 'Flakiness gate log' "$FLAKE_LOG" 20000
+              # Cap 10000: the per-block caps must leave headroom under
+              # GitHub's 65,536-char comment limit once the 45000 report
+              # block and the mandatory prose are added (20000 crossed it).
+              emit_block 'Flakiness gate log' "$FLAKE_LOG" 10000
               if [ -n "$EVIDENCE_SECTION" ]; then
                 printf '%s' "$EVIDENCE_SECTION"
               fi
