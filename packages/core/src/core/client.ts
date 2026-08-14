@@ -97,7 +97,10 @@ import {
   startInteractionSpan,
   endInteractionSpan,
   getActiveInteractionSpan,
+  recordInteractionActivity,
+  addAgentInputMessageAttributes,
   addUserPromptAttributes,
+  AgentOutputMessageCapture,
   MemoryRecallDeliveryEvent,
 } from '../telemetry/index.js';
 import type {
@@ -140,7 +143,7 @@ import {
   type ConversationRecord,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
-import { getErrorMessage } from '../utils/errors.js';
+import { getErrorMessage, getErrorType } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import {
   flatMapTextParts,
@@ -505,7 +508,32 @@ export class GeminiClient {
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
-    if (resumedSessionData) {
+    const restoreRuntime = this.config.getSessionRestoreRuntime?.();
+    if (restoreRuntime) {
+      uiTelemetryService.resetSession(sessionId);
+      for (const event of restoreRuntime.uiTelemetryEvents) {
+        uiTelemetryService.addEvent(event, sessionId);
+      }
+      this.seedRecentCompletedToolNamesFromHistory(restoreRuntime.apiHistory);
+      await this.startChat(
+        restoreRuntime.apiHistory,
+        sessionStartSource ?? SessionStartSource.Resume,
+      );
+      const chat = this.getChat();
+      if (restoreRuntime.resumeTokenCounts) {
+        const counts = restoreRuntime.resumeTokenCounts;
+        uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
+        chat.seedResumeTokenCounts(
+          counts.promptTokenCount,
+          counts.outputTokenCount,
+          counts.isEstimated,
+        );
+      } else {
+        chat.setLastPromptTokenCount(
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+      }
+    } else if (resumedSessionData) {
       const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
@@ -2439,6 +2467,48 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    const startsInteraction =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Retry ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Goal;
+    let interactionOwner = startsInteraction
+      ? undefined
+      : getActiveInteractionSpan(prompt_id);
+    if (interactionOwner) {
+      recordInteractionActivity(prompt_id, interactionOwner);
+    }
+    const agentOutput = new AgentOutputMessageCapture(this.config);
+    const endCurrentInteraction = (
+      status: 'ok' | 'error' | 'cancelled',
+      errorMessage?: string,
+      errorType?: string,
+    ) => {
+      if (
+        !interactionOwner ||
+        getActiveInteractionSpan(prompt_id) !== interactionOwner
+      ) {
+        return;
+      }
+      if (status === 'ok' && this.config.getJsonSchema?.()) {
+        endInteractionSpan('error', {
+          promptId: prompt_id,
+          errorMessage: 'model did not produce structured output',
+          errorType: 'structured_output_missing',
+        });
+        return;
+      }
+      if (status === 'ok') {
+        agentOutput.writeToSpan(interactionOwner);
+      }
+      endInteractionSpan(status, {
+        promptId: prompt_id,
+        ...(errorMessage ? { errorMessage } : {}),
+        ...(errorType ? { errorType } : {}),
+      });
+    };
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
@@ -2658,6 +2728,27 @@ export class GeminiClient {
       messageType === SendMessageType.UserQuery
         ? partToString(request)
         : undefined;
+    if (startsInteraction) {
+      this.loopDetector.reset(prompt_id);
+      this.lastPromptId = prompt_id;
+      startInteractionSpan(this.config, {
+        promptId: prompt_id,
+        model: options?.modelOverride ?? this.config.getModel(),
+        messageType,
+      });
+      interactionOwner = getActiveInteractionSpan(prompt_id);
+      if (
+        interactionOwner &&
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string'
+      ) {
+        addAgentInputMessageAttributes(
+          this.config,
+          interactionOwner,
+          options.submittedPrompt,
+        );
+      }
+    }
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
@@ -2724,9 +2815,12 @@ export class GeminiClient {
             await runtime.finishTurn(goalPermit);
             goalPermitReleased = true;
             closeGoalStateEvents();
+            endCurrentInteraction('cancelled');
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
             }
+          } else {
+            endCurrentInteraction('cancelled');
           }
           yield {
             type: GeminiEventType.UserPromptSubmitBlocked,
@@ -2762,6 +2856,11 @@ export class GeminiClient {
         }
       }
     } catch (error) {
+      endCurrentInteraction(
+        signal.aborted ? 'cancelled' : 'error',
+        signal.aborted ? undefined : 'UserPromptSubmit hook failed',
+        signal.aborted ? undefined : getErrorType(error),
+      );
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -2825,6 +2924,11 @@ export class GeminiClient {
       }
       if (goalRuntime) bindGoalStateEvents(goalRuntime);
     } catch (error) {
+      endCurrentInteraction(
+        signal.aborted ? 'cancelled' : 'error',
+        signal.aborted ? undefined : 'Goal turn admission failed',
+        signal.aborted ? undefined : getErrorType(error),
+      );
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -2878,24 +2982,12 @@ export class GeminiClient {
       );
       this.activeAutomaticTodoWorkChainPromptIds.add(prompt_id);
     }
-    const isTopLevelInteraction =
-      messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate;
     if (messageType === SendMessageType.Goal) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
-    if (isTopLevelInteraction) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-      startInteractionSpan(this.config, {
-        promptId: prompt_id,
-        model: options?.modelOverride ?? this.config.getModel(),
-        messageType,
-      });
-      const interactionSpan = getActiveInteractionSpan();
+    if (startsInteraction) {
+      const interactionSpan = interactionOwner;
       if (
         interactionSpan &&
         this.config.getTelemetryIncludeSensitiveSpanAttributes?.()
@@ -2909,7 +3001,6 @@ export class GeminiClient {
         );
       }
     }
-
     // Tracks whether the generator reached its natural end (the bottom-of-try
     // `return turn`). Only on that path do we want to preserve the pending
     // memory prefetch so the next ToolResult turn can consume it. Any other
@@ -3109,10 +3200,11 @@ export class GeminiClient {
         ) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield { type: GeminiEventType.MaxSessionTurns };
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', {
-              errorMessage: 'max session turns exceeded',
-            });
+          endCurrentInteraction(
+            'error',
+            'max session turns exceeded',
+            'max_session_turns',
+          );
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -3124,8 +3216,7 @@ export class GeminiClient {
           : Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-        if (isTopLevelInteraction)
-          endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
+        endCurrentInteraction('error', 'max turns exhausted', 'max_turns');
         return new Turn(this.getChat(), prompt_id);
       }
 
@@ -3179,10 +3270,11 @@ export class GeminiClient {
                 'Please start a new session or increase the sessionTokenLimit in your settings.json.',
             },
           };
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', {
-              errorMessage: 'session token limit exceeded',
-            });
+          endCurrentInteraction(
+            'error',
+            'session token limit exceeded',
+            'session_token_limit',
+          );
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -3228,7 +3320,7 @@ export class GeminiClient {
           );
           await arenaAgentClient.reportCancelled();
           this.cancelPendingMemoryPrefetch('abort');
-          if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          endCurrentInteraction('cancelled');
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -3465,6 +3557,7 @@ export class GeminiClient {
             )
           : null;
 
+      agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
@@ -3487,6 +3580,15 @@ export class GeminiClient {
             event.type === GeminiEventType.ModelFallback
           ) {
             hasToolCalls = false;
+            agentOutput.restartAttempt(
+              event.type === GeminiEventType.Retry &&
+                event.isContinuation === true,
+            );
+          }
+          if (event.type === GeminiEventType.Content) {
+            agentOutput.appendText(event.value);
+          } else if (event.type === GeminiEventType.Finished) {
+            agentOutput.observeFinishReason(event.value?.reason);
           }
           if (messageDisplay && event.type === GeminiEventType.Content) {
             messageDisplay.addChunk(event.value);
@@ -3522,8 +3624,7 @@ export class GeminiClient {
               await arenaAgentClient.reportError('Loop detected');
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             this.fireLoopDetectedStopFailure(loopType);
             return turn;
@@ -3555,8 +3656,7 @@ export class GeminiClient {
               await arenaAgentClient.reportError('Loop detected');
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
@@ -3634,12 +3734,16 @@ export class GeminiClient {
               await arenaAgentClient.reportError(errorMsg);
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction) {
-              // Sanitize: do not pass raw API error messages to span status
-              const errMsg =
-                event.value instanceof Error ? '[API error]' : 'unknown error';
-              endInteractionSpan('error', { errorMessage: errMsg });
-            }
+            // Sanitize: do not pass raw API error messages to span status.
+            const errMsg =
+              event.value instanceof Error ? '[API error]' : 'unknown error';
+            endCurrentInteraction(
+              'error',
+              errMsg,
+              event.value instanceof Error
+                ? getErrorType(event.value)
+                : 'api_error',
+            );
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
@@ -3657,6 +3761,9 @@ export class GeminiClient {
         // a no-op.
         await messageDisplay?.finish();
       }
+      agentOutput.commitResponse(
+        hasToolCalls || turn.pendingToolCalls.length > 0,
+      );
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -3688,9 +3795,10 @@ export class GeminiClient {
           } finally {
             settleSteerInput(steerInput, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = steeredTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
           normalCompletion = true;
           return steeredTurn;
         }
@@ -3752,7 +3860,7 @@ export class GeminiClient {
           if (activeGoalEvent) {
             yield activeGoalEvent;
           }
-          if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          endCurrentInteraction('cancelled');
           return turn;
         }
 
@@ -3797,7 +3905,7 @@ export class GeminiClient {
             for (const goalEvent of await finalizeInterruptedGoalTurn()) {
               yield goalEvent;
             }
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            endCurrentInteraction('ok');
             return turn;
           } else {
             for (const goalEvent of takePendingGoalEvents()) {
@@ -3822,7 +3930,7 @@ export class GeminiClient {
               for (const goalEvent of await finalizeInterruptedGoalTurn()) {
                 yield goalEvent;
               }
-              if (isTopLevelInteraction) endInteractionSpan('cancelled');
+              endCurrentInteraction('cancelled');
               return turn;
             }
             const continueRequest: Part[] = [{ text: continueReason }];
@@ -3851,8 +3959,9 @@ export class GeminiClient {
             } finally {
               settleSteerInput(pendingSteer, pushCountBefore);
             }
-            if (isTopLevelInteraction) {
-              endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+            hasToolCalls = hookTurn.pendingToolCalls.length > 0;
+            if (!hasToolCalls) {
+              endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
             }
             normalCompletion = true;
             return hookTurn;
@@ -3873,7 +3982,7 @@ export class GeminiClient {
             if (activeGoalEvent) {
               yield activeGoalEvent;
             }
-            if (isTopLevelInteraction) endInteractionSpan('cancelled');
+            endCurrentInteraction('cancelled');
             return turn;
           }
 
@@ -3915,7 +4024,7 @@ export class GeminiClient {
               value: warning,
             };
             debugLogger.warn(warning);
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            endCurrentInteraction('ok');
             return turn;
           }
 
@@ -3977,7 +4086,7 @@ export class GeminiClient {
               ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            endCurrentInteraction('ok');
             normalCompletion = true;
             return turn;
           }
@@ -4021,9 +4130,10 @@ export class GeminiClient {
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = hookTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
           // ToolResult turn still needs to consume the recall result.
@@ -4058,6 +4168,7 @@ export class GeminiClient {
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
+        endCurrentInteraction('ok');
         normalCompletion = true;
         return turn;
       }
@@ -4093,7 +4204,7 @@ export class GeminiClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
-          if (isTopLevelInteraction) endInteractionSpan('ok');
+          endCurrentInteraction('ok');
           return turn;
         }
 
@@ -4137,9 +4248,10 @@ export class GeminiClient {
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = continueTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -4163,8 +4275,8 @@ export class GeminiClient {
         await arenaAgentClient.reportCancelled();
       }
 
-      if (isTopLevelInteraction) {
-        endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
+      if (!hasToolCalls) {
+        endCurrentInteraction(signal?.aborted ? 'cancelled' : 'ok');
       }
       // Reached the bottom of the try — this turn ended cleanly. If the
       // model did not request tool calls, no future ToolResult will arrive
@@ -4212,10 +4324,12 @@ export class GeminiClient {
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );
       }
-      if (isTopLevelInteraction) {
-        endInteractionSpan(signal?.aborted ? 'cancelled' : 'error', {
-          errorMessage: 'unexpected exit',
-        });
+      if (!normalCompletion) {
+        endCurrentInteraction(
+          signal?.aborted ? 'cancelled' : 'error',
+          signal?.aborted ? undefined : 'unexpected exit',
+          signal?.aborted ? undefined : 'unexpected_exit',
+        );
       }
     }
   }

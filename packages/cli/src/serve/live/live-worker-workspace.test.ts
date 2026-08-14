@@ -12,7 +12,7 @@ import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionService } from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSubSessionLauncher } from '../create-sub-session.js';
-import { LiveConversationWorkspace } from './conversation-workspace.js';
+import { ConversationWorkspace } from '../conversations/conversation-workspace.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -26,14 +26,14 @@ afterEach(async () => {
 });
 
 async function createConversationWorkspace(): Promise<{
-  workspace: LiveConversationWorkspace;
+  workspace: ConversationWorkspace;
   root: string;
 }> {
   const home = await mkdtemp(
     join(realpathSync.native(tmpdir()), 'qwen-live-worker-'),
   );
   temporaryDirectories.push(home);
-  const workspace = new LiveConversationWorkspace({ homeDir: home });
+  const workspace = new ConversationWorkspace({ homeDir: home });
   const root = (await workspace.getRoot()).canonicalRoot;
   return { workspace, root };
 }

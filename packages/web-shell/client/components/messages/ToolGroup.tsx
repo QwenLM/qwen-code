@@ -348,16 +348,21 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
 function ToolExpandedCard({
   title,
   detail,
+  status,
   children,
 }: {
   title: string;
   detail?: string;
+  status?: ACPToolCall['status'];
   children?: ReactNode;
 }) {
   return (
     <div className={styles.expandedCard}>
       <div className={styles.expandedCardHeader}>
-        <span className={styles.expandedCardTitle}>{title}</span>
+        <span className={styles.expandedCardTitleRow}>
+          {status && <StatusIcon status={status} />}
+          <span className={styles.expandedCardTitle}>{title}</span>
+        </span>
         {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
       </div>
       {children && <div className={styles.expandedCardBody}>{children}</div>}
@@ -397,7 +402,7 @@ function TodoToolBody({
   const timeline = useContext(TodoTimelineContext);
   const events = timeline.get(tool.callId)?.events ?? [];
   return expanded ? (
-    <ToolExpandedCard title={title}>
+    <ToolExpandedCard title={title} status={tool.status}>
       <div className={styles.todoBody}>
         <TodoFullList todos={todos} />
       </div>
@@ -1301,8 +1306,13 @@ export const ToolLine = memo(function ToolLine({
   const hideDescriptionInHeader =
     showDescriptionInDetail && !isShell && !isSearch && !isRead;
   const expandedCardDetail = fullDescription;
+  // A failed tool with no result text still gets the titled card so its
+  // title-row error icon remains visible when expanded.
   const showExpandedSummaryPanel =
-    !isTodo && expanded && !detailView && (showDescriptionInDetail || result);
+    !isTodo &&
+    expanded &&
+    !detailView &&
+    (showDescriptionInDetail || result || tool.status === 'failed');
 
   return (
     <div className={styles.line}>
@@ -1413,7 +1423,11 @@ export const ToolLine = memo(function ToolLine({
         </div>
       )}
       {showExpandedSummaryPanel && (
-        <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+        <ToolExpandedCard
+          title={displayName}
+          detail={expandedCardDetail}
+          status={tool.status}
+        >
           {result && (
             <div
               className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
@@ -1448,9 +1462,15 @@ export const ToolLine = memo(function ToolLine({
           }
         >
           {isRead ? (
-            <ExpandedReadContent tool={tool} />
+            <ToolExpandedCard title={displayName} status={tool.status}>
+              <ExpandedReadContent tool={tool} />
+            </ToolExpandedCard>
           ) : (
-            <ToolExpandedCard title={displayName} detail={expandedCardDetail}>
+            <ToolExpandedCard
+              title={displayName}
+              detail={expandedCardDetail}
+              status={tool.status}
+            >
               {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
               {(name === 'write_file' || name === 'writefile') && (
                 <ExpandedEditContent tool={tool} />
@@ -1485,7 +1505,6 @@ export const ToolGroup = memo(function ToolGroup({
   const [chatExpanded, setChatExpanded] = useState(false);
   const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveAgents(tools);
-  const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool =
     tools.find(
       (tool) =>
@@ -1563,7 +1582,6 @@ export const ToolGroup = memo(function ToolGroup({
               <ToolGroupIcon />
             )}
           </span>
-          {hasFailedTool && <StatusIcon status="failed" />}
           <span
             className={
               animateSummary

@@ -37,6 +37,7 @@ import { NotificationType } from '../hooks/types.js';
 import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
+  COMBINED_PASS_TOLERANCE_FACTOR,
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
@@ -352,6 +353,7 @@ function setToolSpanFailure(
 ): void {
   try {
     span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+    span.setAttribute('error.type', failureKind);
     // Always write `success: false` so trace backends can filter tool
     // failures with the same query they use for llm_request spans —
     // mirrors the unconditional `success` attribute on llm_request.
@@ -1776,7 +1778,8 @@ export class CoreToolScheduler {
    * second call for the same callId is a no-op.
    *
    * No `metadata` parameter: every caller pre-sets span status via
-   * `setToolSpan{Failure,Cancelled,Ok}` before this call (#4321 review).
+   * `setToolSpan{Failure,Cancelled}` or the success path before this call
+   * (#4321 review).
    */
   private finalizeToolSpan(callId: string, force = false): void {
     // Terminal-state cleanup: drop any PreToolUse 'ask' bounce markers so
@@ -4273,10 +4276,10 @@ export class CoreToolScheduler {
     } catch (error) {
       this.bouncedAwaitingApproval.delete(callId);
       this.bouncedToolUseId.delete(callId);
-      // _executeToolCallBody pre-sets span status (OK / FAILURE /
-      // CANCELLED) only AFTER its main try/catch is entered. Throws
-      // from the prelude — for example getMessageBus — happen BEFORE
-      // the `scheduled → executing` transition, so the span would end
+      // _executeToolCallBody records the span outcome only AFTER its main
+      // try/catch is entered: ERROR or CANCELLED, while success remains
+      // UNSET. Throws from the prelude — for example getMessageBus — happen
+      // BEFORE the `scheduled → executing` transition, so the span would end
       // UNSET with no failure_kind AND the tool call would stay in
       // `scheduled` forever (checkAndNotifyCompletion never sees a
       // terminal state). Set failure status + error response here so
@@ -4318,8 +4321,8 @@ export class CoreToolScheduler {
       // a race where a STREAM_JSON client answers the confirmation
       // synchronously and flips status to 'scheduled' before this runs.
       if (!this.bouncedAwaitingApproval.has(callId)) {
-        // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED)
-        // via setToolSpan*; finalize without metadata to preserve that.
+        // _executeToolCallBody records the outcome via setToolSpan*; finalize
+        // without metadata to preserve ERROR / UNSET status semantics.
         this.finalizeToolSpan(callId);
       }
       this.memoryMonitor?.scheduleCheck();
@@ -5261,7 +5264,7 @@ export class CoreToolScheduler {
             perToolMax !== undefined
               ? Number.POSITIVE_INFINITY
               : this.config.getTruncateToolOutputLines() * 2;
-          if (content.length > baseThreshold * 2) {
+          if (content.length > baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR) {
             try {
               const contentBeforeRecombination = content;
               const recombined = await truncateToolOutput(
@@ -5269,7 +5272,7 @@ export class CoreToolScheduler {
                 toolName,
                 content,
                 {
-                  threshold: baseThreshold * 2,
+                  threshold: baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR,
                   lines: combinedLines,
                   keep: perToolKeep,
                 },
@@ -5417,7 +5420,6 @@ export class CoreToolScheduler {
           return;
         }
         this.setStatusInternal(callId, 'success', successResponse);
-        safeSetStatus(span, { code: SpanStatusCode.OK });
         // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span
         // ends with an explicit `success` attribute so backends can filter
         // failures the same way they filter llm_request failures.

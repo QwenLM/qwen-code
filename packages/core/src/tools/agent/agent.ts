@@ -6,7 +6,6 @@
 
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import {
@@ -118,7 +117,7 @@ import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
-  getAgentJsonlPath,
+  buildAgentTranscriptAttach,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
   patchAgentMeta,
@@ -129,23 +128,8 @@ import type {
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
-import { getGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
-
-// Memoize git branch per cwd for the agent-launch path. `getGitBranch`
-// shells out to `git rev-parse` synchronously; caching avoids the per-launch
-// execSync on a path that runs every time a subagent (foreground or
-// background) starts. Branches don't change within a process under normal
-// use; the transcript annotation is best-effort audit metadata, so a stale
-// value after a user `git checkout` mid-session is acceptable.
-const gitBranchCache = new Map<string, string | undefined>();
-function getCachedGitBranch(cwd: string): string | undefined {
-  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
-  const branch = getGitBranch(cwd);
-  gitBranchCache.set(cwd, branch);
-  return branch;
-}
 
 function persistBackgroundCancellation(
   metaPath: string,
@@ -241,6 +225,8 @@ export interface AgentParams {
   name?: string;
   /** Start a named teammate in plan mode and require leader approval. */
   plan_mode_required?: boolean;
+  /** Restrict a named teammate to read-only inspection and coordination tools. */
+  read_only?: boolean;
   /**
    * When set to `'worktree'`, spins up a temporary git worktree under
    * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
@@ -261,8 +247,8 @@ export interface AgentParams {
    * search tools resolve inside the worktree rather than the parent tree.
    * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
    * reach outside, same as `isolation:'worktree'`.) Must resolve to a
-   * worktree registered against this repository, and must live inside it —
-   * pinning rebinds the child's workspace boundary. If `isolation` is also
+   * worktree registered against this repository. Pinning rebinds the child's
+   * workspace boundary. If `isolation` is also
    * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
@@ -283,16 +269,14 @@ function getForkProfileModeError(config: Config): string | undefined {
 
 /**
  * Resolves and validates an `AgentParams.working_dir`: an EXISTING,
- * caller-owned git worktree that a sub-agent should be pinned to (e.g. the
- * PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
+ * caller-owned git worktree that a sub-agent or teammate should be pinned to
+ * (e.g. the PR-review worktree `/review`'s `fetch-pr` provisions). Unlike
  * `isolation:'worktree'`, the harness neither creates nor tears down this
  * directory — it only rebinds the child Config's cwd surfaces to it.
  *
- * Two checks stop a bad path from aiming the sub-agent somewhere it should not
- * be:
+ * Git's worktree registry stops a bad path from aiming the sub-agent somewhere
+ * it should not be:
  *
- * - It must resolve INSIDE the repository (canonical comparison), because
- *   pinning rebinds the child's `WorkspaceContext` wholesale.
  * - It must be a REGISTERED linked worktree of this repository, enforced by
  *   `isRegisteredLinkedWorktree`: git's own registry entry for the path must
  *   point back at it, and it must not be the primary working tree. That
@@ -341,25 +325,6 @@ async function resolveExternalWorktreeDir(
   const wtService =
     repoRoot === parentCwd ? probe : new GitWorktreeService(repoRoot);
 
-  // Containment. A registered worktree may live anywhere on disk, but pinning
-  // rebinds the child's WorkspaceContext wholesale, so a model-supplied path
-  // must not silently move the file tools' boundary outside the repository.
-  // (`isolation: 'worktree'` has this property implicitly — it always
-  // provisions under `<projectRoot>/.qwen/worktrees/`.) Compare canonical
-  // paths so a symlink cannot straddle the boundary.
-  const realRepoRoot = await fs.realpath(repoRoot).catch(() => repoRoot);
-  const realResolved = await fs
-    .realpath(resolvedPath)
-    .catch(() => resolvedPath);
-  const relToRepo = path.relative(realRepoRoot, realResolved);
-  if (relToRepo.startsWith('..') || path.isAbsolute(relToRepo)) {
-    return {
-      error:
-        `working_dir "${resolvedPath}" resolves outside this repository ` +
-        `(${realRepoRoot}). Pass a worktree that lives inside the repository.`,
-    };
-  }
-
   // The single authoritative gate: the path must be a REGISTERED linked
   // worktree of this repository — git's own registry entry for it points back
   // at exactly this path, and it is not the primary working tree. That one
@@ -407,6 +372,14 @@ const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
     'When true, the named teammate starts in plan mode and must call ' +
     'exit_plan_mode to request leader approval before executing. Only valid ' +
     'with a named teammate in an active team.',
+};
+
+const TEAM_AGENT_READ_ONLY_PROPERTY = {
+  type: 'boolean',
+  description:
+    'When true, the named teammate can only inspect the checkout and use ' +
+    'team coordination tools. Shell, file writes, memory, schedules, and ' +
+    'nested agents are blocked by an execution allowlist.',
 };
 
 /**
@@ -853,12 +826,13 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Caller-owned working_dir launches default to foreground and cannot run in the background.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates may run in the background, but must be shut down before their caller-owned worktree is removed.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
               name: TEAM_AGENT_NAME_PROPERTY,
               plan_mode_required: TEAM_AGENT_PLAN_REQUIRED_PROPERTY,
+              read_only: TEAM_AGENT_READ_ONLY_PROPERTY,
             }
           : {}),
         isolation: {
@@ -870,7 +844,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. If both working_dir and isolation are provided, isolation is ignored and the caller-owned worktree is reused.",
+            "Pin a sub-agent or named teammate to an EXISTING, caller-owned git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up by Agent. Relative file, shell, and search operations resolve inside it. This is a cwd pin, not a filesystem sandbox: explicit absolute paths can still reach outside. The path must be a registered linked worktree of this repository. If both working_dir and isolation are provided, isolation is ignored.",
         },
       },
       required: ['description', 'prompt'],
@@ -940,7 +914,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     // feature is on; otherwise the model is steered toward a
     // `team_create` tool that isn't registered.
     const teamGuidance = this.config.isAgentTeamEnabled()
-      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
+      ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with explicit \`name\` and \`subagent_type\` parameters (the active team is selected automatically). Set \`read_only: true\` for investigation teammates. A single writer teammate may be pinned to a leader-owned Git worktree with \`working_dir\`; shut it down before removing that worktree. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -974,7 +948,7 @@ Usage notes:
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches default to foreground and cannot run in the background; named teammates may use one, but must be shut down before it is removed.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ## When to fork
 
@@ -1043,6 +1017,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
+        read_only?: typeof TEAM_AGENT_READ_ONLY_PROPERTY;
       };
     };
     if (schema.properties) {
@@ -1050,9 +1025,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
         schema.properties.plan_mode_required =
           TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
+        schema.properties.read_only = TEAM_AGENT_READ_ONLY_PROPERTY;
       } else {
         delete schema.properties.name;
         delete schema.properties.plan_mode_required;
+        delete schema.properties.read_only;
       }
 
       const availableGrades = [
@@ -1220,6 +1197,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
       }
+      if (
+        params.name &&
+        params.working_dir === undefined &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
+        return 'Parameter "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".';
+      }
     }
 
     if (
@@ -1237,12 +1223,9 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "working_dir" must be a non-empty string when set.';
       }
-      // A caller-owned worktree has no lifecycle coupling to a background
-      // agent: nothing stops the caller from removing the worktree while a
-      // detached agent is still running in it (ENOENT on its own cwd). The
-      // isolation:'worktree' path is safe in background because the tool owns
-      // and reaps the worktree; working_dir does not.
-      if (params.run_in_background === true) {
+      // Unnamed background agents have no lifecycle coupling to a
+      // caller-owned worktree. Named teammates are team-managed instead.
+      if (params.run_in_background === true && params.name === undefined) {
         return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
       // `working_dir` is the more specific workspace instruction. Some
@@ -1276,6 +1259,27 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         }
         if (!this.config.getTeamManager()) {
           return 'Parameter "plan_mode_required" requires an active team.';
+        }
+      }
+    }
+
+    if (params.read_only !== undefined) {
+      if (typeof params.read_only !== 'boolean') {
+        return 'Parameter "read_only" must be a boolean when set.';
+      }
+      if (params.read_only) {
+        if (
+          !params.name ||
+          typeof params.name !== 'string' ||
+          params.name.trim() === ''
+        ) {
+          return 'Parameter "read_only" requires a named teammate via "name".';
+        }
+        if (!this.config.getTeamManager()) {
+          return 'Parameter "read_only" requires an active team.';
+        }
+        if (params.plan_mode_required === true) {
+          return 'Parameters "read_only" and "plan_mode_required" cannot be used together.';
         }
       }
     }
@@ -2301,6 +2305,30 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
     }
 
+    if (this.params.read_only === true) {
+      if (
+        !this.params.name ||
+        this.params.name.trim() === '' ||
+        isSubagentLikeExecutionContext()
+      ) {
+        const msg =
+          'read_only can only be used when spawning a named teammate from the team leader.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      if (!this.config.getTeamManager()) {
+        const msg = 'read_only requires an active team. Use TeamCreate first.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     // ─── Team routing ────────────────────────────────────
     // A name only means "spawn a teammate" while a team is active. Older
     // prompts may still pass it without a team; treat that as a normal
@@ -2321,16 +2349,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           'Error: "model" is not supported for a named teammate.',
           'model is incompatible with a named teammate',
         );
-      } else if (this.params.working_dir !== undefined) {
-        // A teammate spawns via TeamManager with cwd = getCwd() and returns
-        // before the working_dir rebind below is reached, so the pin would be
-        // silently ignored and the teammate would run in the parent working
-        // tree. Refuse rather than give a false sense of isolation. (Same
-        // lifecycle rationale as run_in_background: a persistent teammate has
-        // no coupling to a caller-owned worktree.)
+      } else if (this.params.isolation !== undefined) {
         return this.buildSpawnBlockedResult(
-          'Error: "working_dir" is not supported for a named teammate — a teammate runs in the parent working tree, so the worktree pin would be silently ignored. Drop "name" to pin a one-shot sub-agent to the worktree, or drop "working_dir".',
-          'working_dir is incompatible with a named teammate',
+          'Error: "isolation" cannot be used for a named teammate. Create a leader-owned worktree first, then pass it with "working_dir".',
+          'isolation is incompatible with a named teammate',
         );
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);
@@ -3155,17 +3177,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const projectDir = this.config.storage.getProjectDir();
         const sessionId = this.config.getSessionId();
-        const jsonlPath = getAgentJsonlPath(
-          projectDir,
-          sessionId,
-          hookOpts.agentId,
-        );
+        const { jsonlPath, options: transcriptAttachOptions } =
+          buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            // Seed the JSONL with the launching prompt so the transcript is
+            // self-describing — readers don't need to consult .meta.json to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
+          });
         const metaPath = getAgentMetaPath(
           projectDir,
           sessionId,
           hookOpts.agentId,
         );
-        const projectRoot = this.config.getProjectRoot();
         try {
           // Register before writing the meta sidecar — see the matching
           // foreground call below for the full rationale. Keeping the
@@ -3257,21 +3284,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
           bgEventEmitter,
           jsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId,
-            cwd: projectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(projectRoot),
-            // Seed the JSONL with the launching prompt so the transcript is
-            // self-describing — readers don't need to consult .meta.json to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-            bootstrapHistory: isFork ? bgInitialMessages : undefined,
-            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
-          },
+          transcriptAttachOptions,
         );
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
@@ -3960,17 +3973,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const registry = this.config.getBackgroundTaskRegistry();
       const fgProjectDir = this.config.storage.getProjectDir();
       const fgSessionId = this.config.getSessionId();
-      const fgJsonlPath = getAgentJsonlPath(
-        fgProjectDir,
-        fgSessionId,
-        hookOpts.agentId,
-      );
+      const { jsonlPath: fgJsonlPath, options: fgTranscriptAttachOptions } =
+        buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
+          agentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          // Seed the JSONL with the launching prompt so the transcript
+          // is self-describing — readers don't need the meta sidecar to
+          // know what the agent was asked to do.
+          initialUserPrompt: this.params.prompt,
+        });
       const fgMetaPath = getAgentMetaPath(
         fgProjectDir,
         fgSessionId,
         hookOpts.agentId,
       );
-      const fgProjectRoot = this.config.getProjectRoot();
       // Declared `let` so the `finally` block can release the writer's
       // listeners + fd even if the attach itself throws partway through.
       // The attach happens inside the `try` below — keeping it outside
@@ -4037,19 +4053,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           this.eventEmitter,
           fgJsonlPath,
-          {
-            agentId: hookOpts.agentId,
-            agentName: subagentConfig.name,
-            agentColor: subagentConfig.color,
-            sessionId: fgSessionId,
-            cwd: fgProjectRoot,
-            version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getCachedGitBranch(fgProjectRoot),
-            // Seed the JSONL with the launching prompt so the transcript
-            // is self-describing — readers don't need the meta sidecar to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
-          },
+          fgTranscriptAttachOptions,
         ));
         // Register before writing the meta sidecar: if register() throws
         // (e.g. duplicate agent id), we leave no orphaned 'running' meta
@@ -4315,18 +4319,44 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     });
 
     try {
+      let cwd = this.config.getCwd();
+      if (this.params.working_dir) {
+        const resolved = await resolveExternalWorktreeDir(
+          this.config,
+          this.params.working_dir,
+        );
+        if ('error' in resolved) {
+          return this.buildSpawnBlockedResult(
+            `Error: ${resolved.error}`,
+            'Invalid teammate working_dir',
+          );
+        }
+        cwd = resolved.path;
+      }
+
+      if (signal?.aborted) {
+        return {
+          llmContent: `Teammate spawn aborted before "${name}" was registered.`,
+          returnDisplay: `Teammate spawn aborted.`,
+          error: { message: 'Aborted.' },
+        };
+      }
+
       await teamManager.spawnTeammate({
         name,
         prompt: this.params.prompt,
         agentType: this.params.subagent_type,
-        cwd: this.config.getCwd(),
+        cwd,
         planModeRequired: this.params.plan_mode_required === true,
+        readOnly: this.params.read_only === true,
       });
 
       // Return immediately — teammate runs concurrently.
       const msg =
         `Teammate "${name}" is now running concurrently.` +
         ` Task: ${this.params.description}` +
+        (this.params.read_only ? '\nMode: enforced read-only.' : '') +
+        (this.params.working_dir ? `\nWorktree: ${cwd}` : '') +
         '\n\nYou will receive their messages as they' +
         ' arrive. Do NOT call task_list to check on' +
         ' them — teammates report results via' +

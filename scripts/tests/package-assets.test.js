@@ -722,6 +722,8 @@ describe('package asset scripts', () => {
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
+
+    expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.4');
     expect(
       existsSync(
         path.join(
@@ -738,6 +740,60 @@ describe('package asset scripts', () => {
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
       ),
     ).toBe(true);
+  });
+
+  it('falls back to the hoisted lockfile entry when core has no nested sharp', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'package-lock.json',
+      JSON.stringify({
+        packages: {
+          'node_modules/sharp': {
+            version: '0.35.3',
+          },
+        },
+      }),
+    );
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/qwen-code-core',
+          version: '0.17.0',
+          dependencies: {
+            sharp: '^0.35.0',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(rootDir, 'dist', 'package.json'), 'utf8'),
+    );
+    expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.3');
+  });
+
+  it('rejects a locked sharp version outside the core declaration', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify({ dependencies: { sharp: '^0.34.0' } }),
+    );
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow(/resolved 0\.35\.4, packages\/core declares \^0\.34\.0/);
   });
 
   it('omits browser MCP install hooks and deps from the prepared dist package', () => {
@@ -1078,8 +1134,42 @@ describe('package asset scripts', () => {
 
     writeFile(
       rootDir,
+      'package-lock.json',
+      JSON.stringify(
+        {
+          packages: {
+            'node_modules/sharp': {
+              version: '0.35.3',
+            },
+            'packages/core/node_modules/sharp': {
+              version: '0.35.4',
+            },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    writeFile(
+      rootDir,
       'packages/cli/src/i18n/locales/en.json',
       '{"hello":"world"}\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/package.json',
+      JSON.stringify(
+        {
+          name: '@qwen-code/qwen-code-core',
+          version: '0.17.0',
+          dependencies: {
+            sharp: '^0.35.0',
+          },
+        },
+        null,
+        2,
+      ),
     );
     writeFile(
       rootDir,
