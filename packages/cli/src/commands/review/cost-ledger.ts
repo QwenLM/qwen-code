@@ -42,7 +42,7 @@ import {
   TranscriptsUnavailableError,
   textOf,
 } from './lib/transcripts.js';
-import { CHUNK_RE } from './lib/coverage.js';
+import { labelFromIdentityLine } from './lib/agent-identity.js';
 
 interface CostLedgerArgs {
   plan: string;
@@ -185,7 +185,8 @@ function labelOf(launch: string, fallback: string): string {
   // label it owns — the file id.
   const nl = launch.indexOf('\n');
   const identity = nl === -1 ? launch : launch.slice(0, nl);
-  if (!identity.startsWith('You are review agent `')) return fallback;
+  const parsed = labelFromIdentityLine(identity);
+  if (parsed === null) return fallback;
   // A reverse-audit chunk auditor shares its launch shape with the territory
   // finder; only its brief path carries the stage and the round — without
   // it, five audit rounds fold into one row and the ledger reports one agent
@@ -198,26 +199,10 @@ function labelOf(launch: string, fallback: string): string {
   if (auditChunk) {
     return `audit chunk ${auditChunk[1]} (round ${auditChunk[2]})`;
   }
-  const role = /^You are review agent `([^`]+)`/.exec(identity);
-  if (!role) return fallback;
-  const round = /\(round (\d+)\)/.exec(identity);
-  const chunk = CHUNK_RE.exec(role[1]);
-  // A chunk role is `chunk N of M`; prefixing it with "agent" would read as
-  // a malformed role, so resolve it through the same regex coverage uses.
-  if (chunk) return `chunk ${chunk[1]}`;
-  if (round) {
-    // Shards of one verify round carry the same label and fold; distinct
-    // rounds — verify and reverse-audit alike — are distinct rows.
-    return `agent ${role[1]} (round ${round[1]})`;
-  }
-  // An invariant role launches once PER heavy file. The role alone would
-  // fold those parallel runs into one (×N) row — the marker reserved for
-  // relaunches — and lose the per-file breakdown. The identity line names
-  // the owned file; the FULL path is the distinguisher, because a monorepo
-  // routinely holds same-basename files in different packages.
-  const file = /Your file: `([^`]+)`/.exec(identity);
-  if (file) return `agent ${role[1]} (${file[1]})`;
-  return `agent ${role[1]}`;
+  // The chunk / round / owned-file grammar lives in the shared parser
+  // (agent-identity.ts), alongside coverage's disclosure labels — one format,
+  // one parser, so the two readers cannot drift apart again.
+  return parsed;
 }
 
 function foldEvents(

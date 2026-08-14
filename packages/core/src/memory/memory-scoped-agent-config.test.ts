@@ -529,6 +529,25 @@ describe('createMemoryScopedAgentConfig', () => {
       evaluate(ToolNames.SHELL, { command: 'git status' }),
     ).resolves.toEqual({ allowed: true });
     await expect(
+      evaluate(ToolNames.SHELL, { command: "bash -c 'git status'" }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff' && touch /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
+      evaluate(ToolNames.SHELL, {
+        command: "bash -c 'git diff' > /tmp/pwn8357",
+      }),
+    ).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(
       evaluate(ToolNames.SHELL, { command: `rm ${pinnedFile}` }),
     ).resolves.toEqual({
       allowed: false,
@@ -573,6 +592,18 @@ describe('createMemoryScopedAgentConfig', () => {
       cwd: projectRoot,
     });
     await expect(evaluate('git status')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git diff')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git diff HEAD')).resolves.toEqual({
+      allowed: false,
+      reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
+    });
+    await expect(evaluate('git ls-files')).resolves.toEqual({
       allowed: false,
       reason: 'ManagedAutoMemory(run_shell_command: read-only only)',
     });

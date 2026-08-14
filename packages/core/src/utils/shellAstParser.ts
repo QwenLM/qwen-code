@@ -1105,7 +1105,7 @@ function localGitConfigMakesCommandUnsafe(
 ): boolean {
   let changedDirectory = false;
   let usesDiff = false;
-  let usesStatus = false;
+  let usesFsmonitor = false;
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1117,15 +1117,15 @@ function localGitConfigMakesCommandUnsafe(
     const subcommand = stripOuterQuotes(
       getArgumentNodes(command)[0]?.text ?? '',
     ).toLowerCase();
-    if (subcommand !== 'diff' && subcommand !== 'status') continue;
+    if (!['diff', 'ls-files', 'status'].includes(subcommand)) continue;
     if (changedDirectory) return true;
     usesDiff ||= subcommand === 'diff';
-    usesStatus ||= subcommand === 'status';
+    usesFsmonitor = true;
   }
 
-  if (!usesDiff && !usesStatus) return false;
+  if (!usesDiff && !usesFsmonitor) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return (usesDiff && risk.diffExternal) || (usesStatus && risk.fsmonitor);
+  return (usesDiff && risk.diffExternal) || (usesFsmonitor && risk.fsmonitor);
 }
 
 function fallbackGitConfigMakesCommandUnsafe(

@@ -66,6 +66,10 @@ import {
   shouldRunVisionBridge,
   splitImageParts,
   GoalPersistenceUnavailableError,
+  addAgentOutputMessageAttributes,
+  endInteractionSpan,
+  getErrorType,
+  getActiveInteractionSpan,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -552,6 +556,42 @@ export async function runNonInteractive(
     let limitedTurnCount = 0;
     let totalApiDurationMs = 0;
     const startTime = Date.now();
+    let activeInteractionPromptId = prompt_id;
+    let activeInteractionOwner: ReturnType<typeof getActiveInteractionSpan>;
+    const selectActiveInteraction = (
+      promptId: string,
+      startsInteraction = false,
+    ) => {
+      if (startsInteraction || activeInteractionPromptId !== promptId) {
+        activeInteractionOwner = undefined;
+      }
+      activeInteractionPromptId = promptId;
+    };
+    const captureActiveInteractionOwner = () => {
+      activeInteractionOwner ??= getActiveInteractionSpan(
+        activeInteractionPromptId,
+      );
+      return activeInteractionOwner;
+    };
+    const endActiveInteraction = (
+      status: 'ok' | 'error' | 'cancelled',
+      metadata: {
+        errorMessage?: string;
+        errorType?: string;
+      } = {},
+    ) => {
+      const owner = captureActiveInteractionOwner();
+      if (
+        !owner ||
+        getActiveInteractionSpan(activeInteractionPromptId) !== owner
+      ) {
+        return;
+      }
+      endInteractionSpan(status, {
+        promptId: activeInteractionPromptId,
+        ...metadata,
+      });
+    };
 
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
@@ -737,6 +777,14 @@ export async function runNonInteractive(
      */
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
+      endActiveInteraction(exceeded ? 'error' : 'cancelled', {
+        ...(exceeded
+          ? {
+              errorMessage: exceeded.message,
+              errorType: 'run_budget_exceeded',
+            }
+          : {}),
+      });
       await failClosedActiveGoalTurn(
         exceeded?.message ?? 'Headless Goal execution was cancelled',
       );
@@ -1005,6 +1053,16 @@ export async function runNonInteractive(
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
+      const userMessageContent = options.userMessage?.message.content;
+      const submittedPrompt =
+        typeof userMessageContent === 'string'
+          ? userMessageContent
+          : Array.isArray(userMessageContent)
+            ? userMessageContent
+                .filter((block) => block.type === 'text')
+                .map((block) => (block.type === 'text' ? block.text : ''))
+                .join(' ')
+            : input;
       // Per-turn model override captured from an inline `/model <id> <prompt>`
       // slash command; seeds the loop-scoped `modelOverride` below so the
       // submitted prompt runs on the chosen model without a session switch.
@@ -1535,6 +1593,27 @@ export async function runNonInteractive(
       // no-op), so unconditional invocation is safe even when the drain
       // path already finalized monitors before reaching here.
       const emitStructuredSuccess = async (): Promise<0> => {
+        const owner = captureActiveInteractionOwner();
+        if (
+          owner &&
+          getActiveInteractionSpan(activeInteractionPromptId) === owner
+        ) {
+          let responseText: string | undefined;
+          try {
+            responseText = JSON.stringify(structuredSubmission);
+          } catch {
+            responseText = undefined;
+          }
+          if (responseText !== undefined) {
+            addAgentOutputMessageAttributes(
+              config,
+              owner,
+              responseText,
+              'tool_call',
+            );
+          }
+          endActiveInteraction('ok');
+        }
         await failClosedActiveGoalTurn(
           'Headless Goal ended with structured output',
         );
@@ -1575,6 +1654,10 @@ export async function runNonInteractive(
       };
 
       const emitLoopDetectedResult = async (): Promise<1> => {
+        endActiveInteraction('error', {
+          errorMessage: 'loop detected',
+          errorType: 'loop_detected',
+        });
         await failClosedActiveGoalTurn(
           'Headless Goal stopped after loop detection',
         );
@@ -2173,18 +2256,28 @@ export async function runNonInteractive(
       };
 
       let currentPromptId = prompt_id;
+      const deferQueuedTeammateTurn = () => {
+        if (!teammateLoopResetPending || pendingTeammateMessages.length === 0) {
+          return;
+        }
+        geminiClient.getLoopDetectionService().reset(currentPromptId);
+        teammateLoopResetPending = false;
+        deferredTeammateTurnPending = true;
+      };
       while (true) {
+        const hasOwningContinuation = Boolean(
+          hasUnsentToolResponse || activeGoalTurn,
+        );
+        const mustDeferTeammateTurn = Boolean(
+          hasOwningContinuation &&
+            (fullTurnToolInvocationGuard || deferredTeammateTurnPending),
+        );
         // Fresh teammate input is a loop-detection boundary even when it must
-        // wait for the owning tool/Goal chain to finish before it can be sent
-        // as a distinct policy turn. Reset once when each queued batch is
-        // first observed rather than on every deferred loop iteration.
-        if (
-          teammateLoopResetPending &&
-          (hasUnsentToolResponse || activeGoalTurn)
-        ) {
-          geminiClient.getLoopDetectionService().reset(currentPromptId);
-          teammateLoopResetPending = false;
-          deferredTeammateTurnPending = true;
+        // wait for a guarded tool/Goal chain to finish before it can be sent as
+        // a distinct policy turn. Unguarded continuations retain the existing
+        // behavior of merging teammate text into their next model send.
+        if (teammateLoopResetPending && mustDeferTeammateTurn) {
+          deferQueuedTeammateTurn();
         }
 
         // Drain pending teammate messages only at a logical turn boundary.
@@ -2198,15 +2291,24 @@ export async function runNonInteractive(
         if (
           !isFirstTurn &&
           pendingTeammateMessages.length > 0 &&
-          !hasUnsentToolResponse &&
-          !activeGoalTurn
+          !mustDeferTeammateTurn
         ) {
           const batch = pendingTeammateMessages.splice(0);
+          if (teammateLoopResetPending) {
+            geminiClient.getLoopDetectionService().reset(currentPromptId);
+          }
           teammateLoopResetPending = false;
           isDeferredTeammateTurn = deferredTeammateTurnPending;
           deferredTeammateTurnPending = false;
           const teammatePart = { text: batch.join('\n\n') };
-          currentMessages = [{ role: 'user', parts: [teammatePart] }];
+          if ((hasUnsentToolResponse || activeGoalTurn) && currentMessages[0]) {
+            currentMessages[0].parts = [
+              ...(currentMessages[0].parts || []),
+              teammatePart,
+            ];
+          } else {
+            currentMessages = [{ role: 'user', parts: [teammatePart] }];
+          }
           isTeammateTurn = true;
           // Defensive clear for callers that enter this boundary without
           // passing through shouldFinalize (the normal path already cleared).
@@ -2224,25 +2326,32 @@ export async function runNonInteractive(
         );
 
         let sendType: SendMessageType;
-        if (goalTurn) {
-          sendType = isFirstGoalSegment
-            ? goalTurn.origin === 'runtime'
+        if (goalTurn && isFirstGoalSegment) {
+          sendType =
+            goalTurn.origin === 'runtime'
               ? SendMessageType.Goal
-              : SendMessageType.UserQuery
-            : SendMessageType.ToolResult;
+              : SendMessageType.UserQuery;
+        } else if (isTeammateTurn) {
+          sendType = SendMessageType.Teammate;
+        } else if (goalTurn) {
+          sendType = SendMessageType.ToolResult;
         } else if (isFirstTurn) {
           sendType =
             continueSendType ??
             options.sendMessageType ??
             SendMessageType.UserQuery;
-        } else if (isTeammateTurn) {
-          sendType = SendMessageType.Teammate;
         } else {
           sendType = SendMessageType.ToolResult;
         }
         if (isTeammateTurn) {
+          selectActiveInteraction(currentPromptId);
+          endActiveInteraction('ok');
           currentPromptId = `${prompt_id}/teammate/${turnCount}`;
         }
+        selectActiveInteraction(
+          currentPromptId,
+          sendType !== SendMessageType.ToolResult,
+        );
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
@@ -2253,6 +2362,10 @@ export async function runNonInteractive(
           {
             type: sendType,
             modelOverride,
+            ...(isFirstTurn &&
+              sendType === SendMessageType.UserQuery &&
+              !options.continueInterrupted &&
+              submittedPrompt.trim().length > 0 && { submittedPrompt }),
             ...(isFirstTurn &&
               options.notificationDisplayText && {
                 notificationDisplayText: options.notificationDisplayText,
@@ -2274,6 +2387,7 @@ export async function runNonInteractive(
         adapter.startAssistantMessage();
 
         for await (const event of responseStream) {
+          captureActiveInteractionOwner();
           if (abortController.signal.aborted) {
             // Pair the startAssistantMessage() above so stream-json mode
             // doesn't leave an unterminated message_start when a budget /
@@ -2323,6 +2437,7 @@ export async function runNonInteractive(
             throw new AlreadyReportedError(errorText);
           }
         }
+        captureActiveInteractionOwner();
 
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
@@ -2385,6 +2500,9 @@ export async function runNonInteractive(
             return emitLoopDetectedResult();
           }
           if (terminateTurn && activeGoalTurn) {
+            if (fullTurnToolInvocationGuard) {
+              deferQueuedTeammateTurn();
+            }
             // The slash-command guard belongs only to the turn that just
             // terminated. Goal work dequeued below is a new turn and must not
             // inherit the expired /dream policy.
@@ -2396,6 +2514,8 @@ export async function runNonInteractive(
             await config.getChatRecordingService?.()?.flush();
             await finishGoalTurn(activeGoalTurn);
             activeGoalTurn = undefined;
+            selectActiveInteraction(currentPromptId);
+            endActiveInteraction('ok');
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
@@ -2418,6 +2538,9 @@ export async function runNonInteractive(
         }
         if (shouldFinalizeTurn) {
           await runFullTurnOnComplete();
+          if (fullTurnToolInvocationGuard) {
+            deferQueuedTeammateTurn();
+          }
           // Clear before any Goal/teammate continuation can loop back through
           // the shared tool-batch call site.
           fullTurnToolInvocationGuard = undefined;
@@ -2428,6 +2551,8 @@ export async function runNonInteractive(
             if (activeGoalTurn === completedGoalTurn) {
               activeGoalTurn = undefined;
             }
+            selectActiveInteraction(currentPromptId);
+            endActiveInteraction('ok');
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
@@ -2570,6 +2695,7 @@ export async function runNonInteractive(
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
+              selectActiveInteraction(itemPromptId, itemIsFirstTurn);
               const itemStream = geminiClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
@@ -2590,6 +2716,7 @@ export async function runNonInteractive(
               adapter.startAssistantMessage();
 
               for await (const event of itemStream) {
+                captureActiveInteractionOwner();
                 if (abortController.signal.aborted) {
                   // Pair the startAssistantMessage() above so stream-json
                   // mode doesn't leave an unterminated message_start, then
@@ -2638,6 +2765,7 @@ export async function runNonInteractive(
                   throw new AlreadyReportedError(errorText);
                 }
               }
+              captureActiveInteractionOwner();
 
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
@@ -2910,6 +3038,10 @@ export async function runNonInteractive(
             const errorMessage =
               `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
               previewSuffix;
+            endActiveInteraction('error', {
+              errorMessage: 'model did not produce structured output',
+              errorType: 'structured_output_missing',
+            });
             await emitResult({
               isError: true,
               durationMs: Date.now() - startTime,
@@ -2934,6 +3066,25 @@ export async function runNonInteractive(
         }
       }
     } catch (error) {
+      const budgetExceeded = budgetEnforcer.getExceeded();
+      endActiveInteraction(
+        budgetExceeded || !abortController.signal.aborted
+          ? 'error'
+          : 'cancelled',
+        {
+          ...(budgetExceeded
+            ? {
+                errorMessage: budgetExceeded.message,
+                errorType: 'run_budget_exceeded',
+              }
+            : abortController.signal.aborted
+              ? {}
+              : {
+                  errorMessage: 'headless invocation failed',
+                  errorType: getErrorType(error),
+                }),
+        },
+      );
       await failClosedActiveGoalTurn(
         error instanceof Error
           ? error.message
@@ -2960,7 +3111,6 @@ export async function runNonInteractive(
       // depend on that envelope to close the stream cleanly) and (b)
       // exit with the budget handler's exit code 55 instead of the
       // generic `handleError` exit code 1 from a raw "AbortError".
-      const budgetExceeded = budgetEnforcer.getExceeded();
       const recoverableCancellation =
         !budgetExceeded &&
         options.recoverableCancellation === true &&

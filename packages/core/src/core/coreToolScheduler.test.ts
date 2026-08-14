@@ -265,11 +265,12 @@ vi.mock('../telemetry/session-tracing.js', () => ({
     ) => {
       if (metadata) {
         span.endMetadata = metadata;
-        const status =
-          metadata.success !== false
-            ? { code: 1 }
-            : { code: 2, message: metadata.error ?? 'tool error' };
-        span.statusCalls.push(status);
+        if (metadata.success === false) {
+          span.statusCalls.push({
+            code: 2,
+            message: metadata.error ?? 'tool error',
+          });
+        }
       }
       span.ended = true;
     },
@@ -10946,6 +10947,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       { code: SpanStatusCode.ERROR, message },
     ]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe(failureKind);
+    expect(spanRecord.spanAttributes['error.type']).toBe(failureKind);
     expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('/secret');
     expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('sensitive');
     expect(spanRecord.ended).toBe(true);
@@ -11767,11 +11769,11 @@ describe('CoreToolScheduler telemetry spans', () => {
     ).toBeUndefined();
   });
 
-  it('marks successful tool calls with OK status via endToolSpan', async () => {
+  it('leaves successful tool calls with UNSET status via endToolSpan', async () => {
     const { spanRecord, completedCalls } = await runSingleTool();
 
     expect(completedCalls[0].status).toBe('success');
-    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.statusCalls).toHaveLength(0);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
   });

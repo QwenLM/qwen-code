@@ -16,7 +16,7 @@ import { buildPermissionCheckContext } from '../core/permission-helpers.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
@@ -259,7 +259,7 @@ async function evaluateScopedDecision(
         return 'deny';
       }
       const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
-        stripShellWrapper(ctx.command),
+        normalizeMonitorCommand(ctx.command).safetyCommand,
         ctx.cwd ?? projectRoot,
       );
       return isReadOnly ? 'allow' : 'deny';
