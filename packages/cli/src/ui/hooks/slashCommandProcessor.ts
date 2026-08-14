@@ -110,19 +110,6 @@ function serializeHistoryItemForRecording(
   return clone;
 }
 
-const SLASH_COMMANDS_SKIP_RECORDING = new Set([
-  'advisor',
-  'quit',
-  'exit',
-  'clear',
-  'reset',
-  'new',
-  'resume',
-  'delete',
-  'branch',
-  'btw',
-  'history',
-]);
 const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
   'auth',
   'diff',
