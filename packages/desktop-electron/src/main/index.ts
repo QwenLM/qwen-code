@@ -6,7 +6,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { app, BrowserWindow, dialog, Menu, screen, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeTheme,
+  screen,
+  shell,
+} from 'electron';
 import { DesktopRuntime } from './runtime';
 import {
   captureWindowState,
@@ -24,6 +32,36 @@ let statePath = '';
 let hostLogPath = '';
 let stateTimer: NodeJS.Timeout | undefined;
 let quitting = false;
+
+const MACOS_TITLE_BAR_CSS = `
+  [data-web-shell-root] {
+    padding-top: calc(env(safe-area-inset-top) + 28px) !important;
+  }
+
+  [data-web-shell-root]::before {
+    app-region: drag;
+    align-items: center;
+    background: var(--sidebar-background, #0d0d0d);
+    color: color-mix(
+      in srgb,
+      var(--sidebar-foreground, #fafafa) 58%,
+      transparent
+    );
+    content: 'Qwen Code' / '';
+    display: flex;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    height: 28px;
+    left: 0;
+    padding-left: 74px;
+    position: absolute;
+    right: 0;
+    top: 0;
+    user-select: none;
+    z-index: 1;
+  }
+`;
 
 const testStateRoot = process.env['QWEN_DESKTOP_STATE_ROOT'];
 if (testStateRoot) {
@@ -110,6 +148,10 @@ async function showMainWindow(
   mainWindow = window;
   try {
     await window.loadURL(runtime.authenticatedWebUrl());
+    if (process.platform === 'darwin') {
+      await window.webContents.insertCSS(MACOS_TITLE_BAR_CSS);
+      window.show();
+    }
   } catch (error) {
     if (mainWindow === window) mainWindow = undefined;
     if (!window.isDestroyed()) window.destroy();
@@ -129,6 +171,7 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
     minWidth: 900,
     show: false,
     title: 'Qwen Code',
+    titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -138,10 +181,15 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
   });
   if (maximized) window.maximize();
 
-  window.once('ready-to-show', () => window.show());
+  if (process.platform !== 'darwin') {
+    window.once('ready-to-show', () => window.show());
+  }
   window.webContents.on('page-title-updated', (event) => {
     event.preventDefault();
     window.setTitle('Qwen Code');
+  });
+  window.webContents.on('did-change-theme-color', (_event, color) => {
+    applyWebShellNativeTheme(window, color);
   });
   window.webContents.once('did-finish-load', () => {
     appendHostLog(`web shell ready at ${runtime?.baseUrl ?? 'unknown'}`);
@@ -166,6 +214,16 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
     return { action: 'deny' };
   });
   return window;
+}
+
+function applyWebShellNativeTheme(
+  window: BrowserWindow,
+  color: string | null,
+): void {
+  const normalized = color?.toLowerCase();
+  if (normalized !== '#0d0d0d' && normalized !== '#ffffff') return;
+  nativeTheme.themeSource = normalized === '#0d0d0d' ? 'dark' : 'light';
+  window.setBackgroundColor(normalized);
 }
 
 async function resolveWorkspace(): Promise<string | undefined> {

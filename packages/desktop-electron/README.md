@@ -15,8 +15,15 @@ handled by the standalone Web Shell entry.
 Electron does not build or maintain another React renderer. The HTML, CSS,
 providers, routing, settings, plugins, sessions, tools, permissions, MCP, and
 all other product UI come from `lib/web-shell` in the bundled Qwen runtime.
-This makes rendering parity a build invariant instead of a collection of
-desktop CSS overrides.
+This keeps product rendering parity as a build invariant; Electron-owned CSS
+is limited to the macOS window-chrome inset and drag strip.
+
+The main process also follows Web Shell's standard `theme-color` metadata so
+the operating-system appearance and window background switch between light and
+dark with the page. On macOS, Electron keeps the native traffic-light controls
+over a host-owned drag strip whose background comes directly from Web Shell's
+sidebar theme token. The page remains sandboxed and does not receive Electron
+APIs, a preload bridge, or desktop-owned theme state.
 
 The preview intentionally provides one Web Shell window only. It does not add
 an embedded browser, Voice overlay, additional chat windows, renderer IPC, or

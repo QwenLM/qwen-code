@@ -49,6 +49,7 @@ Standalone Web Shell
   - reads the token from the URL fragment and removes it
   - mounts the canonical standalone providers and UI
   - owns theme, language, routing, settings, plugins, and chat presentation
+  - publishes the active theme through standard theme-color metadata
 ```
 
 The daemon is started with:
@@ -68,8 +69,10 @@ Electron packages the selected Qwen build under `runtime/qwen-code`. Runtime
 preparation builds `packages/web-shell`, copies the root distribution including
 `dist/web-shell`, and records checksums for every runtime file. Electron then
 loads that server-owned document; there is no Electron HTML, React root,
-Tailwind pipeline, theme state, or CSS capable of diverging from standalone
-Web Shell.
+Tailwind pipeline, theme state, or product CSS capable of diverging from
+standalone Web Shell. The only injected CSS reserves the macOS title-bar inset
+and drag region; it uses Web Shell's existing sidebar theme tokens and does not
+restyle product content.
 
 Therefore settings, plugins, navigation, dialogs, portals, fonts, semantic
 tokens, and responsive behavior use the same generated assets as Web Shell.
@@ -82,6 +85,10 @@ Electron.
 - `contextIsolation: true`
 - `sandbox: true`
 - no preload script, raw IPC, or Electron APIs in the page
+- the main process maps Web Shell's standard `theme-color` metadata to
+  Electron's native theme and window background
+- on macOS, native traffic-light controls remain visible over a host drag strip
+  colored by Web Shell's sidebar theme token
 - navigation restricted to the active daemon origin
 - new windows denied
 - safe external HTTP(S) links opened by the operating system browser
@@ -110,8 +117,11 @@ workflow remains unchanged.
 - The loaded page URL uses the authenticated loopback daemon origin.
 - The packaged page is `lib/web-shell/index.html` from the selected Qwen build.
 - No Electron-owned renderer HTML, React entry, Tailwind/Vite build, theme
-  state, or Web Shell style override exists.
+  state, or product style override exists. Host CSS is limited to the macOS
+  title-bar inset and drag strip.
 - Settings, plugins, dialogs, and chat surfaces match standalone Web Shell at
   the same viewport and theme.
+- The macOS title bar and Web Shell sidebar form one continuous color surface
+  in both light and dark themes.
 - Packaged startup and shutdown smoke tests pass, including daemon cleanup.
 - Shared Core, CLI, daemon, ACP, Tauri, and public release files have no diff.

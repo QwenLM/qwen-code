@@ -81,6 +81,13 @@ function testSecurityBoundary() {
   assert.match(main, /webSecurity: true/);
   assert.match(main, /setWindowOpenHandler/);
   assert.match(main, /page-title-updated/);
+  assert.match(main, /did-change-theme-color/);
+  assert.match(main, /nativeTheme\.themeSource/);
+  assert.match(main, /setBackgroundColor/);
+  assert.match(main, /titleBarStyle:.*'hidden'/);
+  assert.match(main, /insertCSS\(MACOS_TITLE_BAR_CSS\)/);
+  assert.match(main, /var\(--sidebar-background/);
+  assert.match(main, /app-region: drag/);
   assert.match(runtime, /--require-auth/);
   assert.match(runtime, /127\.0\.0\.1/);
   assert.match(runtime, /url\.hash = new URLSearchParams\(\{ token \}\)/);
