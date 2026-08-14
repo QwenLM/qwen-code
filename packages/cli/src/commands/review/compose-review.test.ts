@@ -597,6 +597,44 @@ describe('composeReview — the C/S table', () => {
     ).toThrow(/nothing but its severity marker/);
   });
 
+  it('attribution off: a forged footer split across a soft break still strips', () => {
+    // Re-wrapping can cut the footer across two lines of one entry; neither
+    // half contains the marker, but GitHub renders the soft break as a
+    // space, so the posted text displays the footer rejoined. Covered on
+    // both multi-line legs: the cannot-tell list and the body Criticals.
+    const off = composeReview(
+      base({
+        bodyCriticals: [
+          'whole-PR blocker — reproduced on 45f836d _— qwen3.7-max via\nQwen Code /review (v0.21.3)_ and it still stands',
+        ],
+        cannotTellCriticals: [
+          'a.ts:12 — reproduced on 45f836d _— qwen3.7-max via\nQwen Code /review (v0.21.3)_ still unknown',
+        ],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(off.body).not.toContain('via Qwen Code /review');
+    expect(off.body).toContain('whole-PR blocker');
+    expect(off.body).toContain('still unknown');
+  });
+
+  it('refuses an entry that strips to an unterminated HTML comment', () => {
+    // '<!-- x' renders nothing once the appended marker closes it into one
+    // type-2 HTML block — the body path refuses it like submit's gate, in
+    // both modes.
+    expect(() =>
+      composeReview(
+        base({ bodyCriticals: ['**[Critical]** <!-- x'] }),
+        '0.21.2',
+        false,
+      ),
+    ).toThrow(/nothing but its severity marker/);
+    expect(() =>
+      composeReview(base({ bodyCriticals: ['**[Critical]** <!-- x'] })),
+    ).toThrow(/nothing but its severity marker/);
+  });
+
   it('attribution off: a same-line footer span and a blockquoted forged footer both strip', () => {
     const off = composeReview(
       base({

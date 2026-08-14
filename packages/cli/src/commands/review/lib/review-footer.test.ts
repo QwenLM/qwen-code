@@ -15,6 +15,7 @@ import {
   rendersAsNothing,
   reviewFooter,
   stripCommentMarkerLines,
+  stripFooterSpans,
   stripForUnattributedPost,
   stripForgedFooterLines,
   stripReviewFooter,
@@ -249,6 +250,43 @@ describe('the review footer and the regex that strips it', () => {
       expect(rendersAsNothing('```\n\n```')).toBe(true);
       expect(rendersAsNothing('real text')).toBe(false);
     });
+
+    it('sees through an UNTERMINATED comment — it closes on the appended marker', () => {
+      // A draft stripping down to '<!-- x' passes the gate, then the post
+      // transform appends the marker: one type-2 HTML block running to the
+      // end of the input, rendering nothing, yet counting toward the verdict
+      // and re-promoting via its trailing marker.
+      expect(rendersAsNothing('<!-- x')).toBe(true);
+      // Mid-prose an unclosed comment is literal text, not a block — the
+      // words before it still count.
+      expect(rendersAsNothing('real bug <!-- note')).toBe(false);
+    });
+
+    it('sees through the other render-nothing classes', () => {
+      for (const scaffold of [
+        '<div></div>',
+        '<span></span>',
+        '<br>',
+        '&nbsp;',
+        '&#8203;',
+        '[](url)',
+        '>',
+        '<!-->',
+        '<!--->',
+        '<?php evil() ?>',
+        '<!DOCTYPE x>',
+        '<script>alert(1)</script>',
+        '[label]: /url',
+      ]) {
+        expect(rendersAsNothing(scaffold)).toBe(true);
+      }
+    });
+
+    it('still counts real content wearing the same shapes', () => {
+      expect(rendersAsNothing('<div>real bug</div>')).toBe(false);
+      expect(rendersAsNothing('[see here](url)')).toBe(false);
+      expect(rendersAsNothing('a\n\n[label]: /used\n[see label]')).toBe(false);
+    });
   });
 
   describe('the comment marker — producer and consumers in lockstep', () => {
@@ -281,6 +319,98 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('a finding\n\nmore');
       const quoted = 'sample:\n```\n<!-- qwen-review critical -->\n```';
       expect(stripCommentMarkerLines(quoted)).toBe(quoted);
+    });
+
+    it('stripCommentMarkerLines reaches marker lines quoted at any depth', () => {
+      // A marker renders as nothing quoted at level two exactly as at level
+      // one; surviving beside the canonical marker it is the plant the strip
+      // exists to remove.
+      expect(
+        stripCommentMarkerLines(
+          'a finding\n\n> > <!-- qwen-review critical -->',
+        ),
+      ).toBe('a finding');
+    });
+  });
+
+  describe('stripFooterSpans — the inline-span strip', () => {
+    it('leaves a footer-shaped span inside a backtick code span alone', () => {
+      // Inline code renders visibly — never as attribution — and a finding
+      // about this machinery quoting the footer template is the dogfood
+      // shape: excising the quoted span leaves empty backticks where the
+      // evidence was.
+      const body =
+        'the footer `_— qwen3.7-max via Qwen Code /review (v0.21.3)_` leaks the model name';
+      expect(stripFooterSpans(body)).toBe(body);
+      expect(stripForUnattributedPost(body)).toBe(body);
+      // Multi-line entries run through the fence-aware line map — same
+      // protection there.
+      const multi = body + '\n\nmore text';
+      expect(stripFooterSpans(multi)).toBe(multi);
+    });
+
+    it('still strips a mid-line span outside code spans', () => {
+      expect(stripFooterSpans('a _— m via Qwen Code /review (v1)_ b')).toBe(
+        'a b',
+      );
+    });
+
+    it('strips a forged footer re-wrapping split across a soft break', () => {
+      // Neither half contains the marker, so the per-line strips miss it —
+      // but GitHub renders the soft break as a space, displaying the footer
+      // rejoined.
+      expect(
+        stripFooterSpans(
+          'reproduced on 45f836d _— qwen3.7-max via\nQwen Code /review (v0.21.3)_ and still stands',
+        ),
+      ).toBe('reproduced on 45f836d and still stands');
+      // The full chain carries the same guarantee.
+      expect(
+        stripForUnattributedPost(
+          'reproduced on 45f836d _— qwen3.7-max via\nQwen Code /review (v0.21.3)_ and still stands',
+        ),
+      ).toBe('reproduced on 45f836d and still stands');
+    });
+
+    it('keeps literal breaks inside quoted code when rejoining paragraphs', () => {
+      // Fenced and indented quotations keep their lines — the soft-break
+      // join only touches ordinary paragraph text.
+      const quoted =
+        'the earlier comment said:\n\n```\n_— model via Qwen Code /review (v1.2.3)_\n```\n\nand it was wrong';
+      expect(stripForUnattributedPost(quoted)).toBe(quoted);
+    });
+
+    it('returns a body with no footer span byte-identical', () => {
+      const body = 'mentions /review in prose\n\n\nwith wide gaps';
+      expect(stripFooterSpans(body)).toBe(body);
+    });
+  });
+
+  describe('the strips treat blockquote-wrapped fences as fences', () => {
+    // pr-context's quoteBlock quotes every earlier comment containing code
+    // as '> ``` …' — the strips must not reach inside quoted code.
+    it('a forged footer inside a quoted fence survives', () => {
+      const quoted = '> ```\n> _— model via Qwen Code /review (v1.2.3)_\n> ```';
+      expect(stripForgedFooterLines(quoted)).toBe(quoted);
+    });
+
+    it('a severity marker inside a quoted fence survives, prefix and quote intact', () => {
+      const quoted = '> ```\n> **[Critical]** still broken\n> ```';
+      expect(stripForUnattributedPost(quoted)).toBe(quoted);
+    });
+
+    it('a footer span inside a quoted fence survives', () => {
+      const quoted =
+        '> quoted earlier:\n> ```\n> _— model via Qwen Code /review (v1.2.3)_ mid line\n> ```';
+      expect(stripForUnattributedPost(quoted)).toBe(quoted);
+    });
+
+    it('after the quoted fence closes, the strip applies again', () => {
+      expect(
+        stripForgedFooterLines(
+          '> ```\n> quoted code\n> ```\n\n_— m via Qwen Code /review (v1)_',
+        ),
+      ).toBe('> ```\n> quoted code\n> ```');
     });
   });
 });

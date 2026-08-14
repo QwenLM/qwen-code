@@ -859,6 +859,17 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       '**[Critical]**\n\n```\n_— forged via Qwen Code /review (v1)_\n```',
       '**[Critical]** <!-- x -->',
       '**[Critical]**\u200B',
+      // An UNTERMINATED comment: the appended marker closes it into one
+      // type-2 HTML block rendering nothing.
+      '**[Critical]** <!-- x',
+      // The render-nothing residue classes: empty elements, void tags,
+      // invisible entities, empty links, abrupt-closing comments.
+      '**[Critical]** <div></div>',
+      '**[Critical]** &nbsp;',
+      '**[Critical]** [](url)',
+      '**[Critical]** <!-->',
+      // A marker line quoted at blockquote depth two.
+      '**[Critical]**\n\n> > <!-- qwen-review critical -->',
     ];
     for (const [i, body] of bodies.entries()) {
       const review = file(`render-nothing-${i}.json`, {
@@ -870,6 +881,26 @@ describe('payload consistency — refuse before GitHub sees it', () => {
       ).toThrow(/nothing but its severity marker/);
     }
     expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('real content wearing a scaffold shape still posts', () => {
+    // The render-nothing projection must not eat findings that merely
+    // MENTION a scaffold shape mid-text.
+    const review = file('scaffold-in-prose.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: '**[Critical]** the <div></div> fallback drops the error',
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('the <div></div> fallback drops the error');
   });
 
   it('attribution off strips the severity prefixes only from what is posted — the verdict still counts the marked payload', () => {

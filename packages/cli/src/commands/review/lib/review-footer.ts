@@ -64,12 +64,15 @@ export function commentMarkerSeverity(
  * Bare marker LINES removed from a body — used by `submit` before appending
  * the canonical marker, so a marker quoted from the reviewed code (or
  * planted to be mistaken for one) cannot survive next to the real one.
- * Fence- and indentation-aware like `stripForgedFooterLines`.
+ * Fence- and indentation-aware like `stripForgedFooterLines`. The blockquote
+ * allowance runs to any depth: a marker renders as nothing quoted at level
+ * two exactly as at level one, and a surviving quoted marker beside the
+ * canonical one is the plant this strip exists to remove.
  */
 export function stripCommentMarkerLines(body: string): string {
   if (!body.includes('<!-- qwen-review')) return body;
   return mapLinesAware(body, (line) =>
-    /^[ \t]{0,3}(?:>[ \t]*)?<!-- qwen-review (?:critical|suggestion)? -->[ \t]*\r?$/.test(
+    /^[ \t]{0,3}(?:>[ \t]*)*<!-- qwen-review (?:critical|suggestion)? -->[ \t]*\r?$/.test(
       line,
     )
       ? null
@@ -88,14 +91,111 @@ export function stripCommentMarkerLines(body: string): string {
 const FOOTER_SPAN_RE =
   /_— [^\n]{0,400}? via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?[ \t]*/g;
 
+/** Runs of backticks, for the code-span scan below. */
+const BACKTICK_RUN_RE = /`+/g;
+
+/**
+ * FOOTER_SPAN_RE applied only OUTSIDE backtick code spans: inline code
+ * renders visibly on GitHub — never as attribution — and excising the
+ * quoted footer template out of a finding about this very machinery leaves
+ * empty backticks where the evidence was. A backtick run closes on the next
+ * run of EXACTLY the same length (runs of other lengths inside are the
+ * span's content); a run with no closer is literal text, not a shield.
+ */
+function stripFooterSpanInLine(line: string): string {
+  if (!line.includes(FOOTER_MARKER)) return line;
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    BACKTICK_RUN_RE.lastIndex = pos;
+    const open = BACKTICK_RUN_RE.exec(line);
+    if (open === null) {
+      return out + line.slice(pos).replace(FOOTER_SPAN_RE, '');
+    }
+    out += line.slice(pos, open.index).replace(FOOTER_SPAN_RE, '');
+    const openLen = open[0].length;
+    let closeEnd = -1;
+    for (;;) {
+      const run = BACKTICK_RUN_RE.exec(line);
+      if (run === null) break;
+      if (run[0].length === openLen) {
+        closeEnd = run.index + run[0].length;
+        break;
+      }
+    }
+    if (closeEnd === -1) {
+      out += open[0];
+      pos = open.index + openLen;
+      continue;
+    }
+    out += line.slice(open.index, closeEnd);
+    pos = closeEnd;
+  }
+}
+
 export function stripFooterSpans(text: string): string {
-  if (!text.includes(FOOTER_MARKER)) return text;
+  // `/review`, not FOOTER_MARKER: re-wrapping can split the marker phrase
+  // across a soft break, and only `/review` survives every split point
+  // short of the word itself.
+  if (!text.includes('/review')) return text;
   if (!text.includes('\n')) {
-    const stripped = text.replace(FOOTER_SPAN_RE, '');
+    if (!text.includes(FOOTER_MARKER)) return text;
+    const stripped = stripFooterSpanInLine(text);
     return stripped === text ? text : stripped.trim();
   }
-  // Multi-line: the line-map keeps fenced/indented quotations intact.
-  return mapLinesAware(text, (line) => line.replace(FOOTER_SPAN_RE, ''));
+  const rejoined = stripSplitFooterSpans(text);
+  return mapLinesAware(rejoined, (line) => stripFooterSpanInLine(line));
+}
+
+/**
+ * A forged footer re-wrapped onto the next line survives the per-line
+ * strips — neither half contains the marker — but GitHub renders a soft
+ * break inside a paragraph as a space, so the two halves DISPLAY rejoined.
+ * Where joining a paragraph's lines reveals a footer span the per-line
+ * strip misses, the paragraph goes out on its joined, stripped form:
+ * exactly what GitHub would have rendered. Paragraphs are runs of ordinary
+ * text lines; fenced/indented code and HTML blocks keep their literal
+ * breaks, and a hard break (two trailing spaces or a backslash) ends the
+ * run — it renders a line break, not a space.
+ */
+function stripSplitFooterSpans(text: string): string {
+  let changed = false;
+  const out: string[] = [];
+  let para: string[] = [];
+  const flush = (): void => {
+    if (para.length > 1) {
+      const joinedStripped = stripFooterSpanInLine(para.join(' '));
+      // Whitespace-squashed comparison: a span one line already carries
+      // strips per-line as well, and differs from the joined strip only in
+      // spacing — no split span, no rewrite.
+      const squashed = (s: string): string => s.replace(/\s+/g, ' ').trim();
+      if (
+        squashed(joinedStripped) !==
+        squashed(para.map(stripFooterSpanInLine).join(' '))
+      ) {
+        out.push(joinedStripped);
+        changed = true;
+        para = [];
+        return;
+      }
+    }
+    out.push(...para);
+    para = [];
+  };
+  for (const { line, kind } of scanLines(text)) {
+    if (
+      kind === 'text' &&
+      line.trim() !== '' &&
+      !/(?:[ \t]{2,}|\\)$/.test(line)
+    ) {
+      para.push(line);
+      continue;
+    }
+    flush();
+    out.push(line);
+  }
+  flush();
+  return changed ? out.join('\n') : text;
 }
 
 /** The footer naming the reviewing model and the CLI version it ran under. */
@@ -160,75 +260,124 @@ export function stripReviewFooter(body: string): string {
     : body.slice(0, body.length - tail.length) + stripped;
 }
 
+/** The blockquote prefix a line can carry, at any nesting depth. */
+const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
+
+/** Fence delimiter runs (``` or ~~~), openers and closers alike. */
+const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
+
+/** A fence CLOSER: same shape, nothing but trailing whitespace after it. */
+const FENCE_CLOSE_RE = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/;
+
+/** The simple HTML-block opener the line-map tracks (see `scanLines`). */
+const HTML_BLOCK_OPEN_RE = /^<[A-Za-z][^>]*>?[ \t]*\r?$/;
+
+/** Structural classes a line falls into, in scan order. */
+type LineKind =
+  | 'text' // ordinary line — a strip's map applies
+  | 'htmlOpen' // opens a simple HTML block — kept verbatim
+  | 'html' // HTML-block content — mapped: renders VISIBLY on GitHub
+  | 'htmlEnd' // the blank line closing an HTML block — kept
+  | 'fenceEdge' // a fence opener or closer — kept
+  | 'fence' // fenced-code content — kept (a quotation)
+  | 'code'; // indented-code content — kept (a quotation)
+
+interface ScannedLine {
+  /** The line as written, blockquote prefix included. */
+  line: string;
+  kind: LineKind;
+}
+
 /**
- * Line-map shared by the anywhere-strips. Tracks the markdown constructs
- * under which a footer/marker-shaped line is a QUOTATION, not attribution:
- * fenced code (``` and ~~~, opened with at most three spaces of indent —
- * at four it is itself indented-code content and does not open a fence) and
- * indented code blocks. Lines inside a simple HTML block (`<div>`, `<pre>`,
- * … until the next blank line) render VISIBLY on GitHub, so they are never
- * a shield against the map — the state exists only to stop a fence-shaped
- * line inside one from toggling fence state. `map` returns the replacement
- * line, or null to drop it; a body where nothing changed is returned
- * byte-identical.
+ * One structural pass over the body, shared by every line-aware strip:
+ * markdown constructs under which a footer/marker-shaped line is a
+ * QUOTATION, not attribution, classified identically everywhere.
+ *
+ * Blockquote-wrapped lines classify on their CONTENT, after the `>` prefix
+ * — `quoteBlock` in pr-context quotes every earlier comment containing code
+ * as `> ``` …`, and a scanner that never sees past the `>` reaches inside
+ * quoted code and corrupts it. Fences track their quote depth for the same
+ * reason: a depth change ends the quoted block carrying the fence.
+ *
+ * The fence state is the opener's delimiter character and run length:
+ * CommonMark closes a fence only on the same character, at least the
+ * opener's length, with no info string — a bare boolean inverts parity on
+ * nested/mixed quotes, exactly the 'quoting an earlier round' shape these
+ * strips exist for. Lines inside a simple HTML block (`<div>`, `<pre>`, …
+ * until the next blank line) render VISIBLY on GitHub, so the state only
+ * stops a fence-shaped line inside one from toggling fence state.
  */
-function mapLinesAware(
-  body: string,
-  map: (line: string) => string | null,
-): string {
-  // The opening fence, tracked faithfully: CommonMark closes a fence only
-  // on the same delimiter character, at a run length at least the opener's,
-  // with no info string — a bare boolean inverts parity on nested/mixed
-  // quotes, which is exactly the 'quoting an earlier round' shape these
-  // strips exist for.
-  let fence: { char: string; len: number } | null = null;
+function scanLines(body: string): ScannedLine[] {
+  let fence: { char: string; len: number; depth: number } | null = null;
   let inHtml = false;
-  let changed = false;
-  const out: string[] = [];
+  const out: ScannedLine[] = [];
   for (const line of body.split('\n')) {
-    const trimmed = line.trimStart();
+    const quote = QUOTE_PREFIX_RE.exec(line);
+    const depth = quote === null ? 0 : quote[0].split('>').length - 1;
+    const content = quote === null ? line : line.slice(quote[0].length);
+    const trimmed = content.trimStart();
     if (inHtml) {
       if (trimmed === '') {
         inHtml = false;
-        out.push(line);
-        continue;
+        out.push({ line, kind: 'htmlEnd' });
+      } else {
+        out.push({ line, kind: 'html' });
       }
-      // HTML-block content renders VISIBLY on GitHub, so it is never a
-      // shield against the map — the state exists only to stop a
-      // fence-shaped line inside one from toggling fence state.
-      const mapped = map(line);
-      if (mapped === null) {
-        changed = true;
-        continue;
-      }
-      if (mapped !== line) changed = true;
-      out.push(mapped);
       continue;
     }
+    if (fence !== null && depth !== fence.depth) {
+      // The quoted block carrying the fence ended; reclassify outside it.
+      fence = null;
+    }
     if (fence !== null) {
-      const close = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/.exec(line);
+      const close = FENCE_CLOSE_RE.exec(content);
       if (
         close !== null &&
         close[1]![0] === fence.char &&
         close[1]!.length >= fence.len
       ) {
         fence = null;
+        out.push({ line, kind: 'fenceEdge' });
+      } else {
+        out.push({ line, kind: 'fence' });
       }
-      out.push(line);
       continue;
     }
-    if (/^<[A-Za-z][^>]*>?[ \t]*\r?$/.test(trimmed)) {
+    if (HTML_BLOCK_OPEN_RE.test(trimmed)) {
       inHtml = true;
-      out.push(line);
+      out.push({ line, kind: 'htmlOpen' });
       continue;
     }
-    const open = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+    const open = FENCE_RUN_RE.exec(content);
     if (open !== null) {
-      fence = { char: open[1]![0]!, len: open[1]!.length };
-      out.push(line);
+      fence = { char: open[1]![0]!, len: open[1]!.length, depth };
+      out.push({ line, kind: 'fenceEdge' });
       continue;
     }
-    if (/^[ \t]{4}/.test(line)) {
+    if (/^[ \t]{4}/.test(content)) {
+      out.push({ line, kind: 'code' });
+      continue;
+    }
+    out.push({ line, kind: 'text' });
+  }
+  return out;
+}
+
+/**
+ * Line-map shared by the anywhere-strips: `map` returns the replacement
+ * line, or null to drop it. Fenced code, indented code, fence edges, and
+ * HTML-block openers/closers are quotations — kept verbatim; HTML-block
+ * CONTENT renders visibly, so it maps like text. A body where nothing
+ * changed is returned byte-identical.
+ */
+function mapLinesAware(
+  body: string,
+  map: (line: string) => string | null,
+): string {
+  let changed = false;
+  const out: string[] = [];
+  for (const { line, kind } of scanLines(body)) {
+    if (kind !== 'text' && kind !== 'html') {
       out.push(line);
       continue;
     }
@@ -249,22 +398,57 @@ function mapLinesAware(
 }
 
 /**
- * Whether what remains would render as NOTHING on GitHub: whitespace,
+ * Whether what remains would render as NOTHING on GitHub. Whitespace,
  * format characters (Cf, e.g. zero-width spaces — `.trim()` does not see
- * them), HTML comments, hollowed fence delimiters, and forged-footer lines
- * are not content. The emptiness gates must project through this before
- * comparing to '', or a scaffolded-but-invisible comment posts, counts
- * toward the verdict, and re-promotes as an unanswerable blocker. This is
- * a judgment projection, not a sanitizer, so it is deliberately fence-blind:
- * a quotation of scaffolding is still not a finding.
+ * them), HTML comments — terminated or not: an unclosed `<!--` runs to the
+ * end of the input and swallows the marker this post would append — the
+ * sanitizer-dropped raw-HTML blocks (script/style, `<?…?>`, `<!DOCTYPE …>`),
+ * the entities decoding to nothing visible, empty elements, void tags,
+ * empty links, blockquote-punctuation-only lines, link reference
+ * definitions, hollowed fence delimiters, and forged-footer lines are not
+ * content. The emptiness gates must project through this before comparing
+ * to '', or a scaffolded-but-invisible comment posts, counts toward the
+ * verdict, and re-promotes as an unanswerable blocker. This is a judgment
+ * projection, not a sanitizer, so it is deliberately fence-blind: a
+ * quotation of scaffolding is still not a finding.
  */
 export function rendersAsNothing(text: string): boolean {
-  const stripped = text
-    .replace(/<!--[\s\S]*?-->/g, '')
+  let stripped = text
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
+    .replace(/<script\b[\s\S]*?(?:<\/script\s*>|$)/gi, '')
+    .replace(/<style\b[\s\S]*?(?:<\/style\s*>|$)/gi, '')
+    .replace(/<\?[\s\S]*?(?:\?>|$)/g, '')
+    .replace(/<![A-Za-z][\s\S]*?(?:>|$)/g, '')
     .replace(/\p{Cf}/gu, '')
+    // No-break and zero-width entity forms.
+    .replace(
+      /&nbsp;|&#0*160;|&#x0*a0;|&#0*(?:820[3-7]|8288|65279);|&#x0*(?:200[b-f]|206[0-4]|feff);/gi,
+      '',
+    )
+    // Empty inline links and images render no pixels.
+    .replace(/!?\[\]\([^()\n]*\)/g, '')
+    // Void tags render nothing.
+    .replace(/<(?:br|hr|wbr)\b[^<>\n]*>/gi, '');
+  // Empty paired elements — iterated, because hollowing the inside hollows
+  // the wrapper. Capped: each pass is linear, and nesting deeper than the
+  // cap fails OPEN (the body posts) instead of refusing real content.
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next = stripped.replace(
+      /<([a-z][a-z0-9-]*)[^<>\n]*?>\s*<\/\1\s*>/gi,
+      '',
+    );
+    if (next === stripped) break;
+    stripped = next;
+  }
+  stripped = stripped
     .split('\n')
     .filter((l) => !/^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/.test(l))
     .filter((l) => !FORGED_FOOTER_LINE_RE.test(l))
+    // A line of nothing but blockquote punctuation.
+    .filter((l) => !/^[ \t]{0,3}(?:>[ \t]*)+$/.test(l))
+    // Link reference definitions never render — a link using one lives
+    // elsewhere in the body and still counts as content.
+    .filter((l) => !/^[ \t]{0,3}\[[^\n[\]]+\]:[ \t]*\S/.test(l))
     .join('')
     .trim();
   return stripped === '';

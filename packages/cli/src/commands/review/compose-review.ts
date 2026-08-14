@@ -368,36 +368,38 @@ function formatCannotTell(
   attribution: boolean,
 ): Bi {
   const parsed = cannotTell.map((raw) => {
+    // Entries render as one-line list items: an unindented newline ends a
+    // list item (CommonMark), so a model-written entry spanning lines would
+    // leak its continuation out of the list — collapse FIRST, by split/join
+    // (not a `/\s*\n+\s*/g` replace: that regex backtracks quadratically
+    // on a long whitespace run with no newline in it, and these entries are
+    // model-written with no length cap — one such entry stalled a measured
+    // probe for seconds at 80k characters). Collapsing first also hands the
+    // sanitation the text GitHub renders: re-wrapping can split a forged
+    // footer or a marker across the entry's lines, where neither half
+    // strips, but the collapsed line carries it rejoined.
+    const collapsed = raw.includes('\n')
+      ? raw
+          .split('\n')
+          .map((seg) => seg.trim())
+          .filter((seg) => seg !== '')
+          .join(' ')
+      : raw;
     // An unattributed entry goes through the full fixpoint sanitation —
     // the entry is quoted into a body that carries no canonical footer, so
     // a surviving footer or marker in any position would be the post's
-    // only attribution.
-    const source = attribution ? raw : stripForUnattributedPost(raw);
-    // Entries render as one-line list items: an unindented newline ends a
-    // list item (CommonMark), so a model-written entry spanning lines would
-    // leak its continuation out of the list. Collapsed by split/join, not
-    // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
-    // a long whitespace run with no newline in it, and these entries are
-    // model-written with no length cap — one such entry stalled a measured
-    // probe for seconds at 80k characters. The marker check goes through
-    // `severityOf` (trims first — a leading space used to leak the marker
-    // past this strip into the posted body), and the strip is iterative —
-    // a looping model drafts stacked markers and a single slice posts the
-    // second one.
+    // only attribution. The marker check goes through `severityOf` (trims
+    // first — a leading space used to leak the marker past this strip into
+    // the posted body), and the strip is iterative — a looping model drafts
+    // stacked markers and a single slice posts the second one.
+    const source = attribution
+      ? collapsed
+      : stripForUnattributedPost(collapsed);
     const unmarked =
       severityOf({ body: source }) === null
         ? source
         : stripSeverityPrefix(source).trim();
-    const line = linkifyCommentRefs(
-      unmarked.includes('\n')
-        ? unmarked
-            .split('\n')
-            .map((seg) => seg.trim())
-            .filter((seg) => seg !== '')
-            .join(' ')
-        : unmarked,
-      pr,
-    );
+    const line = linkifyCommentRefs(unmarked, pr);
     const idx = line.indexOf(' — ');
     // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
     // empty-string reason would become a group key and render `2 entries — :`.
