@@ -3177,7 +3177,10 @@ export function WebShellSidebar({
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
             <SessionDetailsTooltip
-              session={session}
+              session={{
+                ...session,
+                workspaceCwd: getSessionWorkspaceCwd(session) ?? '',
+              }}
               label={label}
               time={time}
               completedUnread={completedUnread}
@@ -3705,6 +3708,7 @@ export function WebShellSidebar({
       getArchivedExportWorkspaceCwd,
       getActiveExportScope,
       getIdentityForSession,
+      getSessionWorkspaceCwd,
       handleArchive,
       handleDeleteSession,
       handleExportSession,

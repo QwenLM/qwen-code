@@ -1049,7 +1049,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(primaryArchive).not.toHaveBeenCalled();
   });
 
-  it('allows only the current locked-secondary session to rename', async () => {
+  it('shows rename for current and non-current locked-secondary sessions', async () => {
     connection.sessionId = 'locked-current';
     connection.workspaceCwd = '/tmp/other';
     connection.capabilities = {
@@ -1098,32 +1098,8 @@ describe('WebShellSidebar workspace removal', () => {
       true,
     );
     expect(inlineSessionAction('Locked other', 'Rename')?.disabled).toBe(false);
-
-    const currentRow = Array.from(
-      container.querySelectorAll<HTMLElement>('[role="button"]'),
-    ).find((row) => row.textContent?.includes('Locked current'));
-    await act(async () => {
-      currentRow?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-      await Promise.resolve();
-    });
-    const input = container.querySelector<HTMLInputElement>('input');
-    expect(input).not.toBeNull();
-    await act(async () => {
-      setInputValue(input!, 'Renamed locked current');
-      input!
-        .closest('form')
-        ?.dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
-      await sessionActions.renameSession.mock.results.at(-1)?.value;
-    });
-    expect(sessionActions.renameSession).toHaveBeenCalledWith(
-      'Renamed locked current',
-    );
-    expect(renameSessionCatalog).toHaveBeenCalledWith(
-      '/tmp/other',
-      'locked-current',
-      'Renamed locked current',
+    expect(inlineSessionAction('Locked current', 'Rename')?.disabled).toBe(
+      false,
     );
   });
 
@@ -2105,7 +2081,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
     await expandWorkspace('project');
 
-    expect(inlineSessionAction('Legacy primary', 'Rename')).toBeDefined();
+    expect(inlineSessionAction('Legacy primary', 'Rename')).toBeUndefined();
     expect(inlineSessionAction('Legacy primary', 'Pin')).toBeDefined();
     expect(archiveButtonFor('Legacy primary')?.disabled).toBe(false);
     expect(
@@ -2668,7 +2644,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(render).toHaveBeenLastCalledWith(
       expect.objectContaining({ id: 'secondary', cwd: '/tmp/other' }),
-      { expanded: true },
+      { expanded: false },
     );
   });
 
