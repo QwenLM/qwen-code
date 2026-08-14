@@ -7,7 +7,14 @@
 // catch it — this file is that test.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -850,7 +857,22 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     assert.match(
       flakeStep.run,
       /^\s*set -uo pipefail/m,
-      'the gate must not run under -e',
+      'the gate must not opt into -e',
+    );
+    // The runner wraps run: blocks in `bash -e -o pipefail`, and `set -uo`
+    // does NOT clear that inherited -e — only an explicit `set +e` does.
+    // Without it the first failing test invocation kills the step (round-1
+    // sandboxed verify blocker), and the behavioral suite below proves the
+    // same end to end under the wrapper.
+    assert.match(
+      flakeStep.run,
+      /^\s*set \+e$/m,
+      'the gate must explicitly clear the runner wrapper -e',
+    );
+    assert.match(
+      flakeStep.run,
+      /trap on_gate_exit EXIT/,
+      'abnormal exits (set -u deaths) must be converted to the error verdict',
     );
     assert.doesNotMatch(
       flakeStep.run,
@@ -881,18 +903,45 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       publishStep.env.FLAKE_SUMMARY,
       '${{ needs.verify.outputs.flake_summary }}',
     );
-    // The agent step recreates verify-results from scratch; the gate log is
-    // root-owned in RUNNER_TEMP and must be copied back in afterwards, or
-    // the artifact and the comment lose the per-round matrix.
-    const wipeIdx = agentStep.run.indexOf(
-      'rm -rf "$RUNNER_TEMP/verify-results"',
+    // The authoritative log stays root-owned in RUNNER_TEMP and is staged
+    // into verify-results by a dedicated always() root step AFTER the agent
+    // exits — the last write to that filename. Staging it earlier loses it
+    // on an early agent abort, and verify-results is chowned to the build
+    // user while PR-controlled agent code runs, so an earlier copy could be
+    // rewritten before upload (round-1 review).
+    const stageStep = verifyJob.steps.find(
+      (s) => s.name === 'Stage flakiness gate log for upload',
     );
-    const copyIdx = agentStep.run.indexOf(
-      'cp "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"',
+    assert.ok(stageStep, 'the staging step must exist');
+    assert.equal(
+      stageStep.if,
+      "always() && steps.pr.outputs.decision == 'run'",
+      'staging must survive a failed agent step',
     );
-    assert.ok(wipeIdx !== -1, 'agent step must still recreate verify-results');
-    assert.ok(copyIdx !== -1, 'agent step must copy the gate log back');
-    assert.ok(copyIdx > wipeIdx, 'the copy must happen AFTER the recreation');
+    const agentIdx = verifyJob.steps.indexOf(agentStep);
+    const stageIdx = verifyJob.steps.indexOf(stageStep);
+    const uploadIdx = verifyJob.steps.findIndex(
+      (s) => s.name === 'Upload verify results',
+    );
+    assert.ok(
+      agentIdx < stageIdx && stageIdx < uploadIdx,
+      'staging must run after the agent and before the upload',
+    );
+    assert.match(
+      stageStep.run,
+      /cp -f "\$RUNNER_TEMP\/flake-gate\.log" "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"/,
+      'staging must overwrite whatever the agent era left under that name',
+    );
+    assert.doesNotMatch(
+      agentStep.run,
+      /flake-gate\.log/,
+      'the agent step must not stage the log — that is the wrong trust boundary',
+    );
+    assert.match(
+      publishStep.run,
+      /FLAKE_LOG='verify-results\/flake-gate\.log'/,
+      'the publisher must pin the exact root-level path, never find/sort',
+    );
     assert.match(
       publishStep.run,
       /emit_block 'Flakiness gate log' "\$FLAKE_LOG"/,
@@ -937,6 +986,261 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     assert.ok(
       verifyJob['timeout-minutes'] >= 170,
       `timeout-minutes must cover the gate budget (got ${verifyJob['timeout-minutes']})`,
+    );
+  });
+});
+
+describe('qwen-triage: flakiness gate — behavioral, under the production wrapper', () => {
+  // The structural tests above pin the YAML text; these execute the
+  // extracted gate and publisher fragments, because YAML inspection cannot
+  // observe the runner's own shell contract: every run: block executes
+  // under `bash --noprofile --norc -e -o pipefail`, and a `set -uo` script
+  // does NOT clear that inherited -e. That exact blind spot shipped the
+  // round-1 blocker — the first failing test invocation killed the step —
+  // so every scenario here runs under the wrapper, not under a bare bash.
+  const flakeRun = verifyJob.steps.find((s) => s.id === 'flake').run;
+  const publishRun = doc.jobs['publish-verify'].steps.find(
+    (s) => s.name === 'Post verification report comment',
+  ).run;
+
+  const STUB_RUNUSER = [
+    '#!/bin/bash',
+    'while [ "$1" != "--" ]; do shift; done',
+    'shift',
+    'exec "$@"',
+    '',
+  ].join('\n');
+  // npx/node stub: the last argument is the ./file operand; its scripted
+  // P/F sequence lives at $FLAKE_SEQ_DIR/<basename>, consumed one letter
+  // per invocation and cycled (missing sequence file = always pass).
+  const STUB_TESTRUNNER = [
+    '#!/bin/bash',
+    'f="${@: -1}"',
+    'key="$(basename "$f")"',
+    'n_file="$FLAKE_SEQ_DIR/.count-$key"',
+    'n=$(cat "$n_file" 2>/dev/null || echo 0)',
+    'echo $((n+1)) > "$n_file"',
+    'seq="$(cat "$FLAKE_SEQ_DIR/$key" 2>/dev/null || echo P)"',
+    'i=$((n % ${#seq}))',
+    '[ "${seq:$i:1}" = P ] && exit 0',
+    'echo "stub failure for $key run $((n+1))"',
+    'exit 1',
+    '',
+  ].join('\n');
+
+  const scenarioRoot = mkdtempSync(join(tmpdir(), 'flake-behavioral-'));
+  after(() => rmSync(scenarioRoot, { recursive: true, force: true }));
+
+  const runGate = ({ layout = {}, list, sequences = {} }) => {
+    const root = mkdtempSync(join(scenarioRoot, 'case-'));
+    const ws = join(root, 'ws');
+    const rt = join(root, 'rt');
+    const bin = join(root, 'bin');
+    const seqDir = join(root, 'seq');
+    for (const d of [ws, rt, bin, seqDir]) mkdirSync(d, { recursive: true });
+    for (const [p, content] of Object.entries(layout)) {
+      mkdirSync(dirname(join(ws, p)), { recursive: true });
+      writeFileSync(join(ws, p), content);
+    }
+    if (list !== null) writeFileSync(join(rt, 'flake-gate-files'), list);
+    for (const [k, v] of Object.entries(sequences)) {
+      writeFileSync(join(seqDir, k), v);
+    }
+    for (const [name, content] of [
+      ['runuser', STUB_RUNUSER],
+      ['npx', STUB_TESTRUNNER],
+      ['node', STUB_TESTRUNNER],
+    ]) {
+      writeFileSync(join(bin, name), content);
+      chmodSync(join(bin, name), 0o755);
+    }
+    const gateFile = join(root, 'gate.sh');
+    writeFileSync(gateFile, flakeRun);
+    const out = join(rt, 'github-output');
+    writeFileSync(out, '');
+    writeFileSync(join(rt, 'github-summary'), '');
+    const res = spawnSync(
+      'bash',
+      ['--noprofile', '--norc', '-e', '-o', 'pipefail', gateFile],
+      {
+        cwd: ws,
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: rt,
+          GITHUB_OUTPUT: out,
+          GITHUB_STEP_SUMMARY: join(rt, 'github-summary'),
+          FLAKE_ROUNDS: '5',
+          FLAKE_SEQ_DIR: seqDir,
+        },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    const outputs = Object.fromEntries(
+      readFileSync(out, 'utf8')
+        .split('\n')
+        .filter((l) => l.includes('='))
+        .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+    );
+    let log = '';
+    try {
+      log = readFileSync(join(rt, 'flake-gate.log'), 'utf8');
+    } catch {
+      // a scenario may legitimately abort before creating the log
+    }
+    return { res, outputs, log };
+  };
+
+  const UNIT = {
+    'scripts/tests/a.test.js': '',
+    'scripts/tests/b.test.js': '',
+  };
+
+  it('all-pass rounds land as `pass` with exit 0', () => {
+    const { res, outputs } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+  });
+
+  it('per-file P/F alternation is `flaky` even next to a consistently failing file, and the wrapper -e does not kill the step', () => {
+    // One shared exit bit would classify this pair consistent-fail (the
+    // FFFFF file masks the PFPFP one); per-file groups must still see the
+    // divergence. Every F also exercises the errexit hazard: without
+    // `set +e` the first one kills the script under the wrapper.
+    const { res, outputs, log } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
+      sequences: { 'a.test.js': 'F', 'b.test.js': 'PF' },
+    });
+    assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
+    assert.equal(outputs.flake_verdict, 'flaky');
+    assert.match(log, /a\.test\.js: FFFFF/);
+    assert.match(log, /b\.test\.js: PFPFP/);
+  });
+
+  it('identical failure every round stays informational `consistent-fail`, exit 0', () => {
+    const { res, outputs } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\n',
+      sequences: { 'a.test.js': 'F' },
+    });
+    assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
+    assert.equal(outputs.flake_verdict, 'consistent-fail');
+  });
+
+  it('a missing recorded list degrades to the `error` verdict, exit 0', () => {
+    const { res, outputs } = runGate({ layout: UNIT, list: null });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'error');
+  });
+
+  it('out-of-scope families are skipped with logged reasons and land `n/a`', () => {
+    const { res, outputs, log } = runGate({
+      layout: {
+        'integration-tests/x.test.ts': '',
+        'packages/web/client/e2e/y.spec.ts': '',
+        'packages/bunpkg/package.json': '{}',
+        'packages/bunpkg/z.test.ts': '',
+      },
+      list: [
+        'integration-tests/x.test.ts',
+        'packages/web/client/e2e/y.spec.ts',
+        'packages/bunpkg/z.test.ts',
+        '',
+      ].join('\n'),
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'n/a');
+    assert.match(log, /integration test, out of gate scope/);
+    assert.match(log, /e2e suite, out of gate scope/);
+    assert.match(log, /no vitest config \(unsupported runner family\)/);
+  });
+
+  it('a nested-workspace file runs from its OWN package, and a leading-dash filename stays an operand', () => {
+    const { res, outputs, log } = runGate({
+      layout: {
+        'packages/channels/base/package.json': '{}',
+        'packages/channels/base/vitest.config.ts': '',
+        'packages/channels/base/src/p.test.ts': '',
+        'scripts/tests/--config=evil.test.js': '',
+      },
+      list: 'packages/channels/base/src/p.test.ts\nscripts/tests/--config=evil.test.js\n',
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(
+      log,
+      /\(cd packages\/channels\/base\) npx --no-install vitest run \.\/src\/p\.test\.ts/,
+      'the nested package must be entered itself, not its parent',
+    );
+    assert.match(
+      log,
+      /\.\/scripts\/tests\/--config=evil\.test\.js/,
+      'operands must be ./-prefixed so vitest cannot parse them as options',
+    );
+  });
+
+  it('publisher demotion executes one-way: only `flaky` demotes, and it MUST demote', () => {
+    const block = publishRun.match(
+      /case "\$\{FLAKE_VERDICT:-\}" in[\s\S]*?esac/,
+    );
+    assert.ok(block, 'the publisher must map FLAKE_VERDICT in a case block');
+    const drive = (verdict) => {
+      const res = spawnSync(
+        'bash',
+        [
+          '--noprofile',
+          '--norc',
+          '-e',
+          '-o',
+          'pipefail',
+          '-c',
+          [
+            "QUAL='✅ passed'",
+            "QUAL_ZH='✅ 通过'",
+            "HEADLINE='merge-ready (agent verdict)'",
+            "HEADLINE_ZH='可合入'",
+            "FLAKE_LINE=''",
+            "FLAKE_LINE_ZH=''",
+            block[0],
+            'printf \'%s|%s\' "$QUAL" "$HEADLINE"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            FLAKE_VERDICT: verdict,
+            FLAKE_SUMMARY: '1 of 2 changed test file(s) diverged',
+          },
+          encoding: 'utf8',
+          timeout: 15_000,
+        },
+      );
+      assert.equal(res.status, 0, res.stderr);
+      return res.stdout;
+    };
+    for (const v of [
+      '',
+      'pass',
+      'n/a',
+      'consistent-fail',
+      'timeout',
+      'error',
+    ]) {
+      assert.equal(
+        drive(v),
+        '✅ passed|merge-ready (agent verdict)',
+        `'${v}' must not touch the headline`,
+      );
+    }
+    assert.equal(
+      drive('flaky'),
+      '❌ not passed|non-deterministic tests (flakiness gate)',
+      'flaky must demote — deleting the flaky arm has to fail this test',
     );
   });
 });

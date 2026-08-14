@@ -2895,13 +2895,16 @@ jobs:
 
       # Deterministic flakiness gate (#9125): re-run the PR's changed test
       # files N times through the same entry points CI uses and compare the
-      # outcomes. A single execution has no power against non-deterministic
-      # failures — a ~50% flake passes half of all CI runs (PR #9086's mtime
-      # assertion was certified exactly that way) — while N=5 identical
-      # re-runs catch it with ~97% probability. Only run-to-run DIVERGENCE is
-      # a gate signal: a test that fails identically every round is
+      # outcomes per FILE. A single execution has no power against
+      # non-deterministic failures — a ~50% flake passes half of all CI runs
+      # (PR #9086's mtime assertion was certified exactly that way) — while
+      # N=5 identical re-runs catch it with ~94% probability (all-pass and
+      # all-fail rounds both miss: 1 - 2*(1/2)^5). Only run-to-run DIVERGENCE
+      # is a gate signal: a test that fails identically every round is
       # deterministic, CI already owns that, and an environment-sensitive
-      # suite must not false-positive here.
+      # suite must not false-positive here. Granularity is one runner
+      # invocation per changed file, so a consistently failing file cannot
+      # mask another file's divergence behind a shared exit bit.
       #
       # Authority is one-way by construction: `flaky` demotes the published
       # headline, and no gate value can raise or soften one. The test code
@@ -2916,10 +2919,32 @@ jobs:
           GH_TOKEN: ''
           FLAKE_ROUNDS: '${{ vars.QWEN_VERIFY_FLAKE_ROUNDS }}'
         run: |-
-          # Deliberately NOT -e: the gate is advisory-and-demoting only, so a
-          # bug in it must fail OPEN (verdict `error`, agent still runs) — the
-          # alternative is a gate outage taking down the whole verify lane.
+          # Fail OPEN by contract: the gate is advisory-and-demoting only, so
+          # a bug in it must degrade to the fixed `error` verdict — never
+          # take down the verify lane.
+          #
+          # `set +e` is load-bearing, not style: the runner wraps every run:
+          # block in `bash -e -o pipefail`, and `set -uo pipefail` alone does
+          # NOT clear that inherited -e. Without the explicit +e the first
+          # failing test invocation kills the step, inverting fail-open into
+          # fail-closed for exactly the flaky/consistent-fail populations the
+          # gate exists to classify (round-1 sandboxed verify, cells C/D).
           set -uo pipefail
+          set +e
+          # Abnormal-exit net: `set -u` (or any unforeseen fatal) still
+          # aborts non-zero. Convert that ending to the fixed `error` verdict
+          # and a zero exit, so even a gate implementation bug is
+          # information, not an outage. finish() marks completion — the trap
+          # only rewrites endings that never reached a verdict.
+          GATE_DONE=''
+          on_gate_exit() {
+            if [ -z "$GATE_DONE" ] && [ -n "${GITHUB_OUTPUT:-}" ]; then
+              echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+              echo "flake_summary=the gate aborted before reaching a verdict — see the step log" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          }
+          trap on_gate_exit EXIT
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           LOG="${RUNNER_TEMP:?}/flake-gate.log"
           LIST="$RUNNER_TEMP/flake-gate-files"
@@ -2932,6 +2957,7 @@ jobs:
             echo "flake_summary=$2" >> "$GITHUB_OUTPUT"
             printf '\nverdict: %s\nsummary: %s\n' "$1" "$2" >> "$LOG"
             echo "Flakiness gate: $1 — $2" >> "$GITHUB_STEP_SUMMARY"
+            GATE_DONE=1
             exit 0
           }
 
@@ -2942,70 +2968,107 @@ jobs:
 
           [ -f "$LIST" ] || finish error 'the recorded changed-test list is missing'
 
-          # Partition the recorded files into runnable groups. Every skipped
-          # file is logged with its reason — a silently narrowed gate would
-          # read as "covered" when it was not.
-          scripts_files=()
-          helper_files=()
+          # Partition into per-FILE groups. Every skipped file is logged
+          # with its reason — a silently narrowed gate would read as
+          # "covered" when it was not. Operands are `./`-prefixed BEFORE %q,
+          # so a checked-in filename beginning with `-` (e.g. `--config=x`)
+          # can never be parsed as a runner option.
+          group_labels=()
+          group_dirs=()
+          group_cmds=()
           skipped=0
-          declare -A pkg_files=()
+          add_skip() {
+            printf '%s: %s\n' "$2" "$1" >> "$LOG"
+            skipped=$((skipped + 1))
+          }
+          owning_pkg_dir() {
+            # Nearest ancestor directory carrying package.json — nested
+            # workspaces (packages/channels/base) own their runner and must
+            # be entered themselves, never their parent.
+            local d="$1"
+            d="${d%/*}"
+            while [ -n "$d" ] && [ "$d" != '.' ]; do
+              if [ -f "$d/package.json" ]; then
+                printf '%s' "$d"
+                return 0
+              fi
+              case "$d" in
+                */*) d="${d%/*}" ;;
+                *) d='' ;;
+              esac
+            done
+            return 1
+          }
+          has_vitest_config() {
+            local c
+            for c in vitest.config.ts vitest.config.mts vitest.config.js vitest.config.mjs vitest.workspace.ts; do
+              [ -f "$1/$c" ] && return 0
+            done
+            return 1
+          }
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             if [ ! -f "$f" ]; then
-              printf 'not present in the merge tree, skipped: %s\n' "$f" >> "$LOG"
-              skipped=$((skipped + 1))
+              add_skip "$f" 'not present in the merge tree, skipped'
               continue
             fi
             case "$f" in
-              scripts/tests/*) scripts_files+=("$f") ;;
-              .github/scripts/*.test.mjs) helper_files+=("$f") ;;
               integration-tests/*)
                 # E2E suites need sandbox/model plumbing this gate does not have.
-                printf 'integration test, out of gate scope: %s\n' "$f" >> "$LOG"
-                skipped=$((skipped + 1))
+                add_skip "$f" 'integration test, out of gate scope'
+                continue
                 ;;
-              packages/*/*)
-                pkg="${f#packages/}"
-                pkg="packages/${pkg%%/*}"
-                pkg_files["$pkg"]+="${f#"$pkg"/}"$'\n'
+              */e2e/*|e2e/*)
+                # Browser/E2E specs (e.g. web-shell client/e2e) are excluded
+                # by their vitest configs — running them here would be
+                # permanent "No test files found" noise, not coverage.
+                add_skip "$f" 'e2e suite, out of gate scope'
+                continue
+                ;;
+            esac
+            case "$f" in
+              scripts/tests/*)
+                group_labels+=("$f")
+                group_dirs+=('.')
+                group_cmds+=("npx --no-install vitest run --config ./scripts/tests/vitest.config.ts $(printf '%q' "./$f")")
+                ;;
+              .github/scripts/*.test.mjs)
+                group_labels+=("$f")
+                group_dirs+=('.')
+                group_cmds+=("node --test $(printf '%q' "./$f")")
+                ;;
+              packages/*)
+                if ! pkg="$(owning_pkg_dir "$f")"; then
+                  add_skip "$f" 'no owning package.json, skipped'
+                  continue
+                fi
+                if ! has_vitest_config "$pkg"; then
+                  # e.g. packages/desktop runs `bun test` — an unsupported
+                  # runner family stays explicitly out of scope rather than
+                  # being mis-run through vitest.
+                  add_skip "$f" "owning package ${pkg} has no vitest config (unsupported runner family), skipped"
+                  continue
+                fi
+                # From the owning package CWD (vitest configs assume it);
+                # npx resolves the binary by walking up node_modules.
+                group_labels+=("$f")
+                group_dirs+=("$pkg")
+                group_cmds+=("npx --no-install vitest run $(printf '%q' "./${f#"$pkg"/}")")
                 ;;
               *)
-                printf 'no runner mapped for this path, skipped: %s\n' "$f" >> "$LOG"
-                skipped=$((skipped + 1))
+                add_skip "$f" 'no runner mapped for this path, skipped'
                 ;;
             esac
           done < "$LIST"
 
-          group_labels=()
-          group_dirs=()
-          group_cmds=()
-          if [ "${#scripts_files[@]}" -gt 0 ]; then
-            group_labels+=('scripts/tests')
-            group_dirs+=('.')
-            group_cmds+=("npx --no-install vitest run --config ./scripts/tests/vitest.config.ts $(printf '%q ' "${scripts_files[@]}")")
-          fi
-          if [ "${#helper_files[@]}" -gt 0 ]; then
-            group_labels+=('.github/scripts')
-            group_dirs+=('.')
-            group_cmds+=("node --test $(printf '%q ' "${helper_files[@]}")")
-          fi
-          for pkg in "${!pkg_files[@]}"; do
-            mapfile -t rel <<< "${pkg_files[$pkg]%$'\n'}"
-            group_labels+=("$pkg")
-            group_dirs+=("$pkg")
-            # From the package CWD (vitest configs assume it); npx resolves
-            # the workspace-root binary by walking up node_modules.
-            group_cmds+=("npx --no-install vitest run $(printf '%q ' "${rel[@]}")")
-          done
-
           total="${#group_labels[@]}"
           if [ "$total" -eq 0 ]; then
-            finish n/a "no changed unit-test files to re-run (${skipped} out-of-scope file(s) noted in the log)"
+            finish n/a "no runnable changed test files (${skipped} out-of-scope file(s) noted in the log)"
           fi
           {
-            printf 'rounds=%s groups=%s skipped=%s\n' "$ROUNDS" "$total" "$skipped"
+            printf 'rounds=%s files=%s skipped=%s\n' "$ROUNDS" "$total" "$skipped"
             for i in "${!group_labels[@]}"; do
-              printf 'group %s: (cd %s) %s\n' "${group_labels[$i]}" "${group_dirs[$i]}" "${group_cmds[$i]}"
+              printf 'file %s: (cd %s) %s\n' "${group_labels[$i]}" "${group_dirs[$i]}" "${group_cmds[$i]}"
             done
             printf '\n'
           } >> "$LOG"
@@ -3061,24 +3124,24 @@ jobs:
               *F*) failing=$((failing + 1)) ;;
             esac
           done
-          printf '\nper-group results (P=pass F=fail, one letter per run):\n' >> "$LOG"
+          printf '\nper-file results (P=pass F=fail, one letter per run):\n' >> "$LOG"
           for i in "${!group_labels[@]}"; do
             printf '  %s: %s\n' "${group_labels[$i]}" "${results[$i]:-}" >> "$LOG"
           done
 
           if [ "$flaky" -gt 0 ]; then
-            finish flaky "${flaky} of ${total} changed-test group(s) returned different results across identical re-runs (${rounds_done} full round(s))"
+            finish flaky "${flaky} of ${total} changed test file(s) returned different results across identical re-runs (${rounds_done} full round(s))"
           fi
           if [ "$timed_out" = true ] && [ "$rounds_done" -lt 2 ]; then
             finish timeout "the 15-minute budget elapsed before two full rounds completed (${rounds_done} done) — no flakiness signal either way"
           fi
           if [ "$failing" -gt 0 ]; then
-            finish consistent-fail "${failing} of ${total} changed-test group(s) failed identically in every round — deterministic, so CI owns that signal"
+            finish consistent-fail "${failing} of ${total} changed test file(s) failed identically in every round — deterministic, so CI owns that signal"
           fi
           if [ "$timed_out" = true ]; then
             finish timeout "only ${rounds_done} of ${ROUNDS} rounds fit the 15-minute budget; the completed rounds agreed"
           fi
-          finish pass "${total} changed-test group(s) x ${rounds_done} identical rounds, no divergence"
+          finish pass "${total} changed test file(s) x ${rounds_done} identical rounds, no divergence"
 
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
@@ -3227,12 +3290,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/verify-results"
           if [ -f "$RUNNER_TEMP/prepare.log.keep" ]; then
             mv "$RUNNER_TEMP/prepare.log.keep" "$RUNNER_TEMP/verify-results/prepare.log"
-          fi
-          # The flakiness gate's log is root-owned in RUNNER_TEMP (the build
-          # user cannot rewrite it); copy it into the freshly recreated
-          # results dir so the artifact and the publish job can see it.
-          if [ -f "$RUNNER_TEMP/flake-gate.log" ]; then
-            cp "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"
           fi
 
           # Bypass the runner proxy before launching qwen: the proxy cuts the
@@ -3660,6 +3717,24 @@ jobs:
           fi
           echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
           echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+
+      # The gate log's authoritative copy lives root-owned at
+      # $RUNNER_TEMP/flake-gate.log, outside every agent-writable directory.
+      # It is staged into verify-results HERE — after the agent exits, from
+      # an always() root step — as the LAST write to that filename: an early
+      # agent-step abort cannot lose it, and agent-era PR code (which owns a
+      # chowned verify-results while it runs) cannot control what is
+      # uploaded under this name. The publisher pins this exact root-level
+      # path, so a nested same-named file planted in a collected artifact
+      # dir cannot shadow it either.
+      - name: 'Stage flakiness gate log for upload'
+        if: "always() && steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -euo pipefail
+          if [ -f "${RUNNER_TEMP:?}/flake-gate.log" ]; then
+            mkdir -p "$RUNNER_TEMP/verify-results"
+            cp -f "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"
+          fi
 
       - name: 'Upload verify results'
         if: "always() && steps.pr.outputs.decision == 'run'"
@@ -4345,7 +4420,10 @@ jobs:
             # whatever directory find visits first, which is unordered.
             REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
             ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
-            FLAKE_LOG="$(find verify-results -type f -name 'flake-gate.log' 2>/dev/null | sort | head -1 || true)"
+            # Exact root-level path, never a find: the staging step writes
+            # this name last as root, and a same-named file nested inside a
+            # collected agent artifact dir must not shadow it.
+            FLAKE_LOG='verify-results/flake-gate.log'
             ASSERT_LINE=''
             ASSERT_LINE_ZH=''
             if [ -n "$ASSERTIONS_FILE" ]; then
