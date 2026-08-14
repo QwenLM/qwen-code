@@ -2350,17 +2350,17 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         planPath,
       }),
     ).toThrow(/owner\/repo/);
-    // A flag-shaped or metacharacter host is dropped to null, never welded.
-    const p = buildRoleBrief(
-      { ...PR_PLAN, host: 'ghe.example.com; rm -rf /' },
-      '0',
-      { planPath },
-    );
-    expect(p).not.toContain('--host');
-    const p2 = buildRoleBrief({ ...PR_PLAN, host: '--help' }, '0', {
-      planPath,
-    });
-    expect(p2).not.toContain('--host');
+    // A present-but-invalid host fails closed (throws) — never silently
+    // dropped from the welded command, which would reroute the evidence
+    // fetch to github.com's same-named repo.
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: 'ghe.example.com; rm -rf /' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/not a hostname/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: '--help' }, '0', { planPath }),
+    ).toThrow(/not a hostname/);
   });
 
   it('refuses Agent 0 on a plan with no pull request in it', () => {

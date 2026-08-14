@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dirname, resolve } from 'node:path';
 
 const {
-  ghRawMock,
+  ghApiMock,
   ensureAuthenticatedMock,
   setGhHostMock,
   writeStdoutLineMock,
@@ -16,7 +16,7 @@ const {
   writeFileSyncMock,
   mkdirSyncMock,
 } = vi.hoisted(() => ({
-  ghRawMock: vi.fn(),
+  ghApiMock: vi.fn(),
   ensureAuthenticatedMock: vi.fn(),
   setGhHostMock: vi.fn(),
   writeStdoutLineMock: vi.fn(),
@@ -29,8 +29,9 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
     ...actual,
-    // getCommentBody uses ghRawText (UTF-8, edges preserved), the text seam.
-    ghRawText: ghRawMock,
+    // getCommentBody reads `.body` off the JSON-parsed response (the ghApi
+    // seam) — NOT a `--jq` raw-text fetch, which appends a trailing newline.
+    ghApi: ghApiMock,
     ensureAuthenticated: ensureAuthenticatedMock,
     setGhHost: setGhHostMock,
   };
@@ -59,47 +60,47 @@ describe('runCommentBody', () => {
     ensureAuthenticatedMock.mockReturnValue(undefined);
   });
 
-  it('fetches an inline comment body as raw text (no JSON.parse)', () => {
-    // The body is markdown, not JSON — the seam is `ghRaw`, and the mock
-    // returns raw text precisely because that is what reaches JSON.parse
-    // nowhere.
-    ghRawMock.mockReturnValue('**[Suggestion]** the inline body');
+  it('fetches an inline comment body from the parsed JSON (no --jq newline)', () => {
+    ghApiMock.mockReturnValue({ body: '**[Suggestion]** the inline body' });
     const { body } = runCommentBody({
       id: 3773970278,
       kind: 'inline',
       repo: 'QwenLM/qwen-code',
     });
-    expect(ghRawMock).toHaveBeenCalledWith(
-      'api',
+    expect(ghApiMock).toHaveBeenCalledWith(
       'repos/QwenLM/qwen-code/pulls/comments/3773970278',
-      '--jq',
-      '.body // ""',
     );
     expect(body).toBe('**[Suggestion]** the inline body');
   });
 
-  it('keeps a leading indent (no trim) — it is what puts a log paste in its code block', () => {
-    ghRawMock.mockReturnValue('    indented first line\nrest\n');
+  it('keeps both edges exactly — leading indent AND no invented trailing newline', () => {
+    // A leading indent puts a pasted log inside its code block; a body that
+    // does not end in '\n' must not gain one (the --jq form appended it).
+    ghApiMock.mockReturnValue({ body: '    indented first line\nrest' });
     const { body } = runCommentBody({
       id: 1,
       kind: 'inline',
       repo: 'QwenLM/qwen-code',
     });
-    expect(body).toBe('    indented first line\nrest\n');
+    expect(body).toBe('    indented first line\nrest');
+  });
+
+  it('returns an empty string for a null body', () => {
+    ghApiMock.mockReturnValue({ body: null });
+    expect(
+      runCommentBody({ id: 1, kind: 'inline', repo: 'QwenLM/qwen-code' }).body,
+    ).toBe('');
   });
 
   it('fetches an issue comment body', () => {
-    ghRawMock.mockReturnValue('the issue body');
+    ghApiMock.mockReturnValue({ body: 'the issue body' });
     runCommentBody({
       id: 5277891862,
       kind: 'issue',
       repo: 'QwenLM/qwen-code',
     });
-    expect(ghRawMock).toHaveBeenCalledWith(
-      'api',
+    expect(ghApiMock).toHaveBeenCalledWith(
       'repos/QwenLM/qwen-code/issues/comments/5277891862',
-      '--jq',
-      '.body // ""',
     );
   });
 
@@ -107,23 +108,20 @@ describe('runCommentBody', () => {
     expect(() =>
       runCommentBody({ id: 1, kind: 'review', repo: 'QwenLM/qwen-code' }),
     ).toThrow(TypeError);
-    ghRawMock.mockReturnValue('review body');
+    ghApiMock.mockReturnValue({ body: 'review body' });
     runCommentBody({
       id: 99,
       kind: 'review',
       repo: 'QwenLM/qwen-code',
       prNumber: 9073,
     });
-    expect(ghRawMock).toHaveBeenCalledWith(
-      'api',
+    expect(ghApiMock).toHaveBeenCalledWith(
       'repos/QwenLM/qwen-code/pulls/9073/reviews/99',
-      '--jq',
-      '.body // ""',
     );
   });
 
   it('writes --out instead of returning the body inline', () => {
-    ghRawMock.mockReturnValue('long tail');
+    ghApiMock.mockReturnValue({ body: 'long tail' });
     const result = runCommentBody({
       id: 1,
       kind: 'inline',
@@ -151,7 +149,7 @@ describe('commentBodyCommand handler', () => {
   });
 
   it('prints the body verbatim on stdout', () => {
-    ghRawMock.mockReturnValue('the body');
+    ghApiMock.mockReturnValue({ body: 'the body' });
     (commentBodyCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -164,7 +162,7 @@ describe('commentBodyCommand handler', () => {
   });
 
   it('threads --host to setGhHost before the first gh call', () => {
-    ghRawMock.mockReturnValue('the body');
+    ghApiMock.mockReturnValue({ body: 'the body' });
     (commentBodyCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -174,7 +172,7 @@ describe('commentBodyCommand handler', () => {
       host: 'ghe.example.com',
     });
     expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
-    const ghOrder = ghRawMock.mock.invocationCallOrder[0];
+    const ghOrder = ghApiMock.mock.invocationCallOrder[0];
     const authOrder = ensureAuthenticatedMock.mock.invocationCallOrder[0];
     const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
     // ensureAuthenticated spawns the first real gh process (`gh auth
@@ -192,14 +190,14 @@ describe('commentBodyCommand handler', () => {
       repo: 'QwenLM/qwen-code',
     });
     expect(process.exitCode).toBe(2);
-    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ghApiMock).not.toHaveBeenCalled();
     // The usage error must preempt the auth check — on an unauthenticated
     // machine "log in" can never fix a missing --pr.
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
   it('threads --pr through to the review-body fetch on the success path', () => {
-    ghRawMock.mockReturnValue('review body');
+    ghApiMock.mockReturnValue({ body: 'review body' });
     (commentBodyCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -208,11 +206,8 @@ describe('commentBodyCommand handler', () => {
       repo: 'QwenLM/qwen-code',
       pr: 9073,
     });
-    expect(ghRawMock).toHaveBeenCalledWith(
-      'api',
+    expect(ghApiMock).toHaveBeenCalledWith(
       'repos/QwenLM/qwen-code/pulls/9073/reviews/99',
-      '--jq',
-      '.body // ""',
     );
     expect(process.exitCode).toBeUndefined();
   });
@@ -238,7 +233,7 @@ describe('commentBodyCommand handler', () => {
       pr: -3,
     });
     expect(process.exitCode).toBe(2);
-    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ghApiMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
@@ -252,7 +247,7 @@ describe('commentBodyCommand handler', () => {
       out: '',
     });
     expect(process.exitCode).toBe(2);
-    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ghApiMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
@@ -266,7 +261,7 @@ describe('commentBodyCommand handler', () => {
       out: ' ',
     });
     expect(process.exitCode).toBe(2);
-    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ghApiMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
@@ -283,7 +278,7 @@ describe('commentBodyCommand handler', () => {
       host: 'bad host; rm -rf /',
     });
     expect(process.exitCode).toBe(2);
-    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ghApiMock).not.toHaveBeenCalled();
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
@@ -296,14 +291,14 @@ describe('commentBodyCommand handler', () => {
       repo: '../escape',
     });
     expect(process.exitCode).toBe(2);
-    expect(ghRawMock).not.toHaveBeenCalled();
+    expect(ghApiMock).not.toHaveBeenCalled();
     // The usage error must preempt the auth gate — `gh auth login` can
     // never repair the invocation.
     expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
   });
 
   it('--out prints the JSON marker, not the raw body', () => {
-    ghRawMock.mockReturnValue('raw markdown body');
+    ghApiMock.mockReturnValue({ body: 'raw markdown body' });
     (commentBodyCommand.handler as (a: unknown) => void)({
       _: [],
       $0: 'qwen',
@@ -323,7 +318,7 @@ describe('commentBodyCommand handler', () => {
   });
 
   it('exits 1 when the fetch fails', () => {
-    ghRawMock.mockImplementation(() => {
+    ghApiMock.mockImplementation(() => {
       throw new Error('HTTP 404');
     });
     (commentBodyCommand.handler as (a: unknown) => void)({

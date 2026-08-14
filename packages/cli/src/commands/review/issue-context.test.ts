@@ -57,6 +57,11 @@ const ARGS = {
   extraIssues: [],
 };
 
+/** Same-repo extra requests, in the subcommand's RequestedIssue shape. */
+function ex(...numbers: number[]) {
+  return numbers.map((number) => ({ number, ownerRepo: 'QwenLM/qwen-code' }));
+}
+
 function mockClosing(refs: unknown[]): void {
   ghMock.mockReturnValueOnce(JSON.stringify({ closingIssuesReferences: refs }));
 }
@@ -203,7 +208,7 @@ describe('runIssueContext', () => {
     ghMock.mockImplementationOnce(() => {
       throw new Error('HTTP 404: Not Found');
     });
-    const result = runIssueContext({ ...ARGS, extraIssues: [555] });
+    const result = runIssueContext({ ...ARGS, extraIssues: ex(555) });
     expect(result.unfetchable).toEqual([
       {
         number: 555,
@@ -236,7 +241,7 @@ describe('runIssueContext', () => {
       throw new Error('HTTP 403: secondary rate limit');
     });
     mockIssue('five');
-    runIssueContext({ ...ARGS, extraIssues: [555] });
+    runIssueContext({ ...ARGS, extraIssues: ex(555) });
     const written = writeFileSyncMock.mock.calls[0][1] as string;
     expect(written).toContain('the closing set could not be checked');
     expect(written).not.toContain('NOT in the closing set');
@@ -252,7 +257,7 @@ describe('runIssueContext', () => {
     mockIssue('closing one');
     mockIssue('referenced only');
 
-    runIssueContext({ ...ARGS, extraIssues: [555, 9078] });
+    runIssueContext({ ...ARGS, extraIssues: ex(555, 9078) });
 
     // 9078 is already in the same-repo closing set — only 555 is fetched.
     expect(ghMock).toHaveBeenCalledTimes(3);
@@ -283,7 +288,7 @@ describe('runIssueContext', () => {
     mockIssue('closing elsewhere');
     mockIssue('our own 42');
 
-    runIssueContext({ ...ARGS, extraIssues: [42] });
+    runIssueContext({ ...ARGS, extraIssues: ex(42) });
 
     // The extra targets the PR repo's own #42 — a different issue from the
     // acme/other#42 closing ref, so both fetches must happen.
@@ -305,9 +310,50 @@ describe('runIssueContext', () => {
   it('dedups repeated --issue values', () => {
     mockClosing([]);
     mockIssue('five');
-    runIssueContext({ ...ARGS, extraIssues: [5, 5] });
+    runIssueContext({ ...ARGS, extraIssues: ex(5, 5) });
     // one closing-issues call + exactly one issue fetch
     expect(ghMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('a repo-qualified extra is fetched from its OWN repository', () => {
+    mockClosing([]);
+    mockIssue('referenced elsewhere');
+    runIssueContext({
+      ...ARGS,
+      extraIssues: [{ number: 7, ownerRepo: 'acme/widgets' }],
+    });
+    expect(ghMock).toHaveBeenNthCalledWith(
+      2,
+      'issue',
+      'view',
+      '7',
+      '--repo',
+      'acme/widgets',
+      '--json',
+      'title,body,comments',
+    );
+    const written = writeFileSyncMock.mock.calls[0][1] as string;
+    expect(written).toContain(
+      '## Issue #7 of acme/widgets: referenced elsewhere',
+    );
+  });
+
+  it('a repo-qualified extra matching a closing ref dedups by (repo, number)', () => {
+    mockClosing([
+      {
+        number: 42,
+        repository: { name: 'widgets', owner: { login: 'acme' } },
+      },
+    ]);
+    mockIssue('the closing one');
+    // Same issue as the closing ref, requested repo-qualified — fetched once.
+    runIssueContext({
+      ...ARGS,
+      extraIssues: [{ number: 42, ownerRepo: 'ACME/Widgets' }],
+    });
+    expect(ghMock).toHaveBeenCalledTimes(2); // discovery + one fetch
+    const written = writeFileSyncMock.mock.calls[0][1] as string;
+    expect(written).not.toContain('Additionally fetched issues');
   });
 
   it('an unreadable issue degrades to an explicit section, not an abort', () => {
@@ -367,7 +413,7 @@ describe('runIssueContext', () => {
       throw new Error('HTTP 403: secondary rate limit');
     });
     mockIssue('five');
-    const result = runIssueContext({ ...ARGS, extraIssues: [555] });
+    const result = runIssueContext({ ...ARGS, extraIssues: ex(555) });
     expect(result.discoveryError).toBe('HTTP 403: secondary rate limit');
     const written = writeFileSyncMock.mock.calls[0][1] as string;
     expect(written).toContain('## Issue #555 of QwenLM/qwen-code: five');
@@ -386,7 +432,7 @@ describe('runIssueContext', () => {
     runIssueContext({
       ...ARGS,
       repo: 'qwenlm/qwen-code',
-      extraIssues: [9078],
+      extraIssues: ex(9078),
     });
     // one discovery call + one issue fetch — no duplicate section
     expect(ghMock).toHaveBeenCalledTimes(2);

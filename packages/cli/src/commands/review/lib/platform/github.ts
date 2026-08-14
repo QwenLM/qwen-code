@@ -9,13 +9,7 @@
 // this module owns the GitHub API *shapes* so the subcommands and the skill
 // prose never name an endpoint.
 
-import {
-  ensureAuthenticated,
-  gh,
-  ghRaw,
-  ghRawText,
-  isOwnerRepo,
-} from '../gh.js';
+import { ensureAuthenticated, gh, ghApi, ghRaw, isOwnerRepo } from '../gh.js';
 import type {
   ClosingIssueRef,
   CommentKind,
@@ -221,12 +215,12 @@ export const githubReader: ReviewPlatformReader = {
     } else {
       path = `repos/${ownerRepo}/issues/comments/${id}`;
     }
-    // Not ghApi: `--jq` emits the body as RAW text (markdown), which
-    // JSON.parse would choke on — measured on the first E2E pass. `.body
-    // // ""` because a null body would otherwise print the literal "null".
-    // ghRawText (UTF-8, edges preserved) — NOT the byte path: comment bodies
-    // are always valid UTF-8 from the API, and a leading indent is what puts
-    // a pasted log inside its Markdown code block.
-    return ghRawText('api', path, '--jq', '.body // ""');
+    // Fetch the JSON object and read `.body` — do NOT `--jq '.body // ""'`,
+    // which prints the body plus a trailing newline: a body not ending in one
+    // gains a byte, and an empty body becomes "\n" (witnessed). gh's JSON
+    // output parses exactly (string content is escape-encoded, so the
+    // transport's trim/CRLF-normalise never touches the body bytes).
+    const obj = ghApi(path) as { body?: unknown } | null;
+    return typeof obj?.body === 'string' ? obj.body : '';
   },
 };

@@ -41,7 +41,7 @@ function isTransientGhError(err: unknown): boolean {
  */
 function execGhWithRetry(
   args: string[],
-  options: { input?: string; mode?: 'default' | 'bytes' | 'text' },
+  options: { input?: string; mode?: 'default' | 'bytes' },
 ): string {
   const mode = options.mode ?? 'default';
   const execOptions: Parameters<typeof execFileSync>[2] = {
@@ -63,11 +63,6 @@ function execGhWithRetry(
         // CONTENT, and a trailing whitespace-only context line is part of
         // the last hunk — nothing may be trimmed or rewritten.
         return (out as unknown as Buffer).toString('latin1');
-      }
-      if (mode === 'text') {
-        // UTF-8 text, edges preserved (a leading indent is what puts a
-        // pasted log inside its Markdown code block), no CRLF rewrite.
-        return out as string;
       }
       return (out as string).replace(/\r\n/g, '\n').trim();
     } catch (err) {
@@ -226,15 +221,6 @@ export function gh(...args: string[]): string {
  */
 export function ghRaw(...args: string[]): string {
   return execGhWithRetry(args, { mode: 'bytes' });
-}
-
-/**
- * UTF-8 text with edges preserved — no trim, no CRLF rewrite. For comment
- * bodies (always valid UTF-8 from the API) whose leading indent is what puts
- * a pasted log inside its Markdown code block.
- */
-export function ghRawText(...args: string[]): string {
-  return execGhWithRetry(args, { mode: 'text' });
 }
 
 /**

@@ -1214,7 +1214,16 @@ export function buildRoleBrief(
     }
     const trimmedHost =
       typeof report.host === 'string' ? report.host.trim() : '';
-    const host = HOSTNAME_RE.test(trimmedHost) ? trimmedHost : null;
+    // Fail closed on a PRESENT-but-invalid host (a tampered/corrupted plan):
+    // a missing host is optional (no --host), but an invalid one must not be
+    // silently dropped from the welded command — that would reroute the
+    // evidence fetch to github.com's same-named repo.
+    if (trimmedHost !== '' && !HOSTNAME_RE.test(trimmedHost)) {
+      throw new Error(
+        `agent-prompt: plan host is not a hostname: ${JSON.stringify(report.host)}`,
+      );
+    }
+    const host = trimmedHost === '' ? null : trimmedHost;
     const dir = opts.planPath ? dirname(resolve(opts.planPath)) : null;
     const ctx = dir ? join(dir, `qwen-review-pr-${pr}-context.md`) : null;
     const evidence = dir
