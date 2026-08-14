@@ -72,12 +72,12 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   encodeSessionTranscriptCursor,
-  findBoundaryAtOrBefore,
-  isReplayTurnStartType,
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
   BranchPointInvalidError,
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
   ToolNames,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
@@ -93,6 +93,7 @@ import {
   refreshMemoryInstruction,
   applyReasoningEffort,
   REASONING_EFFORT_TIERS,
+  addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
   emptyGoalSnapshot,
@@ -115,7 +116,10 @@ import {
   type ProviderSetupInputs,
   type ReasoningEffort,
   type ResumedSessionData,
+  type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
+  type SessionLiveRestoreProjection,
+  type SessionRestoreProjection,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
@@ -155,8 +159,8 @@ import type {
   ResumeSessionResponse,
   SessionConfigOption,
   SessionInfo,
-  SessionModeState,
   SessionUpdate,
+  SessionModeState,
   SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse,
   SetSessionModelRequest,
@@ -230,6 +234,8 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { HistoryReplayer } from './session/history-replayer.js';
+import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
 import {
   getModelConfiguration,
@@ -240,6 +246,7 @@ import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
+  HistoryReplayLimitError,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
@@ -339,6 +346,8 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  LOAD_REPLAY_MAX_BYTES,
+  LOAD_REPLAY_MAX_UPDATES,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
@@ -366,6 +375,10 @@ import {
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
 import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
+import {
+  collectGoalStatusItemsFromRecords,
+  findGoalToRestore,
+} from '../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   executeGeneration,
@@ -403,7 +416,10 @@ type AcpSessionProfileStage =
   | 'auth'
   | 'file_system_setup'
   | 'session_register'
-  | 'response_build';
+  | 'runtime_initialize'
+  | 'response_build'
+  | 'history_replay'
+  | 'post_replay_services';
 
 interface AcpSessionProfileSpan {
   setAttribute(name: string, value: string | number | boolean): unknown;
@@ -707,6 +723,196 @@ function shouldHideInheritedHistory(params: LoadSessionRequest): boolean {
   return meta?.[LOAD_REPLAY_HIDE_INHERITED_META_KEY] === true;
 }
 
+function loadRestoreOptions(
+  params: LoadSessionRequest,
+): SelectiveSessionRestoreOptions {
+  const hideInheritedHistory = shouldHideInheritedHistory(params);
+  if (!isBulkLoadReplayRequest(params)) {
+    return { replay: { kind: 'all', hideInheritedHistory } };
+  }
+  const limit = getLoadReplayPageSize(params);
+  return limit === undefined
+    ? { replay: { kind: 'all', hideInheritedHistory } }
+    : { replay: { kind: 'recent', limit, hideInheritedHistory } };
+}
+
+const RESUME_RESTORE_OPTIONS: SelectiveSessionRestoreOptions = {
+  replay: { kind: 'none' },
+};
+
+function mapSessionRestoreRequestError(
+  error: unknown,
+  sessionId: string,
+): unknown {
+  const mappedWriterError = mapSessionWriterRequestError(error);
+  if (mappedWriterError !== error) return mappedWriterError;
+  if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+    return new RequestError(-32010, error.message, {
+      errorKind: 'transcript_snapshot_unavailable',
+      sessionId,
+    });
+  }
+  if (error instanceof SessionTranscriptTooLargeError) {
+    return new RequestError(-32011, error.message, {
+      errorKind: 'transcript_too_large',
+      sessionId,
+      snapshotSize: error.snapshotSize,
+      maxBytes: error.maxBytes,
+    });
+  }
+  if (error instanceof SessionTranscriptPageTooLargeError) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.envelope_limit_reason',
+      'bytes',
+    );
+    return new RequestError(-32012, error.message, {
+      errorKind: 'transcript_page_too_large',
+      sessionId,
+      pageBytes: error.pageBytes,
+      maxBytes: error.maxBytes,
+    });
+  }
+  if (error instanceof HistoryReplayLimitError) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.envelope_limit_reason',
+      error.reason,
+    );
+    return new RequestError(-32012, error.message, {
+      errorKind: 'transcript_page_too_large',
+      sessionId,
+      reason: error.reason,
+      observed: error.observed,
+      limit: error.limit,
+    });
+  }
+  return error;
+}
+
+function validateLoadReplayEnvelope(
+  sessionId: string,
+  envelope: BridgeLoadReplayEnvelope,
+  enforceLimits: boolean,
+): void {
+  if (!enforceLimits) return;
+  if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
+    throw new HistoryReplayLimitError(
+      sessionId,
+      'updates',
+      envelope.updates.length,
+      LOAD_REPLAY_MAX_UPDATES,
+    );
+  }
+  const pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  if (pageBytes > LOAD_REPLAY_MAX_BYTES) {
+    throw new HistoryReplayLimitError(
+      sessionId,
+      'bytes',
+      pageBytes,
+      LOAD_REPLAY_MAX_BYTES,
+    );
+  }
+}
+
+function replayGoalBootstrap(
+  projection:
+    | SessionRestoreProjection
+    | SessionLiveRestoreProjection
+    | undefined,
+): ReturnType<typeof HistoryReplayer.v2GoalBootstrap> {
+  if (projection && !('runtime' in projection)) {
+    const sourceUuid = projection.goalRecoverySourceUuid;
+    if (!sourceUuid) return undefined;
+    if (
+      projection.replay?.records.some((record) => record.uuid === sourceUuid)
+    ) {
+      return undefined;
+    }
+    const replay = projection.replay?.replay;
+    if (isObjectRecord(replay)) {
+      const bootstrap = HistoryReplayer.v2GoalBootstrap(
+        replay['goalState'],
+        replay['goalCause'],
+      );
+      if (bootstrap) return bootstrap;
+    }
+    const sourceRecord = projection.goalRecords?.find(
+      (record) => record.uuid === sourceUuid,
+    );
+    if (sourceRecord?.subtype === 'goal_state') {
+      const payload = isObjectRecord(sourceRecord.systemPayload)
+        ? sourceRecord.systemPayload
+        : undefined;
+      return HistoryReplayer.v2GoalBootstrap(
+        payload?.['snapshot'],
+        payload?.['cause'],
+      );
+    }
+    const active = findGoalToRestore(
+      collectGoalStatusItemsFromRecords(projection.goalRecords ?? []),
+    );
+    return active
+      ? {
+          goalStatus: {
+            kind: active.iterations > 0 ? 'checking' : 'set',
+            condition: active.condition,
+            iterations: active.iterations,
+            ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+          },
+        }
+      : undefined;
+  }
+  const sourceUuid = projection?.replay?.goalRecoverySourceUuid;
+  if (!projection?.replay || !sourceUuid) return undefined;
+  if (projection.replay.records.some((record) => record.uuid === sourceUuid)) {
+    return undefined;
+  }
+  const goalBootstrapRecords = projection.replay.goalBootstrapRecords ?? [];
+  const sourceRecord = goalBootstrapRecords.find(
+    (record) => record.uuid === sourceUuid,
+  );
+  if (sourceRecord?.subtype === 'goal_state') {
+    const payload = isObjectRecord(sourceRecord.systemPayload)
+      ? sourceRecord.systemPayload
+      : undefined;
+    return HistoryReplayer.v2GoalBootstrap(
+      payload?.['snapshot'],
+      payload?.['cause'],
+    );
+  }
+  const active = findGoalToRestore(
+    collectGoalStatusItemsFromRecords(goalBootstrapRecords),
+  );
+  if (!active) return undefined;
+  return {
+    goalStatus: {
+      kind: active.iterations > 0 ? 'checking' : 'set',
+      condition: active.condition,
+      iterations: active.iterations,
+      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+    },
+  };
+}
+
+function replayInitialGoalState(
+  projection: SessionRestoreProjection | undefined,
+): {
+  initialGoalState?: NonNullable<
+    Parameters<HistoryReplayer['replay']>[2]
+  >['initialGoalState'];
+  initialGoalCause?: NonNullable<
+    Parameters<HistoryReplayer['replay']>[2]
+  >['initialGoalCause'];
+} {
+  const replay = projection?.replay?.replay;
+  if (!isObjectRecord(replay)) return {};
+  const initialGoalState = parseGoalSnapshotV2(replay['goalState']);
+  const initialGoalCause = parseGoalStateCause(replay['goalCause']);
+  return {
+    ...(initialGoalState ? { initialGoalState } : {}),
+    ...(initialGoalCause ? { initialGoalCause } : {}),
+  };
+}
+
 export function selectVisibleHistoryRecords(
   records: ChatRecord[],
   hideInheritedHistory: boolean,
@@ -787,92 +993,6 @@ function deriveForkBaseName(
     .trim();
   return stripped && stripped.length > 0 ? stripped : sessionId.slice(0, 8);
 }
-
-function isHistoryTurnStart(record: ChatRecord): boolean {
-  return isReplayTurnStartType(record.type, record.subtype);
-}
-
-// A bulk page can safely start at a turn start or at the assistant record
-// owning any following tool results, mirroring the core reader's page-start
-// rule. Realtime records interleave at wall-clock time and own no tool
-// results, so the pair walk passes through them instead of splitting them.
-function isHistoryPageStart(record: ChatRecord): boolean {
-  return (
-    record.subtype !== 'realtime_message' &&
-    (record.type === 'assistant' || isHistoryTurnStart(record))
-  );
-}
-
-// True when the first tool_result in records[start, end) lost its owning
-// call below `start`, i.e. the selection begins mid-pair. Only the first
-// result needs checking: later results belong to calls at or after it, all
-// inside the page once the first pair is whole.
-function historyOrphansToolResult(
-  records: ChatRecord[],
-  start: number,
-  end: number,
-): boolean {
-  for (let i = start; i < end; i++) {
-    if (records[i]!.type !== 'tool_result') continue;
-    for (let owner = i - 1; owner >= start; owner--) {
-      if (isHistoryPageStart(records[owner]!)) return false;
-    }
-    return true;
-  }
-  return false;
-}
-
-function selectRecentHistoryRecords(
-  records: ChatRecord[],
-  pageSize: number | undefined,
-): { records: ChatRecord[]; hasMore: boolean } {
-  if (pageSize === undefined || records.length <= pageSize) {
-    return { records, hasMore: false };
-  }
-  let start = records.length - pageSize;
-  for (let i = start; i < records.length; i++) {
-    if (isHistoryTurnStart(records[i]!)) {
-      start = i;
-      break;
-    }
-  }
-  // Turn-boundary alignment may expand the page past the requested window,
-  // but never without bound: a history dominated by a single long in-flight
-  // turn would otherwise replay the WHOLE history in one payload and report
-  // hasMore=false, leaving the client unable to page backward. Allow at
-  // most one extra window of expansion, and only when it reaches a real
-  // turn start; otherwise keep the requested window so pages inside a long
-  // turn stay bounded and chainable.
-  const expansionFloor = Math.max(0, records.length - 2 * pageSize);
-  const aligned = findBoundaryAtOrBefore(
-    records,
-    start,
-    expansionFloor,
-    isHistoryTurnStart,
-  );
-  if (isHistoryTurnStart(records[aligned]!)) {
-    start = aligned;
-  }
-  // Backward replay renders each page independently, so a page that starts
-  // mid-pair (on a tool_result whose owning call lies below) would show the
-  // completed call as failed and its result as an orphan block. When the
-  // bounded selection starts on an orphaned tool_result, extend down to the
-  // owning record within one further window, mirroring the core reader.
-  if (start > 0 && historyOrphansToolResult(records, start, records.length)) {
-    const pairFloor = Math.max(0, start - pageSize);
-    const owner = findBoundaryAtOrBefore(
-      records,
-      start,
-      pairFloor,
-      isHistoryPageStart,
-    );
-    if (isHistoryPageStart(records[owner]!)) {
-      start = owner;
-    }
-  }
-  return { records: records.slice(start), hasMore: start > 0 };
-}
-
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
   return new Proxy(config, {
     get(target, prop) {
@@ -4276,7 +4396,11 @@ class QwenAgent implements Agent {
   private async withLiveSessionRestore<T>(
     sessionId: string,
     session: Session,
-    operation: (config: Config, data: ResumedSessionData) => Promise<T>,
+    options: SelectiveSessionRestoreOptions,
+    operation: (
+      config: Config,
+      projection: SessionLiveRestoreProjection | undefined,
+    ) => Promise<T>,
   ): Promise<T> {
     await session.assertCanStartTurn();
     const config = session.getConfig();
@@ -4288,15 +4412,17 @@ class QwenAgent implements Agent {
         'restore',
       );
       const recorder = config.getChatRecordingService();
-      const loadAuthoritative = () =>
-        config.getSessionService().loadSession(sessionId);
-      const data = recorder
-        ? await recorder.runWithWriteBarrier(loadAuthoritative)
-        : await loadAuthoritative();
-      if (!data) throw new SessionWriterUnavailableError();
-      return await operation(config, data);
+      const readProjection = () =>
+        config
+          .getSessionService()
+          .readLiveRestoreProjection(sessionId, options);
+      const projection = recorder
+        ? await recorder.runWithWriteBarrier(readProjection)
+        : await readProjection();
+      if (!projection) throw new SessionWriterUnavailableError();
+      return await operation(config, projection);
     } catch (error) {
-      throw mapSessionWriterRequestError(error);
+      throw mapSessionRestoreRequestError(error, sessionId);
     } finally {
       releaseGate();
     }
@@ -4328,6 +4454,7 @@ class QwenAgent implements Agent {
   private async cleanupAfterRequestFailure(
     error: unknown,
     cleanup: () => Promise<void>,
+    sessionId?: string,
   ): Promise<never> {
     try {
       await cleanup();
@@ -4336,7 +4463,9 @@ class QwenAgent implements Agent {
         `Session cleanup failed while preserving the original request error: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
       );
     }
-    throw mapSessionWriterRequestError(error);
+    throw sessionId
+      ? mapSessionRestoreRequestError(error, sessionId)
+      : mapSessionWriterRequestError(error);
   }
 
   private pendingConfigCleanupKey(
@@ -4935,6 +5064,7 @@ class QwenAgent implements Agent {
   ): Promise<LoadSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    const restoreOptions = loadRestoreOptions(params);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -4946,7 +5076,8 @@ class QwenAgent implements Agent {
         return this.withLiveSessionRestore(
           sessionId,
           liveSession,
-          async (config, sessionData) => {
+          restoreOptions,
+          async (config, projection) => {
             const response = profiler.timeSync(
               'response_build',
               () =>
@@ -4954,33 +5085,39 @@ class QwenAgent implements Agent {
                   modes: this.buildModesData(config),
                   models: this.buildAvailableModels(config),
                   configOptions: this.buildConfigOptions(config),
-                  ...(sessionData.artifactSnapshot
-                    ? { artifactSnapshot: sessionData.artifactSnapshot }
+                  ...(projection?.artifactSnapshot
+                    ? { artifactSnapshot: projection.artifactSnapshot }
                     : {}),
                 }) as LoadSessionResponse,
             );
-            const records = sessionData.conversation.messages;
-            const visibleRecords = selectVisibleHistoryRecords(
-              records,
-              shouldHideInheritedHistory(params),
-            );
-            if (visibleRecords.length === 0) return response;
+            const replayPage = projection?.replay;
+            if (!replayPage || replayPage.records.length === 0) return response;
 
             const bulkReplay = isBulkLoadReplayRequest(params);
-            const replayPage = bulkReplay
-              ? selectRecentHistoryRecords(
-                  visibleRecords,
-                  getLoadReplayPageSize(params),
-                )
-              : { records: visibleRecords, hasMore: false };
-            const replay = await collectHistoryReplayUpdates({
-              sessionId,
-              config,
-              records: replayPage.records,
-              gaps: sessionData.historyGaps,
-              cumulativeUsage: createReplayCumulativeUsage(),
-              logger: debugLogger,
-            });
+            const replay = await profiler.time('history_replay', () =>
+              collectHistoryReplayUpdates({
+                sessionId,
+                config,
+                records: replayPage.records,
+                gaps: replayPage.gaps,
+                cumulativeUsage: createReplayCumulativeUsage(),
+                replayState: replayPage.replay,
+                goalBootstrap: replayGoalBootstrap(projection),
+                ...(restoreOptions.replay.kind === 'recent'
+                  ? {
+                      limits: {
+                        maxBytes: LOAD_REPLAY_MAX_BYTES,
+                        maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                      },
+                    }
+                  : {}),
+                logger: debugLogger,
+              }),
+            );
+            addDaemonRequestAttribute(
+              'qwen-code.daemon.session_restore.partial_replay',
+              replay.replayError !== undefined,
+            );
             if (!bulkReplay) {
               try {
                 for (const update of replay.updates) {
@@ -5001,20 +5138,29 @@ class QwenAgent implements Agent {
               return response;
             }
 
+            const envelope: BridgeLoadReplayEnvelope = {
+              v: LOAD_REPLAY_VERSION,
+              updates: replay.updates,
+              ...(replayPage.anchorRecordId
+                ? { anchorRecordId: replayPage.anchorRecordId }
+                : {}),
+              ...(replay.replayError !== undefined
+                ? {
+                    partial: true,
+                    replayError: replay.replayError,
+                  }
+                : {}),
+              ...(replayPage.hasMore ? { hasMore: true } : {}),
+            };
+            validateLoadReplayEnvelope(
+              sessionId,
+              envelope,
+              restoreOptions.replay.kind === 'recent',
+            );
             return {
               ...response,
               _meta: {
-                [LOAD_REPLAY_META_KEY]: {
-                  v: LOAD_REPLAY_VERSION,
-                  updates: replay.updates,
-                  ...(replay.replayError !== undefined
-                    ? {
-                        partial: true as const,
-                        replayError: replay.replayError,
-                      }
-                    : {}),
-                  ...(replayPage.hasMore ? { hasMore: true as const } : {}),
-                },
+                [LOAD_REPLAY_META_KEY]: envelope,
               },
             };
           },
@@ -5060,129 +5206,222 @@ class QwenAgent implements Agent {
           sessionSource,
           sessionId,
           true,
+          {},
+          undefined,
+          restoreOptions,
         ),
       );
-      const sessionData = config.getResumedSessionData();
+      const projection = config.consumeSessionRestoreProjection?.();
+      const suppressRecoveredGoalPresentation =
+        projection?.runtime.goalRecoverySourceUuid !== undefined &&
+        projection.runtime.goalRecoverySourceUuid !==
+          projection.replay?.goalRecoverySourceUuid;
       const bulkReplay = isBulkLoadReplayRequest(params);
-      const replayPageSize = bulkReplay
-        ? getLoadReplayPageSize(params)
-        : undefined;
       let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
+      const replayUsage = createReplayCumulativeUsage();
+      let recoveredGoalPublicationKey: string | undefined;
+      let suppressedRecoveredGoalId: string | undefined;
+      let streamGoalUpdates: SessionUpdate[] = [];
+      let response: LoadSessionResponse | undefined;
+      const buildResponse = () =>
+        profiler.timeSync('response_build', () => ({
+          modes: this.buildModesData(config),
+          models: this.buildAvailableModels(config),
+          configOptions: this.buildConfigOptions(config),
+          ...(projection?.runtime.artifactSnapshot
+            ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+            : {}),
+          ...(replayEnvelope
+            ? {
+                _meta: {
+                  [LOAD_REPLAY_META_KEY]: replayEnvelope,
+                },
+              }
+            : {}),
+        })) as LoadSessionResponse;
       try {
         await profiler.time('auth', () => this.ensureAuthenticated(config));
         profiler.timeSync('file_system_setup', () =>
           this.setupFileSystem(config),
         );
         await profiler.time('session_register', () =>
-          this.createAndStoreSession(config, settings, sessionData, {
+          this.createAndStoreSession(config, settings, undefined, {
             enableLiveScreenContext: isCompatibleLiveSessionSource(
               sessionSource ?? {},
             ),
-            ...(bulkReplay ? { replayHistory: false } : {}),
-            beforeStartPostReplayServices: async (createdSession) => {
-              if (bulkReplay) {
-                const records = sessionData?.conversation.messages;
-                let replayUpdates: SessionUpdate[] = [];
-                if (records) {
-                  createdSession.primeTurnFromHistory(records);
-                  const visibleRecords = selectVisibleHistoryRecords(
-                    records,
-                    shouldHideInheritedHistory(params),
-                  );
-                  const replayPage = selectRecentHistoryRecords(
-                    visibleRecords,
-                    replayPageSize,
-                  );
-                  const replayUsage = createReplayCumulativeUsage();
-                  const replay = await collectHistoryReplayUpdates({
+            replayHistory: false,
+            prepareBeforeSessionCreate: async () => {
+              if (bulkReplay && projection?.replay) {
+                const replay = await profiler.time('history_replay', () =>
+                  collectHistoryReplayUpdates({
                     sessionId,
                     config,
-                    records: replayPage.records,
-                    gaps: sessionData?.historyGaps,
+                    records: projection.replay!.records,
+                    gaps: projection.replay!.gaps,
                     cumulativeUsage: replayUsage,
+                    replayState: projection.replay!.replay,
+                    goalBootstrap: replayGoalBootstrap(projection),
+                    ...(restoreOptions.replay.kind === 'recent'
+                      ? {
+                          limits: {
+                            maxBytes: LOAD_REPLAY_MAX_BYTES,
+                            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                          },
+                        }
+                      : {}),
                     logger: debugLogger,
-                  });
-                  replayUpdates = replay.updates;
-                  copyCumulativeUsage(
-                    createdSession.cumulativeUsage,
-                    replayUsage,
-                  );
-                  // Strictly after the replay page, mirroring the streamed
-                  // path in `createAndStoreSession`: the page re-emits the
-                  // pre-migration `set` card, so the authoritative state has
-                  // to be the newest goal card or the client keeps showing a
-                  // phantom running goal. It rides *inside* the envelope
-                  // because this path hands its updates to the client rather
-                  // than streaming them — see
-                  // `Session.renderRecoveredGoalUpdates`. Never fatal: a
-                  // session that cannot publish its goal state must still
-                  // open.
-                  try {
-                    replayUpdates = replayUpdates.concat(
-                      await createdSession.renderRecoveredGoalUpdates(records),
-                    );
-                  } catch (error) {
-                    debugLogger.debug(
-                      `Failed to render recovered Goal state: ${
-                        error instanceof Error ? error.message : String(error)
-                      }`,
-                    );
-                  }
-                  if (replay.replayError !== undefined) {
-                    replayEnvelope = {
-                      v: LOAD_REPLAY_VERSION,
-                      updates: replayUpdates,
-                      partial: true,
-                      replayError: replay.replayError,
-                      ...(replayPage.hasMore ? { hasMore: true } : {}),
-                    };
-                  }
-                  replayEnvelope ??= {
-                    v: LOAD_REPLAY_VERSION,
-                    updates: replayUpdates,
-                    ...(replayPage.hasMore ? { hasMore: true } : {}),
-                  };
-                }
+                  }),
+                );
+                addDaemonRequestAttribute(
+                  'qwen-code.daemon.session_restore.partial_replay',
+                  replay.replayError !== undefined,
+                );
+                replayEnvelope = {
+                  v: LOAD_REPLAY_VERSION,
+                  updates: replay.updates,
+                  ...(projection.replay.anchorRecordId
+                    ? { anchorRecordId: projection.replay.anchorRecordId }
+                    : {}),
+                  ...(replay.replayError !== undefined
+                    ? {
+                        partial: true,
+                        replayError: replay.replayError,
+                      }
+                    : {}),
+                  ...(projection.replay.hasMore ? { hasMore: true } : {}),
+                };
+                validateLoadReplayEnvelope(
+                  sessionId,
+                  replayEnvelope,
+                  restoreOptions.replay.kind === 'recent',
+                );
+              }
+              const goalBootstrap = replayGoalBootstrap(projection);
+              const rendered = await renderPreparedGoalUpdate(
+                () => config.getGoalRuntimePrepared(),
+                {
+                  ...(projection?.replay?.records
+                    ? { replayedRecords: projection.replay.records }
+                    : {}),
+                  ...(suppressRecoveredGoalPresentation
+                    ? { hideRuntimeGoal: true }
+                    : {}),
+                  ...(goalBootstrap ? { bootstrap: goalBootstrap } : {}),
+                },
+              ).catch((error) => {
+                if (suppressRecoveredGoalPresentation) throw error;
+                debugLogger.debug(
+                  `Failed to render recovered Goal state: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+                return {
+                  publicationKey: undefined,
+                  suppressedGoalId: undefined,
+                  updates: [],
+                };
+              });
+              recoveredGoalPublicationKey = rendered.publicationKey;
+              suppressedRecoveredGoalId = rendered.suppressedGoalId;
+              if (!bulkReplay) {
+                streamGoalUpdates = rendered.updates;
+                return;
+              }
+              const goalUpdates = rendered.updates;
+              if (goalUpdates.length > 0) {
                 replayEnvelope ??= {
                   v: LOAD_REPLAY_VERSION,
-                  updates: replayUpdates,
+                  updates: [],
                 };
+                replayEnvelope.updates.push(...goalUpdates);
+                validateLoadReplayEnvelope(
+                  sessionId,
+                  replayEnvelope,
+                  restoreOptions.replay.kind === 'recent',
+                );
               }
-
-              await this.#restoreWorktreeOnResume(config, createdSession);
-              await this.#restoreBackgroundAgentsOnResume(
-                config,
-                createdSession,
-              );
+            },
+            beforeSessionCreate: () => {
+              response = buildResponse();
+            },
+            primeSession: (createdSession) => {
+              profiler.timeSync('runtime_initialize', () => {
+                if (!projection) return;
+                createdSession.primeTurnState(
+                  projection.runtime.initialTurn,
+                  projection.runtime.backgroundNotificationTaskIds,
+                );
+                copyCumulativeUsage(
+                  createdSession.cumulativeUsage,
+                  replayUsage,
+                );
+                createdSession.primeRecoveredGoalPublication(
+                  recoveredGoalPublicationKey,
+                  suppressedRecoveredGoalId,
+                );
+              });
+            },
+            beforeStartPostReplayServices: async (createdSession) => {
+              if (!bulkReplay && projection?.replay) {
+                await profiler.time('history_replay', async () => {
+                  const goalBootstrap = replayGoalBootstrap(projection);
+                  const initialGoalState = replayInitialGoalState(projection);
+                  const hasGoalReplayState =
+                    goalBootstrap !== undefined ||
+                    initialGoalState.initialGoalState !== undefined ||
+                    initialGoalState.initialGoalCause !== undefined;
+                  if (hasGoalReplayState) {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                      {
+                        ...(goalBootstrap ? { goalBootstrap } : {}),
+                        ...initialGoalState,
+                      },
+                    );
+                  } else {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                    );
+                  }
+                });
+                try {
+                  for (const update of streamGoalUpdates) {
+                    await createdSession.sendUpdate(update);
+                  }
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to publish recovered Goal state: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
+              }
+              await profiler.time('post_replay_services', async () => {
+                await this.#restoreWorktreeOnResume(config, createdSession);
+                await this.#restoreBackgroundAgentsOnResume(
+                  config,
+                  createdSession,
+                );
+              });
             },
           }),
         );
       } catch (error) {
-        return this.cleanupAfterRequestFailure(error, async () => {
-          if (
-            this.sessions.get(config.getSessionId())?.getConfig() !== config
-          ) {
-            await this.cleanupUnstoredConfig(config);
-          }
-        });
-      }
-      return profiler.timeSync('response_build', () => {
-        const response: LoadSessionResponse = {
-          modes: this.buildModesData(config),
-          models: this.buildAvailableModels(config),
-          configOptions: this.buildConfigOptions(config),
-          ...(sessionData?.artifactSnapshot
-            ? { artifactSnapshot: sessionData.artifactSnapshot }
-            : {}),
-        } as LoadSessionResponse;
-        if (!replayEnvelope) return response;
-        return {
-          ...response,
-          _meta: {
-            [LOAD_REPLAY_META_KEY]: replayEnvelope,
+        return this.cleanupAfterRequestFailure(
+          error,
+          async () => {
+            if (
+              this.sessions.get(config.getSessionId())?.getConfig() !== config
+            ) {
+              await this.cleanupUnstoredConfig(config);
+            }
           },
-        };
-      });
+          sessionId,
+        );
+      }
+      return response!;
     } finally {
       releaseStartingSessionId();
     }
@@ -5228,7 +5467,8 @@ class QwenAgent implements Agent {
         return this.withLiveSessionRestore(
           sessionId,
           liveSession,
-          async (config, sessionData) =>
+          RESUME_RESTORE_OPTIONS,
+          async (config, projection) =>
             profiler.timeSync(
               'response_build',
               () =>
@@ -5236,8 +5476,8 @@ class QwenAgent implements Agent {
                   modes: this.buildModesData(config),
                   models: this.buildAvailableModels(config),
                   configOptions: this.buildConfigOptions(config),
-                  ...(sessionData.artifactSnapshot
-                    ? { artifactSnapshot: sessionData.artifactSnapshot }
+                  ...(projection?.artifactSnapshot
+                    ? { artifactSnapshot: projection.artifactSnapshot }
                     : {}),
                 }) as ResumeSessionResponse,
             ),
@@ -5275,73 +5515,69 @@ class QwenAgent implements Agent {
           sessionSource,
           sessionId,
           true,
+          {},
+          undefined,
+          RESUME_RESTORE_OPTIONS,
         ),
       );
+      const projection = config.consumeSessionRestoreProjection?.();
+      let response: ResumeSessionResponse | undefined;
       try {
         await profiler.time('auth', () => this.ensureAuthenticated(config));
         profiler.timeSync('file_system_setup', () =>
           this.setupFileSystem(config),
         );
         await profiler.time('session_register', () =>
-          this.createAndStoreSession(
-            config,
-            settings,
-            config.getResumedSessionData(),
-            {
-              enableLiveScreenContext: isCompatibleLiveSessionSource(
-                sessionSource ?? {},
-              ),
-              replayHistory: false,
-              beforeStartPostReplayServices: async (createdSession) => {
-                // `replayHistory: false` skips the publication in
-                // `createAndStoreSession`, so without this a resumed session
-                // never tells the client what the recovered goal actually is.
-                // Safe to stream here, unlike the bulk load path: resume
-                // replays nothing, so there is no envelope this card could
-                // sort ahead of. Never fatal.
-                try {
-                  await createdSession.publishRecoveredGoalState(
-                    config.getResumedSessionData()?.conversation.messages,
-                  );
-                } catch (error) {
-                  debugLogger.debug(
-                    `Failed to publish recovered Goal state: ${
-                      error instanceof Error ? error.message : String(error)
-                    }`,
-                  );
-                }
+          this.createAndStoreSession(config, settings, undefined, {
+            enableLiveScreenContext: isCompatibleLiveSessionSource(
+              sessionSource ?? {},
+            ),
+            replayHistory: false,
+            beforeSessionCreate: () => {
+              response = profiler.timeSync('response_build', () => ({
+                modes: this.buildModesData(config),
+                models: this.buildAvailableModels(config),
+                configOptions: this.buildConfigOptions(config),
+                ...(projection?.runtime.artifactSnapshot
+                  ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+                  : {}),
+              })) as ResumeSessionResponse;
+            },
+            primeSession: (createdSession) => {
+              profiler.timeSync('runtime_initialize', () => {
+                if (!projection) return;
+                createdSession.primeTurnState(
+                  projection.runtime.initialTurn,
+                  projection.runtime.backgroundNotificationTaskIds,
+                );
+              });
+            },
+            beforeStartPostReplayServices: async (createdSession) => {
+              await profiler.time('post_replay_services', async () => {
                 await this.#restoreWorktreeOnResume(config, createdSession);
                 await this.#restoreBackgroundAgentsOnResume(
                   config,
                   createdSession,
                 );
-              },
+              });
             },
-          ),
+          }),
         );
       } catch (error) {
-        return this.cleanupAfterRequestFailure(error, async () => {
-          if (
-            this.sessions.get(config.getSessionId())?.getConfig() !== config
-          ) {
-            await this.cleanupUnstoredConfig(config);
-          }
-        });
+        return this.cleanupAfterRequestFailure(
+          error,
+          async () => {
+            if (
+              this.sessions.get(config.getSessionId())?.getConfig() !== config
+            ) {
+              await this.cleanupUnstoredConfig(config);
+            }
+          },
+          sessionId,
+        );
       }
 
-      const sessionData = config.getResumedSessionData();
-      return profiler.timeSync(
-        'response_build',
-        () =>
-          ({
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData?.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          }) as ResumeSessionResponse,
-      );
+      return response!;
     } finally {
       releaseStartingSessionId();
     }
@@ -11937,6 +12173,7 @@ class QwenAgent implements Agent {
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
+    restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
     try {
       this.assertManagedSessionAdmission();
@@ -11954,6 +12191,7 @@ class QwenAgent implements Agent {
           resume,
           initializeOptions,
           chatRecording,
+          restoreOptions,
         );
       });
     } catch (error) {
@@ -11969,7 +12207,9 @@ class QwenAgent implements Agent {
           errorKind: writerError.errorKind,
         });
       }
-      throw error;
+      throw sessionId && restoreOptions
+        ? mapSessionRestoreRequestError(error, sessionId)
+        : error;
     }
   }
 
@@ -11982,6 +12222,7 @@ class QwenAgent implements Agent {
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
+    restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -12094,8 +12335,25 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard
-        ? { toolInvocationGuard: this.managedToolInvocationGuard }
+      this.managedToolInvocationGuard || restoreOptions
+        ? {
+            ...(this.managedToolInvocationGuard
+              ? { toolInvocationGuard: this.managedToolInvocationGuard }
+              : {}),
+            ...(restoreOptions && sessionId
+              ? {
+                  sessionRestore: {
+                    projectionSource: (restoreSessionId) =>
+                      new SessionService(cwd, {
+                        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                      }).readRestoreProjection(
+                        restoreSessionId,
+                        restoreOptions,
+                      ),
+                  },
+                }
+              : {}),
+          }
         : undefined,
     );
     if (sessionSource) {
@@ -12280,6 +12538,9 @@ class QwenAgent implements Agent {
     options: {
       replayHistory?: boolean;
       enableLiveScreenContext?: boolean;
+      prepareBeforeSessionCreate?: () => Promise<void>;
+      beforeSessionCreate?: () => void;
+      primeSession?: (session: Session) => void;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
     } = {},
   ): Promise<Session> {
@@ -12301,6 +12562,17 @@ class QwenAgent implements Agent {
       );
     }
 
+    await options.prepareBeforeSessionCreate?.();
+    this.assertManagedSessionAdmission();
+    if (this.sessions.has(sessionId)) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+    options.beforeSessionCreate?.();
+
     const session = new Session(
       sessionId,
       config,
@@ -12309,12 +12581,16 @@ class QwenAgent implements Agent {
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
     );
-    this.sessions.set(sessionId, session);
-    // The Session set itself is part of the snapshot: publish so the daemon
-    // learns about this Session from a report rather than inferring it.
-    this.activeWorkReporter?.notifyChanged();
-    this.initializingConfigs.delete(config);
+    let published = false;
     try {
+      options.primeSession?.(session);
+      config.hydrateSessionRestoreFileHistory?.();
+      this.sessions.set(sessionId, session);
+      published = true;
+      // The Session set itself is part of the snapshot: publish so the daemon
+      // learns about this Session from a report rather than inferring it.
+      this.activeWorkReporter?.notifyChanged();
+      this.initializingConfigs.delete(config);
       if (options.enableLiveScreenContext) {
         await session.enableLiveScreenContext();
       }
@@ -12363,6 +12639,8 @@ class QwenAgent implements Agent {
       // Install rewriter AFTER history replay to avoid rewriting historical messages
       session.installRewriter();
 
+      config.finalizeSessionRestore?.();
+
       // After replay and resume-state restoration so a durable cron fire can't
       // interleave with either.
       session.startCronScheduler();
@@ -12372,6 +12650,16 @@ class QwenAgent implements Agent {
       }, 0);
       return session;
     } catch (error) {
+      if (!published) {
+        try {
+          session.dispose();
+        } catch (disposeError) {
+          debugLogger.warn(
+            `Failed to dispose unpublished session ${sessionId}: ${disposeError instanceof Error ? disposeError.message : String(disposeError)}`,
+          );
+        }
+        throw error;
+      }
       try {
         await this.discardStoredSessionIfCurrent(sessionId, session, {
           shutdownConfig: false,

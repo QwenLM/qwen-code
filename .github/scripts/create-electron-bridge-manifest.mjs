@@ -6,12 +6,21 @@ import path from 'node:path';
 
 const options = parseArguments(process.argv.slice(2));
 const assets = fs.readdirSync(options.assets).sort();
-const names = [
-  'Qwen-Code-Desktop-arm64.zip',
-  'Qwen-Code-Desktop-x64.zip',
-  'Qwen-Code-Desktop-arm64.dmg',
-  'Qwen-Code-Desktop-x64.dmg',
-];
+const patterns = {
+  macos: [
+    /-arm64\.zip$/i,
+    /-x64\.zip$/i,
+    /-arm64\.dmg$/i,
+    /-x64\.dmg$/i,
+  ],
+  windows: [/-setup\.exe$/i],
+  linux: [/\.AppImage$/i],
+};
+const selectedPatterns = patterns[options.platform];
+if (!selectedPatterns) {
+  throw new Error(`Invalid --platform: ${options.platform}`);
+}
+const names = selectedPatterns.map((pattern) => selectArtifact(assets, pattern));
 const artifacts = names.map((name) => readArtifact(assets, name));
 const primary = artifacts[0];
 
@@ -29,10 +38,18 @@ const lines = [
 ];
 fs.writeFileSync(options.output, `${lines.join('\n')}\n`);
 
-function readArtifact(assets, name) {
-  if (!assets.includes(name)) {
-    throw new Error(`Missing Electron bridge artifact: ${name}`);
+// Keep the selection regexes in sync with create-desktop-update-manifest.mjs.
+function selectArtifact(assets, pattern) {
+  const matches = assets.filter((asset) => pattern.test(asset));
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected one Electron bridge artifact matching ${pattern}, found ${matches.length}: ${matches.join(', ')}`,
+    );
   }
+  return matches[0];
+}
+
+function readArtifact(assets, name) {
   const file = path.join(options.assets, name);
   return {
     name,
@@ -52,7 +69,7 @@ function parseArguments(args) {
     if (!name || value === undefined) throw new Error('Invalid arguments.');
     values[name] = value;
   }
-  for (const required of ['assets', 'version', 'output']) {
+  for (const required of ['assets', 'platform', 'version', 'output']) {
     if (!values[required]) throw new Error(`Missing --${required}`);
   }
   if (

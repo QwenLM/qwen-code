@@ -302,6 +302,7 @@ export interface ChatRecord {
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
+    | 'agent_retry'
     | 'file_history_snapshot'
     | 'user_text_elements'
     | 'session_artifact_event'
@@ -363,6 +364,7 @@ export interface ChatRecord {
     | UserPromptRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
+    | AgentRetryRecordPayload
     | FileHistorySnapshotRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
@@ -448,6 +450,11 @@ export interface AgentBootstrapRecordPayload {
    * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
+}
+
+export interface AgentRetryRecordPayload {
+  /** 1-based attempt number this attach resumes with (2+ on a retry). */
+  attempt: number;
 }
 
 /**
@@ -601,6 +608,16 @@ export interface BranchCheckpointCursor {
   pendingToolCalls: readonly BranchToolCallIdentity[];
 }
 
+export interface ChatRecordingRestoreState {
+  lastCompletedUuid: string;
+  turnParentUuids: Array<string | null>;
+  customTitle?: string;
+  titleSource?: TitleSource;
+  parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -749,25 +766,31 @@ export class ChatRecordingService {
     writerLeaseRequired = config.isSessionWriterLeaseEnabled?.() ??
       config.getExperimentalZedIntegration?.() ??
       true,
+    restoreState?: ChatRecordingRestoreState,
   ) {
     this.config = config;
     this.writerLeaseRequired = writerLeaseRequired;
     const resumed = config.getResumedSessionData();
     if (writerLeaseRequired) {
-      this.lastRecordUuid = resumed?.lastCompletedUuid ?? null;
+      this.lastRecordUuid =
+        restoreState?.lastCompletedUuid ?? resumed?.lastCompletedUuid ?? null;
       this.lastPersistedRecordUuid = this.lastRecordUuid;
     } else {
       this.state = 'active';
       this.acceptingWrites = true;
-      this.restoreSessionState(
-        resumed
-          ? {
-              conversation: resumed.conversation ?? { messages: [] },
-              lastCompletedUuid: resumed.lastCompletedUuid,
-            }
-          : undefined,
-        resumed ? this.readPersistedTitleInfo() : undefined,
-      );
+      if (restoreState) {
+        this.restoreProjectedState(restoreState);
+      } else {
+        this.restoreSessionState(
+          resumed
+            ? {
+                conversation: resumed.conversation ?? { messages: [] },
+                lastCompletedUuid: resumed.lastCompletedUuid,
+              }
+            : undefined,
+          resumed ? this.readPersistedTitleInfo() : undefined,
+        );
+      }
     }
   }
 
@@ -901,6 +924,20 @@ export class ChatRecordingService {
     }
   }
 
+  private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    this.lastRecordUuid = state.lastCompletedUuid;
+    this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.turnParentUuids = [...state.turnParentUuids];
+    this.currentCustomTitle = state.customTitle;
+    this.currentTitleSource = state.titleSource;
+    this.currentParentSessionId = state.parentSessionId;
+    this.currentSourceType = state.sourceType;
+    this.currentSourceId = state.sourceId;
+    if (this.currentCustomTitle) {
+      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+    }
+  }
+
   activate(
     lease: SessionWriterLease,
     sessionData?: {
@@ -908,6 +945,7 @@ export class ChatRecordingService {
       lastCompletedUuid: string | null;
     },
     persistedTitleInfo?: { title?: string; source?: TitleSource },
+    restoreState?: ChatRecordingRestoreState,
   ): void {
     if (
       !this.writerLeaseRequired ||
@@ -917,7 +955,11 @@ export class ChatRecordingService {
       throw new SessionWriterUnavailableError();
     }
     this.binding = { sessionId: lease.sessionId, lease };
-    this.restoreSessionState(sessionData, persistedTitleInfo);
+    if (restoreState) {
+      this.restoreProjectedState(restoreState);
+    } else {
+      this.restoreSessionState(sessionData, persistedTitleInfo);
+    }
     this.state = 'active';
     this.acceptingWrites = true;
   }

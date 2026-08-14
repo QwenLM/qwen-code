@@ -2146,6 +2146,48 @@ describe('ChatRecordingService', () => {
   });
 
   describe('legacy recorder', () => {
+    it('restores reduced recorder state without the full conversation', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, 'projected-parent'],
+        customTitle: 'Projected title',
+        titleSource: 'manual',
+        parentSessionId: 'parent-session',
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+
+      service.recordUserMessage([{ text: 'next' }]);
+      await service.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.parentUuid).toBe('projected-leaf');
+      expect(service.getCurrentCustomTitle()).toBe('Projected title');
+      expect(service.getCurrentTitleSource()).toBe('manual');
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(service.recordParentSession('parent-session')).resolves.toBe(
+        true,
+      );
+      await expect(
+        service.recordSessionSource('channel', 'channel-main'),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('activates a leased recorder from reduced state', async () => {
+      const service = new ChatRecordingService(mockConfig);
+      service.activate(mockLease, undefined, undefined, {
+        lastCompletedUuid: 'leased-projected-leaf',
+        turnParentUuids: [null],
+      });
+
+      service.recordUserMessage([{ text: 'next' }]);
+      await service.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.parentUuid).toBe('leased-projected-leaf');
+    });
+
     it('uses the effective session writer lease gate by default', async () => {
       mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
       mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);

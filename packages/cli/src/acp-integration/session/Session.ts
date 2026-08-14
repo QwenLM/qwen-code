@@ -183,6 +183,8 @@ import {
   runWithInvocationContext,
   truncateNotificationLabel,
   buildBackgroundEntryLabel,
+  collectSessionTurnState,
+  computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -298,12 +300,12 @@ import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
-import {
-  MessageEmitter,
-  buildGoalStateUpdate,
-  buildGoalStatusUpdate,
-} from './emitters/MessageEmitter.js';
+import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type { HistoryItemGoalStatus } from '../../ui/types.js';
+import {
+  goalPublicationKey,
+  renderPreparedGoalUpdate,
+} from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
@@ -1274,30 +1276,7 @@ export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
 ): number {
-  let maxPromptTurn = 0;
-  let userMessageCount = 0;
-  const promptIdPrefix = `${sessionId}########`;
-
-  for (const record of records) {
-    if (record.sessionId === sessionId && isUserPromptRecord(record)) {
-      userMessageCount += 1;
-    }
-
-    for (const promptId of getRecordPromptIds(record)) {
-      if (!promptId.startsWith(promptIdPrefix)) {
-        continue;
-      }
-
-      const suffix = promptId.slice(promptIdPrefix.length);
-      if (!/^\d+$/.test(suffix)) {
-        continue;
-      }
-
-      maxPromptTurn = Math.max(maxPromptTurn, Number(suffix));
-    }
-  }
-
-  return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+  return computeInitialTurnFromHistoryCore(records, sessionId);
 }
 
 export async function fireSessionPermissionDeniedForAutoMode(
@@ -1330,42 +1309,6 @@ export async function fireSessionPermissionDeniedForAutoMode(
       );
     }
   }
-}
-
-function getRecordPromptIds(record: ChatRecord): string[] {
-  const promptIds: string[] = [];
-  const recordPromptId = (record as { promptId?: unknown }).promptId;
-  if (typeof recordPromptId === 'string') {
-    promptIds.push(recordPromptId);
-  }
-  const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
-  if (telemetryPromptId) {
-    promptIds.push(telemetryPromptId);
-  }
-  return promptIds;
-}
-
-function readTelemetryPromptId(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object' || !('uiEvent' in payload)) {
-    return undefined;
-  }
-  const uiEvent = (payload as { uiEvent?: unknown }).uiEvent;
-  if (!uiEvent || typeof uiEvent !== 'object' || !('prompt_id' in uiEvent)) {
-    return undefined;
-  }
-  const promptId = (uiEvent as { prompt_id?: unknown }).prompt_id;
-  return typeof promptId === 'string' ? promptId : undefined;
-}
-
-function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user' || record.subtype === 'realtime_message') {
-    return false;
-  }
-  return (
-    record.message?.parts?.some(
-      (part) => typeof part.text === 'string' && part.text.trim().length > 0,
-    ) ?? false
-  );
 }
 
 const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
@@ -1636,6 +1579,9 @@ export class Session implements SessionContext {
   private goalRuntimeUnsubscribe?: () => void;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
+  // Set only when runtime recovery selected a Goal that initial replay hid.
+  // Keep that Goal private through activation and later progress updates.
+  private suppressedRecoveredGoalId?: string;
   private goalPublicationTail: Promise<void> = Promise.resolve();
 
   // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
@@ -1818,6 +1764,7 @@ export class Session implements SessionContext {
     this.goalHostUnbind = undefined;
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
+    this.suppressedRecoveredGoalId = undefined;
     this.#bindGoalRuntime();
   }
 
@@ -1860,53 +1807,46 @@ export class Session implements SessionContext {
     await this.#queueGoalState(runtime.getSnapshot(), cause);
   }
 
-  /**
-   * Render the recovered-Goal cards instead of streaming them.
-   *
-   * The bulk load-replay path (`historyReplay: 'response'`) does not stream
-   * its replay: `loadSession` collects the page into the `LOAD_REPLAY`
-   * envelope and the bridge seeds those updates onto the session's event bus
-   * *after* the ACP `session/load` call returns. A card streamed from inside
-   * that call therefore lands on the bus **before** the replayed
-   * pre-migration `set` card — the reverse of the ordering
-   * {@link publishRecoveredGoalState} exists to produce, leaving the phantom
-   * running goal exactly as it was. Returning the cards lets the caller
-   * append them to the envelope, after the replay page.
-   *
-   * Appending after a truncated page (`hasMore`) is still correct: paging
-   * drops the oldest records, so the authoritative state belongs last either
-   * way.
-   *
-   * Marks the publication as delivered, so the runtime subscription cannot
-   * emit a duplicate card for the same `(cause, snapshot)` once the session
-   * goes live.
-   */
   async renderRecoveredGoalUpdates(
     replayedRecords?: readonly ChatRecord[],
   ): Promise<SessionUpdate[]> {
     if (this.disposed || this.closing) return [];
-    let runtime;
-    try {
-      runtime = await this.config.getGoalRuntimeReady();
-    } catch (error) {
-      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
-      const status = this.#unrestorableGoalStatus(replayedRecords);
-      return status ? [buildGoalStatusUpdate(status)] : [];
+    const rendered = await renderPreparedGoalUpdate(
+      () => this.config.getGoalRuntimeReady(),
+      {
+        ...(replayedRecords ? { replayedRecords } : {}),
+        previousGoal: this.lastGoalSnapshot?.goal ?? null,
+      },
+    );
+    if (
+      rendered.publicationKey &&
+      rendered.publicationKey === this.lastGoalPublicationKey
+    ) {
+      return [];
     }
-    const cause = runtime.getRecoveryCause?.();
-    // Nothing was recovered, so the replay already told the whole story.
-    if (!cause) return [];
-    const snapshot = runtime.getSnapshot();
-    const publicationKey = this.#goalPublicationKey(snapshot, cause);
-    if (publicationKey === this.lastGoalPublicationKey) return [];
-    this.lastGoalPublicationKey = publicationKey;
-    return [
-      buildGoalStateUpdate(
-        snapshot,
-        cause,
-        this.lastGoalSnapshot?.goal ?? null,
-      ),
-    ];
+    this.primeRecoveredGoalPublication(rendered.publicationKey);
+    return rendered.updates;
+  }
+
+  primeRecoveredGoalPublication(
+    publicationKey: string | undefined,
+    suppressedGoalId?: string,
+  ): void {
+    if (publicationKey) this.lastGoalPublicationKey = publicationKey;
+    this.suppressedRecoveredGoalId = suppressedGoalId;
+  }
+
+  #suppressRecoveredGoalUpdate(snapshot: GoalSnapshotV2): boolean {
+    const suppressedGoalId = this.suppressedRecoveredGoalId;
+    if (!suppressedGoalId) return false;
+    const goal = snapshot.goal;
+    if (goal?.goalId === suppressedGoalId) return true;
+    if (goal === null) {
+      this.suppressedRecoveredGoalId = undefined;
+      return true;
+    }
+    this.suppressedRecoveredGoalId = undefined;
+    return false;
   }
 
   /**
@@ -1947,19 +1887,13 @@ export class Session implements SessionContext {
     };
   }
 
-  #goalPublicationKey(
-    snapshot: GoalSnapshotV2,
-    cause?: GoalStateCause,
-  ): string | undefined {
-    return cause ? `${cause}:${JSON.stringify(snapshot)}` : undefined;
-  }
-
   async #publishGoalState(
     snapshot: GoalSnapshotV2,
     cause?: GoalStateCause,
     previousGoal: GoalRecord | null = this.lastGoalSnapshot?.goal ?? null,
   ): Promise<void> {
-    const publicationKey = this.#goalPublicationKey(snapshot, cause);
+    if (this.#suppressRecoveredGoalUpdate(snapshot)) return;
+    const publicationKey = goalPublicationKey(snapshot, cause);
     if (publicationKey && publicationKey === this.lastGoalPublicationKey) {
       return;
     }
@@ -3196,30 +3130,34 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   primeTurnFromHistory(records: ChatRecord[]): void {
-    for (const record of records) {
-      if (record.subtype !== 'notification') continue;
-      const backgroundTask = (
-        record.systemPayload as
-          | { backgroundTask?: { taskId?: unknown } }
-          | undefined
-      )?.backgroundTask;
-      if (typeof backgroundTask?.taskId === 'string') {
-        this.persistedBackgroundNotificationTaskIds.add(backgroundTask.taskId);
-      }
-    }
-    this.turn = Math.max(
-      this.turn,
-      computeInitialTurnFromHistory(records, this.config.getSessionId()),
+    const turnState = collectSessionTurnState(
+      records,
+      this.config.getSessionId(),
     );
+    this.primeTurnState(
+      turnState.initialTurn,
+      turnState.backgroundNotificationTaskIds,
+    );
+  }
+
+  primeTurnState(
+    initialTurn: number,
+    backgroundNotificationTaskIds: readonly string[],
+  ): void {
+    for (const taskId of backgroundNotificationTaskIds) {
+      this.persistedBackgroundNotificationTaskIds.add(taskId);
+    }
+    this.turn = Math.max(this.turn, initialTurn);
   }
 
   async replayHistory(
     records: ChatRecord[],
     gaps?: HistoryGap[],
+    options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
     try {
-      await this.historyReplayer.replay(records, gaps);
+      await this.historyReplayer.replay(records, gaps, options);
     } finally {
       // Replayed plan updates re-stamp the revision via sendUpdate, but they
       // belong to finished cycles; only live updates may bind the next
