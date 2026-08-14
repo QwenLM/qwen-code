@@ -5361,6 +5361,137 @@ describe('useGeminiStream', () => {
     expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
   });
 
+  it('counts deduped after-completion cancellations (dedup gate uses didToolCallProduceWork)', async () => {
+    // Pins the dedup branch's gate on didToolCallProduceWork rather than the
+    // pre-PR `if (tc.status === 'cancelled') continue;`: an after-completion
+    // cancellation DID run (side effects landed), so it must still be
+    // recorded even when deduped. Without this, reverting the gate to the
+    // bare status check silently drops every deduped after-completion
+    // cancellation from toolCallCount / skillsModifiedInSession.
+    const afterCompletionDedupedTool = {
+      request: {
+        callId: 'call_dedup_after_completion',
+        name: 'write_file',
+        args: { path: '/tmp/landed.txt', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-dedup-after',
+      },
+      status: 'cancelled',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_dedup_after_completion',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_dedup_after_completion',
+              name: 'write_file',
+              response: {
+                error: operationCancelledErrorMessage(
+                  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+                ),
+              },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'cancelled-after-completion write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCancelledToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // Pre-paired in history: the dedup branch fires for this callId.
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_dedup_after_completion']));
+    client.getHistory = vi.fn().mockReturnValue([
+      { role: 'user', parts: [{ text: 'write then cancel' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_dedup_after_completion',
+              name: 'write_file',
+              args: { path: '/tmp/landed.txt', content: 'x' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_dedup_after_completion',
+              name: 'write_file',
+              response: { error: 'synthetic' },
+            },
+          },
+        ],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([afterCompletionDedupedTool]);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'call_dedup_after_completion',
+      ]);
+    });
+
+    // The deduped after-completion cancellation still counts as work.
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('write_file', {
+      path: '/tmp/landed.txt',
+      content: 'x',
+    });
+  });
+
   it('skips recordCompletedToolCall for cancelled tools in the main completion loop', async () => {
     // A cancelled tool in the main (non-deduped) path never ran end-to-end,
     // so it must not inflate toolCallCount / hasSubstantiveWork — parity

@@ -51,8 +51,9 @@ function shellOutputBlock(command: string, exitCode: number): string {
   ].join('\n');
 }
 
-// Real shell.ts failure shape: the `error` key is present (populated only
-// when isShellExitError holds) alongside the output block.
+// Real shell.ts failure shape: shell.ts sets error.message to the llmContent
+// block itself and createErrorResponse writes `response: { error: ... }` with
+// no sibling `output` key.
 function shellError(command: string, exitCode: number): Content {
   return {
     role: 'user',
@@ -62,8 +63,7 @@ function shellError(command: string, exitCode: number): Content {
           id: 'c',
           name: 'run_shell_command',
           response: {
-            error: `Command failed with exit code ${exitCode}`,
-            output: shellOutputBlock(command, exitCode),
+            error: shellOutputBlock(command, exitCode),
           },
         },
       },
@@ -239,6 +239,9 @@ describe('accumulateExperienceSignals', () => {
     expect(noArc.retryArc).toBe(false);
   });
 
+  // Substantive work is latched by recordCompletedToolCall via
+  // isSubstantiveToolCall in production, not from history scanning, so these
+  // pin the classifier directly.
   it('marks write/edit/notebook/shell calls as substantive work', () => {
     for (const name of [
       'write_file',
@@ -246,25 +249,19 @@ describe('accumulateExperienceSignals', () => {
       'notebook_edit',
       'run_shell_command',
     ]) {
-      expect(detect([modelCall(name)]).hasSubstantiveWork).toBe(true);
+      expect(isSubstantiveToolCall(name)).toBe(true);
     }
   });
 
   it('marks MCP and other dynamically named tools as substantive work', () => {
     expect(isSubstantiveToolCall('mcp__github__create_issue')).toBe(true);
     expect(isSubstantiveToolCall('agent')).toBe(true);
-    expect(
-      detect([modelCall('mcp__github__create_issue')]).hasSubstantiveWork,
-    ).toBe(true);
   });
 
   it('does not mark read-only sessions as substantive work', () => {
     const signals = detect([
-      modelCall('read_file'),
       toolOk('read_file'),
-      modelCall('list_directory'),
       toolOk('list_directory'),
-      modelCall('grep_search'),
       toolOk('grep_search'),
     ]);
     expect(signals).toEqual({ retryArc: false, hasSubstantiveWork: false });
@@ -288,6 +285,12 @@ describe('accumulateExperienceSignals', () => {
     ToolNames.TASK_LIST,
     ToolNames.CRON_LIST,
     ToolNames.DISPLAY_IMAGE,
+    ToolNames.ENTER_PLAN_MODE,
+    ToolNames.EXIT_PLAN_MODE,
+    ToolNames.ASK_USER_QUESTION,
+    ToolNames.UPDATE_GOAL,
+    ToolNames.LOOP_WAKEUP,
+    ToolNames.STRUCTURED_OUTPUT,
   ])('treats %s as read-only (not substantive work)', (name) => {
     expect(isSubstantiveToolCall(name)).toBe(false);
   });
@@ -392,13 +395,28 @@ describe('accumulateExperienceSignals', () => {
     }
   });
 
+  it('does not treat a synthesized marker as recovery from a genuine failure', () => {
+    // Symmetric discriminator: without a later real success the marker must
+    // yield retryArc false — classifying it as success (`false`) instead of
+    // unknown (`null`) would close the arc and flip this to true.
+    for (const marker of [cancelledResult, orphanRepairResult]) {
+      const signals = detect([
+        modelCall('run_shell_command'),
+        shellError('npm run test', 2),
+        marker('run_shell_command'),
+      ]);
+      expect(signals.retryArc).toBe(false);
+    }
+  });
+
   it('does not treat an unparseable shell response as failure', () => {
-    const signals = detect([
-      toolError('read_file'),
-      modelCall('run_shell_command'),
+    // Pins the classifier semantics, not just the downstream flag: an
+    // output-only response (no `error` key) classifies as success and must
+    // never seed failedToolNames, even when its text is unparseable.
+    const { failedToolNames } = accumulateExperienceSignals([
       toolOk('run_shell_command', 'Exit Code: (none)'),
     ]);
-    expect(signals.retryArc).toBe(false);
+    expect(failedToolNames.size).toBe(0);
   });
 
   it('keeps a pending failure across separately scanned fragments', () => {

@@ -62,6 +62,15 @@ const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.TASK_LIST,
   ToolNames.CRON_LIST,
   ToolNames.DISPLAY_IMAGE,
+  // Non-work control-flow builtins: mode transitions, user interaction,
+  // goal bookkeeping, and structured output never constitute write/execute
+  // work, so they must not latch hasSubstantiveWork.
+  ToolNames.ENTER_PLAN_MODE,
+  ToolNames.EXIT_PLAN_MODE,
+  ToolNames.ASK_USER_QUESTION,
+  ToolNames.UPDATE_GOAL,
+  ToolNames.LOOP_WAKEUP,
+  ToolNames.STRUCTURED_OUTPUT,
 ]);
 
 export function isSubstantiveToolCall(name: string): boolean {
@@ -111,12 +120,10 @@ export function accumulateExperienceSignals(
 
   for (const content of history) {
     for (const part of content.parts ?? []) {
-      if (part.functionCall) {
-        if (isSubstantiveToolCall(part.functionCall.name ?? '')) {
-          hasSubstantiveWork = true;
-        }
-        continue;
-      }
+      // functionCall parts are model turns without outcomes; the sole
+      // production call site feeds accepted ToolResult/Retry user turns
+      // (functionResponse parts only). Substantive work is latched by
+      // recordCompletedToolCall in the client, not from model turns.
       const failed = isFailedResponse(part);
       if (failed === null) continue;
       const toolName = part.functionResponse?.name;

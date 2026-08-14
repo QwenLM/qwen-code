@@ -90,6 +90,27 @@ describe('didToolCallProduceWork', () => {
   });
 
   it('counts after-completion cancellations (side effects landed)', () => {
+    // Primary production shape: the scheduler reports executionStatus
+    // 'cancelled' for the aborted after-completion path
+    // (coreToolScheduler: executionStatus = aborted ? 'cancelled' : …).
+    expect(
+      didToolCallProduceWork({
+        status: 'cancelled',
+        executionStatus: 'cancelled',
+        responseParts: cancelledParts(TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE),
+      }),
+    ).toBe(true);
+    // The scheduler appends PostToolUseFailure-hook additionalContext after
+    // the marker; the match must survive the suffix.
+    expect(
+      didToolCallProduceWork({
+        status: 'cancelled',
+        executionStatus: 'cancelled',
+        responseParts: cancelledParts(
+          `${TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE}\n\nhook additional context`,
+        ),
+      }),
+    ).toBe(true);
     expect(
       didToolCallProduceWork({
         status: 'cancelled',

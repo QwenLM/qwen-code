@@ -2778,6 +2778,7 @@ describe('Gemini Client (client.ts)', () => {
 
     it('drops a retained in-flight skill-review window so it cannot re-arm after /clear', async () => {
       client['pendingSkillReviewWindow'] = {
+        taskId: 'task-pre-clear',
         toolCallCount: 12,
         userSteer: true,
         signals: {
@@ -8792,13 +8793,24 @@ hello
         );
         expect(client['toolCallCount']).toBe(0);
 
+        // Work accumulates while the review is in flight; a completing
+        // review must preserve it (only the retained window is dropped).
+        client['toolCallCount'] = 4;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['write_file']),
+        };
+
         resolveFn({ status: 'completed', metadata: {} });
         await promise;
         // Drain the .then continuation.
         await Promise.resolve();
 
-        expect(client['toolCallCount']).toBe(0);
-        expect(client['userSteeredSinceReview']).toBe(false);
+        expect(client['toolCallCount']).toBe(4);
+        expect(client['userSteeredSinceReview']).toBe(true);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
         expect(client['pendingSkillReviewWindow']).toBeNull();
       });
 
@@ -8814,7 +8826,7 @@ hello
         });
 
         client['toolCallCount'] = 12;
-        client['userSteeredSinceReview'] = true;
+        client['userSteeredSinceReview'] = false;
         client['experienceSignalsSinceReview'] = {
           retryArc: true,
           hasSubstantiveWork: true,
@@ -8831,8 +8843,15 @@ hello
         // Dispatched: window reset, snapshot retained.
         expect(client['toolCallCount']).toBe(0);
 
-        // New work accumulates while the review is in flight.
+        // New work accumulates while the review is in flight, including
+        // current-side signals the re-arm must merge, not overwrite.
         client['toolCallCount'] = 3;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(['edit']),
+        };
 
         // The review settles as 'skipped' (e.g. memory pressure) without
         // running: the retained window is re-armed on top of new work.
@@ -8841,15 +8860,18 @@ hello
         await Promise.resolve();
 
         expect(client['toolCallCount']).toBe(15);
+        // userSteer comes from the current side (pending side was false).
         expect(client['userSteeredSinceReview']).toBe(true);
+        // retryArc comes from the pending side (current side was false).
         expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
-          true,
-        );
+        // Both sides' failedToolNames survive the merge.
         expect(
           client['experienceSignalsSinceReview'].failedToolNames.has(
             'run_shell_command',
           ),
+        ).toBe(true);
+        expect(
+          client['experienceSignalsSinceReview'].failedToolNames.has('edit'),
         ).toBe(true);
         expect(client['pendingSkillReviewWindow']).toBeNull();
       });
@@ -8893,7 +8915,112 @@ hello
         expect(client['pendingSkillReviewWindow']).toBeNull();
       });
 
-      it('should reset toolCallCount when review is already_running and count exceeds threshold', async () => {
+      it('should stop re-arming after two consecutive failed settlements', async () => {
+        let reject1!: (e: unknown) => void;
+        const promise1 = new Promise<unknown>((_r, reject) => {
+          reject1 = reject;
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'task-1',
+          promise: promise1,
+        });
+
+        client['toolCallCount'] = 12;
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'first dispatch' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-fail-streak-1',
+          ),
+        );
+        reject1(new Error('deterministic failure'));
+        await promise1.catch(() => {});
+        await Promise.resolve();
+        // First failure re-arms: the window is restored for one retry.
+        expect(client['toolCallCount']).toBe(12);
+
+        let reject2!: (e: unknown) => void;
+        const promise2 = new Promise<unknown>((_r, reject) => {
+          reject2 = reject;
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'task-2',
+          promise: promise2,
+        });
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'second dispatch' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-fail-streak-2',
+          ),
+        );
+        reject2(new Error('deterministic failure again'));
+        await promise2.catch(() => {});
+        await Promise.resolve();
+        // Second consecutive failure drops the window instead of re-arming
+        // it, so a deterministically failing review is not re-dispatched on
+        // every turn end.
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['pendingSkillReviewWindow']).toBeNull();
+        // The streak clears: the next window starts fresh.
+        expect(client['skillReviewFailureStreak']).toBe(0);
+      });
+
+      it('should not let a late-settling review touch a later review window', async () => {
+        let resolveA!: (v: unknown) => void;
+        const promiseA = new Promise<unknown>((r) => {
+          resolveA = r;
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'task-a',
+          promise: promiseA,
+        });
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'dispatch A' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-late-a',
+          ),
+        );
+        expect(client['pendingSkillReviewWindow']?.taskId).toBe('task-a');
+
+        // Review B dispatches while A is still settling (the manager drops
+        // its in-flight entry before promise reactions run).
+        let resolveB!: (v: unknown) => void;
+        const promiseB = new Promise<unknown>((r) => {
+          resolveB = r;
+        });
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'task-b',
+          promise: promiseB,
+        });
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'dispatch B' }],
+            new AbortController().signal,
+            'prompt-id-autoskill-late-b',
+          ),
+        );
+        const windowB = client['pendingSkillReviewWindow'];
+        expect(windowB?.taskId).toBe('task-b');
+
+        // A settles late as skipped: it must not re-arm or null B's window.
+        resolveA({ status: 'skipped', metadata: {} });
+        await promiseA;
+        await Promise.resolve();
+        expect(client['pendingSkillReviewWindow']).toBe(windowB);
+        expect(client['toolCallCount']).toBe(0);
+
+        resolveB({ status: 'completed', metadata: {} });
+        await promiseB;
+      });
+
+      it('should keep the window when review is already_running and count exceeds threshold', async () => {
         mockMemoryManager.scheduleSkillReview.mockReturnValue({
           status: 'skipped',
           skippedReason: 'already_running',
@@ -8912,8 +9039,12 @@ hello
           ),
         );
 
-        // Counter should have been reset to prevent immediate cascade.
-        expect(client['toolCallCount']).toBe(0);
+        // The window is kept: its one-shot acceptance-time signals cannot
+        // be re-derived from history (the accumulator runs once, at push
+        // time), and the in-flight review's history snapshot predates them,
+        // so a reset would discard them permanently. The next gate after
+        // the in-flight review ends retries with the same window.
+        expect(client['toolCallCount']).toBe(AUTO_SKILL_THRESHOLD + 5);
       });
 
       it('should always reset skillsModifiedInSession after scheduleSkillReview check', async () => {
@@ -9041,6 +9172,12 @@ hello
             new AbortController().signal,
             'prompt-id-autoskill-window-reset',
           ),
+        );
+
+        // The payload carries the pre-reset count: reading it after the
+        // reset would silently disable every count-triggered review.
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+          expect.objectContaining({ toolCallCount: 7 }),
         );
 
         expect(client['toolCallCount']).toBe(0);
@@ -9229,7 +9366,7 @@ hello
         );
       });
 
-      it('should reset the full fast-path window when review is already_running', async () => {
+      it('should keep the full fast-path window when review is already_running', async () => {
         mockMemoryManager.scheduleSkillReview.mockReturnValue({
           status: 'skipped',
           skippedReason: 'already_running',
@@ -9254,16 +9391,25 @@ hello
           ),
         );
 
-        expect(client['toolCallCount']).toBe(0);
-        expect(client['userSteeredSinceReview']).toBe(false);
+        // already_running consumed a window that provably no review will
+        // cover if reset: the signals are one-shot and the in-flight
+        // review's snapshot predates them, so the window must survive.
+        expect(client['toolCallCount']).toBe(10);
+        expect(client['userSteeredSinceReview']).toBe(true);
         expect(client['experienceSignalsSinceReview']).toEqual({
-          retryArc: false,
+          retryArc: true,
           hasSubstantiveWork: false,
-          failedToolNames: new Set(),
+          failedToolNames: new Set(['run_shell_command']),
         });
       });
 
       it('should not count inputs rejected before history push', async () => {
+        // Documented deviation: the count backstop advances at local tool
+        // completion, before submission acceptance, so a blocked submission
+        // still counts toward the backstop (fail-open: one skippable
+        // review, never data loss). Only the history-derived signals are
+        // acceptance-gated.
+        client.recordCompletedToolCall('run_shell_command');
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
@@ -9304,6 +9450,49 @@ hello
         );
 
         expect(client['userSteeredSinceReview']).toBe(false);
+        // The pinned deviation: the blocked ToolResult still advanced the
+        // backstop inputs at local completion time.
+        expect(client['toolCallCount']).toBe(1);
+        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
+          true,
+        );
+      });
+
+      it('should preserve the review window across a session switch on initialize', async () => {
+        // /resume and /branch switch sessions on the same GeminiClient via
+        // config.startNewSession + initialize(); the old session's window
+        // and retained pending window must not leak into the new one.
+        client['toolCallCount'] = 5;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['run_shell_command']),
+        };
+        client['pendingSkillReviewWindow'] = {
+          taskId: 'task-old',
+          toolCallCount: 5,
+          userSteer: true,
+          signals: {
+            retryArc: true,
+            hasSubstantiveWork: true,
+            failedToolNames: new Set(['run_shell_command']),
+          },
+        };
+
+        vi.mocked(mockConfig.getSessionId).mockReturnValue(
+          'switched-session-id',
+        );
+        await client.initialize();
+
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['userSteeredSinceReview']).toBe(false);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(),
+        });
+        expect(client['pendingSkillReviewWindow']).toBeNull();
       });
 
       it('should preserve substantive-work signals when history is compressed', async () => {
@@ -9339,6 +9528,69 @@ hello
           expect.objectContaining({
             experienceSignals: expect.objectContaining({
               hasSubstantiveWork: true,
+            }),
+          }),
+        );
+      });
+
+      it('should preserve review-window signals across LLM compression', async () => {
+        // Override the suite-wide NOOP stub so the real tryCompressChat runs
+        // its mid-send LLM path: tryCompress → startChat(Compact).
+        vi.mocked(client.tryCompressChat).mockRestore();
+        const startChatSpy = vi
+          .spyOn(
+            client as unknown as {
+              startChat: (history?: unknown, source?: unknown) => Promise<void>;
+            },
+            'startChat',
+          )
+          .mockResolvedValue(undefined);
+        mockChat.tryCompress = vi.fn().mockResolvedValue({
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        });
+        mockChat.getHistoryShallow = vi.fn().mockReturnValue([]);
+        mockChat.setLastPromptTokenCount = vi.fn();
+
+        client['toolCallCount'] = 9;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(['run_shell_command']),
+        };
+
+        const info = await client.tryCompressChat('p1', true);
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(startChatSpy).toHaveBeenCalledWith(
+          [],
+          SessionStartSource.Compact,
+        );
+
+        // The LLM compression path restarts the chat but must not reset the
+        // review window: signals accumulated before compression stay live.
+        expect(client['toolCallCount']).toBe(9);
+        expect(client['userSteeredSinceReview']).toBe(true);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
+
+        mockMemoryManager.scheduleSkillReview.mockReturnValue({
+          status: 'skipped',
+          skippedReason: 'no_experience_signal',
+        });
+        (
+          client as unknown as {
+            runManagedAutoMemoryBackgroundTasks: (
+              messageType: SendMessageType,
+            ) => void;
+          }
+        ).runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery);
+        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            toolCallCount: 9,
+            experienceSignals: expect.objectContaining({
+              retryArc: true,
+              userSteer: true,
             }),
           }),
         );
