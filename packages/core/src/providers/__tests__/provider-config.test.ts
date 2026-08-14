@@ -998,3 +998,27 @@ describe('providerState version semantics', () => {
     );
   });
 });
+
+describe('headless custom-model preservation', () => {
+  it('keeps exact saved custom models beside defaults-only inputs', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const savedCustom = {
+      id: 'saved-custom',
+      name: 'Saved Custom',
+      baseUrl: 'https://proxy.example/v1',
+      envKey: 'TEST_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      preserveModels: [savedCustom],
+    });
+
+    expect(plan.modelProviders?.[0]?.models).toContainEqual(savedCustom);
+  });
+});

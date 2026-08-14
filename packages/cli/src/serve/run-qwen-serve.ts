@@ -64,6 +64,7 @@ import {
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   AuthType,
+  ProviderModelConfig,
   ProviderSetupInputs,
   TelemetryRuntimeConfig,
   TelemetrySettings,
@@ -952,20 +953,35 @@ export function buildProviderSetupInputs(
   helpers: {
     getDefaultModelIds: CoreRuntime['getDefaultModelIds'];
     resolveBaseUrl: CoreRuntime['resolveBaseUrl'];
+    normalizeBaseUrlForMatching?: CoreRuntime['normalizeBaseUrlForMatching'];
+    existingModels?: ProviderModelConfig[];
   },
 ): ProviderSetupInputs {
   const protocol = (req.protocol ?? provider.protocol) as AuthType;
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
+  const modelIds = normalizeInstallModelIds(
+    req,
+    provider,
+    baseUrl,
+    helpers.getDefaultModelIds,
+  );
+  const defaultIds = new Set(helpers.getDefaultModelIds(provider, baseUrl));
+  const selectedEndpoint = helpers.normalizeBaseUrlForMatching?.(baseUrl);
+  const preserveModels = helpers.existingModels?.filter(
+    (model) =>
+      !defaultIds.has(model.id) &&
+      (!provider.mergeModelsByIdentity ||
+        !Array.isArray(provider.baseUrl) ||
+        (model.baseUrl !== undefined &&
+          helpers.normalizeBaseUrlForMatching?.(model.baseUrl) ===
+            selectedEndpoint)),
+  );
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
     baseUrl,
     apiKey: req.apiKey.trim(),
-    modelIds: normalizeInstallModelIds(
-      req,
-      provider,
-      baseUrl,
-      helpers.getDefaultModelIds,
-    ),
+    modelIds,
+    ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
   };
 }
@@ -1121,8 +1137,7 @@ function loadSettingsRuntimeModules(): Promise<{
 }
 
 let channelWebhookConfigRuntimePromise:
-  | Promise<ChannelWebhookConfigRuntime>
-  | undefined;
+  Promise<ChannelWebhookConfigRuntime> | undefined;
 function loadChannelWebhookConfigRuntime(): Promise<ChannelWebhookConfigRuntime> {
   channelWebhookConfigRuntimePromise ??= Promise.all([
     import('../commands/channel/runtime.js'),
@@ -1929,7 +1944,7 @@ function isCorsPreflightRequest(req: Request): boolean {
     Boolean(req.headers.origin) &&
     Boolean(
       req.headers['access-control-request-method'] ||
-        req.headers['access-control-request-headers'],
+      req.headers['access-control-request-headers'],
     )
   );
 }
@@ -2547,9 +2562,8 @@ async function runQwenServeImpl(
     workspaceRegistrationStore === undefined &&
     process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] !== '1'
   ) {
-    const { WorkspaceRegistrationStore } = await import(
-      './workspace-registration-store.js'
-    );
+    const { WorkspaceRegistrationStore } =
+      await import('./workspace-registration-store.js');
     workspaceRegistrationStore = new WorkspaceRegistrationStore(boundWorkspace);
   }
   if (workspaceRegistrationStore) {
@@ -2894,9 +2908,8 @@ async function runQwenServeImpl(
         'Required external tool guarding cannot be combined with an injected bridge.',
       );
     }
-    const { RequiredExternalToolGuard } = await import(
-      './external-tool-guard-provider.js'
-    );
+    const { RequiredExternalToolGuard } =
+      await import('./external-tool-guard-provider.js');
     const provider = new RequiredExternalToolGuard({
       endpoint: opts.externalToolGuard.endpoint,
       token: opts.externalToolGuard.token,
@@ -2985,8 +2998,7 @@ async function runQwenServeImpl(
   let managedChildHeapPolicy: ChildHeapPolicy | undefined;
   const internalRuntimeBridgesForCleanup: AcpSessionBridge[] = [];
   let daemonEventLoopMonitor:
-    | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
-    | undefined;
+    ReturnType<CoreRuntime['startEventLoopLagMonitor']> | undefined;
   // Daemon Status metrics-ring sampler: a fixed-cadence timer that seals a
   // bucket plus the window-scoped event-loop histogram it resets each seal.
   // Torn down together with the event-loop monitor on runtime restart/stop.
@@ -3040,13 +3052,11 @@ async function runQwenServeImpl(
   let channelWebhookConfigVersion = 0;
   let refreshChannelWebhookConfigs: (() => void) | undefined;
   let ensureChannelWorkerManager:
-    | (() => Promise<ChannelWorkerManager>)
-    | undefined;
+    (() => Promise<ChannelWorkerManager>) | undefined;
   const getChannelWebhookConfigSources = (): ChannelWebhookConfigSource[] => {
     const app = runtimeApp ?? runtimeAppForCleanup;
     const registry = app?.locals?.['workspaceRegistry'] as
-      | WorkspaceRegistry
-      | undefined;
+      WorkspaceRegistry | undefined;
     return (channelWorkspaceGroups ?? []).map((group) => {
       const env =
         registry?.getByWorkspaceCwd(group.workspaceCwd)?.env.effectiveEnv ??
@@ -3201,8 +3211,7 @@ async function runQwenServeImpl(
     if (!app || stoppedTrustPolicyMonitors.has(app)) return;
     stoppedTrustPolicyMonitors.add(app);
     const stop = app.locals?.['stopTrustPolicyMonitor'] as
-      | (() => void)
-      | undefined;
+      (() => void) | undefined;
     try {
       stop?.();
     } catch (err) {
@@ -3309,8 +3318,7 @@ async function runQwenServeImpl(
   const getRuntimeBridgesForCleanup = (): AcpSessionBridge[] => {
     const appForCleanup = runtimeApp ?? runtimeAppForCleanup;
     const registry = appForCleanup?.locals?.['workspaceRegistry'] as
-      | WorkspaceRegistry
-      | undefined;
+      WorkspaceRegistry | undefined;
     const bridges = [
       ...(registry
         ? registry.listManaged().map((runtime) => runtime.bridge)
@@ -3365,8 +3373,7 @@ async function runQwenServeImpl(
     const liveConversationWorkspace =
       deps.liveConversationWorkspace ?? new LiveConversationWorkspace();
     let runtimeBootSettings:
-      | ReturnType<SettingsRuntime['loadSettings']>
-      | undefined;
+      ReturnType<SettingsRuntime['loadSettings']> | undefined;
     try {
       runtimeBootSettings = settingsRuntime.settings.loadSettings(
         boundWorkspace,
@@ -4052,9 +4059,8 @@ async function runQwenServeImpl(
     // from a child's agent turn and (for 'first-turn') return its result.
     // Dynamic-imported (not at module scope) so the serve fast-path bundle
     // closure check doesn't trace create-sub-session's transitive deps.
-    const { createSubSessionLauncher } = await import(
-      './create-sub-session.js'
-    );
+    const { createSubSessionLauncher } =
+      await import('./create-sub-session.js');
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
     // brings its own options.
@@ -4386,8 +4392,7 @@ async function runQwenServeImpl(
       );
       const secondaryTrusted = secondaryDecision.targetTrusted;
       let secondarySettings:
-        | ReturnType<SettingsRuntime['loadSettings']>
-        | undefined;
+        ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         secondarySettings = settingsRuntime.settings.loadSettings(
           workspaceInput.cwd,
@@ -4464,8 +4469,7 @@ async function runQwenServeImpl(
       // workspace hit methodNotFound.
       // eslint-disable-next-line prefer-const -- assigned once after bridge creation; `let` required because the launcher closure captures it before the assignment.
       let secondaryBridgeRef:
-        | ReturnType<typeof runtime.createAcpSessionBridge>
-        | undefined;
+        ReturnType<typeof runtime.createAcpSessionBridge> | undefined;
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
         boundWorkspace: workspaceInput.cwd,
@@ -5003,8 +5007,7 @@ async function runQwenServeImpl(
       const wsClientMcpRegistry = new ClientMcpSenderRegistry();
       // eslint-disable-next-line prefer-const
       let wsBridgeRef:
-        | ReturnType<typeof runtime.createAcpSessionBridge>
-        | undefined;
+        ReturnType<typeof runtime.createAcpSessionBridge> | undefined;
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
@@ -5791,12 +5794,19 @@ async function runQwenServeImpl(
             if (!provider) {
               throw new Error(`Unsupported auth provider: ${req.providerId}`);
             }
+            const fresh = loadSettingsForPersistence(boundWorkspace);
+            const existing = core.findExistingProviderModels(
+              provider,
+              (fresh.merged as Record<string, unknown>)['modelProviders'] as
+                Record<string, unknown> | undefined,
+            );
             const inputs = buildProviderSetupInputs(req, provider, {
               getDefaultModelIds: core.getDefaultModelIds,
               resolveBaseUrl: core.resolveBaseUrl,
+              normalizeBaseUrlForMatching: core.normalizeBaseUrlForMatching,
+              existingModels: existing?.models,
             });
             const plan = core.buildInstallPlan(provider, inputs);
-            const fresh = loadSettingsForPersistence(boundWorkspace);
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
                 fresh,
@@ -6404,8 +6414,7 @@ async function runQwenServeImpl(
         liveDiscoveryEnabled = true;
         if (liveDiscoveryPublish) return liveDiscoveryPublish;
         const coordinator = candidateApp.locals?.['liveCoordinator'] as
-          | { daemonInstanceNonce?: unknown }
-          | undefined;
+          { daemonInstanceNonce?: unknown } | undefined;
         const instanceNonce = coordinator?.daemonInstanceNonce;
         if (typeof instanceNonce !== 'string') return Promise.resolve();
         liveDiscoveryPublish = loadLiveDiscoveryRuntime()
@@ -6755,8 +6764,7 @@ async function runQwenServeImpl(
         operation: 'initial' | 'set' | 'reload',
       ): Promise<readonly ChannelWorkspaceGroup[]> => {
         const registry = candidateApp.locals?.['workspaceRegistry'] as
-          | WorkspaceRegistry
-          | undefined;
+          WorkspaceRegistry | undefined;
         if (!registry) {
           throw new Error(
             'Workspace registry is not available for channel workers.',
@@ -6831,8 +6839,7 @@ async function runQwenServeImpl(
         const starting = (async () => {
           const candidateApp = runtimeApp ?? runtimeAppForCleanup;
           const registry = candidateApp?.locals?.['workspaceRegistry'] as
-            | WorkspaceRegistry
-            | undefined;
+            WorkspaceRegistry | undefined;
           if (!candidateApp || !registry) {
             throw new Error(
               'Workspace registry is not available for channels.',
@@ -6940,8 +6947,7 @@ async function runQwenServeImpl(
         runtimeApp = candidateApp;
         attachLiveDiscoveryControl(candidateApp);
         const acpHandle = candidateApp.locals?.['acpHandle'] as
-          | AcpHttpHandle
-          | undefined;
+          AcpHttpHandle | undefined;
         acpHandle?.attachServer?.(server);
         if (opts.channelSelection) {
           closeServerAfterChannelWorkerStartupFailure = true;
@@ -7134,16 +7140,14 @@ async function runQwenServeImpl(
             ] as { sealAndWait?: () => Promise<void> } | undefined;
             const initiallyMountedSessionMaintenance = initiallyMountedApp
               ?.locals?.['sessionArchiveCoordinator'] as
-              | { sealMaintenanceAndWait?: () => Promise<void> }
-              | undefined;
+              { sealMaintenanceAndWait?: () => Promise<void> } | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
             const initialManagementWait =
               initiallyMountedManagement?.sealAndWait?.();
             const initiallyMountedLive = initiallyMountedApp?.locals as
-              | { sealAndWaitLiveCoordinator?: () => Promise<void> }
-              | undefined;
+              { sealAndWaitLiveCoordinator?: () => Promise<void> } | undefined;
             const initialLiveWait =
               initiallyMountedLive?.sealAndWaitLiveCoordinator?.();
             const initialSessionMaintenanceWait =
@@ -7200,8 +7204,7 @@ async function runQwenServeImpl(
               settled = true;
               const accessLogController = (
                 (runtimeApp ?? runtimeAppForCleanup)?.locals as
-                  | AccessLogAppLocals
-                  | undefined
+                  AccessLogAppLocals | undefined
               )?.[ACCESS_LOG_CONTROLLER_LOCAL];
               accessLogController?.sealAndFlushSuppressed();
               const preserveSignalHandlers =
@@ -7298,8 +7301,7 @@ async function runQwenServeImpl(
                 const sessionMaintenance = appForCleanup?.locals?.[
                   'sessionArchiveCoordinator'
                 ] as
-                  | { sealMaintenanceAndWait?: () => Promise<void> }
-                  | undefined;
+                  { sealMaintenanceAndWait?: () => Promise<void> } | undefined;
                 await initialManagementWait;
                 if (workspaceManagementHandle !== initiallyMountedManagement) {
                   await workspaceManagementHandle?.sealAndWait?.();
@@ -7479,8 +7481,7 @@ async function runQwenServeImpl(
           );
         } else {
           const acpHandle = preparedRuntimeApp.locals?.['acpHandle'] as
-            | AcpHttpHandle
-            | undefined;
+            AcpHttpHandle | undefined;
           acpHandle?.attachServer?.(server);
           void publishLiveDiscovery(preparedRuntimeApp);
         }

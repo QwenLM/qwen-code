@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { QwenProviderSummary } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
+  canonicalBaseUrl,
   customModelIdsAfterEdit,
   defaultBaseUrl,
   defaultModelIds,
@@ -11,6 +12,7 @@ import {
   parseModelIds,
   resetTrimmedDefaultModelIds,
   seedProviderModelState,
+  switchEndpointModelState,
   shouldResetApiKeyAfterBaseUrlChange,
   trimmedDefaultModelIds,
 } from './provider-state';
@@ -65,6 +67,28 @@ describe('provider endpoint state', () => {
         baseUrlPlaceholder: 'https://placeholder.example/v1',
       }),
     ).toBe('https://placeholder.example/v1');
+  });
+
+  it('canonicalizes a saved endpoint with a trailing slash', () => {
+    expect(
+      canonicalBaseUrl(kimi, 'https://api.moonshot.ai/v1/'),
+    ).toBe('https://api.moonshot.ai/v1');
+    expect(
+      defaultModelIds(kimi, 'https://api.moonshot.ai/v1/'),
+    ).toEqual(['kimi-k3']);
+    expect(
+      initialModelIds(
+        {
+          ...kimi,
+          existingConfig: {
+            modelIdsByBaseUrl: {
+              'https://api.moonshot.ai/v1/': ['kimi-k3', 'saved-custom'],
+            },
+          },
+        },
+        'https://api.moonshot.ai/v1',
+      ),
+    ).toEqual(['kimi-k3', 'saved-custom']);
   });
 
   it('seeds the saved model ids of a configured provider', () => {
@@ -296,6 +320,68 @@ describe('provider endpoint state', () => {
       modelIds: ['k3-256k'],
       customModelIds: [],
     });
+  });
+
+  it('persists unseen endpoint custom drafts across a saved-endpoint detour', () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const apiUrl = 'https://api.moonshot.ai/v1';
+    const unseenUrl = 'https://preview.example/v1';
+    const provider: QwenProviderSummary = {
+      ...kimi,
+      baseUrl: [
+        ...(Array.isArray(kimi.baseUrl) ? kimi.baseUrl : []),
+        {
+          id: 'preview',
+          label: 'Preview',
+          url: unseenUrl,
+          models: [{ id: 'preview-default' }],
+        },
+      ],
+    };
+    const drafts = new Map<string, string[]>([
+      [codingUrl, ['coding-custom']],
+      [apiUrl, ['api-custom']],
+    ]);
+    const trims = new Map<string, string[]>();
+
+    const atPreview = switchEndpointModelState(
+      provider,
+      codingUrl,
+      unseenUrl,
+      'k3-256k, coding-custom',
+      ['coding-custom'],
+      drafts,
+      trims,
+    );
+    expect(atPreview.modelIds).toEqual([
+      'preview-default',
+      'coding-custom',
+    ]);
+
+    const atApi = switchEndpointModelState(
+      provider,
+      unseenUrl,
+      apiUrl,
+      atPreview.modelIds.join(', '),
+      atPreview.customModelIds,
+      drafts,
+      trims,
+    );
+    expect(atApi.modelIds).toEqual(['kimi-k3', 'api-custom']);
+
+    const backAtPreview = switchEndpointModelState(
+      provider,
+      apiUrl,
+      unseenUrl,
+      atApi.modelIds.join(', '),
+      atApi.customModelIds,
+      drafts,
+      trims,
+    );
+    expect(backAtPreview.modelIds).toEqual([
+      'preview-default',
+      'coding-custom',
+    ]);
   });
 
   it('does not resurrect a saved custom id trimmed at the destination', () => {

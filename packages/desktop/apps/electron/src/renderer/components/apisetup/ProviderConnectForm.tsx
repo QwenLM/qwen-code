@@ -32,13 +32,14 @@ import type {
 } from '../../../shared/types';
 import {
   apiKeyAfterBaseUrlChange,
+  canonicalBaseUrl,
   customModelIdsAfterEdit,
   defaultBaseUrl,
   defaultModelIds,
   initialApiKey,
-  modelIdsAfterBaseUrlChange,
   parseModelIds,
   seedProviderModelState,
+  switchEndpointModelState,
   trimmedDefaultModelIds,
 } from './provider-state';
 
@@ -185,7 +186,10 @@ export function ProviderConnectForm({
   const selectProvider = useCallback((provider: QwenProviderSummary) => {
     const existingConfig = provider.existingConfig;
     const contextWindowSize = existingConfig?.advancedConfig?.contextWindowSize;
-    const baseUrl = existingConfig?.baseUrl ?? defaultBaseUrl(provider);
+    const baseUrl = canonicalBaseUrl(
+      provider,
+      existingConfig?.baseUrl ?? defaultBaseUrl(provider),
+    );
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
     setBaseUrl(baseUrl);
@@ -446,14 +450,14 @@ export function ProviderConnectForm({
                         apiKeyDraftsRef.current,
                       ),
                     );
-                    const nextModelIds = modelIdsAfterBaseUrlChange(
+                    const nextModelIds = switchEndpointModelState(
                       selectedProvider,
                       baseUrl,
                       value,
                       modelIdsText,
                       customModelIdsRef.current,
-                      trimmedDefaultModelIdsRef.current.get(value),
-                      customModelIdsByBaseUrlRef.current.get(value),
+                      customModelIdsByBaseUrlRef.current,
+                      trimmedDefaultModelIdsRef.current,
                     );
                     customModelIdsRef.current = nextModelIds.customModelIds;
                     setModelIdsText(nextModelIds.modelIds.join(', '));

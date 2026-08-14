@@ -1536,7 +1536,7 @@ export async function extractFilesFromTarGz(
       : '';
   const files: DownloadedSkillFile[] = [];
 
-  for (let offset = 0; offset + 512 <= archive.length; ) {
+  for (let offset = 0; offset + 512 <= archive.length;) {
     if (isZeroTarBlock(archive, offset)) break;
 
     const fullPath = readTarPath(archive, offset);
@@ -2078,8 +2078,7 @@ function readExistingProviderConfig(
   const existing = findExistingProviderModels(
     config,
     (settings.merged as Record<string, unknown>)['modelProviders'] as
-      | Record<string, unknown>
-      | undefined,
+      Record<string, unknown> | undefined,
   );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
@@ -2098,6 +2097,8 @@ function readExistingProviderConfig(
 
   const advancedConfig = readExistingAdvancedConfig(firstModel);
   const restoredEndpoint = normalizeBaseUrlForMatching(baseUrl);
+  const endpointScoped =
+    config.mergeModelsByIdentity && Array.isArray(config.baseUrl);
   const modelIdsByBaseUrl =
     existing && Array.isArray(config.baseUrl)
       ? Object.fromEntries(
@@ -2107,7 +2108,8 @@ function readExistingProviderConfig(
                 (model) =>
                   normalizeBaseUrlForMatching(model.baseUrl) ===
                     normalizeBaseUrlForMatching(option.url) ||
-                  (model.baseUrl === undefined &&
+                  (!config.mergeModelsByIdentity &&
+                    model.baseUrl === undefined &&
                     normalizeBaseUrlForMatching(option.url) ===
                       restoredEndpoint),
               )
@@ -2129,12 +2131,15 @@ function readExistingProviderConfig(
     ...(existing
       ? {
           modelIds: existing.models
-            .filter(
-              (model) =>
-                model.baseUrl === undefined ||
-                firstModel?.baseUrl === undefined ||
-                normalizeBaseUrlForMatching(model.baseUrl) ===
-                  normalizeBaseUrlForMatching(firstModel?.baseUrl),
+            .filter((model) =>
+              endpointScoped
+                ? model.baseUrl !== undefined &&
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    restoredEndpoint
+                : model.baseUrl === undefined ||
+                  firstModel?.baseUrl === undefined ||
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    normalizeBaseUrlForMatching(firstModel?.baseUrl),
             )
             .map((model) => model.id),
           ...(modelIdsByBaseUrl && Object.keys(modelIdsByBaseUrl).length > 0
@@ -2204,10 +2209,10 @@ function readProviderSetupInputs(
     protocol: ProviderConfig['protocol'],
     baseUrl: string,
   ) => string | undefined,
+  modelProviders?: Record<string, unknown>,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | AuthType
-    | undefined;
+    AuthType | undefined;
   if (
     protocol &&
     protocol !== config.protocol &&
@@ -2257,12 +2262,27 @@ function readProviderSetupInputs(
   }
 
   const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
+  const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
+  const defaultModelIdSet = new Set(defaultModelIds);
+  const preserveModels =
+    params['modelIds'] === undefined
+      ? findExistingProviderModels(config, modelProviders)?.models.filter(
+          (model) =>
+            !defaultModelIdSet.has(model.id) &&
+            (!config.mergeModelsByIdentity ||
+              !Array.isArray(config.baseUrl) ||
+              (model.baseUrl !== undefined &&
+                normalizeBaseUrlForMatching(model.baseUrl) ===
+                  selectedEndpoint)),
+        )
+      : undefined;
 
   return {
     ...(protocol ? { protocol } : {}),
     baseUrl,
     apiKey,
     modelIds: resolvedModelIds,
+    ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
@@ -3696,10 +3716,7 @@ class QwenAgent implements Agent {
   /** Set once the daemon negotiates active-work reporting; one per channel. */
   private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
-    | 'uninitialized'
-    | 'trusted'
-    | 'untrusted'
-    | 'rejected' = 'uninitialized';
+    'uninitialized' | 'trusted' | 'untrusted' | 'rejected' = 'uninitialized';
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
   // cadence, so successive calls form a clean delta window independent of tool
@@ -3953,8 +3970,7 @@ class QwenAgent implements Agent {
 
   private getMcpServerStatus(config: Config, serverName: string) {
     const manager = config.getToolRegistry()?.getMcpClientManager() as
-      | { getServerStatus?: (name: string) => MCPServerStatus }
-      | undefined;
+      { getServerStatus?: (name: string) => MCPServerStatus } | undefined;
     return (
       manager?.getServerStatus?.(serverName) ?? getMCPServerStatus(serverName)
     );
@@ -8003,6 +8019,9 @@ class QwenAgent implements Agent {
               protocol,
               baseUrl,
             ),
+          (this.settings.merged as Record<string, unknown>)[
+            'modelProviders'
+          ] as Record<string, unknown> | undefined,
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
@@ -10866,8 +10885,7 @@ class QwenAgent implements Agent {
         }
 
         let turnIndex: number | undefined = params['targetTurnIndex'] as
-          | number
-          | undefined;
+          number | undefined;
         const promptId = params['promptId'] as string | undefined;
 
         if (promptId && (turnIndex === undefined || turnIndex === null)) {

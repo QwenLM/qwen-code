@@ -283,8 +283,22 @@ export function buildInstallPlan(
   const baseUrl = resolveBaseUrl(config, inputs.baseUrl);
   const resolvedInputs = { ...inputs, baseUrl };
   const envKey = resolveEnvKey(config, resolvedInputs);
-  const models =
+  const generatedModels =
     inputs.prebuiltModels ?? buildModelConfigs(config, resolvedInputs);
+  const generatedIdentities = new Set(
+    generatedModels.map(
+      (model) => `${model.id}\0${normalizeBaseUrlForMatching(model.baseUrl)}`,
+    ),
+  );
+  const models = [
+    ...generatedModels,
+    ...(inputs.preserveModels ?? []).filter(
+      (model) =>
+        !generatedIdentities.has(
+          `${model.id}\0${normalizeBaseUrlForMatching(model.baseUrl)}`,
+        ),
+    ),
+  ];
   const providerOwnsModel = resolveOwnsModel(config);
   const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const ownsModel = config.mergeModelsByIdentity

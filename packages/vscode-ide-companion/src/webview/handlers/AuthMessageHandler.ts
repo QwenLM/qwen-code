@@ -42,8 +42,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     currentConversationId: string | null,
     sendToWebView: (message: unknown) => void,
     private readonly getModelProviders: () =>
-      | Record<string, unknown>
-      | undefined = () => undefined,
+      Record<string, unknown> | undefined = () => undefined,
   ) {
     super(
       agentManager,
@@ -380,11 +379,17 @@ export class AuthMessageHandler extends BaseMessageHandler {
       const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
       const restoredIds =
         existing?.models
-          .filter(
-            (model) =>
-              model.baseUrl === undefined ||
-              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint,
-          )
+          .filter((model) => {
+            const endpointScoped =
+              provider.mergeModelsByIdentity && Array.isArray(provider.baseUrl);
+            return endpointScoped
+              ? model.baseUrl !== undefined &&
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    selectedEndpoint
+              : model.baseUrl === undefined ||
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    selectedEndpoint;
+          })
           .map((model) => model.id) ?? [];
       const seededModelIds = [
         ...defaults,

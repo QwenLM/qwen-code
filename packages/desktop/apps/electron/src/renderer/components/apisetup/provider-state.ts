@@ -17,12 +17,31 @@ export function defaultBaseUrl(provider: QwenProviderSummary): string {
   return provider.baseUrlPlaceholder ?? '';
 }
 
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, '');
+}
+
+export function canonicalBaseUrl(
+  provider: QwenProviderSummary,
+  baseUrl: string,
+): string {
+  if (!Array.isArray(provider.baseUrl)) return baseUrl;
+  const normalized = normalizeBaseUrl(baseUrl);
+  return (
+    provider.baseUrl.find(
+      (option) => normalizeBaseUrl(option.url) === normalized,
+    )?.url ?? baseUrl
+  );
+}
+
 export function defaultModelIds(
   provider: QwenProviderSummary,
   baseUrl: string,
 ): string[] {
   if (Array.isArray(provider.baseUrl)) {
-    const option = provider.baseUrl.find((item) => item.url === baseUrl);
+    const option = provider.baseUrl.find(
+      (item) => normalizeBaseUrl(item.url) === normalizeBaseUrl(baseUrl),
+    );
     if (option?.models) return option.models.map((model) => model.id);
   }
   return provider.defaultModelIds;
@@ -33,7 +52,9 @@ export function initialModelIds(
   baseUrl: string,
 ): string[] {
   const endpointModelIds =
-    provider.existingConfig?.modelIdsByBaseUrl?.[baseUrl] ?? [];
+    Object.entries(provider.existingConfig?.modelIdsByBaseUrl ?? {}).find(
+      ([endpoint]) => normalizeBaseUrl(endpoint) === normalizeBaseUrl(baseUrl),
+    )?.[1] ?? [];
   if (endpointModelIds.length > 0) return endpointModelIds;
   const existingModelIds = provider.existingConfig?.modelIds ?? [];
   return existingModelIds.length > 0
@@ -61,13 +82,14 @@ export function seedProviderModelState(
   const trims = new Map<string, string[]>();
 
   for (const [endpoint, savedModelIds] of savedEntries) {
-    const defaults = new Set(defaultModelIds(provider, endpoint));
+    const canonicalEndpoint = canonicalBaseUrl(provider, endpoint);
+    const defaults = new Set(defaultModelIds(provider, canonicalEndpoint));
     const endpointCustoms = savedModelIds.filter((id) => !defaults.has(id));
-    customsByBaseUrl.set(endpoint, endpointCustoms);
+    customsByBaseUrl.set(canonicalEndpoint, endpointCustoms);
     for (const id of endpointCustoms) customModelIds.add(id);
     trims.set(
-      endpoint,
-      trimmedDefaultModelIds(provider, endpoint, savedModelIds),
+      canonicalEndpoint,
+      trimmedDefaultModelIds(provider, canonicalEndpoint, savedModelIds),
     );
   }
 
@@ -181,12 +203,44 @@ export function modelIdsAfterBaseUrlChange(
   };
 }
 
+export function switchEndpointModelState(
+  provider: QwenProviderSummary,
+  previousBaseUrl: string,
+  nextBaseUrl: string,
+  currentModelIds: string,
+  currentCustomModelIds: readonly string[],
+  customModelIdsByBaseUrl: Map<string, string[]>,
+  trimmedDefaultModelIdsByBaseUrl: Map<string, string[]>,
+): { modelIds: string[]; customModelIds: string[] } {
+  const previousEndpoint = canonicalBaseUrl(provider, previousBaseUrl);
+  const nextEndpoint = canonicalBaseUrl(provider, nextBaseUrl);
+  const previousCustomModelIds = customModelIdsAfterEdit(
+    defaultModelIds(provider, previousEndpoint),
+    customModelIdsByBaseUrl.get(previousEndpoint) ?? currentCustomModelIds,
+    parseModelIds(currentModelIds),
+  );
+  customModelIdsByBaseUrl.set(previousEndpoint, previousCustomModelIds);
+  const nextState = modelIdsAfterBaseUrlChange(
+    provider,
+    previousEndpoint,
+    nextEndpoint,
+    currentModelIds,
+    previousCustomModelIds,
+    trimmedDefaultModelIdsByBaseUrl.get(nextEndpoint),
+    customModelIdsByBaseUrl.get(nextEndpoint),
+  );
+  customModelIdsByBaseUrl.set(nextEndpoint, nextState.customModelIds);
+  return nextState;
+}
+
 export function selectedBaseUrlEnvKey(
   provider: QwenProviderSummary,
   baseUrl: string,
 ): string | undefined {
   if (!Array.isArray(provider.baseUrl)) return undefined;
-  return provider.baseUrl.find((option) => option.url === baseUrl)?.envKey;
+  return provider.baseUrl.find(
+    (option) => normalizeBaseUrl(option.url) === normalizeBaseUrl(baseUrl),
+  )?.envKey;
 }
 
 export function shouldResetApiKeyAfterBaseUrlChange(

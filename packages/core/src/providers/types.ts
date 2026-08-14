@@ -137,6 +137,8 @@ export interface ProviderSetupInputs {
   modelIds: string[];
   /** Pre-built model configs (e.g. OpenRouter fetches models from API). Overrides modelIds. */
   prebuiltModels?: ProviderModelConfig[];
+  /** Existing custom models that a defaults-only/headless reconnect cannot display. */
+  preserveModels?: ProviderModelConfig[];
   advancedConfig?: {
     enableThinking?: boolean;
     multimodal?: InputModalities;

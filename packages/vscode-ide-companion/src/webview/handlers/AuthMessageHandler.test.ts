@@ -221,7 +221,7 @@ describe('AuthMessageHandler', () => {
       'kimi-for-coding',
       'kimi-for-coding-highspeed',
     ];
-    const seeded = [...defaults, 'my-custom', 'legacy-custom'];
+    const seeded = [...defaults, 'my-custom'];
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'kimi' })
       .mockResolvedValueOnce({ value: codingUrl });
