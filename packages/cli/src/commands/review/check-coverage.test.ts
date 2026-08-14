@@ -25,7 +25,6 @@ import {
   mkdirSync,
   utimesSync,
   readdirSync,
-  renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,6 +40,7 @@ import {
 } from './lib/prompt-record.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import { checkCoverageCommand } from './check-coverage.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 // Only the stderr test below drives the command handler; the rest of this file
@@ -2167,19 +2167,37 @@ describe('coverage — a resumed run credits the prior attempt through the ledge
   function ledger(planPath: string, ...ids: string[]): void {
     const d = promptRecordDir(planPath);
     mkdirSync(d, { recursive: true });
-    writeFileSync(
-      join(d, 'run-sessions.json'),
-      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    // Written by the real writer: it stamps the plan mtime each entry is
+    // keyed on, and the resume marker is what authorizes reading prior
+    // evidence at all. The current attempt is stamped last, since each
+    // attempt's window closes when the next one opened.
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        planPath,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
     );
+    recordResume(planPath, ENV, nowMs + 1500);
   }
 
   /** Re-home a transcript written by `transcript()` into another session. */
   function moveToSession(id: string, session: string): void {
     mkdirSync(join(dir, 'subagents', session), { recursive: true });
-    renameSync(
-      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
-      join(dir, 'subagents', session, `agent-${id}.jsonl`),
+    // Re-stamp the records with the session that now owns them: a
+    // transcript COPIED into another session's directory is not that
+    // session's evidence, and production refuses the misplaced shape.
+    const from = join(dir, 'subagents', 'S1', `agent-${id}.jsonl`);
+    const to = join(dir, 'subagents', session, `agent-${id}.jsonl`);
+    writeFileSync(
+      to,
+      readFileSync(from, 'utf8').replaceAll(
+        '"sessionId":"S1"',
+        `"sessionId":"${session}"`,
+      ),
     );
+    rmSync(from, { force: true });
   }
 
   it('passes 3D on work the interrupted attempt completed, and discloses it', () => {
@@ -2245,18 +2263,36 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
   function ledger(planPath: string, ...ids: string[]): void {
     const d = promptRecordDir(planPath);
     mkdirSync(d, { recursive: true });
-    writeFileSync(
-      join(d, 'run-sessions.json'),
-      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    // Written by the real writer: it stamps the plan mtime each entry is
+    // keyed on, and the resume marker is what authorizes reading prior
+    // evidence at all. The current attempt is stamped last, since each
+    // attempt's window closes when the next one opened.
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        planPath,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
     );
+    recordResume(planPath, ENV, nowMs + 1500);
   }
 
   function moveToSession(id: string, session: string): void {
     mkdirSync(join(dir, 'subagents', session), { recursive: true });
-    renameSync(
-      join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
-      join(dir, 'subagents', session, `agent-${id}.jsonl`),
+    // Re-stamp the records with the session that now owns them: a
+    // transcript COPIED into another session's directory is not that
+    // session's evidence, and production refuses the misplaced shape.
+    const from = join(dir, 'subagents', 'S1', `agent-${id}.jsonl`);
+    const to = join(dir, 'subagents', session, `agent-${id}.jsonl`);
+    writeFileSync(
+      to,
+      readFileSync(from, 'utf8').replaceAll(
+        '"sessionId":"S1"',
+        `"sessionId":"${session}"`,
+      ),
     );
+    rmSync(from, { force: true });
   }
 
   it('a superseded prior-attempt declaration does not delete the chunk it covers', () => {

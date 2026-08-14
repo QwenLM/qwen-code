@@ -40,7 +40,7 @@
 import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { ToolNames } from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
-import { priorSessionIds } from './run-ledger.js';
+import { priorSessionEntries } from './run-ledger.js';
 
 /** One subagent, as the harness recorded it. */
 export interface AgentRecord {
@@ -88,6 +88,14 @@ export interface AgentRecord {
    * read.
    */
   successfulReadFileArgs: string[];
+  /**
+   * The session the harness stamped on the records, when it stamped one.
+   * Compared against the directory that supplied the file: a transcript
+   * COPIED into another session's directory is not that session's evidence,
+   * and on the resume path a copy could otherwise earn recovered coverage
+   * for an attempt that never ran it.
+   */
+  recordedSession: string;
   /** The agent's own final text, as the harness saw it. */
   finalText: string;
   /** When the transcript was last written. */
@@ -225,6 +233,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
 
   let agentId = '';
   let agentName = '';
+  let recordedSession = '';
   let launchPrompt = '';
   let finalText = '';
   let successfulToolCalls = 0;
@@ -258,6 +267,9 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
       agentId = rec['agentId'];
     if (!agentName && typeof rec['agentName'] === 'string') {
       agentName = rec['agentName'];
+    }
+    if (!recordedSession && typeof rec['sessionId'] === 'string') {
+      recordedSession = rec['sessionId'];
     }
 
     const type = rec['type'];
@@ -339,6 +351,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   return {
     agentId,
     agentName,
+    recordedSession,
     launchPrompt,
     successfulToolCalls,
     diffToolCalls,
@@ -416,12 +429,29 @@ function recordsIn(
   names: string[],
   since: number | undefined,
   diffPath: string | undefined,
+  opts: { sessionId?: string; until?: number } = {},
 ): AgentRecord[] {
   const out: AgentRecord[] = [];
   for (const name of names) {
     const rec = parseTranscript(join(dir, name), diffPath);
     if (!rec) continue;
     if (since !== undefined && rec.mtimeMs < since) continue;
+    // Each attempt's window closes when the next one opened: a session that
+    // kept running after the resume took over is no longer this review's,
+    // and its later transcripts must not be credited to it.
+    if (opts.until !== undefined && rec.mtimeMs >= opts.until) continue;
+    // The record must belong to the directory that supplied it. The harness
+    // stamps the session on its records; a file that names a DIFFERENT one
+    // was copied there, and a copy is not evidence of the attempt whose
+    // directory it sits in. A record with no stamp is accepted — older
+    // harness writes carry none — but a mismatch is refused.
+    if (
+      opts.sessionId !== undefined &&
+      rec.recordedSession !== '' &&
+      rec.recordedSession.toLowerCase() !== opts.sessionId.toLowerCase()
+    ) {
+      continue;
+    }
     out.push(rec);
   }
   return out;
@@ -446,10 +476,21 @@ function recordsIn(
 export function priorSessionDirs(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
-): Array<{ sessionId: string; dir: string; chatFile: string }> {
+): Array<{
+  sessionId: string;
+  dir: string;
+  chatFile: string;
+  /** When the NEXT attempt began — this one's upper window. */
+  endsAtMs: number | null;
+}> {
   const { projectDir } = transcriptPaths(env);
-  const out: Array<{ sessionId: string; dir: string; chatFile: string }> = [];
-  for (const sessionId of priorSessionIds(planPath, env)) {
+  const out: Array<{
+    sessionId: string;
+    dir: string;
+    chatFile: string;
+    endsAtMs: number | null;
+  }> = [];
+  for (const { sessionId, endsAtMs } of priorSessionEntries(planPath, env)) {
     const dir = join(projectDir, 'subagents', sessionId);
     try {
       if (lstatSync(dir).isSymbolicLink()) continue;
@@ -462,6 +503,7 @@ export function priorSessionDirs(
       sessionId,
       dir,
       chatFile: join(projectDir, 'chats', `${sessionId}.jsonl`),
+      endsAtMs,
     });
   }
   return out;
@@ -529,14 +571,17 @@ export function readRunTranscripts(
     }
     out = [];
   }
-  for (const { dir } of priors) {
+  for (const prior of priors) {
     let names: string[];
     try {
-      names = listAgentTranscriptFiles(dir);
+      names = listAgentTranscriptFiles(prior.dir);
     } catch {
       continue; // Earlier attempt's evidence invisible → its work is re-owed.
     }
-    for (const rec of recordsIn(dir, names, since, diffPath)) {
+    for (const rec of recordsIn(prior.dir, names, since, diffPath, {
+      sessionId: prior.sessionId,
+      until: prior.endsAtMs ?? undefined,
+    })) {
       rec.fromPriorSession = true;
       out.push(rec);
     }

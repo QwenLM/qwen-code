@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { layerAuditGate } from './layer-audit-gate.js';
+import { appendRunSession, recordResume } from './run-ledger.js';
 import { MODELED_SYSTEM_DOMAIN } from './audit-layers.js';
 
 /** A valid RepositoryContext (strict schema) with the given domains. */
@@ -211,10 +212,19 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
   });
 
   function ledger(...ids: string[]): void {
-    writeFileSync(
-      join(dir, 'plan-prompts', 'run-sessions.json'),
-      JSON.stringify(ids.map((id) => ({ sessionId: id, atMs: Date.now() }))),
+    // Written by the real writer: it stamps the plan mtime each entry is
+    // keyed on, and the resume marker is what authorizes reading prior
+    // evidence at all. The current attempt is stamped last, since each
+    // attempt's window closes when the next one opened.
+    const nowMs = Date.now();
+    ids.forEach((id, i) =>
+      appendRunSession(
+        plan,
+        { QWEN_CODE_SESSION_ID: id },
+        i === ids.length - 1 ? nowMs + 1500 : nowMs,
+      ),
     );
+    recordResume(plan, ENV(), nowMs + 1500);
   }
 
   /** A corroborated reverse auditor in `session`: identity line, a baked

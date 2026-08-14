@@ -23,6 +23,7 @@ import {
   renderLedger,
   costLedgerCommand,
 } from './cost-ledger.js';
+import { appendRunSession, recordResume } from './lib/run-ledger.js';
 
 const SESSION = 'S-ledger';
 
@@ -1383,14 +1384,21 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
 
   /** The ledger `fetch-pr` writes, naming the interrupted attempt S0. */
   function runLedger(plan: string, project: string): void {
-    const d = join(project, 'plan-prompts');
-    mkdirSync(d, { recursive: true });
-    writeFileSync(
-      join(d, 'run-sessions.json'),
-      JSON.stringify([
-        { sessionId: 'S0', atMs: Date.parse('2026-08-03T10:00:30Z') },
-        { sessionId: SESSION, atMs: Date.parse('2026-08-03T10:09:00Z') },
-      ]),
+    void project;
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0' },
+      Date.parse('2026-08-03T10:00:30Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
+    );
+    recordResume(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse('2026-08-03T10:09:00Z'),
     );
   }
 
@@ -1495,14 +1503,21 @@ describe('cost-ledger — prior-session bounds, faults and wall time', () => {
     project: string,
     resumedAt = '2026-08-03T10:09:00Z',
   ): void {
-    const d = join(project, 'plan-prompts');
-    mkdirSync(d, { recursive: true });
-    writeFileSync(
-      join(d, 'run-sessions.json'),
-      JSON.stringify([
-        { sessionId: 'S0', atMs: Date.parse('2026-08-03T10:00:30Z') },
-        { sessionId: SESSION, atMs: Date.parse(resumedAt) },
-      ]),
+    const plan = join(project, 'plan.json');
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: 'S0' },
+      Date.parse('2026-08-03T10:00:30Z'),
+    );
+    appendRunSession(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse(resumedAt),
+    );
+    recordResume(
+      plan,
+      { QWEN_CODE_SESSION_ID: SESSION },
+      Date.parse(resumedAt),
     );
   }
 

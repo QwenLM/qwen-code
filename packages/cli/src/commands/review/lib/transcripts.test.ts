@@ -31,6 +31,7 @@ import {
   TranscriptsUnavailableError,
   type AgentRecord,
 } from './transcripts.js';
+import { appendRunSession, recordResume } from './run-ledger.js';
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -238,6 +239,7 @@ describe('wasGivenTheDiff', () => {
   const rec = (launchPrompt: string): AgentRecord => ({
     agentId: 'a',
     agentName: 'general-purpose',
+    recordedSession: '',
     launchPrompt,
     successfulToolCalls: 0,
     diffToolCalls: 0,
@@ -282,12 +284,18 @@ describe('readRunTranscripts — the run across its sessions', () => {
     writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
     const recordDir = join(dir, 'qwen-review-pr-7-fetch-prompts');
     mkdirSync(recordDir, { recursive: true });
-    writeFileSync(
-      join(recordDir, 'run-sessions.json'),
-      JSON.stringify(
-        sessionIds.map((id) => ({ sessionId: id, atMs: Date.now() })),
-      ),
-    );
+    // Prior attempts first, the current one stamped slightly later: each
+    // attempt's window closes when the next one opened, and a fixture that
+    // stamped them together would fence out transcripts written "now".
+    const now = Date.now();
+    sessionIds.forEach((id, i) => {
+      appendRunSession(
+        plan,
+        { QWEN_CODE_SESSION_ID: id },
+        i === sessionIds.length - 1 ? now + 1500 : now,
+      );
+    });
+    recordResume(plan, ENV, now + 1500);
     return plan;
   }
 
@@ -369,12 +377,8 @@ describe('readRunTranscripts — currentDirOptional', () => {
   it('absorbs a missing CURRENT dir when asked — the pre-launch resume read', () => {
     const plan = join(dir, 'qwen-review-pr-7-fetch.json');
     writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
-    const recordDir = join(dir, 'qwen-review-pr-7-fetch-prompts');
-    mkdirSync(recordDir, { recursive: true });
-    writeFileSync(
-      join(recordDir, 'run-sessions.json'),
-      JSON.stringify([{ sessionId: 'S0', atMs: Date.now() }]),
-    );
+    const now = Date.now();
+    appendRunSession(plan, { QWEN_CODE_SESSION_ID: 'S0' }, now);
     mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
     writeFileSync(
       join(dir, 'subagents', 'S0', 'agent-a0.jsonl'),
@@ -382,6 +386,10 @@ describe('readRunTranscripts — currentDirOptional', () => {
     );
 
     const env = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S-new' };
+    // Reading prior evidence requires this session's own authorized resume,
+    // stamped after the prior attempt's transcripts.
+    appendRunSession(plan, env, now + 1500);
+    recordResume(plan, env, now + 1500);
     // Without the option: the current dir is still load-bearing.
     expect(() => readRunTranscripts(plan, undefined, env)).toThrow(
       TranscriptsUnavailableError,
@@ -419,12 +427,15 @@ describe('readRunTranscripts — containment and fault handling', () => {
     writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
     const recordDir = join(dir, 'qwen-review-pr-7-fetch-prompts');
     mkdirSync(recordDir, { recursive: true });
-    writeFileSync(
-      join(recordDir, 'run-sessions.json'),
-      JSON.stringify(
-        sessionIds.map((id) => ({ sessionId: id, atMs: Date.now() })),
-      ),
-    );
+    const now = Date.now();
+    sessionIds.forEach((id, i) => {
+      appendRunSession(
+        plan,
+        { QWEN_CODE_SESSION_ID: id },
+        i === sessionIds.length - 1 ? now + 1500 : now,
+      );
+    });
+    recordResume(plan, ENV, now + 1500);
     return plan;
   }
 
