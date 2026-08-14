@@ -17,6 +17,7 @@ import {
   LEDGER_MAX_FILE,
   LEDGER_MAX_TITLE,
   LEDGER_MAX_BYTES,
+  LEDGER_MAX_MODEL,
   type Ledger,
 } from './ledger.js';
 
@@ -114,6 +115,68 @@ describe('ledger marker', () => {
     const anchored: Ledger = { ...LEDGER, sha: 'abc1234def567890' };
     const body = `Reviewed.\n\n${serializeLedger(anchored)}`;
     expect(parseLedger(body)).toEqual(anchored);
+  });
+
+  it('round-trips the anchor model beside the sha — incremental is a same-model contract', () => {
+    // The cache pairs `lastCommitSha` with `lastModelId`; the marker's anchor
+    // rode bare, so a round under another model that recovered it would scope
+    // `sha..HEAD` past code the current model never reviewed.
+    const anchored: Ledger = {
+      ...LEDGER,
+      sha: 'abc1234def567890',
+      model: 'qwen3.7-max',
+    };
+    expect(parseLedger(`Reviewed.\n\n${serializeLedger(anchored)}`)).toEqual(
+      anchored,
+    );
+  });
+
+  it('the model rides and falls WITH the anchor, on write and on read', () => {
+    // A model naming no range qualifies nothing: the serializer withholds it
+    // wherever it withholds the sha (fail-closed, truncated), and the parser
+    // drops a hand-edited model whose sha did not survive.
+    expect(serializeLedger({ ...LEDGER, model: 'qwen3.7-max' })).not.toContain(
+      'model',
+    );
+    const truncated = serializeLedger({
+      v: 1,
+      round: 2,
+      sha: 'abc1234def567890',
+      model: 'qwen3.7-max',
+      findings: Array.from({ length: LEDGER_MAX_FINDINGS + 1 }, (_, i) => ({
+        id: `R2-${i}`,
+        sev: 'C' as const,
+        file: 'src/a.ts',
+        title: 'x',
+      })),
+    });
+    expect(parseLedger(truncated)!.model).toBeUndefined();
+    for (const forged of [
+      '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"model":"qwen3.7-max"} -->',
+      '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"not hex","model":"qwen3.7-max"} -->',
+    ]) {
+      expect(parseLedger(forged)!.model).toBeUndefined();
+    }
+  });
+
+  it('normalises the model on both sides — trimmed, capped, never a non-string', () => {
+    const wide = serializeLedger({
+      v: 1,
+      round: 1,
+      findings: [],
+      sha: 'abc1234',
+      model: `  ${'m'.repeat(500)}  `,
+    });
+    expect(wide.length).toBeLessThan(LEDGER_MAX_MODEL + 200);
+    expect(parseLedger(wide)!.model).toHaveLength(LEDGER_MAX_MODEL);
+    const forged = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"abc1234","model":${JSON.stringify('x'.repeat(500))}} -->`,
+    );
+    expect(forged!.model).toHaveLength(LEDGER_MAX_MODEL);
+    for (const model of ['', '   ', 42, null]) {
+      const raw = `<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"abc1234","model":${JSON.stringify(model)}} -->`;
+      expect(parseLedger(raw)!.model).toBeUndefined();
+    }
   });
 
   it('a truncated ledger loses its anchor — a partial work list must not certify a range', () => {

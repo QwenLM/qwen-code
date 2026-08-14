@@ -4333,6 +4333,44 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
   });
 
+  it('the anchor carries its model — the same-model contract survives recovery', () => {
+    // The cache pairs `lastCommitSha` with `lastModelId`, and Step 1 refuses
+    // the incremental shortcut across models — but the marker's anchor rode
+    // bare, so a cross-model round that recovered it from the posted body
+    // scoped `sha..HEAD` past code the current model never reviewed. The
+    // model that certified the range now travels beside it.
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+    });
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.sha).toBe('deadbeef00112233');
+    expect(ledger.model).toBe(MODEL);
+  });
+
+  it('withholds the model WITH the sha on a capped round — it qualifies the anchor, nothing else', () => {
+    const r = composeReview({
+      planPath: plan({ fetchedSha: 'deadbeef00112233' }),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    expect(r.cappedBy.length).toBeGreaterThan(0);
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.sha).toBeUndefined();
+    expect(ledger.model).toBeUndefined();
+  });
+
   it('withholds the sha when the module ITSELF caps the round', () => {
     // The four input fields are not the only fail-closed signals: cappedBy is
     // computed in this module from conditions with no input channel at all

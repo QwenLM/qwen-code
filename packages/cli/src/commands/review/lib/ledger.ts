@@ -65,6 +65,19 @@ export interface Ledger {
    * still ride; only the anchor is withheld.
    */
   sha?: string;
+  /**
+   * The model that certified `sha` — incremental scoping is a SAME-MODEL
+   * contract. "Clean up to the anchor" is one model's verdict: the local
+   * cache has always paired its anchor with `lastModelId` and Step 1 refuses
+   * the same-SHA shortcut across models, but the marker carried its anchor
+   * bare, so a round that recovered it from the posted body would scope
+   * `sha..HEAD` past code the CURRENT model never reviewed — permanently,
+   * since each clean round re-anchors past the last. Rides and falls WITH
+   * the anchor: the serializer withholds it whenever it withholds `sha`
+   * (fail-closed or truncated rounds), and the parser drops it when the sha
+   * beside it did not survive — a model naming no range qualifies nothing.
+   */
+  model?: string;
 }
 
 /**
@@ -91,6 +104,8 @@ const SHA_RE = /^[0-9a-f]{7,64}$/;
 export const LEDGER_MAX_FINDINGS = 50;
 export const LEDGER_MAX_TITLE = 80;
 export const LEDGER_MAX_FILE = 200;
+/** Real model ids run short (`qwen3.7-max`); 64 holds any of them whole. */
+export const LEDGER_MAX_MODEL = 64;
 
 /**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
@@ -138,7 +153,12 @@ export function serializeLedger(ledger: Ledger): string {
     // are IN the work list, so they would retire silently. A partial ledger
     // keeps its findings and loses its anchor, exactly as a fail-closed round
     // does.
-    else if (ledger.sha && SHA_RE.test(ledger.sha)) payload.sha = ledger.sha;
+    else if (ledger.sha && SHA_RE.test(ledger.sha)) {
+      payload.sha = ledger.sha;
+      // The same-model qualifier travels only beside the anchor it qualifies.
+      const model = ledger.model?.trim();
+      if (model) payload.model = model.slice(0, LEDGER_MAX_MODEL);
+    }
     return `${OPEN}${JSON.stringify(payload).replace(/--/g, '-\\u002d')}${CLOSE}`;
   };
   // Drop from the END until the whole marker fits. Trailing entries are the
@@ -214,12 +234,20 @@ export function parseLedger(body: string | undefined): Ledger | null {
       typeof raw.sha === 'string' && SHA_RE.test(raw.sha) && !dropped
         ? raw.sha
         : undefined;
+    const model =
+      // Anchored-only on READ as on WRITE: a model beside no surviving sha
+      // qualifies no range, and a hand-edited marker must not make it look
+      // as if it did.
+      sha && typeof raw.model === 'string' && raw.model.trim() !== ''
+        ? raw.model.trim().slice(0, LEDGER_MAX_MODEL)
+        : undefined;
     return {
       v: 1,
       round: raw.round,
       findings,
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
+      ...(model ? { model } : {}),
     };
   } catch {
     return null;

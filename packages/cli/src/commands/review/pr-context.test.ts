@@ -1149,6 +1149,34 @@ describe('renderLedgerSection', () => {
     ).not.toContain('reviewed at');
   });
 
+  it('names the anchor model beside the sha and demands the same-model gate', () => {
+    // Incremental scoping is a same-model contract: "clean up to that sha"
+    // is the recorded model's verdict. The section must both name who
+    // certified the anchor and instruct the gate — including that an absent
+    // model (a marker from before the field) counts as a mismatch, which the
+    // orchestrator can only learn HERE.
+    const anchored = renderLedgerSection({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'abc1234def56789',
+      model: 'qwen3.7-max',
+    });
+    expect(anchored).toContain(
+      'reviewed at `abc1234def56789` by `qwen3.7-max`',
+    );
+    expect(anchored).toContain('matches the model running THIS review');
+    const bare = renderLedgerSection({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'abc1234def56789',
+    });
+    expect(bare).toContain('reviewed at `abc1234def56789`');
+    expect(bare).not.toContain(' by `');
+    expect(bare).toContain('absent `model` counts as a mismatch');
+  });
+
   it('renders a work-list table that names the ruling owed per entry', () => {
     const md = renderLedgerSection({
       v: 1,

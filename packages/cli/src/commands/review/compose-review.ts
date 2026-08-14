@@ -543,6 +543,15 @@ function ledgerMarkerFor(
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
         : undefined;
+    // The anchor's same-model qualifier: "clean up to `sha`" is THIS model's
+    // verdict, and Step 1's recovered-anchor gate refuses to scope another
+    // model's round to it. Checked here rather than trusted: the boundary
+    // validation of `modelId` runs only when attribution is on, and the
+    // marker rides either way. The serializer writes it only beside a sha.
+    const model =
+      typeof input.modelId === 'string' && input.modelId.trim() !== ''
+        ? input.modelId.trim()
+        : undefined;
     return serializeLedger({
       ...buildLedger(
         prevRound + 1,
@@ -556,6 +565,7 @@ function ledgerMarkerFor(
           .filter((entry) => entry.trim() !== ''),
       ),
       ...(sha ? { sha } : {}),
+      ...(model ? { model } : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
