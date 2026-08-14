@@ -806,9 +806,12 @@ describe('assertVersionUnreleased', () => {
       }
       return notFoundAnywhere(command);
     });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The runner parses workflow commands from stdout only; ::error:: on
+    // stderr would never surface as an annotation in the Actions UI.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(logSpy).toHaveBeenCalledWith(
       `::error::${refusalMessage(PUBLISHED_PACKAGES[0])}`,
     );
   });
@@ -846,9 +849,10 @@ describe('assertVersionUnreleased', () => {
       if (command.includes('npm view')) return '1.2.3';
       return notFoundAnywhere(command);
     });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(logSpy).toHaveBeenCalledWith(
       `::error::${refusalMessage(PUBLISHED_PACKAGES.join(', '))}`,
     );
   });
@@ -860,25 +864,25 @@ describe('assertVersionUnreleased', () => {
       }
       return notFoundAnywhere(command);
     });
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(2);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining('::error::Failed to verify'),
     );
   });
 
   it('CLI dispatch: exits 2 (not the refusal marker) on a missing version', () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runCli({ 'assert-unreleased': '' })).toBe(2);
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(logSpy).toHaveBeenCalledWith(
       '::error::assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
     );
   });
 
   it('CLI dispatch: exits 0 when the version has not shipped', () => {
     vi.mocked(execSync).mockImplementation(notFoundAnywhere);
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(0);
-    expect(errorSpy).not.toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
   });
 });

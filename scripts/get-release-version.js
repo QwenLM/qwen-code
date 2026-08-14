@@ -601,7 +601,9 @@ export function runCli(args) {
     try {
       assertVersionUnreleased(args['assert-unreleased']);
     } catch (error) {
-      console.error(`::error::${error.message}`);
+      // stdout, not stderr: the runner parses workflow commands from
+      // stdout only, so ::error:: on stderr would never annotate.
+      console.log(`::error::${error.message}`);
       return error.code === 'VERSION_SHIPPED' ? 3 : 2;
     }
     return 0;

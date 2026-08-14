@@ -170,7 +170,7 @@ describe('release workflow', () => {
       { encoding: 'utf8' },
     );
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain(
+    expect(result.stdout).toContain(
       '::error::assert-unreleased requires a version',
     );
   });
@@ -200,7 +200,7 @@ describe('release workflow', () => {
         },
       );
       expect(result.status).toBe(3);
-      expect(result.stderr).toContain('has already shipped');
+      expect(result.stdout).toContain('has already shipped');
     },
   );
 
