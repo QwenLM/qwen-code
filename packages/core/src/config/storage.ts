@@ -8,7 +8,13 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import {
+  getProjectHash,
+  QWEN_DIR,
+  sanitizeCwd,
+  isTempDirPath,
+} from '../utils/paths.js';
+import { parseLineTolerant } from '../utils/jsonl-utils.js';
 import { FatalConfigError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
@@ -365,19 +371,28 @@ export class Storage {
   }
 
   /**
-   * Age threshold for removing record-less project directories: protects
+   * Age threshold applied to every sweep deletion. Protects
    * concurrently starting sessions whose chats dir was just created but
-   * not yet written.
+   * not yet written, and gives transiently absent working directories
+   * (ejected removable media, network mounts not up at boot) a grace
+   * window before their resumable history is reclaimed.
    */
   private static readonly ORPHAN_EMPTY_DIR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+  /** Cap on bytes read from any single record file during the sweep. */
+  private static readonly MAX_RECORD_SCAN_BYTES = 1024 * 1024;
+
   /**
    * Removes orphaned project snapshot directories under
-   * `<runtime>/projects/` (issue #7906). An entry is orphaned when the
-   * working directory recorded in its chat logs no longer exists (one-shot
-   * temp dirs, deleted worktrees). Entries without readable records are
-   * only removed when completely empty and older than one day. The entry
-   * for `currentProjectId` is never touched.
+   * `<runtime>/projects/` (issue #7906). An entry is orphaned when none
+   * of the working directories recorded in its artifacts (chat logs,
+   * runtime/worktree sidecars, archived transcripts) still exists — or
+   * when they all sit under OS temp roots and the entry is stale (a
+   * crashed temp session whose temp dir survived). Entries owned by a
+   * still-running session (runtime sidecar with a live pid) are never
+   * touched, as is `currentProjectId`. Entries without any readable
+   * records are only removed when completely empty and older than one
+   * day.
    *
    * Best-effort: per-entry failures are skipped.
    */
@@ -397,9 +412,30 @@ export class Storage {
       if (entry === currentProjectId) continue;
       const entryPath = path.join(projectsDir, entry);
       try {
-        const cwd = Storage.readRecordedCwd(entryPath);
-        if (cwd !== null) {
-          if (!fs.existsSync(cwd)) {
+        // A still-running session owns this entry even if its cwd was
+        // deleted underneath it (worktree teardown mid-session); its
+        // runtime sidecar carries a live pid.
+        if (Storage.hasLiveSession(entryPath)) continue;
+        const cwds = Storage.collectRecordedCwds(entryPath);
+        let stale = false;
+        if (cwds.length > 0) {
+          stale =
+            now - fs.statSync(entryPath).mtimeMs >
+            Storage.ORPHAN_EMPTY_DIR_MAX_AGE_MS;
+          // A single sampled cwd is not conclusive: `/cd` relocation
+          // moves records between entries without rewriting their
+          // first-line cwd, so require EVERY recorded cwd to be gone.
+          if (cwds.every((cwd) => !fs.existsSync(cwd)) && stale) {
+            fs.rmSync(entryPath, { recursive: true, force: true });
+            continue;
+          }
+          // Crashed temp session whose temp dir survived: the gone-cwd
+          // predicate above misses it, and temp roots are disposable by
+          // definition, so age it out instead.
+          if (
+            stale &&
+            cwds.every((cwd) => !fs.existsSync(cwd) || isTempDirPath(cwd))
+          ) {
             fs.rmSync(entryPath, { recursive: true, force: true });
           }
           continue;
@@ -410,8 +446,8 @@ export class Storage {
         const stat = fs.statSync(entryPath);
         if (
           stat.isDirectory() &&
-          Storage.countFiles(entryPath) === 0 &&
-          now - stat.mtimeMs > Storage.ORPHAN_EMPTY_DIR_MAX_AGE_MS
+          now - stat.mtimeMs > Storage.ORPHAN_EMPTY_DIR_MAX_AGE_MS &&
+          Storage.countFiles(entryPath) === 0
         ) {
           fs.rmSync(entryPath, { recursive: true, force: true });
         }
@@ -422,42 +458,214 @@ export class Storage {
   }
 
   /**
-   * Reads the `cwd` of the first chat record under `<entry>/chats/`.
-   * Only the first line of each file is read (bounded 8 KiB buffer) so
-   * startup cost stays independent of chat history size.
+   * Collects every working directory recorded in an entry's artifacts.
+   * Chat logs contribute the cwd of their first AND last record (`/cd`
+   * relocation keeps the old cwd on line 1 and moves the file); runtime
+   * sidecars contribute `work_dir`, worktree sidecars `originalCwd`.
+   * Subdirectories (`chats/archive/`, workflow journals) are scanned too.
+   * All reads are bounded so startup cost stays independent of chat
+   * history size.
    */
-  private static readRecordedCwd(entryPath: string): string | null {
-    let files: string[];
+  static collectRecordedCwds(entryPath: string): string[] {
+    const cwds = new Set<string>();
+    Storage.scanDirForCwds(path.join(entryPath, 'chats'), cwds, 0);
+    return [...cwds];
+  }
+
+  private static scanDirForCwds(
+    dir: string,
+    cwds: Set<string>,
+    depth: number,
+  ): void {
+    if (depth > 2) return;
+    let dirents: fs.Dirent[];
     try {
-      files = fs.readdirSync(path.join(entryPath, 'chats'));
+      dirents = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const dirent of dirents) {
+      const entryPath = path.join(dir, dirent.name);
+      if (dirent.isDirectory()) {
+        Storage.scanDirForCwds(entryPath, cwds, depth + 1);
+      } else if (dirent.name.endsWith('.jsonl')) {
+        const head = Storage.readLineHead(entryPath);
+        if (head) Storage.addRecordedCwd(head, entryPath, cwds);
+        const tail = Storage.readLineTail(entryPath);
+        if (tail && tail !== head) {
+          Storage.addRecordedCwd(tail, entryPath, cwds);
+        }
+      } else if (dirent.name.endsWith('.runtime.json')) {
+        const cwd = Storage.readJsonStringField(entryPath, 'work_dir');
+        if (cwd) cwds.add(cwd);
+      } else if (dirent.name.endsWith('.worktree.json')) {
+        const cwd = Storage.readJsonStringField(entryPath, 'originalCwd');
+        if (cwd) cwds.add(cwd);
+      }
+    }
+  }
+
+  private static addRecordedCwd(
+    line: string,
+    filePath: string,
+    cwds: Set<string>,
+  ): void {
+    for (const record of parseLineTolerant<{ cwd?: unknown }>(line, filePath)) {
+      if (typeof record.cwd === 'string' && record.cwd) {
+        cwds.add(record.cwd);
+      }
+    }
+  }
+
+  /** First physical line of a file, read in bounded chunks. */
+  private static readLineHead(filePath: string): string | null {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      const chunks: Buffer[] = [];
+      const buf = Buffer.alloc(8192);
+      let offset = 0;
+      while (offset < Storage.MAX_RECORD_SCAN_BYTES) {
+        const bytesRead = fs.readSync(fd, buf, 0, buf.length, offset);
+        if (bytesRead === 0) break;
+        const slice = Buffer.from(buf.subarray(0, bytesRead));
+        const newline = slice.indexOf('\n');
+        if (newline !== -1) {
+          chunks.push(slice.subarray(0, newline));
+          return Buffer.concat(chunks).toString('utf8');
+        }
+        chunks.push(slice);
+        offset += bytesRead;
+      }
+      return Buffer.concat(chunks).toString('utf8');
     } catch {
       return null;
-    }
-    for (const file of files) {
-      let fd: number | undefined;
-      try {
-        fd = fs.openSync(path.join(entryPath, 'chats', file), 'r');
-        const buf = Buffer.alloc(8192);
-        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
-        const firstLine = buf.toString('utf8', 0, bytesRead).split('\n', 1)[0];
-        if (!firstLine) continue;
-        const record = JSON.parse(firstLine) as { cwd?: unknown };
-        if (typeof record.cwd === 'string' && record.cwd) {
-          return record.cwd;
-        }
-      } catch {
-        // Unreadable/truncated file — try the next one.
-      } finally {
-        if (fd !== undefined) {
-          try {
-            fs.closeSync(fd);
-          } catch {
-            // Ignore.
-          }
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Ignore.
         }
       }
     }
-    return null;
+  }
+
+  /** Last non-empty physical line of a file, via one bounded tail read. */
+  private static readLineTail(filePath: string): string | null {
+    let fd: number | undefined;
+    try {
+      const { size } = fs.statSync(filePath);
+      if (size === 0) return null;
+      const length = Math.min(size, Storage.MAX_RECORD_SCAN_BYTES);
+      const buf = Buffer.alloc(length);
+      fd = fs.openSync(filePath, 'r');
+      fs.readSync(fd, buf, 0, length, size - length);
+      const lines = buf.toString('utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line) return line;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Ignore.
+        }
+      }
+    }
+  }
+
+  private static readJsonStringField(
+    filePath: string,
+    field: string,
+  ): string | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      const value = parsed[field];
+      return typeof value === 'string' && value ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * True when the entry holds a runtime sidecar whose pid is still alive
+   * — i.e. a session is running from this entry right now.
+   */
+  private static hasLiveSession(entryPath: string): boolean {
+    let dirents: fs.Dirent[];
+    try {
+      dirents = fs.readdirSync(path.join(entryPath, 'chats'), {
+        withFileTypes: true,
+      });
+    } catch {
+      return false;
+    }
+    for (const dirent of dirents) {
+      if (!dirent.name.endsWith('.runtime.json')) continue;
+      try {
+        const parsed = JSON.parse(
+          fs.readFileSync(path.join(entryPath, 'chats', dirent.name), 'utf8'),
+        ) as { pid?: unknown };
+        if (
+          typeof parsed.pid === 'number' &&
+          Number.isInteger(parsed.pid) &&
+          Storage.isPidAlive(parsed.pid)
+        ) {
+          return true;
+        }
+      } catch {
+        // Unreadable sidecar — not proof of liveness.
+      }
+    }
+    return false;
+  }
+
+  private static isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      // EPERM means the process exists but is owned by someone else.
+      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
+  /**
+   * True when the entry contains nothing but this session's own
+   * artifacts. Entries are keyed by sanitized cwd, which collisions and
+   * concurrent sessions can share, so whole-entry deletion at shutdown
+   * must be gated on exclusive ownership.
+   */
+  static containsOnlySessionArtifacts(
+    projectDir: string,
+    sessionId: string,
+  ): boolean {
+    let topEntries: fs.Dirent[];
+    try {
+      topEntries = fs.readdirSync(projectDir, { withFileTypes: true });
+    } catch {
+      // Nothing on disk — nothing foreign either.
+      return true;
+    }
+    for (const entry of topEntries) {
+      if (entry.name !== 'chats' || !entry.isDirectory()) return false;
+    }
+    let files: string[];
+    try {
+      files = fs.readdirSync(path.join(projectDir, 'chats'));
+    } catch {
+      return true;
+    }
+    return files.every((file) => file.startsWith(`${sessionId}.`));
   }
 
   private static countFiles(dirPath: string): number {

@@ -54,6 +54,7 @@ import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { getSessionProjectDir } from '../utils/sessionIdContext.js';
+import { sanitizeCwd } from '../utils/paths.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -6895,6 +6896,128 @@ describe('Server Config (config.ts)', () => {
         config.storage.getProjectDir(),
         expect.anything(),
       );
+    });
+
+    it('keeps the project dir when it holds another session’s artifacts', async () => {
+      // Sanitized-cwd collisions and concurrent temp sessions can share
+      // one entry; whole-entry deletion must require exclusive
+      // ownership. node:fs is module-mocked in this file, so the
+      // guard outcome is injected at the Storage boundary (its own
+      // disk-scanning logic is covered in storage.test.ts).
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(false);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-shared-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(guardSpy).toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          config['sessionId'],
+        );
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when its records point at a live non-temp cwd', async () => {
+      // Records migrated here via `/cd` from a real project are still
+      // resumable — the recorded cwd exists outside temp roots.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi
+        .spyOn(Storage, 'collectRecordedCwds')
+        .mockReturnValue(['/real/project']);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-migrated-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        // Mocked existsSync reports every path present, so a live
+        // non-temp cwd makes the entry non-disposable.
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('still resolves strict shutdown when the temp-dir removal fails', async () => {
+      rmSpy.mockImplementation(() => {
+        throw new Error('EACCES');
+      });
+      const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
+      const config = new Config({
+        ...baseParams,
+        cwd: tmpCwd,
+        targetDir: tmpCwd,
+      });
+      config['initialized'] = true;
+
+      await expect(
+        config.shutdown({ strictResourceCleanup: true }),
+      ).resolves.toBeUndefined();
+      expect(rmSpy).toHaveBeenCalledWith(
+        config.storage.getProjectDir(),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('Config startup orphan-project sweep wiring (issue #7906)', () => {
+    it('schedules cleanOrphanProjectDirs with the current project id', async () => {
+      const sweepSpy = vi
+        .spyOn(Storage, 'cleanOrphanProjectDirs')
+        .mockImplementation(() => {});
+      try {
+        const config = new Config(baseParams);
+        await config.initialize();
+        // The sweep runs on setImmediate; flushing one tick guarantees it
+        // already fired (immediates run FIFO).
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(sweepSpy).toHaveBeenCalledWith(
+          sanitizeCwd(config.storage.getProjectRoot()),
+        );
+      } finally {
+        sweepSpy.mockRestore();
+      }
+    });
+
+    it('initializes successfully even when the sweep throws', async () => {
+      const sweepSpy = vi
+        .spyOn(Storage, 'cleanOrphanProjectDirs')
+        .mockImplementation(() => {
+          throw new Error('sweep exploded');
+        });
+      try {
+        const config = new Config(baseParams);
+        await expect(config.initialize()).resolves.not.toThrow();
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(sweepSpy).toHaveBeenCalled();
+      } finally {
+        sweepSpy.mockRestore();
+      }
     });
   });
 

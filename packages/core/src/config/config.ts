@@ -3179,16 +3179,20 @@ export class Config {
     // longer exists (issue #7906). Exit-time cleanup misses crashes and
     // SIGKILL, so startup is the backstop. Unconditional (not gated on
     // bare mode) because temp-dir sessions are common in scripted/bare
-    // usage. Cheap: each entry costs one bounded 8 KiB read.
-    void (async () => {
+    // usage. Cheap: per-entry cost is a handful of bounded reads.
+    // setImmediate defers actual I/O past the startup hot path; the
+    // sweep itself never throws (per-entry failures are swallowed).
+    setImmediate(() => {
       try {
         Storage.cleanOrphanProjectDirs(
           sanitizeCwd(this.storage.getProjectRoot()),
         );
-      } catch {
-        // Best-effort hygiene sweep — never fail startup.
+      } catch (error: unknown) {
+        this.debugLogger.warn(
+          `Orphan project sweep failed (non-fatal): ${error}`,
+        );
       }
-    })();
+    });
   }
 
   private async activateChatRecording(): Promise<void> {
@@ -5279,13 +5283,29 @@ export class Config {
       // `<runtime>/projects/` forever (issue #7906). The startup sweep
       // backstops crash paths that skip shutdown. The chat recording
       // flush happens in shutdown() before this runs, so no records are
-      // removed mid-write.
+      // removed mid-write. Two guards keep this from destroying data
+      // that isn't ours: the entry must contain only this session's
+      // artifacts (sanitized-cwd collisions and concurrent sessions can
+      // share an entry), and every cwd recorded in those artifacts must
+      // be gone or itself temp — otherwise the records were migrated
+      // here via `/cd` from a real, still-resumable project.
       try {
         if (isTempDirPath(this.storage.getProjectRoot())) {
-          fs.rmSync(this.storage.getProjectDir(), {
-            recursive: true,
-            force: true,
-          });
+          const projectDir = this.storage.getProjectDir();
+          if (
+            Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
+          ) {
+            const recordedCwds = Storage.collectRecordedCwds(projectDir);
+            const disposable = recordedCwds.every(
+              (cwd) => !fs.existsSync(cwd) || isTempDirPath(cwd),
+            );
+            if (disposable) {
+              fs.rmSync(projectDir, {
+                recursive: true,
+                force: true,
+              });
+            }
+          }
         }
       } catch {
         // Best-effort — don't block shutdown
