@@ -24,6 +24,12 @@ import {
   PROTOCOL_VERSION,
   RequestError,
 } from '@agentclientprotocol/sdk';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import { Writable, Readable } from 'node:stream';
 
 // Protect the stdout NDJSON pipe — any console method that writes to
@@ -40,6 +46,17 @@ const delayMs = parseInt(process.env.MOCK_ACP_PROMPT_DELAY_MS || '100', 10);
 const emitChunks = parseInt(process.env.MOCK_ACP_EMIT_CHUNKS || '3', 10);
 let sessionCounter = 0;
 
+// The daemon installs its built-in tool guard for every session and passes
+// this private marker to the child it spawns; the child must consume the
+// marker and acknowledge it in the initialize response, or the daemon refuses
+// the session. Mirror the production child (runAcpAgent) so sessions created
+// through this mock pass the same handshake.
+const externalToolGuardRequired =
+  process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
+
 new AgentSideConnection(
   (connection) => ({
     async initialize() {
@@ -48,6 +65,14 @@ new AgentSideConnection(
         agentInfo: { name: 'mock-acp', version: '0.0.1' },
         authMethods: [],
         agentCapabilities: {},
+        ...(externalToolGuardRequired
+          ? {
+              _meta: {
+                [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+                  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+              },
+            }
+          : {}),
       };
     },
 
