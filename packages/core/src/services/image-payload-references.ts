@@ -74,6 +74,7 @@ export function replaceImagePayloadsInPlace(
   contents: Content[],
   store: ImagePayloadStore,
   skipContent?: Content,
+  skipParts?: ReadonlySet<Part>,
 ): StoredImagePayload[] {
   const replaced: StoredImagePayload[] = [];
   for (const content of contents) {
@@ -81,6 +82,7 @@ export function replaceImagePayloadsInPlace(
     if (!content.parts) continue;
     for (let i = 0; i < content.parts.length; i++) {
       const part = content.parts[i]!;
+      if (skipParts?.has(part)) continue;
       if (
         part.inlineData?.mimeType?.startsWith('image/') &&
         part.inlineData.data

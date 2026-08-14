@@ -2584,6 +2584,43 @@ describe('GeminiChat', async () => {
       });
     });
 
+    it('evicts images before a dropped placeholder while preserving the current image', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 0,
+        imagePayloadThreshold: 1,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
+        },
+        { role: 'model', parts: [{ text: '(request timeout)' }] },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'response' }])),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: [
+            { text: 'describe this' },
+            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
+          ],
+        },
+        'prompt-id-placeholder-image-refs',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      const serialized = JSON.stringify(request?.contents);
+      expect(serialized).not.toContain('"data":"old-shot"');
+      expect(serialized).toContain('"data":"current-shot"');
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {
@@ -6433,6 +6470,46 @@ describe('GeminiChat', async () => {
           { role: 'user', parts: [{ text: 'test' }] },
           { role: 'model', parts: [{ text: 'Recovered response' }] },
         ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should not retry a streamed placeholder when the turn has a function call', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          streamResponse(
+            stopResponse([
+              { text: '(request timeout)' },
+              { functionCall: { name: 'someTool', args: {} } },
+            ]),
+          ),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-degraded-placeholder-stream-tool-call',
+        );
+        await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+        expect(mockLogContentRetry).not.toHaveBeenCalled();
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [
+            { text: '(request timeout)' },
+            {
+              functionCall: expect.objectContaining({
+                name: 'someTool',
+                args: {},
+              }),
+            },
+          ],
+        });
       } finally {
         vi.useRealTimers();
       }

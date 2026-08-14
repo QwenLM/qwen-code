@@ -1895,17 +1895,15 @@ export class GeminiChat {
     );
     if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
       const skipEntry = currentUserContent
-        ? curatedHistory.find(
-            (c) =>
-              c === currentUserContent ||
-              (c.role === 'user' &&
-                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
-          )
+        ? curatedHistory.find((c) => c === currentUserContent)
         : undefined;
       const replaced = replaceImagePayloadsInPlace(
         curatedHistory,
         this.imagePayloadStore,
         skipEntry,
+        currentUserContent?.parts
+          ? new Set(currentUserContent.parts)
+          : undefined,
       );
       const requestHistory = curatedHistory.map(copyContentContainer);
       const reattachParts = buildReattachParts(replaced, maxRecentImages);
