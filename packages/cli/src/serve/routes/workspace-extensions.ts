@@ -14,6 +14,7 @@ import {
   getErrorMessage,
   SettingScope,
   type Extension,
+  type ExtensionIdentity,
   type ExtensionInstallMetadata,
   type ExtensionManager,
   type ClaudeMarketplaceConfig,
@@ -124,27 +125,38 @@ const parseExtensionScope = (
   return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
 };
 
-const parseExtensionBatchIds = (
+const parseExtensionBatchTargets = (
   req: Request,
   res: Response,
   safeBody: SafeBody,
-): string[] | undefined => {
-  const rawExtensionIds = safeBody(req)['extensionIds'];
+): ExtensionIdentity[] | undefined => {
+  const rawExtensions = safeBody(req)['extensions'];
   if (
-    !Array.isArray(rawExtensionIds) ||
-    rawExtensionIds.length === 0 ||
-    rawExtensionIds.length > MAX_EXTENSION_BATCH_SIZE ||
-    !rawExtensionIds.every((id) => typeof id === 'string')
+    !Array.isArray(rawExtensions) ||
+    rawExtensions.length === 0 ||
+    rawExtensions.length > MAX_EXTENSION_BATCH_SIZE ||
+    !rawExtensions.every(
+      (target) =>
+        !!target &&
+        typeof target === 'object' &&
+        !Array.isArray(target) &&
+        typeof (target as Record<string, unknown>)['extensionId'] ===
+          'string' &&
+        typeof (target as Record<string, unknown>)['name'] === 'string',
+    )
   ) {
     res.status(400).json({
-      error: `\`extensionIds\` must be a non-empty string array (max ${MAX_EXTENSION_BATCH_SIZE})`,
-      code: 'invalid_extension_ids',
+      error: `\`extensions\` must be a non-empty identity array (max ${MAX_EXTENSION_BATCH_SIZE})`,
+      code: 'invalid_extensions',
     });
     return undefined;
   }
-  const extensionIds: string[] = [];
-  const seen = new Set<string>();
-  for (const extensionId of rawExtensionIds as string[]) {
+  const identities: ExtensionIdentity[] = [];
+  const namesById = new Map<string, string>();
+  const idsByName = new Map<string, string>();
+  for (const rawTarget of rawExtensions as Array<Record<string, unknown>>) {
+    const extensionId = rawTarget['extensionId'] as string;
+    const name = rawTarget['name'] as string;
     if (!/^[a-f0-9]{64}$/.test(extensionId)) {
       res.status(400).json({
         error: `Invalid extension id "${extensionId}"`,
@@ -152,11 +164,32 @@ const parseExtensionBatchIds = (
       });
       return undefined;
     }
-    if (seen.has(extensionId)) continue;
-    seen.add(extensionId);
-    extensionIds.push(extensionId);
+    if (!/^[a-zA-Z0-9-_.]+$/.test(name)) {
+      res.status(400).json({
+        error: `Invalid extension name "${name}"`,
+        code: 'invalid_extension_name',
+      });
+      return undefined;
+    }
+    const existingName = namesById.get(extensionId);
+    const normalizedName = name.toLowerCase();
+    const existingId = idsByName.get(normalizedName);
+    if (
+      (existingName !== undefined && existingName !== name) ||
+      (existingId !== undefined && existingId !== extensionId)
+    ) {
+      res.status(400).json({
+        error: `Conflicting extension identity for "${name}"`,
+        code: 'conflicting_extension_identity',
+      });
+      return undefined;
+    }
+    if (existingName !== undefined) continue;
+    namesById.set(extensionId, name);
+    idsByName.set(normalizedName, extensionId);
+    identities.push({ id: extensionId, name });
   }
-  return extensionIds;
+  return identities;
 };
 
 const parseExtensionRegistryUrl = (
@@ -1620,8 +1653,8 @@ export function registerWorkspaceExtensionRoutes(
   });
 
   app.put('/extensions/activation', mutate({ strict: true }), (req, res) => {
-    const extensionIds = parseExtensionBatchIds(req, res, safeBody);
-    if (!extensionIds) return;
+    const identities = parseExtensionBatchTargets(req, res, safeBody);
+    if (!identities) return;
     const state = parseActivationState(req, res);
     if (!state) return;
     const manager = primaryController.createExtensionManager(
@@ -1636,43 +1669,21 @@ export function registerWorkspaceExtensionRoutes(
       'set_default_activation_batch',
       {},
       async (extensionManager, _signal, context) => {
-        const extensions: Extension[] = [];
-        const errors: Array<{
-          extensionId: string;
-          code: 'extension_not_found';
-          error: string;
-        }> = [];
-        for (const extensionId of extensionIds) {
-          const extension = extensionById(extensionManager, extensionId);
-          if (extension) {
-            extensions.push(extension);
-          } else {
-            errors.push({
-              extensionId,
-              code: 'extension_not_found',
-              error: `Extension "${extensionId}" not found`,
-            });
-          }
-        }
-        if (extensions.length === 0) {
-          return { status: 'updated', updated: false, results: [], errors };
-        }
         await context!.commit(
           async (onCommitted) =>
             await extensionManager.setExtensionDefaultActivations(
-              extensions.map((extension) => extension.id),
+              identities,
               state,
               onCommitted,
             ),
         );
         return {
           status: 'updated',
-          results: extensions.map((extension) => ({
-            extensionId: extension.id,
-            name: extension.name,
+          results: identities.map((identity) => ({
+            extensionId: identity.id,
+            name: identity.name,
             defaultActivation: state,
           })),
-          errors,
         };
       },
       {
@@ -2106,8 +2117,8 @@ export function registerWorkspaceExtensionRoutes(
       (req, res) => {
         const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
-        const extensionIds = parseExtensionBatchIds(req, res, safeBody);
-        if (!extensionIds) return;
+        const identities = parseExtensionBatchTargets(req, res, safeBody);
+        if (!identities) return;
         const state = parseWorkspaceBatchActivationState(req, res);
         if (!state) return;
         const manager = primaryController.createExtensionManager(
@@ -2122,31 +2133,10 @@ export function registerWorkspaceExtensionRoutes(
           'set_workspace_activation_batch',
           {},
           async (extensionManager, _signal, context) => {
-            const extensions: Extension[] = [];
-            const errors: Array<{
-              extensionId: string;
-              code: 'extension_not_found';
-              error: string;
-            }> = [];
-            for (const extensionId of extensionIds) {
-              const extension = extensionById(extensionManager, extensionId);
-              if (extension) {
-                extensions.push(extension);
-              } else {
-                errors.push({
-                  extensionId,
-                  code: 'extension_not_found',
-                  error: `Extension "${extensionId}" not found`,
-                });
-              }
-            }
-            if (extensions.length === 0) {
-              return { status: 'updated', updated: false, results: [], errors };
-            }
             const snapshot = await context!.commit(
               async (onCommitted) =>
                 await extensionManager.setExtensionWorkspaceActivations(
-                  extensions.map((extension) => extension.id),
+                  identities,
                   runtime.workspaceCwd,
                   state,
                   onCommitted,
@@ -2154,18 +2144,17 @@ export function registerWorkspaceExtensionRoutes(
             );
             return {
               status: 'updated',
-              results: extensions.map((extension) => ({
-                extensionId: extension.id,
-                name: extension.name,
+              results: identities.map((identity) => ({
+                extensionId: identity.id,
+                name: identity.name,
                 workspaceActivation: state === 'inherit' ? null : state,
                 effectiveActivation:
-                  extensionManager.getExtensionActivationFromSnapshot(
-                    extension.id,
+                  extensionManager.getExtensionActivationForIdentityFromSnapshot(
+                    identity,
                     snapshot,
                     runtime.workspaceCwd,
                   ).effective,
               })),
-              errors,
             };
           },
           {

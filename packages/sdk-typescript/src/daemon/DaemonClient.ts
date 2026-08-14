@@ -179,6 +179,7 @@ import type {
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
   ExtensionActivationState,
+  ExtensionBatchActivationTarget,
   ExtensionWorkspaceBatchActivationState,
   ExtensionCatalog,
   ExtensionInstallResponse,
@@ -1590,7 +1591,7 @@ export class DaemonClient {
   }
 
   async setExtensionDefaultActivations(
-    extensionIds: readonly string[],
+    extensions: readonly ExtensionBatchActivationTarget[],
     state: ExtensionActivationState,
     clientId?: string,
   ): Promise<ExtensionMutationResponse> {
@@ -1599,7 +1600,7 @@ export class DaemonClient {
       'PUT /extensions/activation',
       {
         method: 'PUT',
-        body: { extensionIds: [...extensionIds], state },
+        body: { extensions: [...extensions], state },
         clientId,
         mode: 'rest',
       },
@@ -5998,7 +5999,7 @@ export class WorkspaceDaemonClient {
   }
 
   setExtensionActivations(
-    extensionIds: readonly string[],
+    extensions: readonly ExtensionBatchActivationTarget[],
     state: ExtensionWorkspaceBatchActivationState,
     clientId?: string,
   ): Promise<ExtensionMutationResponse> {
@@ -6008,7 +6009,7 @@ export class WorkspaceDaemonClient {
       'PUT /workspaces/:workspace/extensions/activation',
       {
         method: 'PUT',
-        body: { extensionIds: [...extensionIds], state },
+        body: { extensions: [...extensions], state },
         clientId,
         mode: 'rest',
       },

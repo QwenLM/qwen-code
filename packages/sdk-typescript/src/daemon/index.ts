@@ -670,7 +670,7 @@ export type {
   ExtensionOperationResult,
   ExtensionDefaultActivationBatchItem,
   ExtensionWorkspaceActivationBatchItem,
-  ExtensionBatchActivationError,
+  ExtensionBatchActivationTarget,
   ExtensionOperationState,
   ExtensionOperationStatus,
   ExtensionActiveOperations,

@@ -219,6 +219,15 @@ function mockExtensionManager(
   });
   vi.spyOn(
     ExtensionManager.prototype,
+    'getExtensionActivationForIdentityFromSnapshot',
+  ).mockReturnValue({
+    default: 'disabled',
+    workspace: 'inherit',
+    effective: 'disabled',
+    source: 'default',
+  });
+  vi.spyOn(
+    ExtensionManager.prototype,
     'setExtensionDefaultActivation',
   ).mockResolvedValue(snapshot);
   vi.spyOn(
@@ -349,11 +358,11 @@ describe('extension management v2 REST', () => {
         request(h.app)
           .put('/extensions/activation')
           .send({
-            extensionIds: [
-              extensionId,
-              missingExtensionId,
-              secondExtensionId,
-              extensionId,
+            extensions: [
+              { extensionId, name: 'demo' },
+              { extensionId: missingExtensionId, name: 'future-demo' },
+              { extensionId: secondExtensionId, name: 'second-demo' },
+              { extensionId, name: 'demo' },
             ],
             state: 'disabled',
           }),
@@ -374,15 +383,14 @@ describe('extension management v2 REST', () => {
               defaultActivation: 'disabled',
             },
             {
+              extensionId: missingExtensionId,
+              name: 'future-demo',
+              defaultActivation: 'disabled',
+            },
+            {
               extensionId: secondExtensionId,
               name: 'second-demo',
               defaultActivation: 'disabled',
-            },
-          ],
-          errors: [
-            {
-              extensionId: missingExtensionId,
-              code: 'extension_not_found',
             },
           ],
           refreshed: 2,
@@ -392,7 +400,11 @@ describe('extension management v2 REST', () => {
       expect(
         ExtensionManager.prototype.setExtensionDefaultActivations,
       ).toHaveBeenCalledWith(
-        [extensionId, secondExtensionId],
+        [
+          { id: extensionId, name: 'demo' },
+          { id: missingExtensionId, name: 'future-demo' },
+          { id: secondExtensionId, name: 'second-demo' },
+        ],
         'disabled',
         expect.any(Function),
       );
@@ -407,7 +419,7 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('does not mutate or reconcile an all-missing global batch', async () => {
+  it('declares and reconciles an all-uninstalled global batch', async () => {
     const h = await makeHarness();
     mockExtensionManager();
     const missingExtensionId = 'c'.repeat(64);
@@ -416,7 +428,9 @@ describe('extension management v2 REST', () => {
         request(h.app)
           .put('/extensions/activation')
           .send({
-            extensionIds: [missingExtensionId],
+            extensions: [
+              { extensionId: missingExtensionId, name: 'future-demo' },
+            ],
             state: 'enabled',
           }),
       );
@@ -428,27 +442,30 @@ describe('extension management v2 REST', () => {
         status: 'succeeded',
         result: {
           status: 'updated',
-          updated: false,
-          results: [],
-          errors: [
+          results: [
             {
               extensionId: missingExtensionId,
-              code: 'extension_not_found',
+              name: 'future-demo',
+              defaultActivation: 'enabled',
             },
           ],
+          refreshed: 2,
+          failed: 0,
         },
       });
-      expect(completed.result).not.toHaveProperty('refreshed');
-      expect(completed.result).not.toHaveProperty('failed');
       expect(
         ExtensionManager.prototype.setExtensionDefaultActivations,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledWith(
+        [{ id: missingExtensionId, name: 'future-demo' }],
+        'enabled',
+        expect.any(Function),
+      );
       expect(
         h.primary.bridge.refreshExtensionsForAllSessions,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledOnce();
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledOnce();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -493,7 +510,7 @@ describe('extension management v2 REST', () => {
       const nonArrayGlobal = await auth(
         request(h.app)
           .put('/extensions/activation')
-          .send({ extensionIds: extensionId, state: 'enabled' }),
+          .send({ extensions: extensionId, state: 'enabled' }),
       );
       const missingGlobal = await auth(
         request(h.app).put('/extensions/activation').send({ state: 'enabled' }),
@@ -501,23 +518,51 @@ describe('extension management v2 REST', () => {
       const emptyGlobal = await auth(
         request(h.app)
           .put('/extensions/activation')
-          .send({ extensionIds: [], state: 'enabled' }),
+          .send({ extensions: [], state: 'enabled' }),
       );
       const nonStringGlobal = await auth(
         request(h.app)
           .put('/extensions/activation')
-          .send({ extensionIds: [extensionId, 42], state: 'enabled' }),
+          .send({
+            extensions: [{ extensionId, name: 'demo' }, 42],
+            state: 'enabled',
+          }),
       );
       const invalidGlobal = await auth(
         request(h.app)
           .put('/extensions/activation')
-          .send({ extensionIds: ['not-an-id'], state: 'enabled' }),
+          .send({
+            extensions: [{ extensionId: 'not-an-id', name: 'demo' }],
+            state: 'enabled',
+          }),
       );
       const oversizedGlobal = await auth(
         request(h.app)
           .put('/extensions/activation')
           .send({
-            extensionIds: Array.from({ length: 101 }, () => extensionId),
+            extensions: Array.from({ length: 101 }, () => ({
+              extensionId,
+              name: 'demo',
+            })),
+            state: 'enabled',
+          }),
+      );
+      const invalidNameGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensions: [{ extensionId, name: 'not/a/name' }],
+            state: 'enabled',
+          }),
+      );
+      const conflictingIdentityGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensions: [
+              { extensionId, name: 'demo' },
+              { extensionId, name: 'other' },
+            ],
             state: 'enabled',
           }),
       );
@@ -526,26 +571,32 @@ describe('extension management v2 REST', () => {
           .put(
             `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
           )
-          .send({ extensionIds: extensionId }),
+          .send({ extensions: extensionId }),
       );
       const emptyWorkspace = await auth(
         request(h.app)
           .put(
             `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
           )
-          .send({ extensionIds: [] }),
+          .send({ extensions: [] }),
       );
       const invalidWorkspace = await auth(
         request(h.app)
           .put(
             `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
           )
-          .send({ extensionIds: [extensionId], state: 'invalid' }),
+          .send({
+            extensions: [{ extensionId, name: 'demo' }],
+            state: 'invalid',
+          }),
       );
       const inheritedGlobal = await auth(
         request(h.app)
           .put('/extensions/activation')
-          .send({ extensionIds: [extensionId], state: 'inherit' }),
+          .send({
+            extensions: [{ extensionId, name: 'demo' }],
+            state: 'inherit',
+          }),
       );
 
       expect(nonArrayGlobal.status).toBe(400);
@@ -554,6 +605,8 @@ describe('extension management v2 REST', () => {
       expect(nonStringGlobal.status).toBe(400);
       expect(invalidGlobal.status).toBe(400);
       expect(oversizedGlobal.status).toBe(400);
+      expect(invalidNameGlobal.status).toBe(400);
+      expect(conflictingIdentityGlobal.status).toBe(400);
       expect(nonArrayWorkspace.status).toBe(400);
       expect(emptyWorkspace.status).toBe(400);
       expect(invalidWorkspace.status).toBe(400);
@@ -562,7 +615,13 @@ describe('extension management v2 REST', () => {
         code: 'invalid_extension_id',
       });
       expect(oversizedGlobal.body).toMatchObject({
-        code: 'invalid_extension_ids',
+        code: 'invalid_extensions',
+      });
+      expect(invalidNameGlobal.body).toMatchObject({
+        code: 'invalid_extension_name',
+      });
+      expect(conflictingIdentityGlobal.body).toMatchObject({
+        code: 'conflicting_extension_identity',
       });
       expect(invalidWorkspace.body).toMatchObject({
         code: 'invalid_extension_activation',
@@ -578,7 +637,7 @@ describe('extension management v2 REST', () => {
         nonArrayWorkspace,
         emptyWorkspace,
       ]) {
-        expect(response.body).toMatchObject({ code: 'invalid_extension_ids' });
+        expect(response.body).toMatchObject({ code: 'invalid_extensions' });
       }
       expect(
         ExtensionManager.prototype.setExtensionDefaultActivations,
@@ -610,6 +669,10 @@ describe('extension management v2 REST', () => {
           config: { ...template.config, name: `demo-${index}` },
         }) as Extension,
     );
+    const targets = extensions.map(({ id, name }) => ({
+      extensionId: id,
+      name,
+    }));
     vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
       extensions,
     );
@@ -617,7 +680,7 @@ describe('extension management v2 REST', () => {
       const started = await auth(
         request(h.app)
           .put('/extensions/activation')
-          .send({ extensionIds, state: 'enabled' }),
+          .send({ extensions: targets, state: 'enabled' }),
       );
 
       expect(started.status).toBe(202);
@@ -627,7 +690,6 @@ describe('extension management v2 REST', () => {
         status: 'succeeded',
         result: {
           status: 'updated',
-          errors: [],
           refreshed: 2,
           failed: 0,
         },
@@ -649,7 +711,11 @@ describe('extension management v2 REST', () => {
       ).toHaveBeenCalledOnce();
       expect(
         ExtensionManager.prototype.setExtensionDefaultActivations,
-      ).toHaveBeenCalledWith(extensionIds, 'enabled', expect.any(Function));
+      ).toHaveBeenCalledWith(
+        targets.map(({ extensionId: id, name }) => ({ id, name })),
+        'enabled',
+        expect.any(Function),
+      );
       expect(
         h.primary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
@@ -771,11 +837,11 @@ describe('extension management v2 REST', () => {
       ExtensionManager.prototype.setExtensionWorkspaceActivations,
     ).mockResolvedValueOnce(committedSnapshot);
     vi.mocked(
-      ExtensionManager.prototype.getExtensionActivationFromSnapshot,
-    ).mockImplementation((id) => ({
-      default: id === extensionId ? 'disabled' : 'enabled',
+      ExtensionManager.prototype.getExtensionActivationForIdentityFromSnapshot,
+    ).mockImplementation((identity) => ({
+      default: identity.id === extensionId ? 'disabled' : 'enabled',
       workspace: 'inherit',
-      effective: id === extensionId ? 'disabled' : 'enabled',
+      effective: identity.id === extensionId ? 'disabled' : 'enabled',
       source: 'default',
     }));
     try {
@@ -785,7 +851,10 @@ describe('extension management v2 REST', () => {
             `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
           )
           .send({
-            extensionIds: [extensionId, secondExtensionId],
+            extensions: [
+              { extensionId, name: 'demo' },
+              { extensionId: secondExtensionId, name: 'second-demo' },
+            ],
             state: 'inherit',
           }),
       );
@@ -812,7 +881,6 @@ describe('extension management v2 REST', () => {
               effectiveActivation: 'enabled',
             },
           ],
-          errors: [],
           refreshed: 1,
           failed: 0,
         },
@@ -820,24 +888,29 @@ describe('extension management v2 REST', () => {
       expect(
         ExtensionManager.prototype.setExtensionWorkspaceActivations,
       ).toHaveBeenCalledWith(
-        [extensionId, secondExtensionId],
+        [
+          { id: extensionId, name: 'demo' },
+          { id: secondExtensionId, name: 'second-demo' },
+        ],
         h.secondary.workspaceCwd,
         'inherit',
         expect.any(Function),
       );
       expect(
-        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
       ).toHaveBeenNthCalledWith(
         1,
-        extensionId,
+        { id: extensionId, name: 'demo' },
         committedSnapshot,
         h.secondary.workspaceCwd,
       );
       expect(
-        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
       ).toHaveBeenNthCalledWith(
         2,
-        secondExtensionId,
+        { id: secondExtensionId, name: 'second-demo' },
         committedSnapshot,
         h.secondary.workspaceCwd,
       );
@@ -868,13 +941,21 @@ describe('extension management v2 REST', () => {
             [h.secondary.workspaceCwd]: 'enabled',
           },
         },
+        [missingExtensionId]: {
+          name: 'future-demo',
+          declarationOnly: true,
+          defaultActivation: 'enabled',
+          workspaceOverrides: {
+            [h.secondary.workspaceCwd]: 'enabled',
+          },
+        },
       },
     };
     vi.mocked(
       ExtensionManager.prototype.setExtensionWorkspaceActivations,
     ).mockResolvedValueOnce(committedSnapshot);
     vi.mocked(
-      ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+      ExtensionManager.prototype.getExtensionActivationForIdentityFromSnapshot,
     ).mockReturnValue({
       default: 'disabled',
       workspace: 'enabled',
@@ -888,7 +969,10 @@ describe('extension management v2 REST', () => {
             `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
           )
           .send({
-            extensionIds: [extensionId, missingExtensionId],
+            extensions: [
+              { extensionId, name: 'demo' },
+              { extensionId: missingExtensionId, name: 'future-demo' },
+            ],
             state: 'enabled',
           }),
       );
@@ -907,11 +991,11 @@ describe('extension management v2 REST', () => {
               workspaceActivation: 'enabled',
               effectiveActivation: 'enabled',
             },
-          ],
-          errors: [
             {
               extensionId: missingExtensionId,
-              code: 'extension_not_found',
+              name: 'future-demo',
+              workspaceActivation: 'enabled',
+              effectiveActivation: 'enabled',
             },
           ],
           refreshed: 1,
@@ -921,21 +1005,26 @@ describe('extension management v2 REST', () => {
       expect(
         ExtensionManager.prototype.setExtensionWorkspaceActivations,
       ).toHaveBeenCalledWith(
-        [extensionId],
+        [
+          { id: extensionId, name: 'demo' },
+          { id: missingExtensionId, name: 'future-demo' },
+        ],
         h.secondary.workspaceCwd,
         'enabled',
         expect.any(Function),
       );
       expect(
-        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
       ).toHaveBeenCalledWith(
-        extensionId,
+        { id: extensionId, name: 'demo' },
         committedSnapshot,
         h.secondary.workspaceCwd,
       );
       expect(
-        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
-      ).toHaveBeenCalledOnce();
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
+      ).toHaveBeenCalledTimes(2);
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
       ).toHaveBeenCalledOnce();
@@ -947,7 +1036,7 @@ describe('extension management v2 REST', () => {
     }
   });
 
-  it('does not mutate or reconcile an all-missing workspace batch', async () => {
+  it('declares and reconciles an all-uninstalled workspace batch', async () => {
     const h = await makeHarness();
     mockExtensionManager();
     const missingExtensionId = 'c'.repeat(64);
@@ -958,7 +1047,9 @@ describe('extension management v2 REST', () => {
             `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
           )
           .send({
-            extensionIds: [missingExtensionId],
+            extensions: [
+              { extensionId: missingExtensionId, name: 'future-demo' },
+            ],
             state: 'disabled',
           }),
       );
@@ -970,24 +1061,29 @@ describe('extension management v2 REST', () => {
         status: 'succeeded',
         result: {
           status: 'updated',
-          updated: false,
-          results: [],
-          errors: [
+          results: [
             {
               extensionId: missingExtensionId,
-              code: 'extension_not_found',
+              name: 'future-demo',
+              workspaceActivation: 'disabled',
+              effectiveActivation: 'disabled',
             },
           ],
+          refreshed: 1,
+          failed: 0,
         },
       });
-      expect(completed.result).not.toHaveProperty('refreshed');
-      expect(completed.result).not.toHaveProperty('failed');
       expect(
         ExtensionManager.prototype.setExtensionWorkspaceActivations,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledWith(
+        [{ id: missingExtensionId, name: 'future-demo' }],
+        h.secondary.workspaceCwd,
+        'disabled',
+        expect.any(Function),
+      );
       expect(
         h.secondary.bridge.refreshExtensionsForAllSessions,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledOnce();
       expect(
         h.primary.bridge.refreshExtensionsForAllSessions,
       ).not.toHaveBeenCalled();
@@ -2019,10 +2115,16 @@ describe('extension management v2 REST', () => {
           .put(
             `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
           )
-          .send({ extensionIds: [extensionId], state: 'inherit' }),
+          .send({
+            extensions: [{ extensionId, name: 'demo' }],
+            state: 'inherit',
+          }),
       );
       expect(batchResponse.status).toBe(403);
       expect(batchResponse.body.code).toBe('untrusted_workspace');
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

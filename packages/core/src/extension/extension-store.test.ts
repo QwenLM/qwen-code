@@ -197,22 +197,28 @@ describe('ExtensionStore', () => {
     }
   });
 
-  it('does not commit a partial batch when an identity is missing', async () => {
+  it('declares a missing identity in the same batch generation', async () => {
     const store = makeStore();
     const installed = { id: 'b3'.repeat(32), name: 'installed' };
+    const declared = { id: 'b4'.repeat(32), name: 'declared' };
     const initial = await store.ensureInitialized([installed]);
 
-    await expect(
-      store.setWorkspaceActivations(
-        [installed, { id: 'b4'.repeat(32), name: 'missing' }],
-        workspacePath('batch'),
-        'disabled',
-      ),
-    ).rejects.toMatchObject({ code: 'extension_conflict' });
+    const snapshot = await store.setWorkspaceActivations(
+      [installed, declared],
+      workspacePath('batch'),
+      'disabled',
+    );
 
-    const snapshot = await store.readSnapshot();
-    expect(snapshot.generation).toBe(initial.generation);
-    expect(snapshot.extensions[installed.id]?.workspaceOverrides).toEqual({});
+    expect(snapshot.generation).toBe(initial.generation + 1);
+    expect(snapshot.extensions[installed.id]?.workspaceOverrides).toEqual({
+      [workspacePath('batch')]: 'disabled',
+    });
+    expect(snapshot.extensions[declared.id]).toEqual({
+      name: declared.name,
+      declarationOnly: true,
+      defaultActivation: 'enabled',
+      workspaceOverrides: { [workspacePath('batch')]: 'disabled' },
+    });
   });
 
   it('does not commit a batch when an identity name mismatches', async () => {
@@ -236,15 +242,97 @@ describe('ExtensionStore', () => {
     );
   });
 
-  it('rejects a batch mutation before the store is initialized', async () => {
+  it('declares a batch before the store is initialized', async () => {
     const store = makeStore();
+    const identity = { id: 'bc'.repeat(32), name: 'declared' };
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({
+        [identity.name]: { overrides: ['!/legacy/*'] },
+        unrelated: { overrides: ['!/unrelated/*'] },
+      }),
+    );
+
+    const snapshot = await store.setDefaultActivations([identity], 'disabled');
+
+    expect(snapshot.generation).toBe(1);
+    expect(snapshot.extensions[identity.id]).toEqual({
+      name: identity.name,
+      declarationOnly: true,
+      defaultActivation: 'disabled',
+      workspaceOverrides: {},
+      legacyPathRules: ['!/legacy/*'],
+    });
+    expect(snapshot.legacyProjectionRemainder).toEqual({
+      unrelated: { overrides: ['!/unrelated/*'] },
+    });
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      unrelated: { overrides: ['!/unrelated/*'] },
+      [identity.name]: { overrides: ['!/*', '!/legacy/*'] },
+    });
+
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+      initialActivation: { scope: 'user' },
+    });
+
+    expect(installed.legacyProjectionRemainder).toEqual({
+      unrelated: { overrides: ['!/unrelated/*'] },
+    });
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      unrelated: { overrides: ['!/unrelated/*'] },
+      [identity.name]: { overrides: ['!/*', '!/legacy/*'] },
+    });
+  });
+
+  it('imports a persisted legacy remainder while repairing an older projection', async () => {
+    const store = makeStore();
+    const trigger = { id: 'c1'.repeat(32), name: 'trigger' };
+    const discovered = { id: 'c2'.repeat(32), name: 'future' };
+    await fsp.writeFile(
+      enablementPath,
+      JSON.stringify({
+        [discovered.name]: { overrides: ['!/future/*'] },
+        unrelated: { overrides: ['!/unrelated/*'] },
+      }),
+    );
+    const declared = await store.setDefaultActivations([trigger], 'enabled');
+    await fsp.writeFile(enablementPath, '{}');
+    await fsp.utimes(enablementPath, new Date(0), new Date(0));
+
+    const snapshot = await store.ensureInitialized([discovered]);
+
+    expect(snapshot.generation).toBe(declared.generation + 1);
+    expect(snapshot.extensions[discovered.id]).toMatchObject({
+      name: discovered.name,
+      defaultActivation: 'enabled',
+      workspaceOverrides: {},
+      legacyPathRules: ['!/future/*'],
+    });
+    expect(snapshot.legacyProjectionRemainder).toEqual({
+      unrelated: { overrides: ['!/unrelated/*'] },
+    });
+    expect(JSON.parse(await fsp.readFile(enablementPath, 'utf8'))).toEqual({
+      unrelated: { overrides: ['!/unrelated/*'] },
+      [discovered.name]: { overrides: ['!/future/*'] },
+    });
+  });
+
+  it('keeps singular activation mutations installed-only', async () => {
+    const store = makeStore();
+    const identity = { id: 'bd'.repeat(32), name: 'declared' };
+    const declared = await store.setDefaultActivations([identity], 'disabled');
 
     await expect(
-      store.setDefaultActivations(
-        [{ id: 'bc'.repeat(32), name: 'missing' }],
-        'disabled',
-      ),
-    ).rejects.toBeInstanceOf(ExtensionConflictError);
+      store.setDefaultActivation(identity, 'enabled'),
+    ).rejects.toMatchObject({ code: 'extension_conflict' });
+
+    expect(await store.readSnapshot()).toEqual(declared);
   });
 
   it('rejects an empty batch without materializing store state', async () => {
@@ -976,6 +1064,81 @@ describe('ExtensionStore', () => {
       ),
     ).resolves.toBe('{}');
     expect(fs.existsSync(staging)).toBe(false);
+  });
+
+  it('promotes a declaration without replacing its activation policy', async () => {
+    const store = makeStore();
+    const identity = { id: 'f1'.repeat(32), name: 'demo' };
+    const declared = await store.setDefaultActivations([identity], 'disabled');
+    await store.setWorkspaceActivations(
+      [identity],
+      workspacePath('enabled'),
+      'enabled',
+    );
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      stagingDirectory: staging,
+      destinationDirectory: path.join(extensionsDir, identity.name),
+      initialActivation: { scope: 'user' },
+    });
+
+    expect(installed.generation).toBe(declared.generation + 2);
+    expect(installed.extensions[identity.id]).toEqual({
+      name: identity.name,
+      artifactGeneration: installed.generation,
+      defaultActivation: 'disabled',
+      workspaceOverrides: { [workspacePath('enabled')]: 'enabled' },
+    });
+  });
+
+  it('promotes a declaration discovered outside the artifact transaction', async () => {
+    const store = makeStore();
+    const identity = { id: 'f7'.repeat(32), name: 'demo' };
+    const declared = await store.setDefaultActivations([identity], 'disabled');
+
+    const discovered = await store.ensureInitialized([identity]);
+
+    expect(discovered.generation).toBe(declared.generation + 1);
+    expect(discovered.extensions[identity.id]).toEqual({
+      name: identity.name,
+      defaultActivation: 'disabled',
+      workspaceOverrides: {},
+    });
+  });
+
+  it('rejects a declaration that conflicts with an existing name atomically', async () => {
+    const store = makeStore();
+    const installed = { id: 'f2'.repeat(32), name: 'demo' };
+    const other = { id: 'f3'.repeat(32), name: 'other' };
+    const conflicting = { id: 'f4'.repeat(32), name: 'DEMO' };
+    const initial = await store.ensureInitialized([installed]);
+    const initialProjection = await fsp.readFile(enablementPath, 'utf8');
+
+    await expect(
+      store.setDefaultActivations([other, conflicting], 'disabled'),
+    ).rejects.toMatchObject({ code: 'extension_conflict' });
+
+    const snapshot = await store.readSnapshot();
+    expect(snapshot.generation).toBe(initial.generation);
+    expect(snapshot.extensions[other.id]).toBeUndefined();
+    expect(await fsp.readFile(enablementPath, 'utf8')).toBe(initialProjection);
+  });
+
+  it('does not re-key an explicit declaration to a different id', async () => {
+    const store = makeStore();
+    const declared = { id: 'f5'.repeat(32), name: 'demo' };
+    const discovered = { id: 'f6'.repeat(32), name: 'demo' };
+    const initial = await store.setDefaultActivations([declared], 'disabled');
+
+    await expect(store.ensureInitialized([discovered])).rejects.toMatchObject({
+      code: 'extension_conflict',
+    });
+
+    expect(await store.readSnapshot()).toEqual(initial);
   });
 
   it('preserves the original error when rollback also fails', async () => {

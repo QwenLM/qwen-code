@@ -266,7 +266,7 @@ The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces
 
 `extension_management_v2` advertises a user-level extension catalog and mutation surface at `/extensions/*`, plus workspace activation projections at `/workspaces/:workspace/extensions/*`. Artifacts are global; workspace routes expose only projection reads, exact activation overrides, and runtime refresh. Reads may target an untrusted registered workspace, while activation, refresh, and workspace-scoped install require a trusted target. Slow mutations use daemon-local operations at `/extensions/operations/:operationId`; store generation, not operation history, is authoritative across restart and across daemons. The published `workspace_extensions` capability and `/workspace/extensions/*` routes remain a primary-workspace compatibility adapter. Clients must preflight `extension_management_v2` and must not infer it from daemon mode or `workspace_qualified_rest_core`.
 
-`extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 stable `extensionIds`, preserve first-seen order, report well-formed missing ids as per-target errors, persist valid targets in one generation, and return one `202` operation handle. The global route accepts `state: "enabled" | "disabled"`, writes V2 `defaultActivation`, and reconciles every registered runtime. The workspace route also accepts `"inherit"`, applies or clears exact overrides for the selected trusted runtime, and reconciles only that runtime.
+`extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 stable `{ extensionId, name }` identities, preserve first-seen order, persist all targets in one generation, and return one `202` operation handle. A target does not need to be installed: its identity creates a desired-state declaration that is preserved when the matching Extension is installed. The global route accepts `state: "enabled" | "disabled"`, writes V2 `defaultActivation`, and reconciles every registered runtime. The workspace route also accepts `"inherit"`, applies or clears exact overrides for the selected trusted runtime, and reconciles only that runtime. Singular activation routes remain installed-only.
 
 ### Extension Management V2 wire contract
 
@@ -359,16 +359,19 @@ Global and workspace activation `PUT` requests use the same body:
 
 `state` is `enabled` or `disabled`. Update, uninstall, check-updates, clear-activation, and refresh requests have no required body.
 
-Batch activation requests add `extensionIds`:
+Batch activation requests add full Extension identities:
 
 ```json
 {
-  "extensionIds": ["<extension-id-1>", "<extension-id-2>"],
+  "extensions": [
+    { "extensionId": "<extension-id-1>", "name": "formatter" },
+    { "extensionId": "<extension-id-2>", "name": "review-tools" }
+  ],
   "state": "disabled"
 }
 ```
 
-The workspace batch also accepts `"state": "inherit"`. Terminal global results contain `extensionId`, `name`, and `defaultActivation`; workspace results contain `extensionId`, `name`, `workspaceActivation` (`null` for inherit), and `effectiveActivation`. Missing valid ids appear in `errors` with code `extension_not_found`.
+The workspace batch also accepts `"state": "inherit"`. Terminal global results contain `extensionId`, `name`, and `defaultActivation`; workspace results contain `extensionId`, `name`, `workspaceActivation` (`null` for inherit), and `effectiveActivation`. Malformed or internally conflicting identities reject the request; conflicts with existing Store identities fail atomically without a partial commit.
 
 Every accepted asynchronous mutation returns:
 
@@ -399,7 +402,7 @@ An operation snapshot has this shape:
 }
 ```
 
-`status` transitions from `queued` to `running`, then to `succeeded`, `succeeded_with_warnings`, or `failed`. While running, `phase` is `preparing`, `committing`, or `reconciling`. Terminal success may include `result` with `status` equal to `installed`, `enabled`, `disabled`, `updated`, `uninstalled`, `checked`, or `refreshed`; reconciliation results can additionally contain `refreshed`, `failed`, and `error`, while batch activation results contain ordered `results` and `errors`. Update checks return `result.states`, keyed by extension name, with values such as `checking for updates`, `update available`, `up to date`, `not updatable`, or `error`.
+`status` transitions from `queued` to `running`, then to `succeeded`, `succeeded_with_warnings`, or `failed`. While running, `phase` is `preparing`, `committing`, or `reconciling`. Terminal success may include `result` with `status` equal to `installed`, `enabled`, `disabled`, `updated`, `uninstalled`, `checked`, or `refreshed`; reconciliation results can additionally contain `refreshed`, `failed`, and `error`, while batch activation results contain ordered `results`. Update checks return `result.states`, keyed by extension name, with values such as `checking for updates`, `update available`, `up to date`, `not updatable`, or `error`.
 
 A durable commit followed by incomplete cleanup or runtime reconciliation is not reported as a failed mutation. It returns `succeeded_with_warnings` and preserves the committed result:
 
@@ -430,7 +433,7 @@ A durable commit followed by incomplete cleanup or runtime reconciliation is not
 
 Warning `workspaceId` and `code` are optional; `workspaceCwd` and `error` are always present. Clients should display warnings, refresh their catalog/projection, and must not retry the durable mutation blindly.
 
-Validation and authorization failures are synchronous HTTP errors using `{ "error": "...", "code": "..." }` when a stable code exists. Important cases are `400 invalid_extension_id`, `400 invalid_extension_ids`, `400 invalid_extension_activation`, `400 workspace_mismatch`, `403 untrusted_workspace`, `404 extension_operation_not_found`, and `429 extension_queue_full`. Install validation also returns `400` for invalid source/ref/registry options, missing consent, or missing/invalid initial activation. A mutation that fails after `202` is represented, while retained in operation history, with `status: "failed"`, `error`, and an optional stable `code`; common codes include `extension_prepare_timeout` and `extension_conflict`. HTTP `404` for an operation does not imply rollback because operation history is not durable.
+Validation and authorization failures are synchronous HTTP errors using `{ "error": "...", "code": "..." }` when a stable code exists. Important cases are `400 invalid_extension_id`, `400 invalid_extensions`, `400 invalid_extension_name`, `400 conflicting_extension_identity`, `400 invalid_extension_activation`, `400 workspace_mismatch`, `403 untrusted_workspace`, `404 extension_operation_not_found`, and `429 extension_queue_full`. Install validation also returns `400` for invalid source/ref/registry options, missing consent, or missing/invalid initial activation. A mutation that fails after `202` is represented, while retained in operation history, with `status: "failed"`, `error`, and an optional stable `code`; common codes include `extension_prepare_timeout` and `extension_conflict`. HTTP `404` for an operation does not imply rollback because operation history is not durable.
 
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.

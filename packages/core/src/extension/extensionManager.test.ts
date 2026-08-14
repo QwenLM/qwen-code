@@ -2090,7 +2090,7 @@ describe('extension tests', () => {
         .mockResolvedValue();
 
       const snapshot = await manager.setExtensionDefaultActivations(
-        extensions.map((extension) => extension.id),
+        extensions.map(({ id, name }) => ({ id, name })),
         'disabled',
       );
 
@@ -2122,7 +2122,7 @@ describe('extension tests', () => {
         .filter((extension) => extension.name.endsWith('workspace-extension'));
       expect(extensions).toHaveLength(2);
       await manager.setExtensionWorkspaceActivations(
-        extensions.map((extension) => extension.id),
+        extensions.map(({ id, name }) => ({ id, name })),
         tempWorkspaceDir,
         'disabled',
       );
@@ -2133,7 +2133,7 @@ describe('extension tests', () => {
         .mockResolvedValue();
 
       const snapshot = await manager.setExtensionWorkspaceActivations(
-        extensions.map((extension) => extension.id),
+        extensions.map(({ id, name }) => ({ id, name })),
         tempWorkspaceDir,
         'inherit',
       );
@@ -2153,6 +2153,48 @@ describe('extension tests', () => {
         );
       }
       expect(extensions.every((extension) => extension.isActive)).toBe(true);
+    });
+
+    it('updates loaded and declared extensions with one generation and refresh', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'available-extension',
+        version: '1.0.0',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const loaded = manager
+        .getLoadedExtensions()
+        .find((extension) => extension.name === 'available-extension')!;
+      const identity = { id: 'cd'.repeat(32), name: 'future-extension' };
+      const initial = await manager.getExtensionStoreSnapshot();
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+      const onCommitted = vi.fn();
+
+      const snapshot = await manager.setExtensionDefaultActivations(
+        [{ id: loaded.id, name: loaded.name }, identity],
+        'disabled',
+        onCommitted,
+      );
+
+      expect(snapshot.generation).toBe(initial.generation + 1);
+      expect(snapshot.extensions[identity.id]).toMatchObject({
+        name: identity.name,
+        declarationOnly: true,
+        defaultActivation: 'disabled',
+      });
+      expect(snapshot.extensions[loaded.id]?.defaultActivation).toBe(
+        'disabled',
+      );
+      expect(loaded.isActive).toBe(false);
+      expect(onCommitted).toHaveBeenCalledOnce();
+      expect(onCommitted).toHaveBeenCalledWith(snapshot.generation);
+      expect(refreshTools).toHaveBeenCalledOnce();
+      await expect(
+        manager.setExtensionDefaultActivation(identity.id, 'enabled'),
+      ).rejects.toThrow(`Extension with id ${identity.id} does not exist.`);
     });
 
     it('applies V2 default and workspace activation to loaded extensions', async () => {

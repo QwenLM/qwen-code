@@ -84,7 +84,7 @@ import type {
   DaemonSkillBatchToggleErrorCode,
   DaemonSkillBatchToggleItem,
   DaemonSkillBatchToggleResult,
-  ExtensionBatchActivationError,
+  ExtensionBatchActivationTarget,
   ExtensionDefaultActivationBatchItem,
   ExtensionMutationResponse,
   ExtensionWorkspaceActivationBatchItem,
@@ -341,7 +341,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       Parameters<DaemonClient['setExtensionDefaultActivations']>
     >().toEqualTypeOf<
       [
-        extensionIds: readonly string[],
+        extensions: readonly ExtensionBatchActivationTarget[],
         state: 'enabled' | 'disabled',
         clientId?: string,
       ]
@@ -350,7 +350,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       Parameters<WorkspaceDaemonClient['setExtensionActivations']>
     >().toEqualTypeOf<
       [
-        extensionIds: readonly string[],
+        extensions: readonly ExtensionBatchActivationTarget[],
         state: ExtensionWorkspaceBatchActivationState,
         clientId?: string,
       ]
@@ -358,6 +358,10 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<ExtensionWorkspaceBatchActivationState>().toEqualTypeOf<
       'enabled' | 'disabled' | 'inherit'
     >();
+    expectTypeOf<ExtensionBatchActivationTarget>().toEqualTypeOf<{
+      extensionId: string;
+      name: string;
+    }>();
     expectTypeOf<ExtensionDefaultActivationBatchItem>().toEqualTypeOf<{
       extensionId: string;
       name: string;
@@ -368,11 +372,6 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       name: string;
       workspaceActivation: 'enabled' | 'disabled' | null;
       effectiveActivation: 'enabled' | 'disabled';
-    }>();
-    expectTypeOf<ExtensionBatchActivationError>().toEqualTypeOf<{
-      extensionId: string;
-      code: 'extension_not_found';
-      error: string;
     }>();
     expectTypeOf<
       NonNullable<
@@ -386,13 +385,6 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
         | ExtensionWorkspaceActivationBatchItem
       >
     >();
-    expectTypeOf<
-      NonNullable<
-        NonNullable<
-          Awaited<ReturnType<DaemonClient['extensionOperation']>>['result']
-        >['errors']
-      >
-    >().toEqualTypeOf<ExtensionBatchActivationError[]>();
     // `GET /daemon/status` report surface (PR 5174 client coverage): the
     // envelope plus the sub-shapes UI dashboards need to type against.
     expectTypeOf<DaemonStatusReport>().not.toBeNever();

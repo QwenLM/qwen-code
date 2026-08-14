@@ -109,7 +109,7 @@ export {
   type ExtensionWorkspaceBatchActivationState,
   type ExtensionDefaultActivationBatchItem,
   type ExtensionWorkspaceActivationBatchItem,
-  type ExtensionBatchActivationError,
+  type ExtensionBatchActivationTarget,
   type DaemonSkillToggleActivation,
   type DaemonSkillToggleResult,
   type DaemonSkillScope,

@@ -5480,7 +5480,10 @@ describe('DaemonClient', () => {
         'client-1',
       );
       await client.setExtensionDefaultActivations(
-        ['a'.repeat(64), 'b'.repeat(64)],
+        [
+          { extensionId: 'a'.repeat(64), name: 'demo-a' },
+          { extensionId: 'b'.repeat(64), name: 'demo-b' },
+        ],
         'enabled',
         'client-1',
       );
@@ -5498,7 +5501,10 @@ describe('DaemonClient', () => {
       ]);
       expect(calls[6]?.body).toBe(
         JSON.stringify({
-          extensionIds: ['a'.repeat(64), 'b'.repeat(64)],
+          extensions: [
+            { extensionId: 'a'.repeat(64), name: 'demo-a' },
+            { extensionId: 'b'.repeat(64), name: 'demo-b' },
+          ],
           state: 'enabled',
         }),
       );
@@ -5551,7 +5557,10 @@ describe('DaemonClient', () => {
       await expect(ws.workspaceExtensions()).resolves.toEqual(status);
       await ws.setExtensionActivation('a'.repeat(64), 'enabled', 'client-1');
       await ws.setExtensionActivations(
-        ['a'.repeat(64), 'b'.repeat(64)],
+        [
+          { extensionId: 'a'.repeat(64), name: 'demo-a' },
+          { extensionId: 'b'.repeat(64), name: 'demo-b' },
+        ],
         'inherit',
         'client-1',
       );
@@ -5573,7 +5582,10 @@ describe('DaemonClient', () => {
       ]);
       expect(calls[2]?.body).toBe(
         JSON.stringify({
-          extensionIds: ['a'.repeat(64), 'b'.repeat(64)],
+          extensions: [
+            { extensionId: 'a'.repeat(64), name: 'demo-a' },
+            { extensionId: 'b'.repeat(64), name: 'demo-b' },
+          ],
           state: 'inherit',
         }),
       );

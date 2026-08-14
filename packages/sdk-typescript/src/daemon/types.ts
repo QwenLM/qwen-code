@@ -4086,7 +4086,11 @@ export interface ExtensionOperationResult {
   results?: Array<
     ExtensionDefaultActivationBatchItem | ExtensionWorkspaceActivationBatchItem
   >;
-  errors?: ExtensionBatchActivationError[];
+}
+
+export interface ExtensionBatchActivationTarget {
+  extensionId: string;
+  name: string;
 }
 
 export interface ExtensionDefaultActivationBatchItem {
@@ -4100,12 +4104,6 @@ export interface ExtensionWorkspaceActivationBatchItem {
   name: string;
   workspaceActivation: ExtensionWorkspaceActivation;
   effectiveActivation: ExtensionActivationState;
-}
-
-export interface ExtensionBatchActivationError {
-  extensionId: string;
-  code: 'extension_not_found';
-  error: string;
 }
 
 export interface ExtensionOperationStatus {

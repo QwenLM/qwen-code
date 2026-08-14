@@ -25,23 +25,35 @@ PUT /extensions/activation
 PUT /workspaces/:workspace/extensions/activation
 ```
 
-Both accept 1–100 stable `extensionIds`, deduplicate them in request order, and
-return one Extension operation id. The global body accepts `state` as `enabled`
-or `disabled` and writes every valid target's `defaultActivation`. The workspace
-body also accepts `inherit`; it clears each valid target's exact override using
-the same legacy-rule masking semantics as the singular DELETE route.
+Both accept 1–100 stable Extension identities as
+`{ extensionId, name }`, deduplicate identical entries in request order, and
+return one Extension operation id. The name is required because the Store's V1
+projection is name-keyed and cannot derive a name from an opaque id. The global
+body accepts `state` as `enabled` or `disabled` and writes every target's
+`defaultActivation`. The workspace body also accepts `inherit`; it clears each
+target's exact override using the same legacy-rule masking semantics as the
+singular DELETE route.
 
-Malformed ids or state reject the request before queueing. A well-formed but
-missing id is a per-target `extension_not_found` error and does not block valid
-targets. Successful global results report the resulting default activation.
-Successful workspace results report the exact override (`null` for inherit) and
-effective activation.
+Malformed identities, conflicting id/name pairs, or state reject the request
+before queueing. Batch operations intentionally do not require an installed
+artifact: an unknown identity creates a declaration policy so clients can set
+desired activation before installation. Successful global results report the
+resulting default activation. Successful workspace results report the exact
+override (`null` for inherit) and effective activation. Singular activation
+routes remain installed-only.
 
 ## Persistence and ownership
 
-All valid targets are resolved from one loaded-Extension snapshot and written
-under one Extension Store lock, producing one generation. The manager applies
-that snapshot and refreshes its tool cache once.
+All targets are written under one Extension Store lock, producing one
+generation. Existing policies and new declarations share the same atomic
+conflict validation. A declaration uses the regular V2 policy shape plus a
+`declarationOnly` marker. Installing the same id and name removes only that
+marker, records the artifact generation, and preserves the declared global and
+workspace activation. V1 projection entries whose identities are not known yet
+remain carried by the V2 snapshot so later declaration, discovery, or artifact
+transactions cannot erase them. A discovered artifact with a conflicting
+identity fails closed instead of re-keying a declaration. The manager applies
+the committed snapshot and refreshes its tool cache once.
 
 The global batch is process-global: it refreshes all registered runtimes. The
 workspace batch is selected-runtime scoped: it resolves the exact workspace id

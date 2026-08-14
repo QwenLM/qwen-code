@@ -115,11 +115,6 @@ export type ExtensionMutationEvent = {
         effectiveActivation: 'enabled' | 'disabled';
       }
   >;
-  errors?: Array<{
-    extensionId: string;
-    code: 'extension_not_found';
-    error: string;
-  }>;
 };
 
 export type ExtensionPendingInteraction =

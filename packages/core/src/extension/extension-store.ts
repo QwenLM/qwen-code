@@ -23,6 +23,7 @@ export type WorkspaceActivation = ExtensionActivation | 'inherit';
 export interface ExtensionPolicy {
   name: string;
   artifactGeneration?: number;
+  declarationOnly?: true;
   defaultActivation: ExtensionActivation;
   workspaceOverrides: Record<string, WorkspaceActivation>;
   legacyPathRules?: string[];
@@ -32,6 +33,7 @@ export interface ExtensionStoreSnapshot {
   version: 2;
   generation: number;
   legacyProjectionHash: string;
+  legacyProjectionRemainder?: AllExtensionsEnablementConfig;
   extensions: Record<string, ExtensionPolicy>;
 }
 
@@ -220,6 +222,22 @@ function parseState(
     );
   }
   const candidate = value as Partial<ExtensionStoreSnapshot> | null;
+  const validLegacyProjection = (
+    projection: unknown,
+  ): projection is AllExtensionsEnablementConfig =>
+    !!projection &&
+    !Array.isArray(projection) &&
+    typeof projection === 'object' &&
+    Object.values(projection).every(
+      (config) =>
+        !!config &&
+        !Array.isArray(config) &&
+        typeof config === 'object' &&
+        Array.isArray((config as { overrides?: unknown }).overrides) &&
+        (config as { overrides: unknown[] }).overrides.every(
+          (rule) => typeof rule === 'string',
+        ),
+    );
   const validPolicy = (extensionId: string, policy: unknown): boolean => {
     if (
       !/^[a-f0-9]{64}$/.test(extensionId) ||
@@ -235,6 +253,8 @@ function parseState(
       (parsed.artifactGeneration === undefined ||
         (Number.isSafeInteger(parsed.artifactGeneration) &&
           parsed.artifactGeneration >= 0)) &&
+      (parsed.declarationOnly === undefined ||
+        parsed.declarationOnly === true) &&
       (parsed.defaultActivation === 'enabled' ||
         parsed.defaultActivation === 'disabled') &&
       !!parsed.workspaceOverrides &&
@@ -259,6 +279,8 @@ function parseState(
     candidate.generation! < 0 ||
     typeof candidate.legacyProjectionHash !== 'string' ||
     !/^[a-f0-9]{64}$/.test(candidate.legacyProjectionHash) ||
+    (candidate.legacyProjectionRemainder !== undefined &&
+      !validLegacyProjection(candidate.legacyProjectionRemainder)) ||
     !candidate.extensions ||
     Array.isArray(candidate.extensions) ||
     typeof candidate.extensions !== 'object' ||
@@ -323,6 +345,8 @@ export class ExtensionStore {
     const legacy = await this.readLegacyProjection();
     if (existing) {
       let changed = false;
+      const importUnmappedLegacy =
+        existing.legacyProjectionHash === projectionHash(legacy);
       // An id-formula change (e.g. #7568 added the plugin name to the hash)
       // leaves installed extensions pointing at ids the store has never
       // seen. Without this re-key, the blocks below would mint a fresh
@@ -335,7 +359,19 @@ export class ExtensionStore {
       const loadedIds = new Set(extensions.map((identity) => identity.id));
       for (const identity of extensions) {
         assertIdentity(identity);
-        if (existing.extensions[identity.id]) continue;
+        const directPolicy = existing.extensions[identity.id];
+        if (directPolicy) {
+          if (directPolicy.name !== identity.name) {
+            throw new ExtensionConflictError(
+              `Extension id belongs to "${directPolicy.name}", not "${identity.name}".`,
+            );
+          }
+          if (directPolicy.declarationOnly) {
+            delete directPolicy.declarationOnly;
+            changed = true;
+          }
+          continue;
+        }
         const staleEntry = Object.entries(existing.extensions).find(
           ([id, policy]) =>
             !loadedIds.has(id) &&
@@ -343,6 +379,11 @@ export class ExtensionStore {
         );
         if (staleEntry) {
           const [staleId, policy] = staleEntry;
+          if (policy.declarationOnly) {
+            throw new ExtensionConflictError(
+              `Extension name "${identity.name}" is declared with a different id.`,
+            );
+          }
           delete existing.extensions[staleId];
           policy.name = identity.name;
           existing.extensions[identity.id] = policy;
@@ -359,10 +400,14 @@ export class ExtensionStore {
           for (const identity of extensions) {
             assertIdentity(identity);
             if (existing.extensions[identity.id]) continue;
+            const rules =
+              existing.legacyProjectionRemainder?.[identity.name]?.overrides ??
+              [];
             existing.extensions[identity.id] = {
               name: identity.name,
               defaultActivation: 'enabled',
               workspaceOverrides: {},
+              ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
             };
             changed = true;
           }
@@ -429,6 +474,13 @@ export class ExtensionStore {
           changed = true;
         }
       }
+      changed =
+        this.updateLegacyProjectionRemainder(
+          existing,
+          importUnmappedLegacy
+            ? legacy
+            : (existing.legacyProjectionRemainder ?? {}),
+        ) || changed;
       if (changed) {
         existing.generation += 1;
         await this.writeSnapshotUnlocked(existing);
@@ -538,18 +590,26 @@ export class ExtensionStore {
 
       const targetSnapshot = structuredClone(snapshot);
       if (input.operation === 'install') {
-        const initial = input.initialActivation!;
-        targetSnapshot.extensions[input.identity.id] = {
-          name: input.identity.name,
-          artifactGeneration: targetSnapshot.generation + 1,
-          defaultActivation: initial.scope === 'user' ? 'enabled' : 'disabled',
-          workspaceOverrides:
-            initial.scope === 'workspace'
-              ? {
-                  [canonicalizeWorkspacePath(initial.workspacePath)]: 'enabled',
-                }
-              : {},
-        };
+        if (currentPolicy?.declarationOnly) {
+          const policy = targetSnapshot.extensions[input.identity.id]!;
+          delete policy.declarationOnly;
+          policy.artifactGeneration = targetSnapshot.generation + 1;
+        } else {
+          const initial = input.initialActivation!;
+          targetSnapshot.extensions[input.identity.id] = {
+            name: input.identity.name,
+            artifactGeneration: targetSnapshot.generation + 1,
+            defaultActivation:
+              initial.scope === 'user' ? 'enabled' : 'disabled',
+            workspaceOverrides:
+              initial.scope === 'workspace'
+                ? {
+                    [canonicalizeWorkspacePath(initial.workspacePath)]:
+                      'enabled',
+                  }
+                : {},
+          };
+        }
       } else if (input.operation === 'uninstall') {
         delete targetSnapshot.extensions[input.identity.id];
       } else {
@@ -817,6 +877,11 @@ export class ExtensionStore {
           `Extension "${identity.name}" is not installed.`,
         );
       }
+      if (policy.declarationOnly) {
+        throw new ExtensionConflictError(
+          `Extension "${identity.name}" is not installed.`,
+        );
+      }
       if (policy.name !== identity.name) {
         throw new Error(
           `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
@@ -841,21 +906,39 @@ export class ExtensionStore {
     return await this.withLock(async () => {
       const snapshot =
         (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      const legacy = await this.readLegacyProjection();
       const policies = identities.map((identity) => {
-        const policy = snapshot.extensions[identity.id];
+        let policy = snapshot.extensions[identity.id];
         if (!policy) {
-          throw new ExtensionConflictError(
-            `Extension "${identity.name}" is not installed.`,
+          const nameConflict = Object.entries(snapshot.extensions).find(
+            ([extensionId, existing]) =>
+              extensionId !== identity.id &&
+              existing.name.toLowerCase() === identity.name.toLowerCase(),
           );
+          if (nameConflict) {
+            throw new ExtensionConflictError(
+              `Extension name "${identity.name}" conflicts with an existing policy.`,
+            );
+          }
+          const rules = legacy[identity.name]?.overrides ?? [];
+          policy = {
+            name: identity.name,
+            declarationOnly: true,
+            defaultActivation: 'enabled',
+            workspaceOverrides: {},
+            ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
+          };
+          snapshot.extensions[identity.id] = policy;
         }
         if (policy.name !== identity.name) {
-          throw new Error(
+          throw new ExtensionConflictError(
             `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
           );
         }
         return policy;
       });
       for (const policy of policies) update(policy);
+      this.updateLegacyProjectionRemainder(snapshot, legacy);
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
       return snapshot;
@@ -903,6 +986,17 @@ export class ExtensionStore {
     snapshot: ExtensionStoreSnapshot,
   ): AllExtensionsEnablementConfig {
     const projection = Object.create(null) as AllExtensionsEnablementConfig;
+    const representedNames = new Set(
+      Object.values(snapshot.extensions).map((policy) =>
+        policy.name.toLowerCase(),
+      ),
+    );
+    for (const [name, config] of Object.entries(
+      snapshot.legacyProjectionRemainder ?? {},
+    )) {
+      if (representedNames.has(name.toLowerCase())) continue;
+      projection[name] = { overrides: [...config.overrides] };
+    }
     for (const policy of Object.values(snapshot.extensions)) {
       const overrides: string[] = [];
       if (policy.defaultActivation === 'disabled') overrides.push('!/*');
@@ -922,6 +1016,29 @@ export class ExtensionStore {
       if (overrides.length > 0) projection[policy.name] = { overrides };
     }
     return projection;
+  }
+
+  private updateLegacyProjectionRemainder(
+    snapshot: ExtensionStoreSnapshot,
+    legacy: AllExtensionsEnablementConfig,
+  ): boolean {
+    const representedNames = new Set(
+      Object.values(snapshot.extensions).map((policy) =>
+        policy.name.toLowerCase(),
+      ),
+    );
+    const remainder = Object.create(null) as AllExtensionsEnablementConfig;
+    for (const [name, config] of Object.entries(legacy)) {
+      if (representedNames.has(name.toLowerCase())) continue;
+      remainder[name] = { overrides: [...config.overrides] };
+    }
+    const previous = snapshot.legacyProjectionRemainder ?? {};
+    if (Object.keys(remainder).length > 0) {
+      snapshot.legacyProjectionRemainder = remainder;
+    } else {
+      delete snapshot.legacyProjectionRemainder;
+    }
+    return projectionHash(previous) !== projectionHash(remainder);
   }
 
   private importLegacyProjection(
