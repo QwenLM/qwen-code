@@ -180,6 +180,52 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('keeps provider-resolved catalog modalities when the session endpoint lookup misses', () => {
+    const sessionBaseUrl = 'https://proxy.corp.example/v1';
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openrouter: [
+          {
+            id: 'google/gemma-4-31b-it',
+            envKey: 'MY_PROXY_KEY',
+          },
+        ],
+      },
+      providerProtocolConfig: { openrouter: 'openai' },
+      generationConfig: {
+        model: 'google/gemma-4-31b-it',
+        baseUrl: sessionBaseUrl,
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        baseUrl: { kind: 'cli', detail: '--base-url' },
+      },
+      modelMetadataCatalog: {
+        openrouter: {
+          api: 'https://openrouter.ai/api/v1',
+          models: {
+            'google/gemma-4-31b-it': {
+              modalities: { input: ['text', 'image', 'video'] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(modelsConfig.getGenerationConfig().baseUrl).toBe(sessionBaseUrl);
+
+    modelsConfig.syncAfterAuthRefresh(
+      AuthType.USE_OPENAI,
+      'google/gemma-4-31b-it',
+    );
+
+    expect(modelsConfig.getGenerationConfig()).toMatchObject({
+      baseUrl: sessionBaseUrl,
+      modalities: { image: true, video: true },
+    });
+  });
+
   it('keeps catalog modalities for a settings-sourced session endpoint after auth sync', () => {
     const settingsBaseUrl = 'https://openrouter.ai/api/v1';
     const modelsConfig = new ModelsConfig({

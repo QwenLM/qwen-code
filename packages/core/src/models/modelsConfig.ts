@@ -1239,7 +1239,14 @@ export class ModelsConfig {
           savedBaseUrl,
           resolved.envKey,
         );
-        if (!appliedCatalogModalities && this.canApplyCatalogModalities()) {
+        const resolvedCatalogMatchesSessionEndpoint =
+          this.modelRegistry.getModalitiesSource(resolved) === 'catalog' &&
+          resolved.baseUrl === savedBaseUrl;
+        if (
+          !appliedCatalogModalities &&
+          !resolvedCatalogMatchesSessionEndpoint &&
+          this.canApplyCatalogModalities()
+        ) {
           this._generationConfig.modalities = defaultModalities(resolved.id);
           this.generationConfigSources['modalities'] = {
             kind: 'computed',
