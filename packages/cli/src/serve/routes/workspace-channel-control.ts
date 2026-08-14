@@ -289,12 +289,20 @@ function sendChannelControlError(
  * restart must not bring these channels back (#8975). Recorded from the
  * manager's stop result — the names torn down at commit time — because a
  * pre-stop snapshot of the control state can race an in-flight start.
- * Returns whether every group was persisted; a failed write must be
- * surfaced to the caller, or automation treats the stop as durable and the
- * stopped channels silently resurrect on the next restart.
+ * Shared by the whole-selection DELETE route and the channel management
+ * service's per-channel stop routes, which tear down through the same
+ * manager and persist its torn-down set the same way. Returns whether
+ * every group was persisted; a failed write must be surfaced to the
+ * caller, or automation treats the stop as durable and the stopped
+ * channels silently resurrect on the next restart.
  */
-function recordChannelsStopped(
-  groups: Array<{ workspaceCwd: string; names: string[] }> | undefined,
+export function recordChannelsStopped(
+  groups:
+    | ReadonlyArray<{
+        readonly workspaceCwd: string;
+        readonly names: readonly string[];
+      }>
+    | undefined,
 ): boolean {
   let persisted = true;
   for (const { workspaceCwd, names } of groups ?? []) {

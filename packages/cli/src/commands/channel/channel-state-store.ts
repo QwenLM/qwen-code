@@ -1,9 +1,11 @@
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
-  statSync,
 } from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -119,29 +121,52 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
  * destroy this workspace's records. Best-effort — any failure only loses
  * this sync and warns, matching the store's never-fails contract (#8975).
  */
-export function adoptLegacyChannelState(workspaceCwd: string): void {
+export function adoptLegacyChannelState(
+  workspaceCwd: string,
+  /** Internal test seam — see {@link atomicWriteFileSync}. */
+  _testFs?: { openLegacy?: (path: string, flags: 'r') => number },
+): void {
   const targetPath = channelRuntimeStatePath(workspaceCwd);
   const legacyPath = channelRuntimeStatePath();
   if (!existsSync(legacyPath)) return;
   let legacyChannels: Record<string, ChannelRuntimeState>;
   let legacyMtime: number;
   try {
-    legacyMtime = statSync(legacyPath).mtimeMs;
-    const raw = readFileSync(legacyPath, 'utf-8');
-    const parsed = parseStateFile(raw);
-    // A legacy file that reads successfully but no longer parses is
-    // silently coerced to empty otherwise: the stops it carried are lost
-    // with no trace, so warn like every other discard path (#8975).
-    if (!parsed) {
-      writeStoreWarning(
-        `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; treating it as empty for this adoption.`,
-      );
+    // The mtime watermark and the adopted content must describe the SAME
+    // file version: a path-based stat BEFORE the read lets a racing
+    // legacy rewrite land between the two, recording a stale mtime next
+    // to newer content; the next sync then reads moved-mtime +
+    // unchanged-content as a byte-identical re-stop rewrite and
+    // re-applies the stale snapshot over an explicit restart — the R9-3
+    // hazard the watermark exists to prevent. One open fd pins one
+    // inode, so fstat + read below observe one consistent (mtime,
+    // content) pair however many rewrites race this adoption: legacy
+    // writers replace via temp + rename, so a racing rewrite swaps the
+    // path to a new inode and never mutates the pinned one. The rewrite
+    // is then merged by the NEXT sync's content diff (#8975).
+    const fd =
+      _testFs?.openLegacy?.(legacyPath, 'r') ?? openSync(legacyPath, 'r');
+    try {
+      legacyMtime = fstatSync(fd).mtimeMs;
+      const raw = readFileSync(fd, 'utf-8');
+      const parsed = parseStateFile(raw);
+      // A legacy file that reads successfully but no longer parses is
+      // silently coerced to empty otherwise: the stops it carried are lost
+      // with no trace, so warn like every other discard path (#8975).
+      if (!parsed) {
+        writeStoreWarning(
+          `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; treating it as empty for this adoption.`,
+        );
+      }
+      legacyChannels = parsed?.channels ?? Object.create(null);
+    } finally {
+      closeSync(fd);
     }
-    legacyChannels = parsed?.channels ?? Object.create(null);
   } catch {
-    // ENOENT is pre-checked above, so a throw here is a real read failure
-    // (EACCES/EIO/EISDIR on a shared ~/.qwen): the unadopted stops may
-    // resurrect on the next start, so leave a trace (#8975).
+    // ENOENT can still race the existsSync above; anything else is a real
+    // open/read failure (EACCES/EIO/EISDIR on a shared ~/.qwen): the
+    // unadopted stops may resurrect on the next start, so leave a trace
+    // (#8975).
     writeStoreWarning(
       `[Channel] Warning: could not read legacy channel state file ${legacyPath}; recorded stops may not be honored.`,
     );

@@ -101,7 +101,12 @@ export function loadChannelsConfig(
   if (!Object.keys(channels).some(isAllChannelSelectionName)) {
     return channels;
   }
-  const filtered: Record<string, unknown> = {};
+  // Null-prototype map: channel names are user-controlled settings keys,
+  // so a channel literally named `__proto__` must survive the filter as an
+  // own entry instead of routing through the Object.prototype setter —
+  // which would silently drop the channel and set the map's prototype to
+  // its config (same hazard the state store's filterChannelStates avoids).
+  const filtered: Record<string, unknown> = Object.create(null);
   for (const [name, config] of Object.entries(channels)) {
     if (isAllChannelSelectionName(name)) {
       writeStderrLine(

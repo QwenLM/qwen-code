@@ -3,7 +3,9 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -657,6 +659,64 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       slack: 'active',
       telegram: 'stopped',
+    });
+  });
+
+  it('keeps the adoption watermark consistent with the content when a rewrite races the sync (R11-2)', () => {
+    // The watermark must come from the SAME file version as the adopted
+    // content: a path-based stat separated from the read lets a racing
+    // legacy rewrite land between the two, recording a stale mtime next
+    // to newer content; the next sync then reads moved-mtime +
+    // unchanged-content as a byte-identical re-stop rewrite and
+    // re-applies the stale snapshot over an explicit restart — the R9-3
+    // hazard the watermark exists to prevent. The adoption pins one
+    // inode (fstat + read on one open fd), and legacy writers replace
+    // via temp + rename, so a racing rewrite swaps the path to a new
+    // inode and the pinned pair stays consistent (#8975).
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+
+    // Simulate the rewrite racing the adoption: it lands the moment the
+    // legacy file is opened, as a temp + rename (same as every real
+    // writer), adding slack while re-asserting telegram's stop. The
+    // openLegacy seam stands in for openSync, so the racing rewrite hits
+    // the exact window between the fd pin and the fstat/read pair.
+    const racingOpen = (p: string, f: 'r'): number => {
+      const fd = openSync(p, f);
+      const tmp = `${legacyPath}.race.tmp`;
+      writeFileSync(
+        tmp,
+        JSON.stringify({
+          version: 1,
+          channels: { telegram: 'stopped', slack: 'stopped' },
+        }),
+        'utf-8',
+      );
+      renameSync(tmp, legacyPath);
+      return fd;
+    };
+    adoptLegacyChannelState(workspace, { openLegacy: racingOpen });
+
+    // The pinned pair is the PRE-rewrite version, identical to the
+    // recorded snapshot: nothing merges and the explicit restart
+    // survives (re-applying the snapshot here would be the R9-3 hazard).
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'active',
+    });
+
+    // The racing rewrite is picked up by the NEXT sync's content diff:
+    // slack merges, and telegram's snapshot-identical entry is NOT
+    // re-applied because the rewrite changed the content (R10-5).
+    adoptLegacyChannelState(workspace);
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'active',
+      slack: 'stopped',
     });
   });
 

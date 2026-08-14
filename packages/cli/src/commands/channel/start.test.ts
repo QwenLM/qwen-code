@@ -1483,6 +1483,13 @@ describe('startCommand.handler', () => {
         void invokeStartHandler({});
         await new Promise((resolve) => setImmediate(resolve));
 
+        // Capture the keep-alive handle BEFORE any fallible assertion: if
+        // one throws, the finally block must still clear the ref'd
+        // ~24.8-day interval or it leaks past this test (#8975).
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+          | NodeJS.Timeout
+          | undefined;
+
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
           '[Channel] No channels configured; serving with 0 channels.',
         );
@@ -1495,9 +1502,6 @@ describe('startCommand.handler', () => {
         expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
         // Startup no longer exits on an empty channel set.
         expect(exitSpy).not.toHaveBeenCalled();
-        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
-          | NodeJS.Timeout
-          | undefined;
         expect(keepAlive).toBeDefined();
 
         const sigint = processOnSpy.mock.calls.find(
@@ -1536,14 +1540,19 @@ describe('startCommand.handler', () => {
         .mockImplementation(() => process);
       const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
-      // Hoisted above the try: an assertion failure before the signal
-      // call must not leak the ref'd keep-alive timer into the vitest
-      // worker — the finally clears it unconditionally (R10-30).
+      // Hoisted above the try and captured BEFORE any fallible assertion:
+      // an assertion failure must not leak the ref'd keep-alive timer
+      // into the vitest worker — the finally clears it unconditionally
+      // (R10-30).
       let keepAlive: NodeJS.Timeout | undefined;
 
       try {
         void invokeStartHandler({});
         await new Promise((resolve) => setImmediate(resolve));
+
+        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
+          | NodeJS.Timeout
+          | undefined;
 
         expect(mockWriteStdoutLine).toHaveBeenCalledWith(
           '[Channel] "telegram" skipped (stopped before restart)',
@@ -1568,9 +1577,6 @@ describe('startCommand.handler', () => {
         // must hold the event loop open (#8975).
         expect(mockWriteServiceInfo).toHaveBeenCalledWith([], process.cwd());
         expect(mockAcpBridge).not.toHaveBeenCalled();
-        keepAlive = setIntervalSpy.mock.results.at(-1)?.value as
-          | NodeJS.Timeout
-          | undefined;
         expect(keepAlive).toBeDefined();
         expect(keepAlive!.hasRef()).toBe(true);
         // The state file holds every channel as 'stopped' here: a state

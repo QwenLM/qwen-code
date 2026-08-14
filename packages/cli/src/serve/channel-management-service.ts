@@ -33,6 +33,7 @@ import type {
   ChannelWorkerRequiredOwner,
 } from './channel-worker-manager.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import { recordChannelsStopped } from './routes/workspace-channel-control.js';
 
 export interface ChannelRuntimeState {
   state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
@@ -209,34 +210,6 @@ function diagnostic(error: unknown): string {
 
 function usesEnvironment(value: unknown): boolean {
   return typeof value === 'string' && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value);
-}
-
-/**
- * Best-effort per-group persistence of the channels a stop tore down,
- * mirroring the whole-selection route's recordChannelsStopped: returns
- * whether EVERY group was persisted, so the caller can surface the loss —
- * under the same disk condition that failed the stop (ENOSPC), the state
- * write can also fail, and a swallowed boolean resurrects the torn-down
- * channels on the next `--channel all` start (#8975). The groups'
- * workspaceCwd is already canonical (captured inside the manager lane).
- */
-function persistStoppedGroups(
-  groups: ReadonlyArray<{
-    workspaceCwd: string;
-    names: readonly string[];
-  }>,
-): boolean {
-  let persisted = true;
-  for (const group of groups) {
-    if (
-      !new ChannelStateStore(
-        daemonChannelRuntimeStatePath(group.workspaceCwd),
-      ).trySetMany(group.names, 'stopped')
-    ) {
-      persisted = false;
-    }
-  }
-  return persisted;
 }
 
 export function createChannelManagementService(
@@ -666,7 +639,7 @@ export function createChannelManagementService(
           error instanceof ChannelWorkerControlError &&
           error.stoppedChannels
         ) {
-          // Aggregate the persistence boolean like the DELETE route's
+          // Aggregate the persistence boolean via the DELETE route's
           // recordChannelsStopped and surface the loss on the rethrown
           // error: under the same disk condition that failed the lease
           // release, the state write can also fail, and the client gets a
@@ -674,7 +647,7 @@ export function createChannelManagementService(
           // management route's error body must carry the loss, or the
           // torn-down channels silently resurrect on `--channel all`
           // (#8975).
-          if (!persistStoppedGroups(error.stoppedChannels)) {
+          if (!recordChannelsStopped(error.stoppedChannels)) {
             error.statePersisted = false;
           }
         } else if (
@@ -742,12 +715,13 @@ export function createChannelManagementService(
       // fs error and skip the persistence — use the throw-safe form. When
       // the disable routed through the whole-selection stop (disabling the
       // LAST committed channel), the result carries the per-workspace
-      // tear-down set: persist it group-by-group like the catch branch and
-      // the DELETE route do — persisting only this one name would leave the
-      // other torn-down workspaces unrecorded, and they would resurrect on
-      // the next `--channel all` start (#8975).
+      // tear-down set: persist it group-by-group via recordChannelsStopped
+      // like the catch branch and the DELETE route do — persisting only
+      // this one name would leave the other torn-down workspaces
+      // unrecorded, and they would resurrect on the next `--channel all`
+      // start (#8975).
       const statePersisted = result.stoppedChannels
-        ? persistStoppedGroups(result.stoppedChannels)
+        ? recordChannelsStopped(result.stoppedChannels)
         : new ChannelStateStore(
             daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
           ).trySet(name, 'stopped');

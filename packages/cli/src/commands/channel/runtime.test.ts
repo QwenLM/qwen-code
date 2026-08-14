@@ -148,6 +148,33 @@ describe('loadChannelsConfig (#8975)', () => {
       writeSpy.mockRestore();
     }
   });
+
+  it('keeps a channel literally named "__proto__" in the reserved-name filter (R11-1)', () => {
+    // The filter rebuilds the map when a reserved name is present; on a
+    // plain object, assigning a channel named `__proto__` routes through
+    // the Object.prototype setter — the entry silently drops and the
+    // map's prototype becomes the channel config. Channel names are
+    // user-controlled settings keys, so the rebuild must be a
+    // null-prototype map (the same hazard the state store's
+    // filterChannelStates avoids). JSON.parse yields `__proto__` as an
+    // own key, as settings.json does (#8975).
+    const channels = JSON.parse(
+      '{"all":{"type":"telegram"},"__proto__":{"type":"feishu"},"telegram":{"type":"telegram"}}',
+    ) as Record<string, unknown>;
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      const loaded = loadChannelsConfig('/workspace', settingsWith(channels));
+
+      expect(Object.keys(loaded).sort()).toEqual(['__proto__', 'telegram']);
+      expect(Object.getPrototypeOf(loaded)).toBeNull();
+      expect(loaded['__proto__']).toEqual({ type: 'feishu' });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
 
 describe('parseConfiguredChannels', () => {
