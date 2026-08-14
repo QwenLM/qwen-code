@@ -58,6 +58,12 @@ describe('package asset scripts', () => {
     // fires and a review silently measures the old behaviour.
     const builtAt = new Date(Date.now() - 60_000);
     utimesSync(cliEntry, builtAt, builtAt);
+    // Read back what the filesystem actually recorded. Comparing against the
+    // `Date` handed to `utimesSync` would re-pin libuv's double-seconds →
+    // `timespec` truncation (about half of all millisecond values land 1 ns
+    // low), which is not the invariant under test — only whether the rewrite
+    // moves the time the filesystem holds.
+    const builtMs = fs.statSync(cliEntry).mtimeMs;
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -65,7 +71,7 @@ describe('package asset scripts', () => {
     const once = readFileSync(cliEntry, 'utf8');
     expect(once.startsWith('#!/usr/bin/env node\n')).toBe(true);
     expect(once).toContain('console.log("bundle");');
-    expect(fs.statSync(cliEntry).mtimeMs).toBe(builtAt.getTime());
+    expect(fs.statSync(cliEntry).mtimeMs).toBe(builtMs);
     if (process.platform !== 'win32') {
       // Windows has no POSIX exec bit for chmod to set; the shebang half
       // still holds there.
