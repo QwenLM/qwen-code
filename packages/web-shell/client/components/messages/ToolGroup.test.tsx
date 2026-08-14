@@ -13,7 +13,6 @@ import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
   return {
-    CompactModeContext: createContext(false),
     TodoTimelineContext: createContext(new Map()),
     TodoDetailContext: createContext(new Map()),
   };
@@ -61,6 +60,7 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
+  customization = {},
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -68,7 +68,9 @@ function renderToolLine(
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <ToolLine tool={tool} {...props} />
+        <WebShellCustomizationProvider value={customization}>
+          <ToolLine tool={tool} {...props} />
+        </WebShellCustomizationProvider>
       </I18nProvider>,
     );
   });
@@ -98,9 +100,9 @@ function renderToolGroup(
 
 const t = (key: string, values?: Record<string, string | number>): string => {
   if (key === 'toolGroup.running') {
-    return `Running ${values?.name ?? 'tool'}${values?.duration ? ` ${values.duration}` : ''}${
-      Number(values?.count ?? 0) > 1 ? ` · ${values?.count ?? 0} tools` : ''
-    }`;
+    return Number(values?.count ?? 0) > 1
+      ? `Running ${values?.count ?? 0} tools: ${values?.name ?? 'tool'}`
+      : `Running ${values?.name ?? 'tool'}`;
   }
   if (key === 'toolGroup.summary') {
     return `Ran ${values?.count ?? 0} tool${values?.count === 1 ? '' : 's'}`;
@@ -150,7 +152,7 @@ describe('tool group summary logic', () => {
 
     expect(hasActiveAgents(tools)).toBe(true);
     expect(getActiveTool(tools).callId).toBe('active');
-    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile');
   });
 
   it('uses a static summary when only background agents remain active', () => {
@@ -183,7 +185,79 @@ describe('tool group summary logic', () => {
       }),
     ];
 
-    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile');
+  });
+
+  it('describes every active foreground tool until all tools finish', () => {
+    const tools = [
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: 'package.json' },
+      }),
+      makeTool({
+        callId: 'search',
+        toolName: 'grep',
+        status: 'pending',
+        args: { pattern: 'ToolGroup' },
+      }),
+      makeTool({ callId: 'done', status: 'completed' }),
+    ];
+
+    const summary = formatToolGroupSummary(tools, t);
+    expect(summary).toContain('ReadFile package.json');
+    expect(summary).toContain('ToolGroup');
+    expect(summary).toContain('Running 2 tools:');
+  });
+
+  it('keeps workspace-relative paths in multi-tool summaries', () => {
+    const tools = [
+      makeTool({
+        callId: 'first',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: '/workspace/src/index.ts' },
+      }),
+      makeTool({
+        callId: 'second',
+        toolName: 'ReadFile',
+        status: 'pending',
+        args: { file_path: '/workspace/test/index.ts' },
+      }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t, '/workspace')).toBe(
+      'Running 2 tools: ReadFile src/index.ts · ReadFile test/index.ts',
+    );
+  });
+
+  it('excludes a running background agent from a multi-tool summary', () => {
+    const tools = [
+      makeTool({
+        callId: 'agent',
+        toolName: 'agent',
+        status: 'in_progress',
+        args: { run_in_background: true },
+      }),
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: 'package.json' },
+      }),
+      makeTool({
+        callId: 'search',
+        toolName: 'grep',
+        status: 'pending',
+        args: { pattern: 'ToolGroup' },
+      }),
+    ];
+
+    const summary = formatToolGroupSummary(tools, t);
+    expect(summary).toBe(
+      "Running 2 tools: ReadFile package.json · Grep 'ToolGroup' in path './'",
+    );
   });
 
   it('localizes active tool names in running summaries', () => {
@@ -537,12 +611,287 @@ describe('tool kind logic', () => {
 });
 
 describe('tool row rendering', () => {
-  it('shows failed status in the collapsed chat summary', () => {
+  it('renders the aggregate summary for a multi-tool group', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'read',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+        args: { file_path: 'package.json' },
+      }),
+      makeTool({
+        callId: 'search',
+        toolName: 'grep',
+        status: 'pending',
+        args: { pattern: 'ToolGroup' },
+      }),
+    ]);
+
+    expect(container.querySelector('button')?.textContent).toContain(
+      'package.json',
+    );
+    expect(container.querySelector('button')?.textContent).toContain(
+      'ToolGroup',
+    );
+  });
+
+  it('does not show elapsed time in a running summary', () => {
+    const container = renderToolGroup([
+      makeTool({ status: 'in_progress', startTime: 1_000 }),
+      makeTool({ callId: 'done', status: 'completed' }),
+    ]);
+
+    expect(container.querySelector('button')?.textContent).not.toMatch(
+      /\d+[sm]/,
+    );
+  });
+
+  it('keeps elapsed time updating in a running tool row', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(6_000);
+
+    try {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status: 'in_progress',
+          startTime: 1_000,
+        }),
+      );
+      expect(container.textContent).toContain('5s');
+
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain('6s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows live elapsed time after expanding a single-tool group', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(6_000);
+
+    try {
+      const container = renderToolGroup(
+        [
+          makeTool({
+            toolName: 'ReadFile',
+            status: 'in_progress',
+            startTime: 1_000,
+          }),
+        ],
+        {
+          renderToolHeaderExtra: (info) =>
+            info.elapsed ? <span>custom {info.elapsed}</span> : null,
+        },
+      );
+      const summary = container.querySelector('button');
+      expect(summary?.textContent).not.toContain('5s');
+
+      act(() => summary?.click());
+      const content = container.querySelector(
+        '[class*="chatSummaryContentClip"]',
+      );
+      expect(content?.className).not.toContain('chatSummaryContentCollapsed');
+      expect(content?.textContent).toContain('custom 5s');
+
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(content?.textContent).toContain('custom 6s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not show elapsed time after a tool completes', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        status: 'completed',
+        startTime: 1_000,
+        endTime: 6_000,
+      }),
+    );
+
+    expect(container.textContent).not.toContain('5s');
+  });
+
+  it('keeps completed elapsed data available to custom header renderers', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        status: 'completed',
+        startTime: 1_000,
+        endTime: 6_000,
+      }),
+      {},
+      { renderToolHeaderExtra: (info) => <span>{info.elapsed}</span> },
+    );
+
+    expect(container.textContent).toContain('5s');
+  });
+
+  it.each([
+    ['completed', undefined],
+    ['failed', 'Agent process failed'],
+  ] as const)('shows meta for a %s agent', (status, reason) => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'Task',
+        status,
+        startTime: 1_000,
+        endTime: 6_000,
+        rawOutput: {
+          type: 'task_execution',
+          executionSummary: { outputTokens: 1_200 },
+          reason,
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain('5s');
+    expect(container.textContent).toContain('1.2k tokens');
+    if (reason) expect(container.textContent).toContain(reason);
+  });
+
+  it('shows a tool-kind icon on every expanded group row', () => {
+    const container = renderToolGroup([
+      makeTool({ callId: 'read', toolName: 'ReadFile' }),
+      makeTool({ callId: 'edit', toolName: 'edit' }),
+    ]);
+    const summary = container.querySelector('button');
+    act(() => summary?.click());
+
+    const rows = container.querySelectorAll(
+      '[class*="chatSummaryGroup"] [class*="lineMain"]',
+    );
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(
+        row.querySelector('svg[class*="chatSummaryToolIcon"]'),
+      ).not.toBeNull();
+    }
+  });
+
+  it('keeps the failed label out of the collapsed chat summary', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'Shell', status: 'failed' }),
     ]);
 
-    expect(container.querySelector('button')?.textContent).toContain('Failed');
+    const summary = container.querySelector('button');
+    expect(summary?.textContent).toContain('Shell');
+    expect(summary?.textContent).not.toContain('Failed');
+    expect(summary?.querySelector('[class*="iconError"]')).toBeNull();
+  });
+
+  it('shows the error icon in a failed tool line header', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'Shell', status: 'failed' }),
+    );
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.getAttribute('role')).toBe('img');
+    expect(errorIcon?.getAttribute('aria-label')).toBe('Failed');
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('Failed');
+  });
+
+  it('shows an error icon instead of the failed label on expanded tool rows', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'boom' } }],
+      }),
+      makeTool({ callId: 'call-2', toolName: 'Grep', status: 'completed' }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(errorIcon?.textContent).not.toContain('Failed');
+  });
+
+  it('shows an error icon in the expanded single-tool card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'boom' } }],
+      }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+    expect(titleRow?.textContent).not.toContain('Failed');
+  });
+
+  it('renders no status icon in the expanded completed tool card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'Shell',
+        status: 'completed',
+        content: [{ type: 'content', content: { text: 'ok' } }],
+      }),
+    ]);
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => summary.click());
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"]')).toBeNull();
+  });
+
+  it('shows an error icon in the expanded failed todo card title', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'todo_write',
+        status: 'failed',
+        args: {
+          todos: [{ id: '1', content: 'Check UI', status: 'in_progress' }],
+        },
+      }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+  });
+
+  it('shows an error icon for a single failed read tool', () => {
+    const container = renderToolGroup([
+      makeTool({
+        toolName: 'read_file',
+        status: 'failed',
+        content: [{ type: 'content', content: { text: 'Permission denied' } }],
+      }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
+  });
+
+  it('shows an error icon for a single failed tool without result text', () => {
+    const container = renderToolGroup([
+      makeTool({ toolName: 'glob', status: 'failed' }),
+    ]);
+
+    const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
+    expect(titleRow).not.toBeNull();
+    expect(titleRow?.querySelector('[class*="iconError"] svg')).not.toBeNull();
   });
 
   it('renders ANSI shell output as styled spans instead of escape text', () => {
@@ -1114,7 +1463,9 @@ describe('tool row rendering', () => {
 
     act(() => header.click());
 
-    const cardTitle = container.querySelector('[class*="expandedCardTitle"]');
+    const cardTitle = container.querySelector(
+      '[class*="expandedCardTitleRow"] [class*="expandedCardTitle"]',
+    );
     expect(cardTitle?.textContent).toBe('Shell');
   });
 

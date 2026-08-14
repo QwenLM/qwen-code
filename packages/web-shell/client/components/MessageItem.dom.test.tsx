@@ -10,6 +10,11 @@ import {
 } from '../customization';
 import type { Message } from '../adapters/types';
 
+vi.mock('../App', async () => {
+  const { createContext } = await import('react');
+  return { CompactModeContext: createContext(false) };
+});
+
 // Stub the message body components so MessageItem's own wiring — not the bodies
 // — is under test. UserMessage/AssistantMessage throw on a sentinel so we can
 // drive the message-level ErrorBoundary (the real one, imported below); the
@@ -18,8 +23,18 @@ import type { Message } from '../adapters/types';
 vi.mock('./MessageTimestamp', async () => {
   const React = await import('react');
   return {
-    MessageTimestamp: ({ children }: { children: React.ReactNode }) =>
-      React.createElement('div', null, children),
+    MessageTimestamp: ({
+      children,
+      toolGroupSpacing,
+    }: {
+      children: React.ReactNode;
+      toolGroupSpacing?: boolean;
+    }) =>
+      React.createElement(
+        'div',
+        { 'data-tool-group-spacing': String(toolGroupSpacing === true) },
+        children,
+      ),
     formatTimestamp: () => '',
   };
 });
@@ -73,6 +88,7 @@ vi.mock('./InsightProgress', () => ({ InsightProgress: () => null }));
 vi.mock('./InsightReady', () => ({ InsightReady: () => null }));
 
 const { MessageItem } = await import('./MessageItem');
+const { CompactModeContext } = await import('../App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -112,6 +128,12 @@ const assistantMsg = (id: string, content: string): Message =>
   ({ id, role: 'assistant', content, timestamp: 0 }) as Message;
 const thinkingMsg = (id: string, content: string): Message =>
   ({ id, role: 'thinking', content, timestamp: 0 }) as Message;
+const toolMsg = (id: string): Message => ({
+  id,
+  role: 'tool_group',
+  tools: [],
+  timestamp: 0,
+});
 
 function item(message: Message) {
   return <MessageItem message={message} />;
@@ -192,6 +214,50 @@ describe('MessageItem selectable wrapper', () => {
     // The message body renders inside the wrapper, so the CSS descendant
     // selector `[data-user-selectable] *` still re-enables selection.
     expect(wrapper.querySelector('[data-testid="user-ok"]')).not.toBeNull();
+  });
+});
+
+describe('MessageItem tool group spacing', () => {
+  it('uses larger row spacing only in compact mode', () => {
+    const compact = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('compact'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const regular = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={false}>
+          {item(toolMsg('regular'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const compactAssistant = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(assistantMsg('assistant', 'answer'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const defaultTool = render(
+      <I18nProvider language="en">{item(toolMsg('default'))}</I18nProvider>,
+    );
+
+    expect(
+      compact.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('true');
+    expect(
+      regular.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('false');
+    expect(
+      compactAssistant.firstElementChild?.getAttribute(
+        'data-tool-group-spacing',
+      ),
+    ).toBe('false');
+    expect(
+      defaultTool.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('false');
   });
 });
 

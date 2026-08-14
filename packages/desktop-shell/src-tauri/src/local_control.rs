@@ -19,7 +19,7 @@ const MAX_CONNECTIONS: usize = 64;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocalNetwork {
     address: Ipv4Addr,
     netmask: Ipv4Addr,
@@ -633,13 +633,19 @@ fn start_sleep_inhibitor() -> Option<Child> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     return None;
 
-    Command::new(command.0)
+    let mut child_command = Command::new(command.0);
+    child_command
         .args(command.1)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        child_command.creation_flags(CREATE_NO_WINDOW);
+    }
+    child_command.spawn().ok()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

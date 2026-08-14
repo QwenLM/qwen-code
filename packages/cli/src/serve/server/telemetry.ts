@@ -121,15 +121,15 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
-    path: '/session/:id/subagents/:toolCallId',
+    path: '/session/:id/subagents/:subagentRef',
     attribution: 'handler_resolved',
-    route: 'GET /session/:id/subagents/:toolCallId',
+    route: 'GET /session/:id/subagents/:subagentRef',
   },
   {
     method: 'POST',
-    path: '/session/:id/subagents/:toolCallId/cancel',
+    path: '/session/:id/subagents/:subagentRef/cancel',
     attribution: 'handler_resolved',
-    route: 'POST /session/:id/subagents/:toolCallId/cancel',
+    route: 'POST /session/:id/subagents/:subagentRef/cancel',
   },
   {
     method: 'GET',
@@ -250,6 +250,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/model',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/model',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/config-option',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/config-option',
   },
   {
     method: 'POST',
@@ -550,6 +556,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/reload' ||
         suffix === '/workspace/file/write' ||
         suffix === '/workspace/file/edit' ||
+        suffix === '/workspace/file/upload' ||
         suffix === '/workspace/mcp/servers' ||
         suffix === '/workspace/memory' ||
         suffix === '/workspace/agents' ||

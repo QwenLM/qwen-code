@@ -25,7 +25,7 @@ import request from 'supertest';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
 import {
-  createServeApp,
+  createServeApp as createServeAppImpl,
   computeKeepaliveIntervalMs,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
@@ -39,6 +39,15 @@ import {
 } from './channel-worker-manager.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import {
+  CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+  registerChannelWorkerPromptAuthorization,
+  revokeChannelWorkerPromptAuthorization,
+} from './channel-worker-prompt-authorization.js';
+import {
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
 import {
   resolveWebShellDir,
   isDocumentNavigation,
@@ -174,7 +183,7 @@ import {
   createVirtualSubagentSessionId,
   VirtualSubagentSessions,
 } from './virtual-subagent-sessions.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
 import type { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import {
@@ -191,7 +200,9 @@ import { getActiveSseCount } from './routes/sse-events.js';
 // `mockWt.impl` to control instance behaviour.
 const mockWt = vi.hoisted(() => ({
   impl: undefined as (() => Record<string, unknown>) | undefined,
-  readSidecar: undefined as (() => Promise<unknown>) | undefined,
+  readSidecar: undefined as
+    | ((...args: unknown[]) => Promise<unknown>)
+    | undefined,
   realpath: undefined as ((p: string) => string) | undefined,
 }));
 const mockTmpdir = vi.hoisted(() => ({
@@ -223,7 +234,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...original,
     readWorktreeSession: (...args: unknown[]) =>
       mockWt.readSidecar
-        ? mockWt.readSidecar()
+        ? mockWt.readSidecar(...args)
         : (original.readWorktreeSession as (...a: unknown[]) => unknown)(
             ...args,
           ),
@@ -283,6 +294,38 @@ const baseOpts: ServeOptions = {
   port: 4170,
   mode: 'http-bridge',
 };
+
+// Direct app tests bypass runQwenServe's reconciler cleanup.
+const createdApps = new Set<ReturnType<typeof createServeAppImpl>>();
+
+function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
+  const app = createServeAppImpl(...args);
+  createdApps.add(app);
+  return app;
+}
+
+function stopCreatedApps() {
+  for (const app of createdApps) {
+    (
+      app.locals as { stopExtensionGenerationReconciler?: () => void }
+    ).stopExtensionGenerationReconciler?.();
+  }
+  createdApps.clear();
+}
+
+afterEach(stopCreatedApps);
+
+it('stops extension generation reconcilers for direct app tests', () => {
+  const stopExtensionGenerationReconciler = vi.fn();
+  createdApps.add({
+    locals: { stopExtensionGenerationReconciler },
+  } as ReturnType<typeof createServeAppImpl>);
+
+  stopCreatedApps();
+
+  expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+  expect(createdApps.size).toBe(0);
+});
 
 function fakeDaemonLog(): DaemonLogger {
   return {
@@ -356,7 +399,11 @@ afterAll(async () => {
   restoreEnv('QWEN_HOME', previousServerTestQwenHome);
   restoreEnv('QWEN_RUNTIME_DIR', previousServerTestRuntimeDir);
   resetHomeEnvBootstrapForTesting();
-  await fsp.rm(serverTestEnvironmentRoot, { recursive: true, force: true });
+  await fsp.rm(serverTestEnvironmentRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+  });
 });
 
 function deferred<T = void>(): {
@@ -460,6 +507,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_bytes',
   'workspace_file_read_cursor',
   'workspace_file_write',
+  // Binary file upload (never overwrites; auto-numbers occupied names).
+  'workspace_file_upload',
   // Mutation control routes (approval mode, workspace tool/skill toggles,
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
@@ -769,6 +818,7 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  setConfigOptionImpl?: AcpSessionBridge['setSessionConfigOption'];
   setLanguageImpl?: (
     sessionId: string,
     params: { language: string; syncOutputLanguage: boolean },
@@ -1049,6 +1099,10 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  setConfigOptionCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
+  }>;
   setLanguageCalls: Array<{
     sessionId: string;
     params: { language: string; syncOutputLanguage: boolean };
@@ -1207,6 +1261,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
   const workspaceMemoryForgetCalls: FakeBridge['workspaceMemoryForgetCalls'] =
@@ -1555,6 +1610,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       hooks: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const setConfigOptionImpl =
+    opts.setConfigOptionImpl ?? (async () => ({ configOptions: [] }));
   const setLanguageCalls: FakeBridge['setLanguageCalls'] = [];
   const setLanguageImpl =
     opts.setLanguageImpl ??
@@ -1715,6 +1772,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
         channelIdleTimeoutMs: 0,
         sessionIdleTimeoutMs: 1_800_000,
       },
@@ -1783,6 +1841,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
     shellCalls,
@@ -2076,6 +2135,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async setSessionConfigOption(sessionId, req) {
+      setConfigOptionCalls.push({ sessionId, req });
+      return setConfigOptionImpl(sessionId, req);
     },
     async setSessionLanguage(sessionId, params, context) {
       setLanguageCalls.push({
@@ -8785,53 +8848,70 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('resolves and cancels a virtual subagent through its routes', async () => {
-      const bridge = fakeBridge({
-        cancelSessionTaskImpl: async () => ({ cancelled: true }),
-      });
-      const resolveSpy = vi
-        .spyOn(VirtualSubagentSessions.prototype, 'resolve')
-        .mockResolvedValue({
-          sessionId: createVirtualSubagentSessionId('s-1', 'agent-1'),
-          taskId: 'agent-1',
-          title: 'Investigate',
-          status: 'running',
+    it.each([
+      ['agent%3A8', 'agent:8'],
+      ['agent%2F8', 'agent/8'],
+    ])(
+      'resolves and cancels a virtual subagent through its routes: %s',
+      async (encodedSubagentRef, subagentRef) => {
+        const taskId = `general-purpose-${subagentRef}`;
+        const bridge = fakeBridge({
+          cancelSessionTaskImpl: async () => ({ cancelled: true }),
         });
-      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
-      const app = createServeApp(
-        { ...tokenOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
+        const resolveSpy = vi
+          .spyOn(VirtualSubagentSessions.prototype, 'resolve')
+          .mockResolvedValue({
+            sessionId: createVirtualSubagentSessionId('s-1', taskId),
+            taskId,
+            title: 'Investigate',
+            status: 'running',
+          });
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
 
-      try {
-        const resolveRes = await request(app)
-          .get('/session/s-1/subagents/tool-1')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret');
-        const cancelRes = await request(app)
-          .post('/session/s-1/subagents/tool-1/cancel')
-          .set('Host', `127.0.0.1:${tokenOpts.port}`)
-          .set('Authorization', 'Bearer secret');
+        try {
+          const resolveRes = await request(app)
+            .get(`/session/s-1/subagents/${encodedSubagentRef}`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
+          const cancelRes = await request(app)
+            .post(`/session/s-1/subagents/${encodedSubagentRef}/cancel`)
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret');
 
-        expect(resolveRes.status).toBe(200);
-        expect(resolveRes.headers['cache-control']).toBe('no-store');
-        expect(resolveRes.body).toMatchObject({
-          taskId: 'agent-1',
-          status: 'running',
-        });
-        expect(cancelRes.status).toBe(200);
-        expect(cancelRes.body).toEqual({ cancelled: true });
-        expect(resolveSpy).toHaveBeenCalledTimes(2);
-        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'tool-1']);
-        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'tool-1']);
-        expect(bridge.cancelSessionTaskCalls).toEqual([
-          { sessionId: 's-1', taskId: 'agent-1', taskKind: 'agent' },
-        ]);
-      } finally {
-        resolveSpy.mockRestore();
-      }
-    });
+          expect(resolveRes.status).toBe(200);
+          expect(resolveRes.headers['cache-control']).toBe('no-store');
+          expect(resolveRes.body).toMatchObject({
+            taskId,
+            status: 'running',
+          });
+          expect(cancelRes.status).toBe(200);
+          expect(cancelRes.body).toEqual({ cancelled: true });
+          expect(resolveSpy).toHaveBeenCalledTimes(2);
+          expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual([
+            's-1',
+            subagentRef,
+          ]);
+          expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual([
+            's-1',
+            subagentRef,
+          ]);
+          expect(bridge.cancelSessionTaskCalls).toEqual([
+            {
+              sessionId: 's-1',
+              taskId,
+              taskKind: 'agent',
+            },
+          ]);
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      },
+    );
 
     it('requires the parent runtime for virtual heartbeat and detach', async () => {
       const primaryBridge = fakeBridge();
@@ -11561,6 +11641,90 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('passes the requested live replay mode to load', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-summary',
+          workspaceCwd: WS_BOUND,
+          historyReplay: 'response',
+          liveReplayMode: 'summary',
+        },
+      ]);
+    });
+
+    it('rejects an invalid live replay mode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.loadCalls).toEqual([]);
+    });
+
+    it('rejects an invalid live replay mode on resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.resumeCalls).toEqual([]);
+    });
+
+    it('does not forward a valid live replay mode to resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary-resume/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      // Resume always restores with the full journal; the load-only field
+      // is validated but never forwarded to the bridge.
+      expect(bridge.resumeCalls).toEqual([
+        {
+          sessionId: 'persisted-summary-resume',
+          workspaceCwd: WS_BOUND,
+        },
+      ]);
+    });
+
     it('does not restore through a closed runtime generation', async () => {
       const generationGuard = createWorkspaceGenerationGuard();
       generationGuard.close();
@@ -12441,6 +12605,110 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.context?.promptId).toBe(res.body.promptId);
     });
 
+    it('accepts channel display text only from the workspace worker', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const workspace = realpathSync(process.cwd());
+      const token = 'channel-worker-prompt-token';
+      registerChannelWorkerPromptAuthorization(token, workspace);
+      try {
+        const forged = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'model text' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+              [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: 'forged display',
+            },
+          });
+        const trusted = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'model text' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: 'visible text',
+            },
+          });
+
+        expect(forged.status).toBe(202);
+        expect(trusted.status).toBe(202);
+        expect(
+          bridge.promptCalls[0]?.context?.promptDisplayText,
+        ).toBeUndefined();
+        expect(bridge.promptCalls[1]?.context?.promptDisplayText).toBe(
+          'visible text',
+        );
+        for (const call of bridge.promptCalls) {
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+          );
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+          );
+        }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('accepts channel-prompt classification only from the workspace worker', async () => {
+      // `qwen.channel.prompt` opts a turn out of loop-detected rejection;
+      // a forged key from an unauthorized caller must be dropped at the
+      // route (and again at the bridge admission strip), never reaching
+      // the trusted prompt context.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const workspace = realpathSync(process.cwd());
+      const token = 'channel-worker-classification-token';
+      registerChannelWorkerPromptAuthorization(token, workspace);
+      try {
+        const forged = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          });
+        const forgedWithBadToken = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+        const trusted = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+
+        expect(forged.status).toBe(202);
+        expect(forgedWithBadToken.status).toBe(202);
+        expect(trusted.status).toBe(202);
+        expect(bridge.promptCalls[0]?.context?.channelPrompt).toBeUndefined();
+        expect(bridge.promptCalls[1]?.context?.channelPrompt).toBeUndefined();
+        expect(bridge.promptCalls[2]?.context?.channelPrompt).toBe(true);
+        for (const call of bridge.promptCalls) {
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_PROMPT_META_KEY,
+          );
+        }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
     it('validates delivery and forwards it only through trusted prompt context', async () => {
       const bridge = fakeBridge();
       const channelDeliveryAuthorizations =
@@ -12944,6 +13212,63 @@ describe('createServeApp', () => {
       ]);
       expect(primaryBridge.listCalls).toEqual([]);
       expect(secondaryBridge.listCalls).toEqual([WS_DIFFERENT]);
+    });
+
+    it('cancels the trusted-secondary persisted preflight when the request disconnects', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'preflight-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'preflight-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          trusted: true,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      let preflightSignal: AbortSignal | undefined;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) => {
+          preflightSignal = options.signal;
+          await new Promise<void>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => reject(options.signal?.reason),
+              { once: true },
+            );
+          });
+          return { items: [], nextCursor: undefined, hasMore: false };
+        });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+      const catalogRequest = request(app)
+        .get('/workspaces/preflight-secondary/sessions')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      catalogRequest.end(() => undefined);
+
+      try {
+        await vi.waitFor(() => expect(preflightSignal).toBeDefined());
+        expect(listSessionsSpy).toHaveBeenCalledWith({
+          archiveState: 'active',
+          size: 1,
+          signal: preflightSignal,
+        });
+        catalogRequest.abort();
+        await vi.waitFor(() => expect(preflightSignal?.aborted).toBe(true));
+        expect(secondaryBridge.listCalls).toEqual([]);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
     });
 
     it('includes persisted sessions from the CLI session store', async () => {
@@ -13567,6 +13892,315 @@ describe('createServeApp', () => {
       }
     });
 
+    it('cancels one organized waiter without aborting the shared catalog scan', async () => {
+      const scan = deferred<{
+        items: SessionListItem[];
+        nextCursor: undefined;
+        hasMore: false;
+      }>();
+      let loadSignal: AbortSignal | undefined;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) => {
+          loadSignal = options.signal;
+          return scan.promise;
+        });
+      const controller = new AbortController();
+      const reason = new Error('first REST waiter disconnected');
+      const readOptions = {
+        runtimeBaseDir: path.join(runtimeDir, 'cancel-one-waiter'),
+      };
+
+      try {
+        const leader = listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { view: 'organized' },
+          { ...readOptions, signal: controller.signal },
+        );
+        const follower = listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { sourceType: 'default' },
+          readOptions,
+        );
+        await vi.waitFor(() => expect(loadSignal).toBeDefined());
+
+        controller.abort(reason);
+        await expect(leader).rejects.toBe(reason);
+        expect(loadSignal).not.toBe(controller.signal);
+        expect(loadSignal?.aborted).toBe(false);
+
+        scan.resolve({ items: [], nextCursor: undefined, hasMore: false });
+        await expect(follower).resolves.toMatchObject({ sessions: [] });
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        scan.resolve({ items: [], nextCursor: undefined, hasMore: false });
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('aborts and detaches a catalog scan after its last waiter cancels', async () => {
+      let firstLoadSignal: AbortSignal | undefined;
+      let invocation = 0;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) => {
+          invocation += 1;
+          if (invocation > 1) {
+            return { items: [], nextCursor: undefined, hasMore: false };
+          }
+          firstLoadSignal = options.signal;
+          await new Promise<void>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => reject(options.signal?.reason),
+              { once: true },
+            );
+          });
+          return { items: [], nextCursor: undefined, hasMore: false };
+        });
+      const firstController = new AbortController();
+      const secondController = new AbortController();
+      const firstReason = new Error('first waiter disconnected');
+      const secondReason = new Error('last waiter disconnected');
+      const readOptions = {
+        runtimeBaseDir: path.join(runtimeDir, 'cancel-all-waiters'),
+      };
+
+      try {
+        const first = listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { view: 'organized' },
+          { ...readOptions, signal: firstController.signal },
+        );
+        const second = listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { sourceType: 'default' },
+          { ...readOptions, signal: secondController.signal },
+        );
+        await vi.waitFor(() => expect(firstLoadSignal).toBeDefined());
+
+        firstController.abort(firstReason);
+        await expect(first).rejects.toBe(firstReason);
+        expect(firstLoadSignal?.aborted).toBe(false);
+        secondController.abort(secondReason);
+        await expect(second).rejects.toBe(secondReason);
+        expect(firstLoadSignal?.aborted).toBe(true);
+
+        await expect(
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { view: 'organized' },
+            readOptions,
+          ),
+        ).resolves.toMatchObject({ sessions: [] });
+        expect(listSessionsSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('propagates catalog cancellation through worktree enrichment', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440016';
+      const controller = new AbortController();
+      const reason = new Error('cancelled during worktree enrichment');
+      let sidecarSignal: AbortSignal | undefined;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items: [
+            {
+              sessionId,
+              cwd: WS_BOUND,
+              startTime: '2026-05-17T12:00:00.000Z',
+              mtime: Date.parse('2026-05-17T12:00:00.000Z'),
+              prompt: 'persisted prompt',
+              filePath: `/tmp/${sessionId}.jsonl`,
+            },
+          ],
+          nextCursor: undefined,
+          hasMore: false,
+        });
+      mockWt.readSidecar = async (_filePath: unknown, options: unknown) => {
+        sidecarSignal = (options as { signal?: AbortSignal }).signal;
+        await new Promise<void>((_resolve, reject) => {
+          sidecarSignal?.addEventListener(
+            'abort',
+            () => reject(sidecarSignal?.reason),
+            { once: true },
+          );
+        });
+        return null;
+      };
+
+      try {
+        const result = listWorkspaceSessionsForResponse(
+          fakeBridge(),
+          WS_BOUND,
+          { view: 'organized' },
+          {
+            runtimeBaseDir: path.join(runtimeDir, 'cancel-sidecar'),
+            signal: controller.signal,
+          },
+        );
+        await vi.waitFor(() =>
+          expect(sidecarSignal).toBeInstanceOf(AbortSignal),
+        );
+        expect(sidecarSignal).not.toBe(controller.signal);
+
+        controller.abort(reason);
+
+        await expect(result).rejects.toBe(reason);
+        expect(sidecarSignal?.aborted).toBe(true);
+      } finally {
+        listSessionsSpy.mockRestore();
+        mockWt.readSidecar = undefined;
+      }
+    });
+
+    it('propagates cancellation through numeric pagination', async () => {
+      const controller = new AbortController();
+      const reason = new Error('numeric request disconnected');
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) => {
+          expect(options.signal).toBe(controller.signal);
+          controller.abort(reason);
+          options.signal?.throwIfAborted();
+          return { items: [], nextCursor: undefined, hasMore: false };
+        });
+
+      try {
+        await expect(
+          listWorkspaceSessionsForResponse(fakeBridge(), WS_BOUND, undefined, {
+            runtimeBaseDir: runtimeDir,
+            signal: controller.signal,
+          }),
+        ).rejects.toBe(reason);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('does not start an organized catalog lookup after organization loading is cancelled', async () => {
+      const controller = new AbortController();
+      const reason = new Error('cancelled after organization read');
+      const readSnapshotSpy = vi
+        .spyOn(qwenCore.SessionOrganizationService.prototype, 'readSnapshot')
+        .mockImplementation(async () => {
+          controller.abort(reason);
+          return { groups: [], sessions: new Map() };
+        });
+      const listSessionsSpy = vi.spyOn(
+        SessionService.prototype,
+        'listSessions',
+      );
+
+      try {
+        await expect(
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { view: 'organized' },
+            {
+              runtimeBaseDir: path.join(runtimeDir, 'cancel-organization'),
+              signal: controller.signal,
+            },
+          ),
+        ).rejects.toBe(reason);
+        expect(listSessionsSpy).not.toHaveBeenCalled();
+      } finally {
+        readSnapshotSpy.mockRestore();
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('aborts a REST catalog scan when its last request disconnects', async () => {
+      const workspaceCwd = path.join(WS_BOUND, 'rest-cancel-last-waiter');
+      let loadSignal: AbortSignal | undefined;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) => {
+          loadSignal = options.signal;
+          await new Promise<void>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => reject(options.signal?.reason),
+              { once: true },
+            );
+          });
+          return { items: [], nextCursor: undefined, hasMore: false };
+        });
+      const app = createServeApp(
+        { ...baseOpts, workspace: workspaceCwd },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: workspaceCwd },
+      );
+      const catalogRequest = request(app)
+        .get(
+          `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?view=organized`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      catalogRequest.end(() => undefined);
+
+      try {
+        await vi.waitFor(() => expect(loadSignal).toBeDefined());
+        catalogRequest.abort();
+        await vi.waitFor(() => expect(loadSignal?.aborted).toBe(true));
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
+    });
+
+    it('keeps a shared REST catalog scan alive until every request disconnects', async () => {
+      const workspaceCwd = path.join(WS_BOUND, 'rest-cancel-waiter');
+      const scan = deferred<{
+        items: SessionListItem[];
+        nextCursor: undefined;
+        hasMore: false;
+      }>();
+      let loadSignal: AbortSignal | undefined;
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockImplementation(async (options) => {
+          loadSignal = options.signal;
+          return scan.promise;
+        });
+      const app = createServeApp(
+        { ...baseOpts, workspace: workspaceCwd },
+        undefined,
+        { bridge: fakeBridge(), boundWorkspace: workspaceCwd },
+      );
+      const url = `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?view=organized`;
+      const firstRequest = request(app)
+        .get(url)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      firstRequest.end(() => undefined);
+      const secondRequest = request(app)
+        .get(url)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      secondRequest.end(() => undefined);
+
+      try {
+        await vi.waitFor(() => expect(loadSignal).toBeDefined());
+        firstRequest.abort();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(loadSignal?.aborted).toBe(false);
+
+        secondRequest.abort();
+        await vi.waitFor(() => expect(loadSignal?.aborted).toBe(true));
+        expect(listSessionsSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        scan.resolve({ items: [], nextCursor: undefined, hasMore: false });
+        listSessionsSpy.mockRestore();
+      }
+    });
+
     it('invalidates a warm catalog on metadata update while keeping persistence asynchronous', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440015';
       const createdAt = '2026-05-17T12:00:00.000Z';
@@ -13811,16 +14445,24 @@ describe('createServeApp', () => {
           'single_flight',
         );
 
+        await Promise.all([
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { sourceType: 'default' },
+            { runtimeBaseDir: runtimeDir },
+          ),
+          listWorkspaceSessionsForResponse(
+            fakeBridge(),
+            WS_BOUND,
+            { parentSessionId: 'missing-parent' },
+            { runtimeBaseDir: runtimeDir },
+          ),
+        ]);
         await listWorkspaceSessionsForResponse(
           fakeBridge(),
           WS_BOUND,
           { sourceType: 'default' },
-          { runtimeBaseDir: runtimeDir },
-        );
-        await listWorkspaceSessionsForResponse(
-          fakeBridge(),
-          WS_BOUND,
-          { parentSessionId: 'missing-parent' },
           { runtimeBaseDir: runtimeDir },
         );
         expect(setAttribute).toHaveBeenCalledWith(
@@ -13855,6 +14497,12 @@ describe('createServeApp', () => {
           'qwen-code.daemon.session_list.scan_duration_ms',
           expect.any(Number),
         );
+        expect(
+          setAttribute.mock.calls.filter(
+            ([name]) =>
+              name === 'qwen-code.daemon.session_list.scan_duration_ms',
+          ),
+        ).toHaveLength(2);
       } finally {
         getSpanSpy.mockRestore();
         listSessionsSpy.mockRestore();
@@ -15925,6 +16573,46 @@ describe('createServeApp', () => {
         .send({ modelId: 'qwen3-coder' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/config-option', () => {
+    it('routes reasoning effort to the session owner and returns its current options', async () => {
+      const configOptions = [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select' as const,
+          currentValue: 'medium',
+          options: [{ value: 'medium', name: 'Medium' }],
+        },
+      ];
+      const bridge = fakeBridge({
+        setConfigOptionImpl: async () => ({ configOptions }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          sessionId: 'spoofed-B',
+          configId: 'reasoning_effort',
+          value: 'medium',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ configOptions });
+      expect(bridge.setConfigOptionCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          req: {
+            sessionId: 'session-A',
+            configId: 'reasoning_effort',
+            value: 'medium',
+          },
+        },
+      ]);
     });
   });
 
@@ -22928,6 +23616,7 @@ describe('createServeApp', () => {
             compactedReplayMaxBytes: 4 * 1024 * 1024,
             maxJournalEvents: 10_000,
             maxJournalBytes: 8 * 1024 * 1024,
+            journalGrowth: null,
             channelIdleTimeoutMs: 0,
             sessionIdleTimeoutMs: 1_800_000,
           },
@@ -22947,6 +23636,8 @@ describe('createServeApp', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 4,
+              maxJournalEvents: 10_000,
+              maxJournalBytes: 8 * 1024 * 1024,
             },
           ],
         }),
@@ -26355,7 +27046,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   }
 
   it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26396,7 +27086,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26418,7 +27107,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected fsFactory verbatim when supplied', async () => {
-    const { createServeApp } = await import('./server.js');
     const sentinel = { forRequest: vi.fn(() => ({ marker: 'injected' })) };
     const app = createServeApp(
       {
@@ -26441,7 +27129,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads production-style primary trust into the default runtime metadata', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26457,7 +27144,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads primary runtime env metadata into the default registry runtime', async () => {
-    const { createServeApp } = await import('./server.js');
     const primaryRuntimeEnv = {
       mode: 'runtime-overlay',
       overlayKeys: ['OPENAI_API_KEY'],
@@ -26479,7 +27165,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses an injected workspace registry as the primary runtime source', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -26552,7 +27237,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('accepts matching runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -26576,8 +27260,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires the Voice coordinator paired with runtime removal', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -26594,8 +27276,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires a live bridge provider when runtime generations can change', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -26612,7 +27292,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected registry sender when client-MCP over WS is enabled', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -26668,7 +27347,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -26792,7 +27470,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('default fsFactory is built with trusted=false (writes refused)', async () => {
-    const { createServeApp } = await import('./server.js');
     const { isFsError } = await import('./fs/index.js');
     const os = await import('node:os');
     const tmp = await import('node:fs').then((m) =>
@@ -28811,7 +29488,7 @@ describe('Live conversation runtime lifecycle', () => {
         async (sessionId: string) =>
           `${root.canonicalRoot}/conversation-${sessionId}`,
       ),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveBridge = fakeBridge(liveBridgeOptions);
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
@@ -29019,6 +29696,53 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('shares the boot publication with a concurrent Live Host bind', async () => {
+    const restoreLiveSettings = await enableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    try {
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      const coordinator = setup.app.locals[
+        'liveCoordinator'
+      ] as LiveHostCoordinator;
+      const socket = new FakeLiveHostSocket();
+      coordinator.attachHost(
+        socket as unknown as WebSocket,
+        coordinator.daemonInstanceNonce,
+      );
+      socket.hello('host_live_runtime_concurrent_0001');
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+
+      setup.resolveCreation();
+      await vi.waitFor(() => {
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+      });
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+      expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+      expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+    } finally {
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      await restoreLiveSettings();
+    }
+  });
+
   it('hot-enables and disables the Live runtime without restarting the daemon', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29202,6 +29926,74 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it.each(['task', 'speech'] as const)(
+    'rolls back a partial Live bind after a %s handler failure and retries without republishing',
+    async (failedChannel) => {
+      const restoreLiveSettings = await disableLiveVoiceAtBoot();
+      const setup = setupLiveRuntime();
+      const failedSetter =
+        failedChannel === 'task'
+          ? vi.spyOn(setup.liveBridge, 'setLiveTaskToolRequestHandler')
+          : vi.spyOn(setup.liveBridge, 'setLiveSpeakToUserHandler');
+      failedSetter.mockImplementationOnce(() => {
+        throw new Error(`${failedChannel} handler bind failed`);
+      });
+      try {
+        const setEnabled = setup.app.locals['setLiveVoiceEnabled'] as
+          | ((enabled: boolean) => Promise<void>)
+          | undefined;
+        if (!setEnabled) throw new Error('Live hot-toggle hook missing.');
+        const capabilitiesBefore = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesBefore.body.workspaces).not.toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
+
+        const firstEnable = setEnabled(true);
+        await vi.waitFor(() => {
+          expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+        });
+        setup.resolveCreation();
+        await expect(firstEnable).rejects.toThrow(
+          `${failedChannel} handler bind failed`,
+        );
+
+        expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
+          setup.liveRuntime,
+        );
+        expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+        expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+        expect(failedSetter).toHaveBeenCalledTimes(2);
+        const capabilitiesAfter = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesAfter.body.workspaces).toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
+
+        await expect(setEnabled(true)).resolves.toBeUndefined();
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(failedSetter.mock.calls.length).toBeGreaterThanOrEqual(3);
+      } finally {
+        await (
+          setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+        )();
+        await restoreLiveSettings();
+      }
+    },
+  );
+
   it('shutdown waits for the in-flight boot publication', async () => {
     const restoreLiveSettings = await enableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29337,7 +30129,7 @@ describe('Live Appshot server integration', () => {
         return root;
       }),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const coordinator = new LiveHostCoordinator({
       daemonInstanceNonce: 'daemon_live_appshot_nonce_0001',
       getProviderReadiness: () => ({ state: 'ready' }),
@@ -29469,7 +30261,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-disabled-conversations',
@@ -29574,7 +30366,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-acp-disabled-conversations',
@@ -29755,6 +30547,7 @@ describe('Live Appshot server integration', () => {
       await shutdown;
       expect(settled).toBe(true);
       expect(setup.captureHandler).toBeUndefined();
+      expect(setup.speakHandler).toBeUndefined();
       expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
     } finally {
       channelGate.resolve(undefined);

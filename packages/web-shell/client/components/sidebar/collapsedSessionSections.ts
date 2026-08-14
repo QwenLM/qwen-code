@@ -4,7 +4,7 @@
  * key so preferences survive reload without competing overwrites.
  *
  * Id conventions:
- * - Primary catalog: `group:<id>`, `recent`, `color:<name>`
+ * - Primary catalog: `group:<id>`, `recent`, `color:<name>`, `channel-type:<type>`
  * - Workspace-scoped: `ws:<workspaceId>|group:<id>`, `ws:<workspaceId>|ungrouped`
  */
 

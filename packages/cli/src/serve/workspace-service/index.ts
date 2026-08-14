@@ -959,10 +959,12 @@ export function createDaemonWorkspaceService(
       for (const requestedName of requestedSkillNames) {
         const normalizedName = requestedName.trim().toLowerCase();
         const skill = skillsByName.get(normalizedName);
-        let domainError: unknown;
         if (!skill) {
-          domainError = new WorkspaceSkillNotFoundError(requestedName);
-        } else if (skill.userInvocable === false) {
+          targets.push({ requestedName, skillName: requestedName });
+          continue;
+        }
+        let domainError: unknown;
+        if (skill.userInvocable === false) {
           domainError = new WorkspaceSkillNotToggleableError(
             skill.name,
             'not_user_invocable',
@@ -990,7 +992,7 @@ export function createDaemonWorkspaceService(
           if (!error) throw domainError;
           targets.push({ requestedName, error });
         } else {
-          targets.push({ requestedName, skillName: skill!.name });
+          targets.push({ requestedName, skillName: skill.name });
         }
       }
 

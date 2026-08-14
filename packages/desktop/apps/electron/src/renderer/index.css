@@ -532,6 +532,12 @@ html[data-font="inter"] {
     height: 4px;
   }
 
+  /* Reserve scrollbar space so content does not shift when the scrollbar
+     appears or disappears */
+  .scrollbar-stable {
+    scrollbar-gutter: stable;
+  }
+
   /* Hide scrollbar but keep scrolling */
   .scrollbar-hide {
     -ms-overflow-style: none;
