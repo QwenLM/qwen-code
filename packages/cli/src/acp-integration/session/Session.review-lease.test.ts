@@ -153,6 +153,9 @@ describe('Session review-worktree lease sweep', () => {
       }),
       getBackgroundShellRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
       }),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),

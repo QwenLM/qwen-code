@@ -5,6 +5,7 @@
  */
 
 import { performance } from 'node:perf_hooks';
+import { context, ROOT_CONTEXT } from '@opentelemetry/api';
 import type { Application } from 'express';
 import type { DaemonLogContext, DaemonLogger } from '../daemon-logger.js';
 
@@ -99,7 +100,9 @@ export function installAccessLogMiddleware(
 
   const flushSuppressed = (): boolean => {
     if (!daemonLog || suppressed.suppressed === 0) return false;
-    daemonLog.warn('access logs suppressed', suppressed);
+    context.with(ROOT_CONTEXT, () => {
+      daemonLog.warn('access logs suppressed', suppressed);
+    });
     suppressed = emptySuppressedCounts();
     return true;
   };

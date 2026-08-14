@@ -545,6 +545,12 @@ export interface DaemonStatusReportSession {
   lastSeenAt?: number;
   currentModelId?: string;
   currentApprovalMode?: string;
+  /**
+   * Effective live-journal caps right now — the baseline, or higher when
+   * adaptive growth raised them mid-turn. Absent on older daemons.
+   */
+  maxJournalEvents?: number;
+  maxJournalBytes?: number;
 }
 
 /**
@@ -689,8 +695,23 @@ export interface DaemonStatusReport {
      * none.
      */
     memory?: {
-      /** False, and required: nothing in this section is applied to a process. */
+      /**
+       * False, and required — scoped to the child-heap model: nothing in
+       * this section except `journalGrowth` is applied to a process.
+       */
       enforced: false;
+      /**
+       * Adaptive live-journal growth derived from the budget — the one
+       * figure with runtime effect: session journal caps really do grow
+       * within this daemon-wide pool mid-turn. `null` when growth is
+       * disabled; absent on daemons predating it.
+       */
+      journalGrowth?: {
+        poolBytes: number;
+        hardCapBytes: number;
+        baselineMaxEvents: number;
+        baselineMaxBytes: number;
+      } | null;
       /**
        * The per-child heap partition the daemon models but does not apply.
        * `null` when no policy was built; absent on daemons predating it.
