@@ -17,8 +17,8 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     ...actual,
     uiTelemetryService: {
       reset: vi.fn(),
-      getMetrics: vi.fn(() => ({ models: {} })),
-      getSessionStartTime: vi.fn(() => new Date()),
+      getMetricsForSession: vi.fn(() => ({ models: {} })),
+      getSessionStartTimeForSession: vi.fn(() => new Date()),
     },
     persistSessionUsage: vi.fn(),
   };
@@ -183,7 +183,7 @@ describe('clearCommand', () => {
   it('should persist usage when session has activity before clearing', async () => {
     const core = await import('@qwen-code/qwen-code-core');
     (
-      core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
+      core.uiTelemetryService.getMetricsForSession as ReturnType<typeof vi.fn>
     ).mockReturnValue({
       models: { 'test-model': { api: { totalRequests: 5 } } },
     });
@@ -196,7 +196,7 @@ describe('clearCommand', () => {
   it('should not persist usage when session has no activity', async () => {
     const core = await import('@qwen-code/qwen-code-core');
     (
-      core.uiTelemetryService.getMetrics as ReturnType<typeof vi.fn>
+      core.uiTelemetryService.getMetricsForSession as ReturnType<typeof vi.fn>
     ).mockReturnValue({
       models: {},
     });

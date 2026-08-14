@@ -17,10 +17,7 @@ import {
   SessionService,
   setStartupEventSink,
   createDebugLogger,
-  persistSessionUsage,
-  type SessionMetrics,
   PRIVATE_ACP_CAPABILITY_ENV,
-  uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
@@ -102,9 +99,9 @@ import {
   UPDATE_COMPLETE_EXIT_CODE,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { startSessionUsageSnapshots } from './utils/session-usage.js';
 
 const debugLogger = createDebugLogger('STARTUP');
-const LIVE_USAGE_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 
 interface RuntimeLspReinitializeResult {
   reconcile: {
@@ -263,65 +260,6 @@ function getSignalExitCode(signal: NodeJS.Signals): number {
   if (signal === 'SIGINT') return 130;
   if (signal === 'SIGHUP') return 129;
   return 143;
-}
-
-interface SessionUsageSnapshotDeps {
-  getMetrics: () => SessionMetrics;
-  getSessionStartTime: () => Date;
-  persist: typeof persistSessionUsage;
-  now: () => Date;
-}
-
-export function flushSessionUsageSnapshot(
-  config: Pick<Config, 'getProjectRoot' | 'getSessionId'>,
-  deps: SessionUsageSnapshotDeps = {
-    getMetrics: () => uiTelemetryService.getMetrics(),
-    getSessionStartTime: () => uiTelemetryService.getSessionStartTime(),
-    persist: persistSessionUsage,
-    now: () => new Date(),
-  },
-): boolean {
-  const metrics = deps.getMetrics();
-  if (!Object.values(metrics.models).some((m) => m.api.totalRequests > 0)) {
-    return false;
-  }
-
-  deps.persist({
-    sessionId: config.getSessionId(),
-    startTime: deps.getSessionStartTime(),
-    endTime: deps.now(),
-    project: config.getProjectRoot(),
-    metrics,
-  });
-  return true;
-}
-
-export function startSessionUsageSnapshots(
-  config: Pick<Config, 'getProjectRoot' | 'getSessionId'>,
-  deps?: Partial<SessionUsageSnapshotDeps>,
-): void {
-  const snapshotDeps: SessionUsageSnapshotDeps = {
-    getMetrics: deps?.getMetrics ?? (() => uiTelemetryService.getMetrics()),
-    getSessionStartTime:
-      deps?.getSessionStartTime ??
-      (() => uiTelemetryService.getSessionStartTime()),
-    persist: deps?.persist ?? persistSessionUsage,
-    now: deps?.now ?? (() => new Date()),
-  };
-  const flush = () => {
-    try {
-      flushSessionUsageSnapshot(config, snapshotDeps);
-    } catch {
-      // Best-effort — usage reporting must not affect the session.
-    }
-  };
-  const timer = setInterval(flush, LIVE_USAGE_FLUSH_INTERVAL_MS);
-  timer.unref();
-
-  registerCleanup(() => {
-    clearInterval(timer);
-    flush();
-  });
 }
 
 // A real SIGINT only reaches the process-level handler while raw mode is

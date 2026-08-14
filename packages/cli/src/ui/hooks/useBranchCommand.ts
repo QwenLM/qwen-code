@@ -25,6 +25,7 @@ import {
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
+import { flushSessionUsageSnapshot } from '../../utils/session-usage.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
@@ -197,6 +198,7 @@ export function useBranchCommand(
         //    block below — without it, a failure between swap and UI
         //    update would leave core on the fork while UI still shows
         //    the parent, silently recording user input into an orphan.
+        flushSessionUsageSnapshot(config);
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);

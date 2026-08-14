@@ -24,10 +24,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createNonInteractivePromptId,
-  flushSessionUsageSnapshot,
   main,
   registerLspHotReload,
-  startSessionUsageSnapshots,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './gemini.js';
@@ -36,7 +34,7 @@ import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { Config, SessionMetrics } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
@@ -269,123 +267,6 @@ function withLspDisabledConfig<T extends object>(
     ...config,
   };
 }
-
-function makeSessionMetrics(totalRequests: number): SessionMetrics {
-  return {
-    models:
-      totalRequests > 0
-        ? {
-            'qwen-max': {
-              api: {
-                totalRequests,
-                totalErrors: 0,
-                totalLatencyMs: 100,
-              },
-              tokens: {
-                prompt: 10,
-                candidates: 20,
-                total: 30,
-                cached: 0,
-                thoughts: 0,
-              },
-              bySource: {},
-            },
-          }
-        : {},
-    tools: {
-      totalCalls: 0,
-      totalSuccess: 0,
-      totalFail: 0,
-      totalDurationMs: 0,
-      totalDecisions: {
-        accept: 0,
-        reject: 0,
-        modify: 0,
-        auto_accept: 0,
-      },
-      byName: {},
-    },
-    files: {
-      totalLinesAdded: 0,
-      totalLinesRemoved: 0,
-    },
-  };
-}
-
-describe('session usage snapshots', () => {
-  const config = {
-    getSessionId: () => 'session-1',
-    getProjectRoot: () => '/workspace',
-  } as const;
-
-  it('skips snapshot writes when no API requests ran', () => {
-    const persist = vi.fn();
-
-    const wrote = flushSessionUsageSnapshot(config, {
-      getMetrics: () => makeSessionMetrics(0),
-      getSessionStartTime: () => new Date('2026-07-06T00:00:00Z'),
-      now: () => new Date('2026-07-06T00:05:00Z'),
-      persist,
-    });
-
-    expect(wrote).toBe(false);
-    expect(persist).not.toHaveBeenCalled();
-  });
-
-  it('writes an active session snapshot with current timing data', () => {
-    const persist = vi.fn();
-    const metrics = makeSessionMetrics(2);
-    const startTime = new Date('2026-07-06T00:00:00Z');
-    const endTime = new Date('2026-07-06T00:05:00Z');
-
-    const wrote = flushSessionUsageSnapshot(config, {
-      getMetrics: () => metrics,
-      getSessionStartTime: () => startTime,
-      now: () => endTime,
-      persist,
-    });
-
-    expect(wrote).toBe(true);
-    expect(persist).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      startTime,
-      endTime,
-      project: '/workspace',
-      metrics,
-    });
-  });
-
-  it('flushes on the interval and once more during cleanup', async () => {
-    vi.useFakeTimers();
-    const persist = vi.fn();
-    try {
-      const { registerCleanup } = await import('./utils/cleanup.js');
-      const registerCleanupMock = vi.mocked(registerCleanup);
-      registerCleanupMock.mockClear();
-
-      startSessionUsageSnapshots(config, {
-        getMetrics: () => makeSessionMetrics(1),
-        getSessionStartTime: () => new Date('2026-07-06T00:00:00Z'),
-        now: () => new Date('2026-07-06T00:05:00Z'),
-        persist,
-      });
-
-      expect(vi.getTimerCount()).toBe(1);
-      expect(registerCleanupMock).toHaveBeenCalledOnce();
-
-      vi.advanceTimersByTime(5 * 60 * 1000);
-      expect(persist).toHaveBeenCalledTimes(1);
-
-      const cleanup = registerCleanupMock.mock.calls[0]![0];
-      cleanup();
-
-      expect(vi.getTimerCount()).toBe(0);
-      expect(persist).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
 
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;

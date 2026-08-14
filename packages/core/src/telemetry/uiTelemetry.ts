@@ -192,6 +192,7 @@ export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
   #sessionMetrics: Map<string, SessionMetrics> = new Map();
+  #sessionStartTimes: Map<string, Date> = new Map();
   #closedSessions: Set<string> = new Set();
   #lastPromptTokenCount = 0;
   #lastCachedContentTokenCount = 0;
@@ -204,6 +205,7 @@ export class UiTelemetryService extends EventEmitter {
       if (!this.#sessionMetrics.has(sessionId)) {
         this.#sessionMetrics.set(sessionId, createInitialMetrics());
       }
+      this.#recordSessionStartTime(sessionId, event['event.timestamp']);
       this.#accumulateEvent(this.#sessionMetrics.get(sessionId)!, event);
     }
 
@@ -221,6 +223,10 @@ export class UiTelemetryService extends EventEmitter {
     return this.#sessionMetrics.get(sessionId) ?? createInitialMetrics();
   }
 
+  getSessionStartTimeForSession(sessionId: string): Date {
+    return this.#sessionStartTimes.get(sessionId) ?? this.#sessionStartTime;
+  }
+
   recordSkillInvocation(
     skillName: string,
     success: boolean,
@@ -231,6 +237,9 @@ export class UiTelemetryService extends EventEmitter {
     if (sessionId && !this.#closedSessions.has(sessionId)) {
       if (!this.#sessionMetrics.has(sessionId)) {
         this.#sessionMetrics.set(sessionId, createInitialMetrics());
+      }
+      if (!this.#sessionStartTimes.has(sessionId)) {
+        this.#sessionStartTimes.set(sessionId, new Date());
       }
       this.#accumulateSkillInvocation(
         this.#sessionMetrics.get(sessionId)!,
@@ -275,6 +284,7 @@ export class UiTelemetryService extends EventEmitter {
   reset(): void {
     this.#metrics = createInitialMetrics();
     this.#sessionMetrics.clear();
+    this.#sessionStartTimes.clear();
     this.#closedSessions.clear();
     this.#lastPromptTokenCount = 0;
     this.#lastCachedContentTokenCount = 0;
@@ -287,15 +297,29 @@ export class UiTelemetryService extends EventEmitter {
 
   resetSession(sessionId: string): void {
     this.#sessionMetrics.set(sessionId, createInitialMetrics());
+    this.#sessionStartTimes.delete(sessionId);
     this.#closedSessions.delete(sessionId);
   }
 
   removeSession(sessionId: string): void {
     this.#sessionMetrics.delete(sessionId);
+    this.#sessionStartTimes.delete(sessionId);
     this.#closedSessions.add(sessionId);
     if (this.#closedSessions.size > UiTelemetryService.#MAX_CLOSED_SESSIONS) {
       const oldest = this.#closedSessions.values().next().value;
       if (oldest) this.#closedSessions.delete(oldest);
+    }
+  }
+
+  #recordSessionStartTime(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): void {
+    const parsed = timestamp ? new Date(timestamp) : new Date();
+    const candidate = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+    const current = this.#sessionStartTimes.get(sessionId);
+    if (!current || candidate < current) {
+      this.#sessionStartTimes.set(sessionId, candidate);
     }
   }
 
