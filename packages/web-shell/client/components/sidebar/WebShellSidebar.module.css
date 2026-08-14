@@ -681,6 +681,20 @@
   cursor: pointer;
 }
 
+.collapsedSessionPopover {
+  width: min(
+    var(--collapsed-session-popover-width, 260px),
+    var(--radix-popover-content-available-width, 420px)
+  );
+  max-width: var(--radix-popover-content-available-width, 420px);
+  max-height: min(70vh, var(--radix-popover-content-available-height, 70vh));
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 8px;
+  overflow-y: auto;
+}
+
 .currentSession {
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
@@ -1495,6 +1509,7 @@
 .collapsed .body {
   align-items: center;
   width: 100%;
+  gap: 2px;
   margin-right: 0;
   padding-right: 0;
 }
@@ -1505,6 +1520,7 @@
 
 .collapsed .primaryNav {
   align-items: center;
+  padding-bottom: 0;
 }
 
 .collapsed .sessionList {

@@ -42,6 +42,7 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   DownloadIcon,
+  FolderClosedIcon,
   FolderInputIcon,
   GitBranchIcon,
   GitForkIcon,
@@ -80,6 +81,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection } from './WorkspaceSection';
@@ -530,6 +532,129 @@ function IconChevron({ expanded }: { expanded: boolean }) {
   );
 }
 
+function SidebarSessionSurface({
+  collapsed,
+  label,
+  width,
+  open,
+  onOpenChange,
+  children,
+}: {
+  collapsed: boolean;
+  label: string;
+  width: number;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  const closeTimerRef = useRef<number | undefined>(undefined);
+  const pointerOpenRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => () => window.clearTimeout(closeTimerRef.current), []);
+
+  useEffect(() => {
+    if (!collapsed || !open) return;
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!pointerOpenRef.current) return;
+      const target = event.target;
+      const insideSurface =
+        target instanceof Node &&
+        (triggerRef.current?.contains(target) ||
+          contentRef.current?.contains(target));
+      const insideNestedOverlay =
+        target instanceof Element &&
+        target.closest(
+          '[data-slot="dropdown-menu-content"], [data-slot="popover-content"]',
+        );
+      window.clearTimeout(closeTimerRef.current);
+      if (!insideSurface && !insideNestedOverlay) {
+        closeTimerRef.current = window.setTimeout(
+          () => onOpenChange(false),
+          150,
+        );
+      }
+    };
+    document.addEventListener('pointermove', handlePointerMove);
+    return () => document.removeEventListener('pointermove', handlePointerMove);
+  }, [collapsed, onOpenChange, open]);
+
+  if (!collapsed) {
+    return <div className={styles.sessionList}>{children}</div>;
+  }
+
+  const cancelClose = () => window.clearTimeout(closeTimerRef.current);
+  const closeAfterDelay = () => {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => onOpenChange(false), 150);
+  };
+
+  return (
+    <div className={styles.sessionList}>
+      <Popover open={open} onOpenChange={onOpenChange}>
+        <PopoverTrigger asChild>
+          <button
+            ref={triggerRef}
+            className={styles.pluginButton}
+            type="button"
+            aria-label={label}
+            data-web-shell-collapsed-session-trigger
+            onPointerEnter={() => {
+              pointerOpenRef.current = true;
+              cancelClose();
+              onOpenChange(true);
+            }}
+            onPointerLeave={closeAfterDelay}
+            onPointerDown={() => {
+              pointerOpenRef.current = true;
+            }}
+            onClick={(event) => {
+              event.preventDefault();
+              onOpenChange(true);
+            }}
+            onKeyDown={() => {
+              pointerOpenRef.current = false;
+            }}
+          >
+            <span className={styles.navIcon}>
+              <FolderClosedIcon size={16} strokeWidth={1.2} />
+            </span>
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          ref={contentRef}
+          side="right"
+          align="start"
+          sideOffset={8}
+          collisionPadding={8}
+          className={styles.collapsedSessionPopover}
+          style={
+            {
+              '--collapsed-session-popover-width': `${width}px`,
+            } as CSSProperties
+          }
+          data-web-shell-collapsed-session-switcher
+          onOpenAutoFocus={(event) => {
+            if (pointerOpenRef.current) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            if (pointerOpenRef.current) event.preventDefault();
+            pointerOpenRef.current = false;
+          }}
+          onPointerEnter={() => {
+            pointerOpenRef.current = true;
+            cancelClose();
+          }}
+          onPointerLeave={closeAfterDelay}
+        >
+          {children}
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
 export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
@@ -813,6 +938,7 @@ export function WebShellSidebar({
   const [projectsExpanded, setProjectsExpanded] = useState(() =>
     readWorkspaceExpanded('projects'),
   );
+  const [collapsedSessionsOpen, setCollapsedSessionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [bodyScrolled, setBodyScrolled] = useState(false);
   const [workspaceRemovalCandidate, setWorkspaceRemovalCandidate] =
@@ -1502,9 +1628,8 @@ export function WebShellSidebar({
   }, []);
 
   useEffect(() => {
-    if (collapsed) {
-      setSearchOpen(false);
-      setSearchQuery('');
+    if (!collapsed) {
+      setCollapsedSessionsOpen(false);
     }
   }, [collapsed]);
 
@@ -1828,6 +1953,7 @@ export function WebShellSidebar({
 
   const handleLoadSession = useCallback(
     (sessionId: string, workspaceCwd?: string) => {
+      setCollapsedSessionsOpen(false);
       const sessionIdentity = getSessionIdentity(
         sessionId,
         workspaceCwd || primaryWorkspaceCwd,
@@ -3025,12 +3151,13 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
+        expanded?: boolean;
         // Some controls still depend on the active runtime even though
         // workspace-qualified actions can target trusted secondary rows.
         readOnly?: boolean;
       } = {},
     ) => {
-      const { isArchived = false } = options;
+      const { isArchived = false, expanded = !collapsed } = options;
       const readOnly = options.readOnly ?? isActiveSessionReadOnly(session);
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
@@ -3237,7 +3364,7 @@ export function WebShellSidebar({
             handleLoadSession(session.sessionId, session.workspaceCwd)
           }
           onDoubleClick={() => {
-            if (!collapsed && canRenameSession(session)) startRename(session);
+            if (expanded && canRenameSession(session)) startRename(session);
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
@@ -3245,7 +3372,7 @@ export function WebShellSidebar({
             }
           }}
         >
-          {!collapsed && (
+          {expanded && (
             <>
               <span className={styles.sessionStatusSlot}>
                 {completedUnread ? (
@@ -3604,7 +3731,9 @@ export function WebShellSidebar({
         : filteredSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
       return (
         <>
-          {displayedSessions.map((session) => renderSessionRow(session))}
+          {displayedSessions.map((session) =>
+            renderSessionRow(session, { expanded: true }),
+          )}
           {!showAll &&
             filteredSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
               <button
@@ -3654,7 +3783,9 @@ export function WebShellSidebar({
           expanded={!collapsedSessionSectionIds.has(section.id)}
           onToggle={() => toggleSessionSection(section.id)}
         >
-          {section.sessions.map((session) => renderSessionRow(session))}
+          {section.sessions.map((session) =>
+            renderSessionRow(session, { expanded: true }),
+          )}
         </SessionGroupSection>
       ));
     }
@@ -3695,7 +3826,9 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) => renderSessionRow(session))}
+          {section.sessions.map((session) =>
+            renderSessionRow(session, { expanded: true }),
+          )}
         </SessionGroupSection>
       );
     });
@@ -3722,7 +3855,7 @@ export function WebShellSidebar({
   ]);
 
   const archivedSection = useMemo(() => {
-    if (!sessionArchiveEnabled || collapsed || searchQuery.trim()) return null;
+    if (!sessionArchiveEnabled || searchQuery.trim()) return null;
 
     const header = (
       <button
@@ -3778,7 +3911,7 @@ export function WebShellSidebar({
       content = (
         <>
           {allArchivedSessions.map((session) =>
-            renderSessionRow(session, { isArchived: true }),
+            renderSessionRow(session, { isArchived: true, expanded: true }),
           )}
           {effectiveArchivedError && retry}
         </>
@@ -3794,7 +3927,6 @@ export function WebShellSidebar({
   }, [
     archivedExpanded,
     allArchivedSessions,
-    collapsed,
     effectiveArchivedError,
     effectiveArchivedLoading,
     reloadArchived,
@@ -3806,7 +3938,6 @@ export function WebShellSidebar({
     t,
     toggleArchived,
   ]);
-
   return (
     <>
       <aside
@@ -4328,8 +4459,14 @@ export function WebShellSidebar({
               {primaryNavOptions?.render?.()}
             </div>
           )}
-          <div className={styles.sessionList}>
-            {!collapsed && sourceMetadataEnabled && (
+          <SidebarSessionSurface
+            collapsed={collapsed}
+            label={t('sidebar.project')}
+            width={sidebarWidth}
+            open={collapsedSessionsOpen}
+            onOpenChange={setCollapsedSessionsOpen}
+          >
+            {sourceMetadataEnabled && (
               <Tabs
                 className="px-2 pb-2"
                 value={sessionSource}
@@ -4352,8 +4489,7 @@ export function WebShellSidebar({
                 </TabsList>
               </Tabs>
             )}
-            {!collapsed &&
-              selectedSessionSource !== 'channel' &&
+            {selectedSessionSource !== 'channel' &&
               pinnedSessions.length > 0 && (
                 <>
                   <div className={styles.projectsHeader}>
@@ -4371,6 +4507,7 @@ export function WebShellSidebar({
                     <div className={styles.pinnedSessionList}>
                       {pinnedSessions.map((session) =>
                         renderSessionRow(session, {
+                          expanded: true,
                           readOnly: isActiveSessionReadOnly(session),
                         }),
                       )}
@@ -4378,67 +4515,67 @@ export function WebShellSidebar({
                   )}
                 </>
               )}
-            {!collapsed &&
-              liveWorkspaces.map((ws) => (
-                <WorkspaceSection
-                  key={ws.id}
-                  workspace={ws}
-                  renderHeader={(expanded) => (
-                    <>
-                      <RadioTowerIcon
-                        size={16}
-                        strokeWidth={1.2}
+            {liveWorkspaces.map((ws) => (
+              <WorkspaceSection
+                key={ws.id}
+                workspace={ws}
+                renderHeader={(expanded) => (
+                  <>
+                    <RadioTowerIcon
+                      size={16}
+                      strokeWidth={1.2}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.liveWorkspaceLabel}>
+                      {t('sidebar.live')}
+                    </span>
+                    {expanded ? (
+                      <ChevronDownIcon
+                        size={15}
+                        strokeWidth={1.8}
                         aria-hidden="true"
                       />
-                      <span className={styles.liveWorkspaceLabel}>
-                        {t('sidebar.live')}
-                      </span>
-                      {expanded ? (
-                        <ChevronDownIcon
-                          size={15}
-                          strokeWidth={1.8}
-                          aria-hidden="true"
-                        />
-                      ) : (
-                        <ChevronRightIcon
-                          size={15}
-                          strokeWidth={1.8}
-                          aria-hidden="true"
-                        />
-                      )}
-                    </>
-                  )}
-                  client={workspace.client}
-                  reloadToken={workspaceSessionsReloadToken}
-                  untrustedLabel={t('sidebar.workspaceUntrusted')}
-                  readOnlyLabel={t('sidebar.workspaceReadOnly')}
-                  trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
-                  noSessionsLabel={t('sidebar.noSessions')}
-                  loadErrorLabel={t('sidebar.loadFailed')}
-                  organizationEnabled={false}
-                  sourceType={selectedSessionSource}
-                  channelGroupingEnabled={channelGroupingEnabled}
-                  ungroupedLabel={t('sidebar.groupUngrouped')}
-                  autoExpandKey={
-                    autoExpandWorkspace?.id === ws.id
-                      ? autoExpandWorkspace.key
-                      : undefined
-                  }
-                  renderSession={(session) =>
-                    renderSessionRow(
-                      { ...session, workspaceCwd: ws.cwd },
-                      {
-                        readOnly: isActiveSessionReadOnly({
-                          ...session,
-                          workspaceCwd: ws.cwd,
-                        }),
-                      },
-                    )
-                  }
-                  showSessionDetails={sessionActionItems.has('details')}
-                />
-              ))}
-            {!collapsed && !hideProjectHeader && (
+                    ) : (
+                      <ChevronRightIcon
+                        size={15}
+                        strokeWidth={1.8}
+                        aria-hidden="true"
+                      />
+                    )}
+                  </>
+                )}
+                client={workspace.client}
+                reloadToken={workspaceSessionsReloadToken}
+                untrustedLabel={t('sidebar.workspaceUntrusted')}
+                readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
+                noSessionsLabel={t('sidebar.noSessions')}
+                loadErrorLabel={t('sidebar.loadFailed')}
+                organizationEnabled={false}
+                sourceType={selectedSessionSource}
+                channelGroupingEnabled={channelGroupingEnabled}
+                ungroupedLabel={t('sidebar.groupUngrouped')}
+                autoExpandKey={
+                  autoExpandWorkspace?.id === ws.id
+                    ? autoExpandWorkspace.key
+                    : undefined
+                }
+                renderSession={(session) =>
+                  renderSessionRow(
+                    { ...session, workspaceCwd: ws.cwd },
+                    {
+                      expanded: true,
+                      readOnly: isActiveSessionReadOnly({
+                        ...session,
+                        workspaceCwd: ws.cwd,
+                      }),
+                    },
+                  )
+                }
+                showSessionDetails={sessionActionItems.has('details')}
+              />
+            ))}
+            {!hideProjectHeader && (
               <div className={styles.projectsHeader}>
                 <button
                   className={styles.projectsHeaderToggle}
@@ -4484,7 +4621,7 @@ export function WebShellSidebar({
                 </div>
               </div>
             )}
-            {searchOpen && !collapsed && !hideProjectHeader && (
+            {searchOpen && !hideProjectHeader && (
               <div className={styles.projectSearch}>
                 <SearchIcon aria-hidden="true" />
                 <Input
@@ -4502,214 +4639,201 @@ export function WebShellSidebar({
                 />
               </div>
             )}
-            {(collapsed || projectsExpanded) && (
+            {projectsExpanded && (
               <>
-                {!collapsed && (
-                  <div className={styles.workspacePicker}>
-                    <div className={styles.workspaceList}>
-                      {projectWorkspaces.map((ws) => (
-                        <Fragment key={ws.id}>
-                          <WorkspaceSection
-                            workspace={ws}
-                            renderHeader={
-                              lockedWorkspaceCwd &&
-                              lockedWorkspaceOptions?.render
-                                ? (expanded) =>
-                                    lockedWorkspaceOptions.render?.(ws, {
-                                      expanded,
-                                    })
-                                : undefined
-                            }
-                            client={workspace.client}
-                            reloadToken={workspaceSessionsReloadToken}
-                            untrustedLabel={t('sidebar.workspaceUntrusted')}
-                            readOnlyLabel={t('sidebar.workspaceReadOnly')}
-                            trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
-                            noSessionsLabel={t('sidebar.noSessions')}
-                            loadErrorLabel={t('sidebar.loadFailed')}
-                            organizationEnabled={organizationEnabled}
-                            sourceType={selectedSessionSource}
-                            channelGroupingEnabled={channelGroupingEnabled}
-                            ungroupedLabel={t('sidebar.groupUngrouped')}
-                            onRenameGroup={
-                              canOrganizeWorkspace(ws.cwd)
-                                ? handleRenameGroup
-                                : undefined
-                            }
-                            onDeleteGroup={
-                              canOrganizeWorkspace(ws.cwd)
-                                ? handleDeleteGroup
-                                : undefined
-                            }
-                            renameGroupLabel={t('sidebar.groupRename')}
-                            deleteGroupLabel={t('sidebar.groupDelete')}
-                            groupActionsDisabled={groupBusy}
-                            excludePinned={selectedSessionSource !== 'channel'}
-                            onOpenGitDiff={onOpenGitDiff}
-                            onOpenCommit={onOpenCommit}
-                            searchQuery={searchQuery}
-                            expanded={ws.primary ? projectExpanded : undefined}
-                            autoExpandKey={
-                              autoExpandWorkspace?.id === ws.id
-                                ? autoExpandWorkspace?.key
-                                : undefined
-                            }
-                            onExpandedChange={
-                              ws.primary
-                                ? (expanded) => {
-                                    writeWorkspaceExpanded(
-                                      primaryWorkspaceExpansionId,
-                                      expanded,
-                                    );
-                                    setProjectExpanded(expanded);
-                                  }
-                                : undefined
-                            }
-                            renderSessions={!ws.primary}
-                            renderSession={(session) =>
-                              renderSessionRow(
-                                {
+                <div className={styles.workspacePicker}>
+                  <div className={styles.workspaceList}>
+                    {projectWorkspaces.map((ws) => (
+                      <Fragment key={ws.id}>
+                        <WorkspaceSection
+                          workspace={ws}
+                          renderHeader={
+                            lockedWorkspaceCwd && lockedWorkspaceOptions?.render
+                              ? (expanded) =>
+                                  lockedWorkspaceOptions.render?.(ws, {
+                                    expanded,
+                                  })
+                              : undefined
+                          }
+                          client={workspace.client}
+                          reloadToken={workspaceSessionsReloadToken}
+                          untrustedLabel={t('sidebar.workspaceUntrusted')}
+                          readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                          trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
+                          noSessionsLabel={t('sidebar.noSessions')}
+                          loadErrorLabel={t('sidebar.loadFailed')}
+                          organizationEnabled={organizationEnabled}
+                          sourceType={selectedSessionSource}
+                          channelGroupingEnabled={channelGroupingEnabled}
+                          ungroupedLabel={t('sidebar.groupUngrouped')}
+                          onRenameGroup={
+                            canOrganizeWorkspace(ws.cwd)
+                              ? handleRenameGroup
+                              : undefined
+                          }
+                          onDeleteGroup={
+                            canOrganizeWorkspace(ws.cwd)
+                              ? handleDeleteGroup
+                              : undefined
+                          }
+                          renameGroupLabel={t('sidebar.groupRename')}
+                          deleteGroupLabel={t('sidebar.groupDelete')}
+                          groupActionsDisabled={groupBusy}
+                          excludePinned={selectedSessionSource !== 'channel'}
+                          onOpenGitDiff={onOpenGitDiff}
+                          onOpenCommit={onOpenCommit}
+                          searchQuery={searchQuery}
+                          expanded={ws.primary ? projectExpanded : undefined}
+                          autoExpandKey={
+                            autoExpandWorkspace?.id === ws.id
+                              ? autoExpandWorkspace?.key
+                              : undefined
+                          }
+                          onExpandedChange={
+                            ws.primary
+                              ? (expanded) => {
+                                  writeWorkspaceExpanded(
+                                    primaryWorkspaceExpansionId,
+                                    expanded,
+                                  );
+                                  setProjectExpanded(expanded);
+                                }
+                              : undefined
+                          }
+                          renderSessions={!ws.primary}
+                          renderSession={(session) =>
+                            renderSessionRow(
+                              {
+                                ...session,
+                                workspaceCwd: ws.cwd,
+                              },
+                              {
+                                expanded: true,
+                                readOnly: isActiveSessionReadOnly({
                                   ...session,
                                   workspaceCwd: ws.cwd,
-                                },
-                                {
-                                  readOnly: isActiveSessionReadOnly({
-                                    ...session,
-                                    workspaceCwd: ws.cwd,
-                                  }),
-                                },
-                              )
+                                }),
+                              },
+                            )
+                          }
+                          showSessionDetails={sessionActionItems.has('details')}
+                          headerActions={(visible) => {
+                            if (
+                              lockedWorkspaceCwd &&
+                              lockedWorkspaceOptions?.render
+                            ) {
+                              return null;
                             }
-                            showSessionDetails={sessionActionItems.has(
-                              'details',
-                            )}
-                            headerActions={(visible) => {
-                              if (
-                                lockedWorkspaceCwd &&
-                                lockedWorkspaceOptions?.render
-                              ) {
-                                return null;
-                              }
-                              const canRemove =
-                                !lockedWorkspaceCwd &&
-                                workspaceRemovalEnabled &&
-                                !ws.primary &&
-                                ws.removable === true;
-                              if (!ws.trusted && !canRemove) return null;
-                              const wsCwd = ws.primary ? undefined : ws.cwd;
-                              return (
-                                <div
-                                  className={styles.workspaceHeaderActions}
-                                  style={{
-                                    visibility: visible ? 'visible' : 'hidden',
-                                  }}
-                                >
-                                  {ws.trusted && (
-                                    <>
-                                      {canOrganizeWorkspace(ws.cwd) && (
-                                        <button
-                                          className={
-                                            styles.workspaceHeaderAction
-                                          }
-                                          type="button"
-                                          aria-label={t('sidebar.groupCreate')}
-                                          onClick={(event) => {
-                                            event.preventDefault();
-                                            event.stopPropagation();
-                                            if (ws.primary) {
-                                              handleCreateGroup();
-                                            } else {
-                                              handleCreateWorkspaceGroup(
-                                                ws.cwd,
-                                              );
-                                            }
-                                          }}
-                                        >
-                                          <PlusIcon
-                                            size={18}
-                                            strokeWidth={1.4}
-                                          />
-                                        </button>
-                                      )}
+                            const canRemove =
+                              !lockedWorkspaceCwd &&
+                              workspaceRemovalEnabled &&
+                              !ws.primary &&
+                              ws.removable === true;
+                            if (!ws.trusted && !canRemove) return null;
+                            const wsCwd = ws.primary ? undefined : ws.cwd;
+                            return (
+                              <div
+                                className={styles.workspaceHeaderActions}
+                                style={{
+                                  visibility: visible ? 'visible' : 'hidden',
+                                }}
+                              >
+                                {ws.trusted && (
+                                  <>
+                                    {canOrganizeWorkspace(ws.cwd) && (
                                       <button
                                         className={styles.workspaceHeaderAction}
                                         type="button"
-                                        title={t('sidebar.newTask')}
-                                        aria-label={t('sidebar.newTask')}
+                                        aria-label={t('sidebar.groupCreate')}
                                         onClick={(event) => {
                                           event.preventDefault();
                                           event.stopPropagation();
-                                          handleNewSession(wsCwd);
+                                          if (ws.primary) {
+                                            handleCreateGroup();
+                                          } else {
+                                            handleCreateWorkspaceGroup(ws.cwd);
+                                          }
                                         }}
                                       >
-                                        <SquarePenIcon
+                                        <PlusIcon size={18} strokeWidth={1.4} />
+                                      </button>
+                                    )}
+                                    <button
+                                      className={styles.workspaceHeaderAction}
+                                      type="button"
+                                      title={t('sidebar.newTask')}
+                                      aria-label={t('sidebar.newTask')}
+                                      onClick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        handleNewSession(wsCwd);
+                                      }}
+                                    >
+                                      <SquarePenIcon
+                                        size={16}
+                                        strokeWidth={1.2}
+                                      />
+                                    </button>
+                                  </>
+                                )}
+                                {canRemove && (
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <button
+                                        className={styles.workspaceHeaderAction}
+                                        type="button"
+                                        aria-label={t(
+                                          'sidebar.workspaceActions',
+                                        )}
+                                        disabled={
+                                          workspaceRemovalSubmitting &&
+                                          workspaceRemovalCandidate?.id ===
+                                            ws.id
+                                        }
+                                      >
+                                        <EllipsisVerticalIcon
                                           size={16}
                                           strokeWidth={1.2}
                                         />
                                       </button>
-                                    </>
-                                  )}
-                                  {canRemove && (
-                                    <DropdownMenu>
-                                      <DropdownMenuTrigger asChild>
-                                        <button
-                                          className={
-                                            styles.workspaceHeaderAction
-                                          }
-                                          type="button"
-                                          aria-label={t(
-                                            'sidebar.workspaceActions',
-                                          )}
-                                          disabled={
-                                            workspaceRemovalSubmitting &&
-                                            workspaceRemovalCandidate?.id ===
-                                              ws.id
-                                          }
-                                        >
-                                          <EllipsisVerticalIcon
-                                            size={16}
-                                            strokeWidth={1.2}
-                                          />
-                                        </button>
-                                      </DropdownMenuTrigger>
-                                      <DropdownMenuContent
-                                        align="end"
-                                        className="w-auto min-w-40"
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent
+                                      align="end"
+                                      className="w-auto min-w-40"
+                                    >
+                                      <DropdownMenuItem
+                                        variant="destructive"
+                                        aria-label={`${t(
+                                          'sidebar.removeWorkspace',
+                                        )}: ${ws.cwd}`}
+                                        onSelect={() =>
+                                          requestWorkspaceRemoval(ws)
+                                        }
                                       >
-                                        <DropdownMenuItem
-                                          variant="destructive"
-                                          aria-label={`${t(
-                                            'sidebar.removeWorkspace',
-                                          )}: ${ws.cwd}`}
-                                          onSelect={() =>
-                                            requestWorkspaceRemoval(ws)
-                                          }
-                                        >
-                                          <Trash2Icon />
-                                          {t('sidebar.removeWorkspace')}
-                                        </DropdownMenuItem>
-                                      </DropdownMenuContent>
-                                    </DropdownMenu>
-                                  )}
-                                </div>
-                              );
-                            }}
-                          />
-                          {ws.primary &&
-                          (projectExpanded || searchQuery.trim()) ? (
-                            <div className={styles.workspaceSessionBody}>
-                              {body}
-                            </div>
-                          ) : null}
-                        </Fragment>
-                      ))}
-                    </div>
+                                        <Trash2Icon />
+                                        {t('sidebar.removeWorkspace')}
+                                      </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                )}
+                              </div>
+                            );
+                          }}
+                        />
+                        {ws.primary &&
+                        (projectExpanded || searchQuery.trim()) ? (
+                          <div className={styles.workspaceSessionBody}>
+                            {body}
+                          </div>
+                        ) : null}
+                      </Fragment>
+                    ))}
                   </div>
-                )}
+                </div>
               </>
             )}
             {archivedSection}
-          </div>
+          </SidebarSessionSurface>
         </div>
 
         {footer !== false && (
