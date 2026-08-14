@@ -175,6 +175,7 @@ function onDebuggerDetach(
   reason: string,
 ): void {
   if (source.tabId === undefined || !attachedTabIds.has(source.tabId)) return;
+  if (attaching) releaseRequestedDuringAttach = true;
   console.log(LOG_PREFIX, 'debugger detached:', reason);
   attachedTabIds.delete(source.tabId);
   directTabIds.delete(source.tabId);

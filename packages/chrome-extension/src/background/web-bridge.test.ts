@@ -88,11 +88,11 @@ describe('WebBridge protocol', () => {
       } as never,
       send,
     );
-    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(10));
 
-    expect(send.mock.calls[0][0].payload.chunk).toHaveLength(8 * 1024 * 1024);
-    expect(send.mock.calls[1][0].payload.chunk).toBe('x');
-    expect(send.mock.calls[2][0]).toEqual({
+    expect(send.mock.calls[0][0].payload.chunk).toHaveLength(1024 * 1024);
+    expect(send.mock.calls[8][0].payload.chunk).toBe('x');
+    expect(send.mock.calls[9][0]).toEqual({
       type: 'webbridge_result',
       responseToRequestId: 'request-2',
       payload: { data: { format: 'png' }, chunked: true },

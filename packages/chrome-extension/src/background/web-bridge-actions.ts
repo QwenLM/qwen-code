@@ -54,7 +54,7 @@ const INTERACTIVE_ROLES = new Set([
   'tab',
   'treeitem',
 ]);
-const refsByTab = new Map<number, Map<string, ElementRef>>();
+const refsByTab = new Map<number, Map<string, Map<string, ElementRef>>>();
 const groupBySession = new Map<string, number>();
 const tabsBySession = new Map<string, Set<number>>();
 const networkCaptures = new Map<string, NetworkCapture>();
@@ -215,7 +215,7 @@ async function navigate(args: Args): Promise<unknown> {
           frameId: currentFrameId,
           loaderId: currentLoaderId,
         };
-        refsByTab.delete(currentTabId);
+        refsByTab.get(currentTabId)?.delete(sessionKey(args));
         await send('Page.reload', {
           ignoreCache: true,
           loaderId: currentLoaderId,
@@ -227,7 +227,7 @@ async function navigate(args: Args): Promise<unknown> {
         ]);
         target = nextReloadLoader ?? target;
       } else {
-        refsByTab.delete(currentTabId);
+        refsByTab.get(currentTabId)?.delete(sessionKey(args));
         directNavigationStarted = true;
         const result = record(
           await Promise.race([
@@ -369,7 +369,11 @@ async function evaluate(args: Args): Promise<unknown> {
       throwOnCdpException('evaluate', result);
       remote = record(result['result']);
     }
-    return { type: remote['type'], value: remote['value'] };
+    return {
+      type: remote['type'],
+      value:
+        'value' in remote ? remote['value'] : remote['unserializableValue'],
+    };
   });
 }
 
@@ -379,7 +383,9 @@ async function snapshot(args: Args): Promise<unknown> {
     const result = record(await send('Accessibility.getFullAXTree'));
     const nodes = Array.isArray(result['nodes']) ? result['nodes'] : [];
     const refs = new Map<string, ElementRef>();
-    refsByTab.set(tab.id, refs);
+    const refsBySession = refsByTab.get(tab.id) ?? new Map();
+    refsBySession.set(sessionKey(args), refs);
+    refsByTab.set(tab.id, refsBySession);
     return {
       url: tab.url,
       title: tab.title,
@@ -392,7 +398,13 @@ async function click(args: Args): Promise<unknown> {
   const selector = requiredString(args, 'selector', 'click');
   return onCurrentTab(args, async (send, tabId) => {
     if (isRef(selector)) {
-      const objectId = await objectIdFromRef('click', selector, tabId, send);
+      const objectId = await objectIdFromRef(
+        'click',
+        selector,
+        tabId,
+        sessionKey(args),
+        send,
+      );
       const result = record(
         await send('Runtime.callFunctionOn', {
           objectId,
@@ -423,7 +435,13 @@ async function fill(args: Args): Promise<unknown> {
   return onCurrentTab(args, async (send, tabId) => {
     let result: JsonRecord;
     if (isRef(selector)) {
-      const objectId = await objectIdFromRef('fill', selector, tabId, send);
+      const objectId = await objectIdFromRef(
+        'fill',
+        selector,
+        tabId,
+        sessionKey(args),
+        send,
+      );
       result = record(
         await send('Runtime.callFunctionOn', {
           objectId,
@@ -450,6 +468,7 @@ async function mouseClick(args: Args): Promise<unknown> {
       'mouse_click',
       selector,
       tabId,
+      sessionKey(args),
       send,
     );
     await send('Runtime.callFunctionOn', {
@@ -487,14 +506,33 @@ async function mouseClick(args: Args): Promise<unknown> {
       buttons: 1,
       clickCount: 1,
     });
-    await send('Input.dispatchMouseEvent', {
-      type: 'mouseReleased',
-      x,
-      y,
-      button: 'left',
-      buttons: 0,
-      clickCount: 1,
-    });
+    let released = false;
+    try {
+      await send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x,
+        y,
+        button: 'left',
+        buttons: 0,
+        clickCount: 1,
+      });
+      released = true;
+    } finally {
+      if (!released) {
+        try {
+          await send('Input.dispatchMouseEvent', {
+            type: 'mouseReleased',
+            x,
+            y,
+            button: 'left',
+            buttons: 0,
+            clickCount: 1,
+          });
+        } catch {
+          // Preserve the original release error.
+        }
+      }
+    }
     let value: JsonRecord = {};
     try {
       const metadata = record(
@@ -660,6 +698,7 @@ async function screenshot(args: Args): Promise<unknown> {
         'screenshot',
         selector,
         tabId,
+        sessionKey(args),
         send,
       );
       await send('Runtime.callFunctionOn', {
@@ -836,51 +875,68 @@ async function closeSession(args: Args): Promise<unknown> {
     : new Set<number>();
   const currentTabId = integer(args['_tabId']);
   if (currentTabId !== undefined) touched.add(currentTabId);
-  if (session) {
-    tabsBySession.delete(session);
-    groupBySession.delete(session);
-    for (const [key, capture] of networkCaptures) {
-      if (capture.session === session) networkCaptures.delete(key);
-    }
-    stopNetworkListenerIfIdle();
-  }
   const owned = new Set(tabIds(args));
   if (args['close_tabs'] === false) {
     let released = 0;
     for (const tabId of new Set([...touched, ...owned])) {
-      if (tabUsedByAnotherSession(tabId)) continue;
-      refsByTab.delete(tabId);
-      await releaseCdpTab(tabId);
-      released++;
+      const shared = tabUsedByAnotherSession(tabId, session);
+      const captured = [...networkCaptures.values()].some(
+        (capture) => capture.tabId === tabId && capture.session !== session,
+      );
+      if (!captured) {
+        await releaseCdpTab(tabId);
+        released++;
+      }
+      if (!shared) refsByTab.delete(tabId);
     }
+    forgetSession(session);
     return { success: true, closed: 0, released };
   }
   let closed = 0;
   for (const tabId of owned) {
-    let removed = true;
+    const shared = tabUsedByAnotherSession(tabId, session);
+    if (shared) {
+      const captured = [...networkCaptures.values()].some(
+        (capture) => capture.tabId === tabId && capture.session !== session,
+      );
+      if (!captured) await releaseCdpTab(tabId);
+      continue;
+    }
     try {
       await chrome.tabs.remove(tabId);
       closed++;
-    } catch {
-      removed = false;
-    }
-    const shared = tabUsedByAnotherSession(tabId);
-    if (removed || !shared) {
-      refsByTab.delete(tabId);
-      await releaseCdpTab(tabId);
-    }
-    if (removed) {
-      forgetTab(tabId);
-      for (const [key, capture] of networkCaptures) {
-        if (capture.tabId === tabId) networkCaptures.delete(key);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/no tab|tab not found|invalid tab id/i.test(message)) {
+        throw new Error(`close_session: ${message}`);
       }
+    }
+    refsByTab.delete(tabId);
+    await releaseCdpTab(tabId);
+    forgetTab(tabId);
+    for (const [key, capture] of networkCaptures) {
+      if (capture.tabId === tabId) networkCaptures.delete(key);
     }
   }
   for (const tabId of touched) {
-    if (owned.has(tabId) || tabUsedByAnotherSession(tabId)) continue;
+    if (owned.has(tabId) || tabUsedByAnotherSession(tabId, session)) continue;
     await releaseCdpTab(tabId);
   }
+  forgetSession(session);
   return { success: true, closed };
+}
+
+function forgetSession(session: string | undefined): void {
+  if (!session) return;
+  tabsBySession.delete(session);
+  groupBySession.delete(session);
+  for (const [key, capture] of networkCaptures) {
+    if (capture.session === session) networkCaptures.delete(key);
+  }
+  for (const refsBySession of refsByTab.values()) {
+    refsBySession.delete(session);
+  }
+  stopNetworkListenerIfIdle();
 }
 
 async function currentTab(
@@ -1018,9 +1074,12 @@ async function objectIdFromSelectorOrRef(
   action: string,
   selector: string,
   tabId: number,
+  session: string,
   send: CdpCommand,
 ): Promise<string> {
-  if (isRef(selector)) return objectIdFromRef(action, selector, tabId, send);
+  if (isRef(selector)) {
+    return objectIdFromRef(action, selector, tabId, session, send);
+  }
   const result = record(
     await send('Runtime.evaluate', {
       expression: `document.querySelector(${JSON.stringify(selector)})`,
@@ -1040,10 +1099,11 @@ async function objectIdFromRef(
   action: string,
   selector: string,
   tabId: number,
+  session: string,
   send: CdpCommand,
 ): Promise<string> {
   const ref = selector.startsWith('@') ? selector.slice(1) : selector;
-  const element = refsByTab.get(tabId)?.get(ref);
+  const element = refsByTab.get(tabId)?.get(session)?.get(ref);
   if (!element) {
     throw new Error(`${action}: unknown ref "${selector}". Run snapshot first`);
   }
@@ -1132,8 +1192,17 @@ function forgetTab(tabId: number): void {
   }
 }
 
-function tabUsedByAnotherSession(tabId: number): boolean {
-  return [...tabsBySession.values()].some((tabs) => tabs.has(tabId));
+function tabUsedByAnotherSession(
+  tabId: number,
+  excludedSession?: string,
+): boolean {
+  return [...tabsBySession].some(
+    ([session, tabs]) => session !== excludedSession && tabs.has(tabId),
+  );
+}
+
+function sessionKey(args: Args): string {
+  return string(args['_session']) ?? '';
 }
 
 interface KeySpec {

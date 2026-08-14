@@ -526,6 +526,17 @@ describe('WebBridge actions', () => {
     });
   });
 
+  it('preserves unserializable evaluate results', async () => {
+    cdp.send.mockResolvedValue({
+      result: { type: 'bigint', unserializableValue: '1n' },
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('evaluate', { code: '1n', _tabId: 17 }),
+    ).resolves.toEqual({ type: 'bigint', value: '1n' });
+  });
+
   it('surfaces implicit promise rejections in evaluate', async () => {
     cdp.send
       .mockResolvedValueOnce({
@@ -619,6 +630,44 @@ describe('WebBridge actions', () => {
     ).rejects.toThrow('Run snapshot first');
   });
 
+  it('keeps snapshot refs isolated by session on a shared tab', async () => {
+    const nodes = (backendDOMNodeId: number) => ({
+      nodes: [
+        { nodeId: 'root', childIds: ['button'] },
+        {
+          nodeId: 'button',
+          role: { value: 'button' },
+          name: { value: 'Submit' },
+          backendDOMNodeId,
+        },
+      ],
+    });
+    cdp.send
+      .mockResolvedValueOnce(nodes(91))
+      .mockResolvedValueOnce(nodes(55))
+      .mockResolvedValueOnce({ object: { objectId: 'object-91' } })
+      .mockResolvedValueOnce({ result: { value: { success: true } } });
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('snapshot', {
+      _session: 'one',
+      _tabId: 17,
+    });
+    await executeWebBridgeAction('snapshot', {
+      _session: 'two',
+      _tabId: 17,
+    });
+    await executeWebBridgeAction('click', {
+      _session: 'one',
+      selector: '@e1',
+      _tabId: 17,
+    });
+
+    expect(cdp.send).toHaveBeenNthCalledWith(3, 'DOM.resolveNode', {
+      backendNodeId: 91,
+    });
+  });
+
   it('dispatches a trusted mouse click at the element center', async () => {
     cdp.send
       .mockResolvedValueOnce({ result: { objectId: 'button-1' } })
@@ -665,6 +714,28 @@ describe('WebBridge actions', () => {
         _tabId: 17,
       }),
     ).resolves.toMatchObject({ success: true, x: 20, y: 30 });
+  });
+
+  it('retries mouse release without replacing the original error', async () => {
+    cdp.send
+      .mockResolvedValueOnce({ result: { objectId: 'button-1' } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        model: { content: [10, 20, 30, 20, 30, 40, 10, 40] },
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error('release failed'))
+      .mockResolvedValueOnce({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await expect(
+      executeWebBridgeAction('mouse_click', {
+        selector: '#submit',
+        _tabId: 17,
+      }),
+    ).rejects.toThrow('release failed');
+    expect(cdp.send).toHaveBeenCalledTimes(7);
   });
 
   it('rejects mouse clicks on zero-size elements', async () => {
@@ -1163,12 +1234,14 @@ describe('WebBridge actions', () => {
     ).rejects.toThrow('Tabs cannot be edited right now');
     expect(cdp.release).not.toHaveBeenCalled();
 
-    await executeWebBridgeAction('close_session', {
-      _session: 'research',
-      _tabId: 17,
-      _tabIds: [17],
-    });
-    expect(cdp.release).toHaveBeenCalledWith(17);
+    await expect(
+      executeWebBridgeAction('close_session', {
+        _session: 'research',
+        _tabId: 17,
+        _tabIds: [17],
+      }),
+    ).rejects.toThrow('Tabs cannot be edited right now');
+    expect(cdp.release).not.toHaveBeenCalled();
   });
 
   it('uploads files through DOM.setFileInputFiles', async () => {

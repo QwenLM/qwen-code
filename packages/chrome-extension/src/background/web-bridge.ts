@@ -36,7 +36,7 @@ interface WebBridgeResultChunkFrame {
 type WebBridgeSend = (
   frame: WebBridgeResultFrame | WebBridgeResultChunkFrame,
 ) => void;
-const ARTIFACT_CHUNK_LENGTH = 8 * 1024 * 1024;
+const ARTIFACT_CHUNK_LENGTH = 1024 * 1024;
 const JSON_CHUNK_LENGTH = 2 * 1024 * 1024;
 const MAX_RESULT_CHARS = 32 * 1024 * 1024;
 
