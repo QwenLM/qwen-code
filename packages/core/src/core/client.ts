@@ -1882,6 +1882,26 @@ export class GeminiClient {
                     }
                     reminderInsertionIndex -= 1;
                   }
+                  const trailingResponses = effectiveExtraHistory
+                    .slice(reminderInsertionIndex)
+                    .flatMap((entry) => entry.parts ?? [])
+                    .flatMap((part) =>
+                      part.functionResponse ? [part.functionResponse] : [],
+                    );
+                  const owner =
+                    effectiveExtraHistory[reminderInsertionIndex - 1];
+                  const ownerHasMatchingCall = owner?.parts?.some((part) => {
+                    const call = part.functionCall;
+                    if (!call) return false;
+                    return trailingResponses.some((response) =>
+                      call.id && response.id
+                        ? call.id === response.id
+                        : call.name === response.name,
+                    );
+                  });
+                  if (owner?.role === 'model' && ownerHasMatchingCall) {
+                    reminderInsertionIndex -= 1;
+                  }
                 }
                 effectiveExtraHistory = [
                   ...effectiveExtraHistory.slice(0, reminderInsertionIndex),

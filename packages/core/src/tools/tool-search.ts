@@ -381,6 +381,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       deferredToolPresentations,
       directlyDeclared,
       missing,
+      blockedErrorMessage,
       truncated,
     );
     if (oversizedFallback) {
@@ -416,6 +417,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     presentations: readonly DeferredToolPresentation[],
     directlyDeclared: readonly string[],
     missing: readonly string[],
+    blockedErrorMessage: string | undefined,
     truncated: readonly string[],
   ): Promise<ToolResult | undefined> {
     const batchBudget = this.config.getToolOutputBatchBudget();
@@ -459,6 +461,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
       }
       if (missing.length > 0) {
         message += `\n\nNot found: ${missing.join(', ')}`;
+      }
+      if (blockedErrorMessage) {
+        message += `\n\nUnavailable: ${blockedErrorMessage}`;
       }
       if (truncated.length > 0) {
         message += `\n\nTruncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
@@ -530,6 +535,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     }
     if (missing.length > 0) {
       directDeclarationMessage += `\n\nNot found: ${missing.join(', ')}`;
+    }
+    if (blockedErrorMessage) {
+      directDeclarationMessage += `\n\nUnavailable: ${blockedErrorMessage}`;
     }
     if (truncated.length > 0) {
       directDeclarationMessage += `\n\nTruncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;

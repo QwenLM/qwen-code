@@ -1162,6 +1162,12 @@ describe('ToolSearchTool', () => {
         shouldDefer: true,
       }),
     );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
     vi.spyOn(config, 'getToolOutputBatchBudget').mockReturnValue(
       Number.POSITIVE_INFINITY,
     );
@@ -1171,7 +1177,9 @@ describe('ToolSearchTool', () => {
 
     const result = await runWithAgentContext('agent-1', () =>
       new ToolSearchTool(config)
-        .build({ query: 'select:subagent_small,subagent_oversized' })
+        .build({
+          query: `select:subagent_small,subagent_oversized,${ToolNames.ENTER_PLAN_MODE}`,
+        })
         .execute(new AbortController().signal),
     );
 
@@ -1188,6 +1196,9 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).not.toContain('"name":"subagent_small"');
     expect(String(result.llmContent)).not.toContain(
       '"name":"subagent_oversized"',
+    );
+    expect(String(result.llmContent)).toContain(
+      `Unavailable: ${ToolNames.ENTER_PLAN_MODE} is not available inside subagents`,
     );
     expect(result.deferredToolPresentations).toBeUndefined();
   });

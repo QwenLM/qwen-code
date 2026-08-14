@@ -4335,11 +4335,7 @@ export class GeminiChat {
     this.clearPendingPartialState();
   }
 
-  /**
-   * Pop orphaned trailing user entries from chat history.
-   * In a valid conversation the last entry is always a model response;
-   * any trailing user entries are leftovers from a request that failed.
-   */
+  /** Pop orphaned trailing user entries from chat history. */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
     while (
@@ -4359,6 +4355,31 @@ export class GeminiChat {
       // text, which then leaks into the next turn via appendCuratedContent.
       const lastEntry = this.history[this.history.length - 1];
       if (lastEntry && isSystemReminderContent(lastEntry)) {
+        break;
+      }
+      const previousEntry = this.history[this.history.length - 2];
+      const lastParts = lastEntry?.parts ?? [];
+      const responses = lastParts.flatMap((part) =>
+        part.functionResponse ? [part.functionResponse] : [],
+      );
+      const calls = (previousEntry?.parts ?? []).flatMap((part) =>
+        part.functionCall ? [part.functionCall] : [],
+      );
+      const hasOnlyFunctionResponses =
+        lastParts.length > 0 &&
+        lastParts.every((part) => part.functionResponse !== undefined);
+      const isCompletedToolResult =
+        previousEntry?.role === 'model' &&
+        hasOnlyFunctionResponses &&
+        responses.length > 0 &&
+        responses.every((response) =>
+          calls.some((call) =>
+            call.id && response.id
+              ? call.id === response.id
+              : call.name === response.name,
+          ),
+        );
+      if (isCompletedToolResult) {
         break;
       }
       strippedEntries.unshift(this.history.pop()!);

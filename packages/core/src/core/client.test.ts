@@ -1840,8 +1840,21 @@ describe('Gemini Client (client.ts)', () => {
       expect(client.stripOrphanedUserEntriesFromHistory()).toEqual([
         { role: 'user', parts: [{ text: 'failed prompt' }] },
       ]);
-      expect(client.getHistory().at(-1)?.parts?.[0]?.text).toBe(
-        restoredSchemaText,
+      expect(
+        client.getHistory().at(-1)?.parts?.[0]?.functionResponse?.response,
+      ).toEqual({ output: 'cron created' });
+      expect(
+        client
+          .getHistory()
+          .findIndex((entry) => entry.parts?.[0]?.text === restoredSchemaText),
+      ).toBeLessThan(
+        client
+          .getHistory()
+          .findIndex((entry) =>
+            entry.parts?.some(
+              (part) => part.functionCall?.id === 'proxy-success',
+            ),
+          ),
       );
       expect(reg.clearProxySchemaPresentations).not.toHaveBeenCalled();
     });
@@ -1997,6 +2010,75 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         buildSessionRecoveryPlanFromApiHistory({
           sessionId: 'resume-with-prompt',
+          apiHistory: history,
+        }).kind,
+      ).toBe('interrupted_prompt');
+    });
+
+    it('keeps a completed deferred call resumable after schema restoration', async () => {
+      const reg = getRegistryMock();
+      const cronCreateSchema = {
+        name: 'cron_create',
+        description: 'schedule',
+        parametersJsonSchema: { type: 'object' },
+      };
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        isDeferredProxyControlTool(name)
+          ? ({} as never)
+          : name === 'cron_create'
+            ? ({ schema: cronCreateSchema } as never)
+            : null,
+      );
+      reg.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === 'cron_create',
+      );
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'proxy-complete',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: { name: 'cron_create', arguments: {} },
+              },
+            } as never,
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'proxy-complete',
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                response: { output: 'created' },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const reminderIndex = history.findIndex((entry) =>
+        entry.parts?.some((part) =>
+          part.text?.includes(
+            'Current schemas for deferred tools restored from session history',
+          ),
+        ),
+      );
+      const callIndex = history.findIndex((entry) =>
+        entry.parts?.some((part) => part.functionCall?.id === 'proxy-complete'),
+      );
+      expect(reminderIndex).toBeGreaterThanOrEqual(0);
+      expect(reminderIndex).toBeLessThan(callIndex);
+      expect(
+        buildSessionRecoveryPlanFromApiHistory({
+          sessionId: 'resume-after-completed-proxy',
           apiHistory: history,
         }).kind,
       ).toBe('interrupted_prompt');
