@@ -154,6 +154,12 @@ export function getFollowupSuggestionFeatureDecision(
     value: settings.merged?.ui?.enableFollowupSuggestions,
     configured: isFollowupSuggestionSettingConfigured(settings),
   };
+  if (
+    setting.value === false ||
+    (setting.value === true && setting.configured)
+  ) {
+    return { enabled: setting.value === true, suppressedReason: undefined };
+  }
   const providerConfig = getFollowupSuggestionProviderConfig(config);
 
   return getDecisionForProviderConfig(setting, providerConfig);

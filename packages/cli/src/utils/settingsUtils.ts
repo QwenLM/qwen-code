@@ -646,7 +646,7 @@ export function getDisplayValue(
     if (option?.label) {
       valueString = t(option.label) || option.label;
     } else {
-      valueString = `${value}`;
+      valueString = value === undefined ? t('Unset') : `${value}`;
     }
   }
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   AuthType,
   type Config,
@@ -537,6 +537,30 @@ describe('getFollowupSuggestionProviderConfig', () => {
 });
 
 describe('getFollowupSuggestionFeatureDecision', () => {
+  it.each([true, false])(
+    'does not resolve provider config for an explicit %s setting',
+    (value) => {
+      const getModelsConfig = vi.fn();
+      const getContentGeneratorConfig = vi.fn();
+      const getFastModel = vi.fn();
+
+      expect(
+        getFollowupSuggestionFeatureDecision(
+          {
+            merged: { ui: { enableFollowupSuggestions: value } },
+            user: settingsFile({
+              ui: { enableFollowupSuggestions: value },
+            }),
+          } as Parameters<typeof getFollowupSuggestionFeatureDecision>[0],
+          { getModelsConfig, getContentGeneratorConfig, getFastModel },
+        ),
+      ).toEqual({ enabled: value, suppressedReason: undefined });
+      expect(getModelsConfig).not.toHaveBeenCalled();
+      expect(getContentGeneratorConfig).not.toHaveBeenCalled();
+      expect(getFastModel).not.toHaveBeenCalled();
+    },
+  );
+
   it('reports when the loopback default suppresses follow-up suggestions', () => {
     expect(
       getFollowupSuggestionFeatureDecision(
