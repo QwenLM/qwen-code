@@ -17,7 +17,11 @@
 import type { CommandModule } from 'yargs';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import { HOSTNAME_RE } from './lib/gh.js';
@@ -201,7 +205,10 @@ export const planDiffCommand: CommandModule = {
     try {
       runPlanDiff(argv as unknown as PlanDiffArgs);
     } catch (err) {
-      writeStderrLine(`plan-diff: ${(err as Error).message}`);
+      // writeStderrLineSafe, not writeStderrLine: a broken stderr (an
+      // early-exited reader) must not let the throw escape the catch and
+      // lose the exit-2/exit-1 classification this handler exists to give.
+      writeStderrLineSafe(`plan-diff: ${(err as Error).message}`);
       process.exitCode = err instanceof TypeError ? 2 : 1;
     }
   },

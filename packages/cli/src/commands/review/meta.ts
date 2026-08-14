@@ -14,7 +14,12 @@
 // answer that PR's head SHA and canonical web URL.
 
 import type { CommandModule } from 'yargs';
-import { isOwnerRepo, resolveGhHost, setGhHost } from './lib/gh.js';
+import {
+  HOSTNAME_RE,
+  isOwnerRepo,
+  resolveGhHost,
+  setGhHost,
+} from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import {
   writeStdoutLine,
@@ -62,8 +67,21 @@ export function runMeta(args: MetaArgs): MetaResult {
     // The discovered host is a label only until it routes: with several gh
     // auths (github.com + an Enterprise login) a bare `gh pr view --repo`
     // would resolve at github.com while the output claims the URL's host.
-    // An explicit flag/env keeps precedence over the discovery.
-    setGhHost(resolveGhHost(args.host) ?? id.host);
+    // An explicit flag/env keeps precedence over the discovery. But the
+    // routed value can be a host gh tolerates yet HOSTNAME_RE rejects
+    // (underscore intranet aliases, IPv6 literals) — that is an
+    // environmental condition, not a --host typo, so name the actual source
+    // and fail in the runtime class (exit 1), never as a usage error that
+    // blames a flag the caller never passed.
+    const routed = resolveGhHost(args.host) ?? id.host;
+    if (!HOSTNAME_RE.test(routed)) {
+      throw new Error(
+        `cannot route at the ${
+          args.host !== undefined ? '--host flag' : 'discovered repo-URL host'
+        } ${JSON.stringify(routed)} — not a hostname the review subcommands accept`,
+      );
+    }
+    setGhHost(routed);
   }
 
   const result: MetaResult = { platform: platform.kind, host, ownerRepo };
