@@ -26,6 +26,7 @@ import {
   latestOwnLedger,
   renderLedgerSection,
 } from './pr-context.js';
+import { serializeLedger, type Ledger } from './lib/ledger.js';
 
 // Guards the recognition of legacy suggestion-summary comments. This is what
 // decides which issue comment is excluded from the "Already discussed" list.
@@ -1035,6 +1036,31 @@ describe('latestOwnLedger', () => {
     expect(ledger?.round).toBe(4);
   });
 
+  it('carries the anchor sha through the recovery seam intact', () => {
+    // The PR's payoff depends on this seam: posted marker → latestOwnLedger →
+    // the prev-ledger side file (a JSON.stringify of exactly this return).
+    // A future normalization that projects the return onto known fields
+    // would silently drop `sha` with every other test still green; this
+    // pins the recovered object, anchor included.
+    const anchored: Ledger = {
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'abc1234def567890',
+    };
+    const recovered = latestOwnLedger(
+      [
+        review(
+          'bot',
+          '2026-01-01T00:00:00Z',
+          `LGTM ${serializeLedger(anchored)}`,
+        ),
+      ],
+      'bot',
+    );
+    expect(recovered).toEqual(anchored);
+  });
+
   it('yields nothing with no login, no marker, or a malformed one', () => {
     expect(
       latestOwnLedger([review('bot', '2026-01-01', marker(1))], null),
@@ -1101,6 +1127,26 @@ describe('renderLedgerSection', () => {
         findings: [{ id: 'R3-1', sev: 'C', file: 'a.ts', title: 't' }],
       }),
     ).not.toContain('PARTIAL');
+  });
+
+  it('names the reviewed-at sha when the ledger carries one, and stays silent when not', () => {
+    // The sha is the incremental anchor Step 1's recovered-anchor check reads
+    // from the side file; the rendered section names it so the orchestrator
+    // sees the anchor exists without opening the JSON.
+    const anchored = renderLedgerSection({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      sha: 'abc1234def56789',
+    });
+    expect(anchored).toContain('reviewed at `abc1234def56789`');
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('reviewed at');
   });
 
   it('renders a work-list table that names the ruling owed per entry', () => {

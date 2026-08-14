@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MessageTimestamp, formatTimestamp } from './MessageTimestamp';
+import styles from './MessageTimestamp.module.css';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -65,7 +66,7 @@ describe('MessageTimestamp', () => {
     expect(container.textContent).toContain('body');
   });
 
-  it('renders children unchanged with no tooltip when timestamp is undefined', () => {
+  it('renders no wrapper when timestamp is undefined', () => {
     const container = render(
       <MessageTimestamp>
         <div data-testid="child">body</div>
@@ -73,10 +74,28 @@ describe('MessageTimestamp', () => {
     );
 
     expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
-    // No wrapper element is introduced: the child stays a direct child of the
-    // mount container, so message spacing/structure is untouched.
     const child = container.querySelector('[data-testid="child"]');
     expect(child).not.toBeNull();
     expect(child?.parentElement).toBe(container);
+  });
+
+  it('uses larger spacing only when requested for a tool group', () => {
+    const defaultRow = render(
+      <MessageTimestamp>
+        <div>default</div>
+      </MessageTimestamp>,
+    );
+    const toolRow = render(
+      <MessageTimestamp toolGroupSpacing>
+        <div>tool</div>
+      </MessageTimestamp>,
+    );
+
+    expect(defaultRow.firstElementChild?.classList).not.toContain(
+      styles.toolGroupSpacing,
+    );
+    expect(toolRow.firstElementChild?.classList).toContain(
+      styles.toolGroupSpacing,
+    );
   });
 });

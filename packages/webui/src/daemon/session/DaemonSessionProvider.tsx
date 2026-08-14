@@ -62,6 +62,7 @@ import {
   getTokenCountFromUsage,
   mapProviderStatus,
   mapSessionContextModels,
+  mapSessionContextReasoning,
   mapSupportedCommands,
   mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
@@ -925,6 +926,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const pumpTransitionRef = useRef<() => void>(() => undefined);
   const lifecycleRef = useRef(0);
   const sourceBoundOperationCountRef = useRef(0);
+  const sessionConfigGenerationRef = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
   const controlledRetryPendingRef = useRef(false);
   const cancelTransitionRef = useRef<(reason: string) => void>(() => undefined);
   const controlledTransitionOriginRef = useRef(false);
@@ -1611,6 +1615,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   {
                     workspaceCwd: effectWorkspaceCwd,
                     timeoutMs: restoreRequestTimeoutMs,
+                    ...(restoreMethod === DaemonSessionClient.load &&
+                    subagentTranscriptModeRef.current === 'summary'
+                      ? { liveReplayMode: 'summary' as const }
+                      : {}),
                     ...(historyPaginationSupported &&
                     restoreMode === 'load' &&
                     attemptedLoad?.replaySource !== 'memory' &&
@@ -1627,6 +1635,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     {
                       workspaceCwd: effectWorkspaceCwd,
                       timeoutMs: restoreRequestTimeoutMs,
+                      ...(subagentTranscriptModeRef.current === 'summary'
+                        ? { liveReplayMode: 'summary' as const }
+                        : {}),
                       ...(historyPaginationSupported &&
                       historyPageSizeRef.current !== undefined
                         ? { historyPageSize: historyPageSizeRef.current }
@@ -2246,6 +2257,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.skills !== undefined &&
               connectionRef.current.supportedCommands !== undefined &&
               connectionRef.current.context !== undefined);
+          const configGeneration =
+            sessionConfigGenerationRef.current.get(activeSession) ?? 0;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
@@ -2329,6 +2342,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               return current;
             }
+            const configSnapshotCurrent =
+              configGeneration % 2 === 0 &&
+              (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
+                configGeneration;
             return {
               ...current,
               status: 'connected',
@@ -2350,15 +2367,28 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 supportedCommands !== undefined ? commands : current.commands,
               skills: supportedCommands !== undefined ? skills : current.skills,
               models: sessionModels.length > 0 ? sessionModels : current.models,
-              currentModel: sessionCurrentModel ?? current.currentModel,
+              currentModel: configSnapshotCurrent
+                ? (sessionCurrentModel ?? current.currentModel)
+                : current.currentModel,
               currentMode: currentMode ?? current.currentMode,
+              reasoning:
+                configSnapshotCurrent && context !== undefined
+                  ? mapSessionContextReasoning(
+                      context,
+                      current.reasoning?.effort,
+                    )
+                  : current.reasoning,
               displayName:
                 getSessionDisplayName(activeSession.state) ??
                 current.displayName,
-              contextWindow: sessionContextWindow ?? current.contextWindow,
+              contextWindow: configSnapshotCurrent
+                ? (sessionContextWindow ?? current.contextWindow)
+                : current.contextWindow,
               providers: providers ?? current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
-              context: context ?? current.context,
+              context: configSnapshotCurrent
+                ? (context ?? current.context)
+                : current.context,
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch
@@ -3946,6 +3976,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       {
         workspaceCwd: intent.workspaceCwd,
         timeoutMs,
+        ...(intent.mode === 'load' &&
+        subagentTranscriptModeRef.current === 'summary'
+          ? { liveReplayMode: 'summary' as const }
+          : {}),
         ...(intent.effectiveHistoryPageSize !== undefined
           ? { historyPageSize: intent.effectiveHistoryPageSize }
           : {}),
@@ -4423,6 +4457,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             });
           }
         },
+        sessionConfigGeneration: sessionConfigGenerationRef.current,
         getTransitionOrigin: () => {
           const controlled = controlledTransitionOriginRef.current;
           controlledTransitionOriginRef.current = false;
@@ -5262,7 +5297,11 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'cleared' &&
     kind !== 'achieved' &&
     kind !== 'failed' &&
-    kind !== 'aborted'
+    kind !== 'aborted' &&
+    // Rejecting 'paused' made every surface keep showing a paused goal as
+    // actively running: the card never rendered and the active-goal
+    // derivation fell back to the previous 'set' card.
+    kind !== 'paused'
   ) {
     return null;
   }

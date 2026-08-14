@@ -31,6 +31,7 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
+import { DAEMON_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
@@ -127,6 +128,10 @@ import {
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
+import {
+  CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+  isChannelWorkerPromptAuthorized,
+} from '../channel-worker-prompt-authorization.js';
 import {
   createRequestedSessionIdAdmission,
   RequestedSessionIdAdmissionError,
@@ -350,6 +355,22 @@ function parseHistoryPageSize(
     return null;
   }
   return value as number;
+}
+
+function parseLiveReplayMode(
+  body: Record<string, unknown>,
+  res: Response,
+): 'full' | 'summary' | undefined | null {
+  const value = body['liveReplayMode'];
+  if (value === undefined) return undefined;
+  if (value !== 'full' && value !== 'summary') {
+    res.status(400).json({
+      error: '`liveReplayMode` must be `full` or `summary`',
+      code: 'invalid_live_replay_mode',
+    });
+    return null;
+  }
+  return value;
 }
 
 function workspaceTranscriptCursorExceedsLimit(
@@ -2106,6 +2127,8 @@ export function registerSessionRoutes(
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
       if (historyPageSize === null) return;
+      const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
+      if (liveReplayMode === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       let sessionIdReservation: RequestedSessionIdReservation;
@@ -2168,6 +2191,7 @@ export function registerSessionRoutes(
                     ...(historyPageSize !== undefined
                       ? { historyPageSize }
                       : {}),
+                    ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
@@ -3352,6 +3376,33 @@ export function registerSessionRoutes(
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
         delete forwardedBody['delivery'];
+        const forwardedMeta =
+          typeof forwardedBody['_meta'] === 'object' &&
+          forwardedBody['_meta'] !== null &&
+          !Array.isArray(forwardedBody['_meta'])
+            ? { ...(forwardedBody['_meta'] as Record<string, unknown>) }
+            : undefined;
+        const promptAuthorization =
+          forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
+        const promptDisplayText =
+          forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+        if (forwardedMeta) {
+          delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
+          delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          if (Object.keys(forwardedMeta).length > 0) {
+            forwardedBody['_meta'] = forwardedMeta;
+          } else {
+            delete forwardedBody['_meta'];
+          }
+        }
+        const trustedPromptDisplayText =
+          typeof promptDisplayText === 'string' &&
+          isChannelWorkerPromptAuthorized(
+            promptAuthorization,
+            runtime.workspaceCwd,
+          )
+            ? promptDisplayText
+            : undefined;
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
@@ -3397,6 +3448,9 @@ export function registerSessionRoutes(
               promptId,
               ...(effectiveDeadlineMs !== undefined
                 ? { deadlineMs: effectiveDeadlineMs }
+                : {}),
+              ...(trustedPromptDisplayText !== undefined
+                ? { promptDisplayText: trustedPromptDisplayText }
                 : {}),
               ...(delivery !== undefined
                 ? {
@@ -4556,6 +4610,36 @@ export function registerSessionRoutes(
             modelId,
           } as Parameters<AcpSessionBridge['setSessionModel']>[1],
           clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/config-option',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/config-option',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const configId = body['configId'];
+        const value = body['value'];
+        if (configId !== 'reasoning_effort') {
+          res.status(400).json({
+            error: '`configId` must be reasoning_effort',
+          });
+          return;
+        }
+        if (typeof value !== 'string' || !value) {
+          res.status(400).json({
+            error: '`value` is required and must be a non-empty string',
+          });
+          return;
+        }
+        const response = await runtime.bridge.setSessionConfigOption(
+          sessionId,
+          { sessionId, configId, value },
         );
         res.status(200).json(response);
       },
