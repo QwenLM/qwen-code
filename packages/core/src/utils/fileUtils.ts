@@ -59,6 +59,8 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+// Every entry must have a magic signature in sniffFileKind (binary-content.ts);
+// an unmagicked format here would classify every valid image of it as 'binary'.
 const SNIFFABLE_IMAGE_MIME_TYPES = new Set([
   'image/gif',
   'image/jpeg',
