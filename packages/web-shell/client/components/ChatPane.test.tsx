@@ -883,7 +883,7 @@ describe('ChatPane', () => {
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('hi', undefined, commit);
+      returned = latestOnSubmit!('hi', undefined, undefined, commit);
     });
     expect(returned).toBe(false);
     expect(commit).not.toHaveBeenCalled();
@@ -980,7 +980,7 @@ describe('ChatPane', () => {
     ];
     render();
     act(() => {
-      latestOnSubmit!('check @.husky/', undefined, undefined, {
+      latestOnSubmit!('check @.husky/', undefined, undefined, undefined, {
         inputAnnotations,
       });
     });
@@ -997,11 +997,12 @@ describe('ChatPane', () => {
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('queued next', undefined, commit);
+      returned = latestOnSubmit!('queued next', undefined, undefined, commit);
     });
     expect(returned).toBe(true);
     expect(enqueuePrompt).toHaveBeenCalledWith(
       'queued next',
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -1020,7 +1021,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('name this queued task');
     });
 
-    const onAdmitted = enqueuePrompt.mock.calls[0]?.[4] as
+    const onAdmitted = enqueuePrompt.mock.calls[0]?.[5] as
       | (() => void)
       | undefined;
     expect(onAdmitted).toEqual(expect.any(Function));
@@ -1103,12 +1104,13 @@ describe('ChatPane', () => {
     ];
     render();
     act(() => {
-      latestOnSubmit!('queue @.husky/', undefined, undefined, {
+      latestOnSubmit!('queue @.husky/', undefined, undefined, undefined, {
         inputAnnotations,
       });
     });
     expect(enqueuePrompt).toHaveBeenCalledWith(
       'queue @.husky/',
+      undefined,
       undefined,
       undefined,
       inputAnnotations,
@@ -1129,6 +1131,7 @@ describe('ChatPane', () => {
       images,
       undefined,
       undefined,
+      undefined,
       expect.any(Function),
     );
   });
@@ -1142,7 +1145,7 @@ describe('ChatPane', () => {
       latestOnSubmit!('', images);
     });
 
-    expect(enqueuePrompt).toHaveBeenCalledWith('', images);
+    expect(enqueuePrompt).toHaveBeenCalledWith('', images, undefined);
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -1196,7 +1199,7 @@ describe('ChatPane', () => {
     render({ onError, onImageIngestionNotice });
     const commit = vi.fn();
     await act(async () => {
-      latestOnSubmit!('hi', undefined, commit);
+      latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
     expect(commit).not.toHaveBeenCalled();
@@ -1270,7 +1273,7 @@ describe('ChatPane', () => {
     const commit = vi.fn();
 
     act(() => {
-      latestOnSubmit!('hi', undefined, commit);
+      latestOnSubmit!('hi', undefined, undefined, commit);
       sendPromptAdmit?.();
     });
     await act(async () => {
@@ -1296,7 +1299,7 @@ describe('ChatPane', () => {
     render();
     const commit = vi.fn();
     await act(async () => {
-      latestOnSubmit!('hi', undefined, commit);
+      latestOnSubmit!('hi', undefined, undefined, commit);
       await Promise.resolve();
     });
 
@@ -1560,7 +1563,7 @@ describe('ChatPane', () => {
     render();
     let returned: boolean | undefined;
     act(() => {
-      returned = latestOnSubmit!('   ', undefined, vi.fn());
+      returned = latestOnSubmit!('   ', undefined, undefined, vi.fn());
     });
     expect(returned).toBe(false);
     expect(sendPrompt).not.toHaveBeenCalled();

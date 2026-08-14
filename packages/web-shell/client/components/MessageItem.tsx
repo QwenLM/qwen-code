@@ -72,6 +72,7 @@ export const MessageItem = memo(function MessageItem({
           <UserMessage
             content={message.content}
             images={message.images}
+            files={message.files}
             inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}

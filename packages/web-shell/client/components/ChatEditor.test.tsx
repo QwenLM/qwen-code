@@ -26,6 +26,12 @@ Element.prototype.scrollIntoView = vi.fn();
 const mockComposerCoreState = vi.hoisted(() => ({
   composerTags: [] as WebShellComposerTag[],
   pastedImages: [] as Array<{ data: string; media_type: string }>,
+  pastedFiles: [] as Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>,
   removeTopTag: vi.fn(),
 }));
 
@@ -177,6 +183,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         hasInput: vi.fn(() => false),
         hasAttachments:
           mockComposerCoreState.pastedImages.length > 0 ||
+          mockComposerCoreState.pastedFiles.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
         hasContent: false,
         canSubmit: false,
@@ -197,10 +204,13 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           submit: vi.fn(),
           hasAttachments: () =>
             mockComposerCoreState.pastedImages.length > 0 ||
+            mockComposerCoreState.pastedFiles.length > 0 ||
             mockComposerCoreState.composerTags.length > 0,
         },
         pastedImages: mockComposerCoreState.pastedImages,
         removeImage: vi.fn(),
+        pastedFiles: mockComposerCoreState.pastedFiles,
+        removeFile: vi.fn(),
         composerTags: mockComposerCoreState.composerTags,
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
@@ -301,6 +311,7 @@ afterEach(() => {
   }
   mockComposerCoreState.composerTags = [];
   mockComposerCoreState.pastedImages = [];
+  mockComposerCoreState.pastedFiles = [];
   mockComposerCoreState.removeTopTag.mockReset();
   vi.useRealTimers();
 });
@@ -308,6 +319,12 @@ afterEach(() => {
 interface ChatEditorRenderProps {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
+  pastedFiles?: Array<{
+    name: string;
+    media_type: string;
+    text: string;
+    size?: number;
+  }>;
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -342,6 +359,7 @@ function renderChatEditorInto(
   const {
     composerTags,
     pastedImages,
+    pastedFiles,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -352,6 +370,9 @@ function renderChatEditorInto(
   }
   if (pastedImages) {
     mockComposerCoreState.pastedImages = pastedImages;
+  }
+  if (pastedFiles) {
+    mockComposerCoreState.pastedFiles = pastedFiles;
   }
 
   act(() => {

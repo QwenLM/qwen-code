@@ -168,6 +168,7 @@ export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
+  files?: readonly { name: string; mimeType: string }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
 }
 

@@ -31,6 +31,7 @@ export type {
   DaemonNoticeCategory,
   DaemonNoticeOperation,
   DaemonNoticeSeverity,
+  DaemonPromptFile,
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonReasoningControls,
