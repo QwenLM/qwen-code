@@ -248,6 +248,36 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     expect(capturedMaxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
   });
 
+  it('rejects any output at a floored budget of 1 instead of persisting a degenerate summary', async () => {
+    // When the slimmed estimate already fills the window the budget floors
+    // at 1. A 1-token cap cannot hold a usable summary, so the single token
+    // the model emits is definitionally truncated and must be dropped —
+    // persisting it would replace the entire history with a 1-token fragment
+    // while resetting the failure breaker.
+    // 257,900 chars (~64.5K tokens) puts the estimate inside the narrow
+    // floor band where estimate >= window - margin (budget floors at 1) yet
+    // estimate + 1 still fits the window, so the backend accepts the request
+    // instead of 400-ing preflight.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'x'.repeat(257_900) }] },
+      { role: 'model', parts: [{ text: 'ok' }] },
+    ]);
+    mockVllmBackend(WINDOW, true);
+
+    const result = await service.compress(mockChat, {
+      promptId: 'test-prompt-id',
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 65_000,
+    });
+    expect(capturedMaxOutputTokens).toBe(1);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+  });
+
   describe('computeCompactionOutputBudget', () => {
     it('returns the fixed ceiling when the window has ample room', () => {
       expect(computeCompactionOutputBudget(10_000, 128_000)).toBe(

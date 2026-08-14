@@ -874,6 +874,10 @@ export class ChatCompressionService {
       compressionUsageMetadata?.promptTokenCount;
     let compressionOutputTokenCount =
       compressionUsageMetadata?.candidatesTokenCount;
+    // Local fallback estimates are NOT bounded by the requested budget (only
+    // provider-reported counts are), so the guard below keys its threshold
+    // to the count's provenance.
+    let outputCountIsEstimated = false;
     if (
       compressionOutputTokenCount === undefined &&
       typeof compressionUsageMetadata?.totalTokenCount === 'number' &&
@@ -885,6 +889,7 @@ export class ChatCompressionService {
       );
     }
     if (compressionOutputTokenCount === undefined && !isSummaryEmpty) {
+      outputCountIsEstimated = true;
       compressionOutputTokenCount = estimateSummaryOutputTokens(
         summary,
         slimmingConfig.imageTokenEstimate,
@@ -907,32 +912,40 @@ export class ChatCompressionService {
     // call on every send. Reactive overflow still catches the catastrophic
     // case. See docs/design/auto-compaction-threshold-redesign.md risk #2.
     //
-    // The comparison is against coldOutputBudget, not the fixed ceiling:
-    // since issue #7960's clamp the requested budget can sit below
-    // COMPACT_MAX_OUTPUT_TOKENS, and output can never exceed what was
+    // Provider-reported counts compare against coldOutputBudget, not the
+    // fixed ceiling: since issue #7960's clamp the requested budget can sit
+    // below COMPACT_MAX_OUTPUT_TOKENS, and output can never exceed what was
     // requested — comparing against the fixed ceiling would make this guard
-    // unreachable on every clamped request. The floor regime (budget 1)
-    // is excluded: `>= budget` degenerates there (any output "hits" a
-    // 1-token cap), and a prompt that exhausts the window is normally
-    // rejected by the backend before generating anything.
+    // unreachable on every clamped request. That includes the floor regime
+    // (budget 1): a 1-token cap cannot hold a usable summary, so any output
+    // at the cap is definitionally truncated and must be dropped.
+    //
+    // Local estimates instead keep the pre-clamp fixed-ceiling threshold:
+    // unlike provider counts they can overshoot the budget purely from
+    // estimator error (the ±30% variance the margin documents), so comparing
+    // them against a clamped budget would convert that error into false
+    // truncation verdicts for complete summaries. The fixed ceiling
+    // preserves the pre-#7960 semantics for the usage-missing path.
     //
     // TODO(finish_reason): the current `>= budget` check is a heuristic that
     // false-positives on legitimate summaries that happen to land exactly at
     // the budget. The proper signal is `finish_reason === 'length'` (OpenAI) /
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
+    const truncationThreshold = outputCountIsEstimated
+      ? COMPACT_MAX_OUTPUT_TOKENS
+      : coldOutputBudget;
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
-      coldOutputBudget > 1 &&
-      compressionOutputTokenCount >= coldOutputBudget
+      compressionOutputTokenCount >= truncationThreshold
     ) {
       config
         .getDebugLogger()
         .warn(
-          `[chat-compression] summary output reached the requested output ` +
-            `budget (${coldOutputBudget}); ` +
+          `[chat-compression] summary output reached the truncation ` +
+            `threshold (${truncationThreshold}); ` +
             `dropping potentially-truncated result. This counts as a ` +
             `compression failure for the per-chat circuit breaker.`,
         );

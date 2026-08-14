@@ -563,13 +563,19 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    // Realistic window: a 1000-token window floors the side-query output
+    // budget to 1 (issue #7960 clamp), and the truncation guard rightly
+    // rejects any output at a 1-token cap. 32K keeps the budget at the 20K
+    // ceiling so the 50-token summary below is accepted.
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      28_000,
+    );
     // Mock contextWindowSize instead of tokenLimit
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 32_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    // newTokenCount = 900 - (1600 - 1000) + 50 = 900 - 600 + 50 = 350 <= 900 (success)
+    // newTokenCount = 28000 - (1600 - 1000) + 50 = 27450 <= 28000 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
       usage: {
@@ -591,7 +597,7 @@ describe('ChatCompressionService', () => {
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.newTokenCount).toBe(350); // 900 - (1600 - 1000) + 50
+    expect(result.info.newTokenCount).toBe(27_450); // 28000 - (1600 - 1000) + 50
     expect(result.newHistory).not.toBeNull();
     // postProcessSummary appends the resume trailer to the summary body,
     // so it's "Summary\n\n<trailer>" rather than a strict equality.
@@ -634,11 +640,16 @@ describe('ChatCompressionService', () => {
       throw new Error('getHistory should not be called by compression');
     });
     vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+    // Window must comfortably exceed the ~256K-token estimate of the 1MB
+    // tool output above, otherwise the issue-#7960 clamp floors the output
+    // budget to 1 and the truncation guard rejects the summary.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 1_000_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      900_000,
+    );
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -1286,7 +1297,7 @@ describe('ChatCompressionService', () => {
       expect.stringContaining('local estimate'),
     );
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('requested output budget'),
+      expect.stringContaining('truncation threshold'),
     );
   });
 
@@ -1342,7 +1353,7 @@ describe('ChatCompressionService', () => {
       expect.stringContaining('local estimate'),
     );
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('requested output budget'),
+      expect.stringContaining('truncation threshold'),
     );
   });
 
@@ -1453,10 +1464,12 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      28_000,
+    );
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 32_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1547,11 +1560,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1629,11 +1642,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       mockFirePreCompactEvent.mockRejectedValue(
@@ -1675,11 +1688,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const callOrder: string[] = [];
@@ -1721,11 +1734,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1819,11 +1832,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -1902,11 +1915,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       mockFirePostCompactEvent.mockRejectedValue(
@@ -1948,11 +1961,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const callOrder: string[] = [];
@@ -1998,11 +2011,11 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        900,
+        28_000,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
-        contextWindowSize: 1000,
+        contextWindowSize: 32_000,
       } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
       const mockGenerateContent = vi.fn().mockResolvedValue({
@@ -2158,7 +2171,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     );
     expect(result.newHistory).toBeNull();
     expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('requested output budget'),
+      expect.stringContaining('truncation threshold'),
     );
   });
 });
