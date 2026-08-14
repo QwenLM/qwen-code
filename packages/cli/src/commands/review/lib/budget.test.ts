@@ -332,6 +332,23 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'Budget gap: no gaps found',
       'Budget gap: none ( all checks completed)',
       'Budget gap:',
+      // The trailing budget adverbial after the completion word — three of
+      // these reached two posted bodies in one live round (2026-08-13,
+      // PRs #9013/#9045) because the completion word was not final.
+      'Budget gap: none — all checks above completed within budget.',
+      'Budget gap: none — all checks I started were completed within budget.',
+      'Budget gap: none — all checks my dimension defines were completed within budget.',
+      'Budget gap: none — all planned checks done under the tool budget',
+      'Budget gap: None (all checks completed within the tool-call budget)',
+      // One vocabulary across the idiom family: `below` in the completion
+      // tail, and the stayed idiom with the same qualifiers the tail takes —
+      // including the space-separated `tool call` form the regex accepts.
+      'Budget gap: none — all checks completed below budget.',
+      'Budget gap: none — stayed inside budget.',
+      'Budget gap: none — stayed under the tool budget',
+      'Budget gap: none — stayed below the tool-call budget.',
+      'Budget gap: none — all checks completed within the tool call budget.',
+      'Budget gap: none — stayed within the tool call budget',
     ]) {
       expect(budgetGapDisclosures(line)).toEqual([]);
     }
@@ -388,6 +405,10 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       'nothing — every check crashed',
       'none — all 5 Windows checks failed to start',
       'none — all planned checks completed except the Windows matrix',
+      // The budget adverbial is end-anchored like its siblings: a clause
+      // continuing past it discloses skipped work — in both branch forms.
+      'none — all checks completed within budget, but the Windows matrix never ran',
+      'None (all checks completed within the tool-call budget, but the Windows matrix never ran)',
       '<integration tests on Windows> runner unavailable',
     ]) {
       expect(budgetGapDisclosures(`Budget gap: ${gap}`)).toEqual([gap]);
