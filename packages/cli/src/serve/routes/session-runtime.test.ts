@@ -183,4 +183,59 @@ describe('requireSessionRuntime telemetry attribution', () => {
       expect(telemetryMocks.setDaemonTelemetryWorkspace).not.toHaveBeenCalled();
     },
   );
+
+  it('redacts internal workspace ids from ambiguous ownership responses', () => {
+    const primary = runtime('/workspace/primary', { primary: true });
+    const internal = {
+      ...runtime('/workspace/conversations'),
+      provenance: 'live-conversation' as const,
+    };
+    const setup = registry({
+      primary,
+      runtimes: [primary, internal],
+      resolution: { kind: 'ambiguous', runtimes: [primary, internal] },
+    });
+    const res = response();
+
+    expect(
+      requireSessionRuntime({
+        sessionId: 'duplicate-session',
+        route: 'GET /session/:id/events',
+        res,
+        workspaceRegistry: setup.registry,
+      }),
+    ).toBeUndefined();
+    expect(res.statusCode).toBe(500);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'ambiguous_session_owner',
+        sessionId: 'duplicate-session',
+      }),
+    );
+    expect(vi.mocked(res.json).mock.calls[0]?.[0]).not.toHaveProperty(
+      'workspaceIds',
+    );
+  });
+
+  it('keeps ordinary workspace ids in ambiguous ownership responses', () => {
+    const primary = runtime('/workspace/primary', { primary: true });
+    const secondary = runtime('/workspace/secondary');
+    const setup = registry({
+      primary,
+      runtimes: [primary, secondary],
+      resolution: { kind: 'ambiguous', runtimes: [primary, secondary] },
+    });
+    const res = response();
+
+    requireSessionRuntime({
+      sessionId: 'duplicate-session',
+      route: 'GET /session/:id/events',
+      res,
+      workspaceRegistry: setup.registry,
+    });
+
+    expect(vi.mocked(res.json).mock.calls[0]?.[0]).toMatchObject({
+      workspaceIds: ['primary', 'secondary'],
+    });
+  });
 });

@@ -77,19 +77,20 @@
 12. **Build `fsFactory`**: `runQwenServe` defaults to `trusted: true`; direct `createServeApp` callers default to `trusted: false` and warn once.
 13. **`createHttpAcpBridge`**, see [`03-acp-bridge.md`](./03-acp-bridge.md).
 14. **`createServeApp`** assembles Express.
-15. **`server.listen(port, hostname)`**, then resolve the actual `getPort()` for host allowlist.
-16. **Register SIGINT / SIGTERM handlers** for graceful shutdown.
+15. **Create and lifecycle-bind the HTTP(S) server before listening**, then call `server.listen(port, hostname)` and resolve the actual `getPort()` for host allowlist. Conversations ownership cannot start until this listener and the remaining host startup gates are ready.
+16. **Register SIGINT / SIGTERM handlers** for graceful shutdown through the shared app lifecycle.
 
 ### Graceful shutdown
 
-1. **Phase 1 - bridge teardown** on first signal:
+1. **Seal admission and begin all drains** on the first signal:
    - Dispose the device-flow registry and cancel pending flows.
    - `bridge.shutdown()` marks each channel `isDying = true`, sends graceful close to each ACP child stdin, waits `KILL_HARD_DEADLINE_MS` (10s) per channel, then calls `channel.kill()` if needed.
-2. **Phase 2 - HTTP teardown**:
+2. **Close the listener while app and host drains run**:
    - `server.close()` stops accepting new connections and lets in-flight requests finish.
    - `SHUTDOWN_FORCE_CLOSE_MS` (5s) triggers `server.closeAllConnections()`.
    - A second 2s deadline escalates again if needed.
-3. **Second signal while exiting**:
+3. **Release Conversations ownership only after positive shutdown proof** from the listener, app-local work, host-owned work, Live discovery cleanup, and runtime drains. Any incomplete proof rejects shutdown instead of allowing an unsafe handoff.
+4. **Second signal while exiting**:
    - `bridge.killAllSync()` + `process.exit(1)` to avoid orphaned children blocking daemon exit.
 
 ## State and lifecycle
@@ -98,9 +99,9 @@
 
 - `url`: resolved listen URL, after ephemeral port resolution.
 - `port`: actual port, including `0` resolution.
-- `close({ timeoutMs? })`: programmatic shutdown for embedders and tests.
+- `close()`: programmatic shutdown for embedders and tests.
 
-Calling `createServeApp` directly returns only an `Application`; the embedder owns `listen` and shutdown.
+Calling `createServeApp` directly still returns only an `Application`. An embedder that needs Live/Conversations must create the actual Node server, call `getServeAppLifecycle(app).bindServer(server)` before its first `listen()`, and await `lifecycle.close()` during shutdown. Without binding, ordinary routes remain available but Live/Conversations fail closed. Calling raw `server.close()` triggers event-driven cleanup, but the embedder must still await `lifecycle.close()` to observe drain or ownership-release failures.
 
 ## Dependencies
 

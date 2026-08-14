@@ -298,6 +298,7 @@ function makeHarness() {
     bridge,
     projectBridge,
     runtime,
+    registry,
     summaries,
     resident,
     sendPrompt,
@@ -321,6 +322,24 @@ beforeEach(() => {
 });
 
 describe('LiveTaskService', () => {
+  it('preserves the structured unavailable error for an inactive internal owner', async () => {
+    const harness = makeHarness();
+    vi.spyOn(harness.registry, 'resolveLiveSessionOwner').mockReturnValue({
+      kind: 'unavailable',
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'inactive-task' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
+  });
+
   it('lists existing tasks in the current Codex wire shape without creating one', async () => {
     const harness = makeHarness();
     listWorkspaceSessionsForResponse

@@ -42,7 +42,10 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
-import type { WorkspaceRegistry } from './workspace-registry.js';
+import {
+  isInternalWorkspaceRuntime,
+  type WorkspaceRegistry,
+} from './workspace-registry.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
@@ -159,6 +162,7 @@ interface FullDaemonStatus {
 
 interface WorkspaceBridgeStatusSnapshot {
   workspaceCwd: string;
+  internal?: boolean;
   snapshot: BridgeDaemonStatusSnapshot;
   lastActivity: number | null;
 }
@@ -560,9 +564,12 @@ export async function buildDaemonStatusResponse(
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const lastActivity = input.bridge.lastActivityAt ?? null;
   const workspaceRuntimes = input.workspaceRegistry?.list();
+  const aggregateRuntimes =
+    input.workspaceRegistry?.listAll?.() ?? workspaceRuntimes;
   const workspaceSnapshots: WorkspaceBridgeStatusSnapshot[] =
-    workspaceRuntimes?.map((runtime) => ({
+    aggregateRuntimes?.map((runtime) => ({
       workspaceCwd: runtime.workspaceCwd,
+      internal: isInternalWorkspaceRuntime(runtime),
       snapshot:
         runtime.bridge === input.bridge
           ? bridgeSnapshot
@@ -606,7 +613,10 @@ export async function buildDaemonStatusResponse(
           .length
       : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
     const registeredWorkspaceCount = input.workspaceRegistry
-      ? input.workspaceRegistry.listEntries().length
+      ? (
+          input.workspaceRegistry.listAllEntries?.() ??
+          input.workspaceRegistry.listEntries()
+        ).length
       : workspaceSnapshots.length;
     // Summed in the SAME synchronous pass that produced `activeAcpChildCount`
     // above, over the same array. Keep it that way: an `await` slipped between
@@ -718,7 +728,7 @@ export async function buildDaemonStatusResponse(
     derivedQueuedPromptsByWorkspace[index] = derivedQueuedPromptsForWorkspace;
   }
   const queuedPrompts =
-    workspaceRuntimes?.reduce(
+    aggregateRuntimes?.reduce(
       (sum, runtime, index) =>
         sum +
         (runtime.bridge.pendingPromptTotal ??
@@ -803,7 +813,9 @@ export async function buildDaemonStatusResponse(
     full = await buildFullStatus(
       input,
       acpAggregate,
-      workspaceSnapshots.flatMap((item) => item.snapshot.sessions),
+      workspaceSnapshots
+        .filter((item) => item.internal !== true)
+        .flatMap((item) => item.snapshot.sessions),
     );
     pushFullIssues(issues, full);
   }
@@ -936,7 +948,7 @@ export async function buildDaemonStatusResponse(
         : {}),
       activity: {
         activePrompts:
-          workspaceRuntimes?.reduce(
+          aggregateRuntimes?.reduce(
             (sum, runtime) => sum + (runtime.bridge.activePromptCount ?? 0),
             0,
           ) ??
@@ -1096,7 +1108,7 @@ function pushRuntimeIssues(
   totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
   workspaceSnapshots: readonly WorkspaceBridgeStatusSnapshot[],
 ): void {
-  for (const { workspaceCwd, snapshot } of workspaceSnapshots) {
+  for (const { workspaceCwd, internal, snapshot } of workspaceSnapshots) {
     if (
       snapshot.limits.maxSessions !== null &&
       snapshot.limits.maxSessions > 0 &&
@@ -1108,7 +1120,9 @@ function pushRuntimeIssues(
         severity: 'warning',
         message:
           workspaceSnapshots.length > 1
-            ? `Workspace ${workspaceCwd} active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
+            ? internal
+              ? `An internal runtime's active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
+              : `Workspace ${workspaceCwd} active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
             : `Active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`,
       });
     }
@@ -1174,7 +1188,9 @@ function pushRuntimeIssues(
       severity: 'error',
       message:
         downWorkspaces.length === 1
-          ? `Active sessions exist but the ACP channel is not live for ${downWorkspaces[0]!.workspaceCwd}.`
+          ? downWorkspaces[0]!.internal
+            ? 'Active sessions exist but the ACP channel is not live for an internal runtime.'
+            : `Active sessions exist but the ACP channel is not live for ${downWorkspaces[0]!.workspaceCwd}.`
           : `Active sessions exist but the ACP channel is not live for ${downWorkspaces.length} workspace(s).`,
     });
   }

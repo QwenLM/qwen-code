@@ -8,10 +8,11 @@ import * as fs from 'node:fs';
 import path from 'node:path';
 import type { Request, Response } from 'express';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
-import type {
-  WorkspaceEntry,
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  isInternalWorkspaceRuntime,
+  type WorkspaceEntry,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
 } from './workspace-registry.js';
 
 export interface WorkspaceRouteContext {
@@ -127,15 +128,18 @@ export function resolveManagedWorkspaceRuntimeByPathSelector(
   selector: string,
 ): WorkspaceRuntime | undefined {
   const exact = registry.getManagedByWorkspaceCwd(selector);
-  if (exact) return exact;
+  if (exact && !isInternalWorkspaceRuntime(exact)) return exact;
 
   if (path.isAbsolute(selector) && !isUncPath(selector)) {
     try {
       const canonicalSelector = canonicalizeWorkspace(selector);
       const canonicalMatch =
         registry.getManagedByWorkspaceCwd(canonicalSelector);
-      if (canonicalMatch) return canonicalMatch;
+      if (canonicalMatch && !isInternalWorkspaceRuntime(canonicalMatch)) {
+        return canonicalMatch;
+      }
       for (const runtime of registry.listManaged()) {
+        if (isInternalWorkspaceRuntime(runtime)) continue;
         if (canonicalizeWorkspace(runtime.workspaceCwd) === canonicalSelector) {
           return runtime;
         }
@@ -150,8 +154,9 @@ export function resolveManagedWorkspaceRuntimeByPathSelector(
     .listManaged()
     .find(
       (runtime) =>
+        !isInternalWorkspaceRuntime(runtime) &&
         normalizePortableAbsolutePath(runtime.workspaceCwd) ===
-        normalizedSelector,
+          normalizedSelector,
     );
 }
 
@@ -169,6 +174,43 @@ export function resolveWorkspaceRuntimeFromParam(
     return null;
   }
   return runtime;
+}
+
+export function resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  if (
+    typeof registry.getManagedEntryByWorkspaceId !== 'function' ||
+    typeof registry.getManagedEntryByWorkspaceCwd !== 'function'
+  ) {
+    return resolveWorkspaceRuntimeFromParam(registry, req, res, paramName);
+  }
+  const selector = req.params[paramName] ?? '';
+  let entry = registry.getManagedEntryByWorkspaceId(selector);
+  if (!entry && isPortableAbsolutePath(selector)) {
+    entry = registry.getManagedEntryByWorkspaceCwd(selector);
+  }
+  if (!entry?.internal) {
+    return resolveWorkspaceRuntimeFromParam(registry, req, res, paramName);
+  }
+  const runtime = entry.state === 'active' ? entry.current?.runtime : undefined;
+  if (!runtime) {
+    sendConversationRuntimeUnavailable(res);
+    return null;
+  }
+  return runtime;
+}
+
+export function sendConversationRuntimeUnavailable(res: Response): void {
+  res.set('Retry-After', '1');
+  res.status(503).json({
+    error: 'The Conversations runtime is temporarily unavailable.',
+    code: 'conversation_runtime_unavailable',
+    retryable: true,
+  });
 }
 
 export function sendWorkspaceRuntimeUnavailable(
@@ -211,7 +253,7 @@ export function resolveManagedWorkspaceRuntimeFromParam(
 ): WorkspaceRuntime | null {
   const selector = req.params[paramName] ?? '';
   const byId = registry.getManagedByWorkspaceId(selector);
-  if (byId) return byId;
+  if (byId && !isInternalWorkspaceRuntime(byId)) return byId;
 
   if (!isPortableAbsolutePath(selector)) {
     res.status(400).json({

@@ -4360,7 +4360,7 @@ export function WebShellSidebar({
                   noSessionsLabel={t('sidebar.noSessions')}
                   loadErrorLabel={t('sidebar.loadFailed')}
                   organizationEnabled={false}
-                  sourceType={selectedSessionSource}
+                  sourceType={sourceMetadataEnabled ? 'default' : undefined}
                   channelGroupingEnabled={channelGroupingEnabled}
                   ungroupedLabel={t('sidebar.groupUngrouped')}
                   formatTime={(iso) => formatRelativeTime(iso, t)}

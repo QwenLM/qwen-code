@@ -220,7 +220,7 @@ describe('SessionArchiveCoordinator', () => {
     expect(drained).toBe(true);
   });
 
-  it('does not wait for shared transcript reads when sealed', async () => {
+  it('seals new shared maintenance and waits for admitted reads', async () => {
     const coordinator = new SessionArchiveCoordinator();
     let finish!: () => void;
     const shared = coordinator.runSharedMany(
@@ -231,9 +231,21 @@ describe('SessionArchiveCoordinator', () => {
         }),
     );
 
-    await expect(coordinator.sealMaintenanceAndWait()).resolves.toBeUndefined();
+    const drain = coordinator.sealMaintenanceAndWait();
+    await expect(
+      coordinator.runSharedMany(['session-b'], async () => undefined),
+    ).rejects.toMatchObject({ code: 'daemon_draining' });
+    let drained = false;
+    void drain.then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
     finish();
     await shared;
+    await drain;
+    expect(drained).toBe(true);
   });
 });
 

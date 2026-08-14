@@ -4178,7 +4178,22 @@ describe('WebShellSidebar Live group', () => {
     expect(container.textContent).toContain('Voice check');
     expect(listWorkspaceSessions).toHaveBeenCalledWith(
       liveWorkspace.cwd,
-      expect.objectContaining({ archiveState: 'active' }),
+      expect.objectContaining({
+        archiveState: 'active',
+        sourceType: 'default',
+      }),
+    );
+
+    await switchSessionSource('Channels');
+    expect(
+      listWorkspaceSessions.mock.calls.findLast(
+        ([cwd]) => cwd === liveWorkspace.cwd,
+      )?.[1],
+    ).toEqual(
+      expect.objectContaining({
+        archiveState: 'active',
+        sourceType: 'default',
+      }),
     );
   });
 });

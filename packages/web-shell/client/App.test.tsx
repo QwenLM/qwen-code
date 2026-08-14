@@ -9182,7 +9182,7 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('labels the Live composer workspace without exposing its backing name', async () => {
+  it('keeps the Live runtime out of the ordinary composer workspace selector', async () => {
     mockWorkspace.capabilities = {
       workspaces: [
         {
@@ -9205,16 +9205,9 @@ describe('App session callbacks', () => {
     renderApp();
     await flush();
 
-    expect(
-      testState.latestChatEditorProps?.workspaces?.find(
-        (entry) => entry.id === 'live',
-      ),
-    ).toMatchObject({ label: 'Live' });
-    expect(
-      testState.latestChatEditorProps?.workspaces?.some(
-        (entry) => entry.label === 'Conversations',
-      ),
-    ).toBe(false);
+    expect(testState.latestChatEditorProps?.workspaces).toEqual([
+      expect.objectContaining({ id: 'primary', cwd: '/tmp/project' }),
+    ]);
   });
 
   it('keeps composer git status stable across an equivalent refresh', async () => {

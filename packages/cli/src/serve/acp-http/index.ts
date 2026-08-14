@@ -23,9 +23,10 @@ import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
 import { AcpDispatcher, type LiveSessionIsolation } from './dispatch.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  isInternalWorkspaceRuntime,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
   isPortableAbsolutePath,
@@ -1378,7 +1379,9 @@ export function mountAcpHttp(
   const getOrCreateSecondaryMount = (
     rt: WorkspaceRuntime,
   ): RuntimeAcpMount | undefined => {
-    if (rt.primary || !rt.trusted) return undefined;
+    if (rt.primary || !rt.trusted || isInternalWorkspaceRuntime(rt)) {
+      return undefined;
+    }
     const existing = secondaryMounts.get(rt.workspaceId);
     if (existing) return existing;
     const mount = createSecondaryAcpMount(rt);
@@ -1678,6 +1681,12 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
+        if (isInternalWorkspaceRuntime(runtime)) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
         if (!runtime.trusted) {
           logReject(`untrusted-workspace ${runtime.workspaceId}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -1725,6 +1734,12 @@ export function mountAcpHttp(
             ? resolveManagedWorkspaceRuntimeByPathSelector(wsRegistry, selector)
             : undefined);
         if (!rt) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        if (isInternalWorkspaceRuntime(rt)) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);
           socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
           socket.destroy();

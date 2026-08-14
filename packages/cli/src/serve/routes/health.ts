@@ -56,7 +56,7 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
     try {
       if (
         workspaceRegistry
-          .listEntries()
+          .listAllEntries()
           .some((entry) => entry.state === 'blocked')
       ) {
         res.status(503).json({

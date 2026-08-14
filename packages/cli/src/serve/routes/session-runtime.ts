@@ -6,9 +6,10 @@
 
 import type { Response } from 'express';
 import type { DaemonLogger } from '../daemon-logger.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
+import {
+  isInternalWorkspaceRuntime,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
   sendUntrustedWorkspaceResponse,
@@ -46,11 +47,21 @@ export function requireSessionRuntime(opts: {
     daemonLog,
     details = {},
   } = opts;
-  if (workspaceRegistry.listEntries().length === 1) {
+  if (workspaceRegistry.listAllEntries().length === 1) {
     return requirePrimarySessionRuntime(workspaceRegistry, res);
   }
 
   const resolution = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+  if (resolution.kind === 'unavailable') {
+    daemonLog?.warn('session routing failed', {
+      route,
+      resolutionKind: 'workspace_runtime_unavailable',
+      sessionId,
+      ...details,
+    });
+    sendWorkspaceRuntimeUnavailable(res);
+    return undefined;
+  }
   if (resolution.kind === 'found') {
     const runtime = resolution.runtime;
     setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
@@ -103,7 +114,11 @@ export function requireSessionRuntime(opts: {
     code: 'ambiguous_session_owner',
     sessionId,
     route,
-    workspaceIds,
+    ...(resolution.runtimes.every(
+      (runtime) => !isInternalWorkspaceRuntime(runtime),
+    )
+      ? { workspaceIds }
+      : {}),
   });
   return undefined;
 }
