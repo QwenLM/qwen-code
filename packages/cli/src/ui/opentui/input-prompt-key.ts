@@ -37,6 +37,21 @@ export function isUnmodifiedBackspaceSequence(sequence: string): boolean {
   return UNMODIFIED_BACKSPACE_SEQUENCES.has(sequence);
 }
 
+/**
+ * Raw DELETE_WORD_BACKWARD sequences (keyBindings.ts parity). MinTTY (Git
+ * Bash on Windows) emits the byte \x1f (ASCII Unit Separator) for
+ * Ctrl+Backspace under its Ctrl-modifies-meta-keys convention; the same byte
+ * is the historical Ctrl-mapping of Unit Separator on traditional ANSI/VT
+ * terminals. Kitty-encoded modified Backspace (CSI 127;5u etc.) and parsed
+ * ctrl/command+backspace keypresses are handled on the parsed-key path.
+ */
+const DELETE_WORD_BACKWARD_SEQUENCES: ReadonlySet<string> = new Set(['\x1f']);
+
+/** True when a raw stdin sequence is a legacy Ctrl+Backspace word delete. */
+export function isDeleteWordBackwardSequence(sequence: string): boolean {
+  return DELETE_WORD_BACKWARD_SEQUENCES.has(sequence);
+}
+
 /** The parsed-key fields the printable fallback decides on. */
 export interface PrintableKeyInput {
   sequence: string;

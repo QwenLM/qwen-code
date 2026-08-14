@@ -30,7 +30,11 @@
 import { escapePath } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
-import type { SlashCommand } from '../commands/types.js';
+import {
+  CommandKind,
+  type CommandCompletionItem,
+  type SlashCommand,
+} from '../commands/types.js';
 import {
   findMidInputSlashCommand,
   isSlashCommand,
@@ -173,23 +177,191 @@ function compareRankedMatches(left: RankedMatch, right: RankedMatch): number {
   );
 }
 
-/**
- * Port of useSlashCompletion's prefix suggestion builder: matches the partial
- * against every visible command's name AND altNames, keeps the best match per
- * command, and orders exact matches first. An empty partial lists every
- * visible command (the original's "no query yet" case).
- */
-export function slashSuggestions(
-  query: string,
-  commands: readonly SlashCommand[],
-): Suggestion[] {
-  // `/name args` — top-level completion stops once the command name is done
-  // (argument completion needs per-command context the composer doesn't own).
-  const path = query.startsWith('/') ? query.slice(1) : query;
-  const partial = path.split(/\s/)[0] ?? '';
-  if (path.includes(' ')) return [];
+/** Case-insensitive name-or-altName exact match (useCommandParser parity). */
+function matchesCommandName(cmd: SlashCommand, part: string): boolean {
+  return (
+    cmd.name.toLowerCase() === part.toLowerCase() ||
+    cmd.altNames?.some((alt) => alt.toLowerCase() === part.toLowerCase()) ||
+    false
+  );
+}
 
-  const visible = commands.filter((cmd) => cmd.description && !cmd.hidden);
+/** Tree-parse result for one `/…` composer query (code-point positions). */
+export interface CommandParseResult {
+  hasTrailingSpace: boolean;
+  /** Fully resolved command path parts (e.g. ['directory', 'add']). */
+  commandPathParts: string[];
+  /** The token currently being typed (after the resolved path). */
+  partial: string;
+  /** Commands to complete at this level (root list or a subCommands list). */
+  currentLevel: readonly SlashCommand[] | undefined;
+  /** Deepest command matched by the resolved path (argument-completion owner). */
+  leafCommand: SlashCommand | null;
+  /** Set when `partial` exactly names a command that itself has subCommands. */
+  exactMatchAsParent: SlashCommand | undefined;
+  /** True when the leaf command's `completion()` should supply suggestions. */
+  isArgumentCompletion: boolean;
+  /** Argument string passed to `completion()` (the in-progress last word). */
+  argumentString: string;
+  /** `invocation.raw` parity for the completion context. */
+  invocationRaw: string;
+}
+
+/**
+ * Port of useSlashCompletion's useCommandParser: walks the command tree part
+ * by part (`/cmd sub partial`), drilling into `subCommands`, so `/directory `
+ * offers `add` and `/curator pin ` reaches the pin subcommand's argument
+ * completion. MCP prompt commands stop the walk like the original.
+ */
+export function parseSlashCommandQuery(
+  query: string | null,
+  slashCommands: readonly SlashCommand[],
+): CommandParseResult {
+  if (!query) {
+    return {
+      hasTrailingSpace: false,
+      commandPathParts: [],
+      partial: '',
+      currentLevel: slashCommands,
+      leafCommand: null,
+      exactMatchAsParent: undefined,
+      isArgumentCompletion: false,
+      argumentString: '',
+      invocationRaw: '/',
+    };
+  }
+
+  const fullPath = query.startsWith('/') ? query.substring(1) : query;
+  const hasTrailingSpace = query.endsWith(' ');
+  const rawParts = fullPath.split(/\s+/).filter((p) => p);
+  let commandPathParts = rawParts;
+  let partial = '';
+
+  if (!hasTrailingSpace && rawParts.length > 0) {
+    partial = rawParts[rawParts.length - 1] ?? '';
+    commandPathParts = rawParts.slice(0, -1);
+  }
+
+  let currentLevel: readonly SlashCommand[] | undefined = slashCommands;
+  let leafCommand: SlashCommand | null = null;
+
+  for (const part of commandPathParts) {
+    if (!currentLevel) {
+      leafCommand = null;
+      currentLevel = [];
+      break;
+    }
+    const found = currentLevel.find((cmd) => matchesCommandName(cmd, part));
+    if (found) {
+      leafCommand = found;
+      currentLevel = found.subCommands as readonly SlashCommand[] | undefined;
+      if (found.kind === CommandKind.MCP_PROMPT) {
+        break;
+      }
+    } else {
+      leafCommand = null;
+      currentLevel = [];
+      break;
+    }
+  }
+
+  let exactMatchAsParent: SlashCommand | undefined;
+  if (!hasTrailingSpace && currentLevel) {
+    exactMatchAsParent = currentLevel.find(
+      (cmd) => matchesCommandName(cmd, partial) && cmd.subCommands,
+    );
+    if (exactMatchAsParent) {
+      leafCommand = exactMatchAsParent;
+      currentLevel = exactMatchAsParent.subCommands;
+      partial = '';
+    }
+  }
+
+  const depth = commandPathParts.length;
+  const isArgumentCompletion = !!(
+    leafCommand?.completion &&
+    (hasTrailingSpace ||
+      (rawParts.length > depth && depth > 0 && partial !== ''))
+  );
+
+  const invocationParts = [...commandPathParts];
+  if (partial) invocationParts.push(partial);
+
+  return {
+    hasTrailingSpace,
+    commandPathParts,
+    partial,
+    currentLevel,
+    leafCommand,
+    exactMatchAsParent,
+    isArgumentCompletion,
+    // useCommandParser feeds only the in-progress last word to completion().
+    argumentString: partial,
+    invocationRaw: `/${invocationParts.join(' ')}`,
+  };
+}
+
+/**
+ * Port of useSlashCompletion's useCompletionPositions: the replacement range
+ * RELATIVE TO THE QUERY string (query[0] is the leading '/'), in code points.
+ */
+export function slashCompletionPositions(
+  query: string,
+  parsed: CommandParseResult,
+): { start: number; end: number } {
+  const queryLength = toCodePoints(query).length;
+  const { hasTrailingSpace, partial, exactMatchAsParent } = parsed;
+
+  if (hasTrailingSpace || exactMatchAsParent) {
+    return { start: queryLength, end: queryLength };
+  }
+  if (partial) {
+    if (parsed.isArgumentCompletion) {
+      const commandSoFar = `/${parsed.commandPathParts.join(' ')}`;
+      const argStartIndex =
+        toCodePoints(commandSoFar).length +
+        (parsed.commandPathParts.length > 0 ? 1 : 0);
+      return { start: argStartIndex, end: queryLength };
+    }
+    return {
+      start: queryLength - toCodePoints(partial).length,
+      end: queryLength,
+    };
+  }
+  return { start: 1, end: queryLength };
+}
+
+/**
+ * Port of useSlashCompletion's usePerfectMatch: the typed query already names
+ * a runnable command exactly, so Enter should submit instead of accepting a
+ * suggestion.
+ */
+export function isPerfectSlashMatch(parsed: CommandParseResult): boolean {
+  if (parsed.hasTrailingSpace) return false;
+  if (parsed.leafCommand && parsed.partial === '') {
+    return !!parsed.leafCommand.action;
+  }
+  if (parsed.currentLevel) {
+    return parsed.currentLevel.some(
+      (cmd) => matchesCommandName(cmd, parsed.partial) && cmd.action,
+    );
+  }
+  return false;
+}
+
+/**
+ * Prefix suggestion builder (useSlashCompletion's deterministic fallback)
+ * over one command level: matches the partial against every visible command's
+ * name AND altNames, keeps the best match per command, and orders exact
+ * matches first. An empty partial lists every visible command at the level
+ * (the original's "no query yet" case, e.g. `/directory ` → its subcommands).
+ */
+export function subcommandSuggestions(
+  parsed: CommandParseResult,
+): Suggestion[] {
+  const level = parsed.currentLevel ?? [];
+  const visible = level.filter((cmd) => cmd.description && !cmd.hidden);
+  const partial = parsed.partial;
 
   if (partial === '') {
     return visible.map((command) =>
@@ -229,6 +401,45 @@ export function slashSuggestions(
     );
 }
 
+/**
+ * One-shot synchronous slash suggestions for a query. Argument completion is
+ * async (per-command `completion()` calls) and owned by the composer, so it
+ * reports no suggestions here — check `parseSlashCommandQuery(...).
+ * isArgumentCompletion` first.
+ */
+export function slashSuggestions(
+  query: string,
+  commands: readonly SlashCommand[],
+): Suggestion[] {
+  const parsed = parseSlashCommandQuery(query, commands);
+  if (parsed.isArgumentCompletion) return [];
+  return subcommandSuggestions(parsed);
+}
+
+/** Maps `command.completion()` results onto suggestions (ink toSuggestion). */
+export function commandCompletionItemsToSuggestions(
+  items: ReadonlyArray<string | CommandCompletionItem>,
+): Suggestion[] {
+  return items
+    .map((item): Suggestion | null => {
+      if (typeof item === 'string') {
+        return { label: item, value: item };
+      }
+      if (!item.value) {
+        return null;
+      }
+      return {
+        label: item.label ?? item.value,
+        value: item.value,
+        description: item.description,
+        ...(item.isDirectory !== undefined && {
+          isDirectory: item.isDirectory,
+        }),
+      };
+    })
+    .filter((suggestion): suggestion is Suggestion => suggestion !== null);
+}
+
 function toCommandSuggestion(
   command: SlashCommand,
   matchedAlias?: string,
@@ -263,18 +474,28 @@ export interface AppliedCompletion {
  * space for mid-input inserts glued to prior text, and append a trailing
  * space unless one follows already — with the directory exception that keeps
  * tab-completing deeper possible.
+ *
+ * For SLASH targets, `slashRange` carries the query-relative replacement
+ * positions computed by `slashCompletionPositions` (sub-command and argument
+ * completion insert AFTER the leading '/', so the value is used verbatim).
+ * Without it, the whole-token range is replaced and the leading '/' is
+ * re-added (top-level command and `@` behavior).
  */
 export function applyCompletion(
   currentLine: string,
   target: CompletionTarget,
   suggestion: Suggestion,
   viaEnter: boolean,
+  slashRange?: { start: number; end: number },
 ): AppliedCompletion {
   const lineCodePoints = toCodePoints(currentLine);
-  const { start, end } = target;
+  let start: number;
+  let end: number;
 
   let suggestionText = suggestion.value;
-  if (target.mode === CompletionMode.SLASH) {
+  if (target.mode === CompletionMode.SLASH && slashRange) {
+    start = target.start + slashRange.start;
+    end = target.start + slashRange.end;
     if (
       start === end &&
       start > 1 &&
@@ -283,9 +504,21 @@ export function applyCompletion(
     ) {
       suggestionText = ` ${suggestionText}`;
     }
-    suggestionText = suggestionText.startsWith('/')
-      ? suggestionText
-      : `/${suggestionText}`;
+  } else {
+    ({ start, end } = target);
+    if (target.mode === CompletionMode.SLASH) {
+      if (
+        start === end &&
+        start > 1 &&
+        lineCodePoints[start - 1] !== ' ' &&
+        lineCodePoints[start - 1] !== '/'
+      ) {
+        suggestionText = ` ${suggestionText}`;
+      }
+      suggestionText = suggestionText.startsWith('/')
+        ? suggestionText
+        : `/${suggestionText}`;
+    }
   }
 
   const charAfterCompletion = lineCodePoints[end];
@@ -374,6 +607,98 @@ export function decideSubmit(
     return { kind: 'newline-continuation' };
   }
   return { kind: 'submit', text };
+}
+
+// ── large-paste collapsing (ink useBracketedPaste parity) ─────────────────
+//
+// Pastes over the thresholds fold into a `[Pasted Content N chars]`
+// placeholder in the composer; the full text is restored when the buffer is
+// submitted (InputPrompt.tsx LARGE_PASTE_* thresholds + pendingPastes).
+
+export const LARGE_PASTE_CHAR_THRESHOLD = 1000;
+export const LARGE_PASTE_LINE_THRESHOLD = 10;
+
+/** Normalizes CRLF/CR pastes onto LF exactly like the original. */
+export function normalizePastedText(raw: string): string {
+  return raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+/** Whether a normalized paste must collapse into a placeholder. */
+export function isLargePaste(pasted: string): boolean {
+  const charCount = [...pasted].length; // Unicode-aware, like the original
+  const lineCount = pasted.split('\n').length;
+  return (
+    charCount > LARGE_PASTE_CHAR_THRESHOLD ||
+    lineCount > LARGE_PASTE_LINE_THRESHOLD
+  );
+}
+
+/** The placeholder for one collapsed paste (ink nextLargePastePlaceholder). */
+export function largePastePlaceholder(charCount: number, id: number): string {
+  const base = `[Pasted Content ${charCount} chars]`;
+  return id === 1 ? base : `${base} #${id}`;
+}
+
+/**
+ * Allocates the next free placeholder id for a char count, marking it active
+ * in `activeIds` so concurrent pastes of identical size get distinct ids
+ * (ids freed by `freePastePlaceholderId` are reused, like the original).
+ */
+export function nextLargePastePlaceholder(
+  charCount: number,
+  activeIds: Map<number, Set<number>>,
+): string {
+  const ids = activeIds.get(charCount) ?? new Set<number>();
+  let id = 1;
+  while (ids.has(id)) id++;
+  ids.add(id);
+  activeIds.set(charCount, ids);
+  return largePastePlaceholder(charCount, id);
+}
+
+/** Parses a placeholder back into its char count and id. */
+export function parsePastePlaceholder(
+  placeholder: string,
+): { charCount: number; id: number } | null {
+  const match = /^\[Pasted Content (\d+) chars\](?: #(\d+))?$/.exec(
+    placeholder,
+  );
+  if (!match) return null;
+  return {
+    charCount: Number(match[1]),
+    id: match[2] ? Number(match[2]) : 1,
+  };
+}
+
+/** Frees a placeholder id for reuse (backspace deleted the placeholder). */
+export function freePastePlaceholderId(
+  activeIds: Map<number, Set<number>>,
+  charCount: number,
+  id: number,
+): void {
+  activeIds.get(charCount)?.delete(id);
+}
+
+/** Restores every placeholder in `value` to its pasted content on submit. */
+export function expandPendingPastePlaceholders(
+  value: string,
+  pendingPastes: ReadonlyMap<string, string>,
+): string {
+  if (pendingPastes.size === 0) {
+    return value;
+  }
+  const placeholders = Array.from(pendingPastes.keys()).sort(
+    (a, b) => b.length - a.length,
+  );
+  const escapedPlaceholders = placeholders.map((placeholderValue) =>
+    placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+  );
+  const placeholderRegex = new RegExp(escapedPlaceholders.join('|'), 'g');
+  return value.replace(
+    placeholderRegex,
+    (matchedPlaceholder) =>
+      pendingPastes.get(matchedPlaceholder) ?? matchedPlaceholder,
+  );
 }
 
 /** The double-Esc clear state machine (500ms arm window). */
