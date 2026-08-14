@@ -5,7 +5,7 @@
  */
 
 import type { WebSocket } from 'ws';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 import type {
   DeliveryResult,
   TransportCloseReason,
@@ -27,10 +27,10 @@ export class WsStream implements TransportStream {
   ) {
     ws.on('close', () => this.close());
     ws.on('error', (err) => {
-      writeStderrLine(
+      this.close();
+      writeStderrLineSafe(
         `qwen serve: /acp WS error: ${err instanceof Error ? err.message : String(err)}`,
       );
-      this.close();
     });
     let alive = true;
     ws.on('pong', () => {
@@ -109,8 +109,8 @@ export class WsStream implements TransportStream {
       .catch(() => 'failed' as const);
     this.writeChain = next.then((result) => {
       if (result === 'failed' && !this._closed) {
-        writeStderrLine('qwen serve: /acp WS write failed');
         this.close();
+        writeStderrLineSafe('qwen serve: /acp WS write failed');
       }
     });
     return next;
@@ -135,7 +135,7 @@ export class WsStream implements TransportStream {
     try {
       this.onClose?.();
     } catch (err) {
-      writeStderrLine(
+      writeStderrLineSafe(
         `qwen serve: /acp WS onClose threw: ${err instanceof Error ? err.message : String(err)}`,
       );
     }

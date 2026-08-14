@@ -258,4 +258,48 @@ describe('WsStream', () => {
     expect(onClose).toHaveBeenCalled();
     expect(stream.isClosed).toBe(true);
   });
+
+  it('closes after a synchronous send failure when stderr is unavailable', async () => {
+    const onClose = vi.fn();
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => {
+        throw new Error('write EPIPE');
+      });
+    ws.send = () => {
+      throw new Error('socket send failed');
+    };
+    const stream = new WsStream(ws as never, onClose);
+
+    try {
+      await expect(
+        stream.sendSerialized(Buffer.from('{"fail":true}')),
+      ).resolves.toBe('failed');
+      expect(stream.isClosed).toBe(true);
+      expect(onClose).toHaveBeenCalledTimes(1);
+      await expect(
+        stream.sendSerialized(Buffer.from('{"after":"failure"}')),
+      ).resolves.toBe('closed');
+    } finally {
+      stderrWrite.mockRestore();
+    }
+  });
+
+  it('closes after a socket error when stderr is unavailable', () => {
+    const onClose = vi.fn();
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => {
+        throw new Error('write EPIPE');
+      });
+    const stream = new WsStream(ws as never, onClose);
+
+    try {
+      expect(() => ws.emit('error', new Error('socket failed'))).not.toThrow();
+      expect(stream.isClosed).toBe(true);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      stderrWrite.mockRestore();
+    }
+  });
 });
