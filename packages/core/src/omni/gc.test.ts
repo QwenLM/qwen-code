@@ -367,9 +367,12 @@ describe('runOmniGcOnce', () => {
         maxTotalBytes: 100,
         uploadCache: {
           // Fires while `first` is being deleted — before `second`'s turn.
+          // A +10s timestamp keeps the assertion immune to filesystems
+          // that truncate mtime to whole seconds (observed on the CI
+          // runner: touch-with-now floored below the sweep start).
           removeBySha256: async () => {
-            const now = new Date();
-            await fs.utimes(secondPath, now, now);
+            const future = new Date(Date.now() + 10_000);
+            await fs.utimes(secondPath, future, future);
           },
         } as never,
       }),
