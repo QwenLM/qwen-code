@@ -14,12 +14,31 @@
 
 import { useLayoutEffect } from 'react';
 import { useRenderer } from '@opentui/react';
-import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { getAllGeminiMdFilenames, Storage } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
 import { C } from './theme.js';
+
+/**
+ * Parity of MemoryDialog.resolvePreferredMemoryFile: the first configured
+ * context filename that exists in `dir`, else the configured primary
+ * filename (the file the editor would create).
+ */
+export function resolvePreferredMemoryFile(dir: string): string {
+  const filenames = getAllGeminiMdFilenames();
+  for (const filename of filenames) {
+    const filePath = path.join(dir, filename);
+    try {
+      if (fs.existsSync(filePath)) return filePath;
+    } catch {
+      // Unreadable — try the next candidate.
+    }
+  }
+  return path.join(dir, filenames[0] ?? 'QWEN.md');
+}
 
 function useEsc(onClose: () => void) {
   const renderer = useRenderer();
@@ -82,14 +101,25 @@ export function OpenTuiMemoryDialog(props: {
   useEsc(onClose);
   const mem = (settings.merged as { memory?: Record<string, unknown> })?.memory;
   const toggle = (k: string, dflt: boolean) => Boolean(mem?.[k] ?? dflt);
+  // Real memory file names (audit 01 G-8): ink's MemoryDialog resolves the
+  // user file from Storage.getGlobalQwenDir() and the project file from the
+  // working dir, both through getAllGeminiMdFilenames() (default QWEN.md) —
+  // never a hardcoded memory.md.
   const cwd = config?.getWorkingDir?.() ?? process.cwd();
-  const userMem = path.join(os.homedir(), '.qwen', 'memory.md');
-  const projectMem = path.join(cwd, '.qwen', 'memory.md');
+  const filenames = getAllGeminiMdFilenames();
+  const userMem = path.join(
+    Storage.getGlobalQwenDir(),
+    filenames[0] ?? 'QWEN.md',
+  );
+  const projectMem = resolvePreferredMemoryFile(cwd);
   return (
     <Shell title="Memory">
       <box flexDirection="column" marginTop={1}>
         <Row label="User memory:" value={userMem} />
         <Row label="Project memory:" value={projectMem} />
+        {filenames.length > 1 && (
+          <Row label="Context files:" value={filenames.join(', ')} />
+        )}
         <Row
           label="Managed auto-memory:"
           value={toggle('enableManagedAutoMemory', false) ? 'on' : 'off'}

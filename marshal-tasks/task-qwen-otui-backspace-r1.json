@@ -1,0 +1,156 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-BACKSPACE-R1",
+    "title": "Restore OpenTUI Backspace editing under Bun"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/opentui/input-prompt.tsx",
+      "packages/cli/src/ui/opentui/input-prompt-key.ts",
+      "packages/cli/src/ui/opentui/input-prompt-key.test.ts"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/components/**",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 3,
+    "maxDiffBytes": 30000
+  },
+  "work": {
+    "objective": "Fix the real Bun/OpenTUI composer regression where Backspace cannot delete typed text, without regressing printable input, Enter submit, completion, history, cursor movement or native textarea editing.",
+    "constraints": [
+      "Use repository-relative paths for every read, search, edit and command.",
+      "Only modify the three allowlisted input-prompt files; do not modify Ink, renderer dispatch, dependencies, lockfiles, Marshal state, commit, push, publish, use network access or start subagents.",
+      "Do not replace Unicode/code-point-safe native textarea deletion with manual JavaScript string slicing.",
+      "Preserve the global printable-key fallback only for genuinely printable input; control bytes and named editing/navigation keys must reach the focused textarea unless this component intentionally handles them.",
+      "If an operation is denied, do not retry that path; use an allowed relative-path equivalent or report blocked."
+    ],
+    "context": [
+      "User reproduced under QWEN_TUI_RENDERER=opentui bun packages/cli/dist/index.js: typing works, but pressing Backspace does not remove characters.",
+      "Confirmed root-cause candidate in input-prompt.tsx: the global useKeyboard printable fallback runs before native textarea editing. Backspace arrives with name=backspace and sequence DEL (0x7f); the current condition accepts any non-ESC sequence, calls insertText(sequence), and preventDefault(), so TextareaRenderable never receives its default backspace action.",
+      "@opentui/core already merges custom keyBindings with defaultTextareaKeyBindings, including name=backspace action=backspace. The fix should stop swallowing non-printable editing keys rather than reimplementing the edit buffer.",
+      "Add a focused pure regression test for DEL/backspace classification, including printable ASCII, CJK/Unicode input, escape/control sequences, Delete and navigation keys. Keep the code easy to exercise from Bun.",
+      "The product acceptance remains real Bun behavior: input abc, press Backspace once, visible/editor content becomes ab, Enter submits ab."
+    ],
+    "nonGoals": [
+      "Do not perform the visual parity redesign in this run.",
+      "Do not fix /help or runtime preflight in this run.",
+      "Do not change input history, completion ranking or multiline semantics beyond what is necessary for correct key routing."
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "backspace-unit",
+        "argv": [
+          "./node_modules/.bin/vitest",
+          "run",
+          "packages/cli/src/ui/opentui/input-prompt-key.test.ts"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 120,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "opentui-tests",
+        "argv": [
+          "./node_modules/.bin/vitest",
+          "run",
+          "packages/cli/src/ui/opentui"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-build",
+        "argv": ["npm", "run", "build", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "bun-native-import",
+        "argv": [
+          "bun",
+          "-e",
+          "import('@opentui/core').then(m => { m.resolveRenderLib(); console.log('BUN_OPENTUI_NATIVE_OK') })"
+        ],
+        "cwd": "packages/cli",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 2400,
+    "runTimeoutSeconds": 4200,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 12000000
+  },
+  "deliverables": [
+    {
+      "id": "backspace-fix",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/input-prompt*",
+      "minimumCount": 2,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

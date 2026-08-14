@@ -14,7 +14,7 @@
  * the backend through `onClose` / `onNavigate` / `notify`.
  */
 
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   useKeyboard,
   useRenderer,
@@ -42,11 +42,17 @@ import {
   EXTENSIONS_TABS,
   OpenTuiExtensionsDialog,
 } from './dialogs-extensions.js';
-import { OpenTuiMcpDialog } from './dialogs-mcp.js';
+import { OpenTuiMcpDialog, type McpServerInfo } from './dialogs-mcp.js';
 import {
   OpenTuiStatsDialog,
   OpenTuiSkillsDialog,
 } from './dialogs-stats-skills.js';
+import {
+  OpentuiRewindSelector,
+  type RestoreOption,
+  type RewindDiffStats,
+  type RewindTurn,
+} from './session-rewind.js';
 import {
   OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
@@ -71,6 +77,7 @@ import {
 } from './dialogs-misc.js';
 import {
   addPermissionRule,
+  applyMcpServerAction,
   applyModelSelection,
   applyThemeSelection,
   buildExtensionRows,
@@ -79,8 +86,18 @@ import {
   buildPermissionsData,
   computeModelDialogInitialKey,
   deletePermissionRule,
+  enrichMcpOAuthState,
+  getMcpServerResources,
   getMcpServerTools,
 } from './dialog-data.js';
+
+/** The data the mounted rewind selector needs from the backend. */
+export interface OpenTuiRewindData {
+  turns: readonly RewindTurn[];
+  fileCheckpointingEnabled: boolean;
+  getDiffStats?: (promptId: string) => Promise<RewindDiffStats | undefined>;
+  onRewind: (turn: RewindTurn, option: RestoreOption) => void | Promise<void>;
+}
 
 export interface OpenTuiDialogMountProps {
   dialog: MountedDialog;
@@ -100,6 +117,10 @@ export interface OpenTuiDialogMountProps {
   /** Append a command-style message to the chat history. */
   notify: (text: string) => void;
   onApprovalModeChanged: (mode: ApprovalMode) => void;
+  /** Resume picker selection → the real session switch (host.handleResume). */
+  onResume?: (sessionId: string) => void;
+  /** Rewind selector data (turns come from the backend transcript). */
+  rewind?: OpenTuiRewindData;
 }
 
 function HelpDialogHost(props: {
@@ -346,6 +367,50 @@ function PermissionsDialogHost(props: {
   );
 }
 
+/**
+ * MCP host (audit 01 G-6 / 05 G-13): loads the server inventory with the
+ * REAL OAuth token state (enrichMcpOAuthState), feeds tools/resources, and
+ * runs the server actions through applyMcpServerAction (enable/disable,
+ * reconnect, approve, authenticate, clear-auth), reloading after changes.
+ */
+function McpDialogHost(props: {
+  config?: Config;
+  settings: LoadedSettings;
+  onClose: () => void;
+  notify: (text: string) => void;
+}) {
+  const { config, settings, onClose, notify } = props;
+  const [servers, setServers] = useState<McpServerInfo[]>([]);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    void enrichMcpOAuthState(config, buildMcpServers(config)).then((list) => {
+      if (alive) setServers(list);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [config, version]);
+  return (
+    <OpenTuiMcpDialog
+      servers={servers}
+      getServerTools={(server) => getMcpServerTools(config, server.name)}
+      getServerResources={(server) =>
+        getMcpServerResources(config, server.name)
+      }
+      onClose={onClose}
+      onServerAction={(server, action) => {
+        void applyMcpServerAction(config, settings, server, action).then(
+          (result) => {
+            if (result.message) notify(result.message);
+            if (result.changed) setVersion((v) => v + 1);
+          },
+        );
+      }}
+    />
+  );
+}
+
 export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   const { dialog, config, settings, commands, onClose, onNavigate, notify } =
     props;
@@ -404,10 +469,11 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         />
       )}
       {dialog.dialog === 'mcp' && (
-        <OpenTuiMcpDialog
-          servers={buildMcpServers(config)}
-          getServerTools={(server) => getMcpServerTools(config, server.name)}
+        <McpDialogHost
+          config={config}
+          settings={settings}
           onClose={onClose}
+          notify={notify}
         />
       )}
       {dialog.dialog === 'stats' && (
@@ -467,6 +533,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          notify={notify}
         />
       )}
       {dialog.dialog === 'resume' && (
@@ -474,6 +541,8 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+          matchedSessions={dialog.matchedSessions}
+          onSelect={props.onResume}
         />
       )}
       {dialog.dialog === 'branch' && (
@@ -490,13 +559,24 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           onClose={onClose}
         />
       )}
-      {dialog.dialog === 'rewind' && (
-        <OpenTuiRewindDialog
-          config={config}
-          settings={settings}
-          onClose={onClose}
-        />
-      )}
+      {dialog.dialog === 'rewind' &&
+        (props.rewind ? (
+          // The full multi-phase selector (session-rewind.tsx) wired to the
+          // backend's transcript turns (audit 01 G-8 / 05 G-07).
+          <OpentuiRewindSelector
+            turns={props.rewind.turns}
+            fileCheckpointingEnabled={props.rewind.fileCheckpointingEnabled}
+            getDiffStats={props.rewind.getDiffStats}
+            onRewind={props.rewind.onRewind}
+            onCancel={onClose}
+          />
+        ) : (
+          <OpenTuiRewindDialog
+            config={config}
+            settings={settings}
+            onClose={onClose}
+          />
+        ))}
       {dialog.dialog === 'diff' && (
         <OpenTuiDiffDialog
           config={config}

@@ -1,0 +1,76 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-EVIDENCE2",
+    "title": "R4 真实 Ink/OpenTUI 对照证据矩阵"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["scripts/tui-parity/**"],
+    "allowSubmodules": false,
+    "denyPaths": [".marshal/**", "packages/**"],
+    "maxChangedFiles": 25,
+    "maxDiffBytes": 300000
+  },
+  "work": {
+    "objective": "建 mock-model 流驱动真实 CLI 的 Ink/OpenTUI 同参数对照，产出 R4 硬指标矩阵",
+    "constraints": [
+      "只改 scripts/tui-parity/**；不改产品代码；不安装依赖；不提交；勿向工作区外写文件；permission 拒绝不得重试。"
+    ],
+    "context": [
+      "【PR1 R4 证据门禁：真实 Ink/OpenTUI 对照矩阵（QWEN-OTUI-REACT-1TO1 任务族·Evidence Harness 域）】 写域仅限 scripts/tui-parity/**。目标：让 parity harness 能驱动【真实 CLI】做同参数 Ink/OpenTUI 对照，产出 R4 硬指标。 1. 建确定性 mock-model stream：一个本地 mock model provider/wrapper，使真实 CLI（dist/index.js）在 QWEN_TUI_RENDERER=ink / opentui 两侧以【同一】脚本流式响应（不依赖真实凭据）； 2. runner.mjs 增加/完善 real-CLI 场景：--base/--fixed 指向同 SHA 的 ink/opentui 构建，同终端尺寸/同 mock 流； 3. 产出 R4 硬指标：全屏 clear opcode 数、重复 live-output 事件数、最大帧高/可见行数、render/frame 数、DEC 2026 配对平衡、退出后终端恢复； 4. 必测场景：streaming 合帧/重复输出、resize/窄屏 reflow、锁屏/唤醒、1k 轮长会话、超大工具输出、markdown/代码块/表格、贴底/滚动/selection/copy、dark/light、五终端矩阵缺口显式标未验收； 5. 补 self-test 覆盖新逻辑，保持 self-test 全绿。 纪律：只改 scripts/tui-parity/**；不改产品代码；不安装依赖；不提交；勿向工作区外写文件；permission 拒绝不得重试。 "
+    ],
+    "nonGoals": ["不改产品代码", "不做 R3 逐屏"]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "selftest",
+        "argv": ["node", "scripts/tui-parity/self-test.mjs"],
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "maxLogBytes": 20000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 5400,
+    "runTimeoutSeconds": 9000,
+    "maxAttempts": 4,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 2,
+    "maxOutputBytes": 32000000
+  },
+  "deliverables": [
+    {
+      "id": "ev",
+      "kind": "code",
+      "pathGlob": "scripts/tui-parity/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "required": false,
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "mergePolicy": "never",
+    "requiredChecks": []
+  }
+}

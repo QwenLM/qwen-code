@@ -1,0 +1,147 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-HELP-NATIVE-R6",
+    "title": "OpenTUI help gate-corrected successor"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/opentui/help-overlay.tsx",
+      "packages/cli/src/ui/opentui/dialog-mount.tsx",
+      "packages/cli/src/ui/opentui/help-content.ts",
+      "packages/cli/src/ui/opentui/help-content.test.ts"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 4,
+    "maxDiffBytes": 55000
+  },
+  "work": {
+    "objective": "Reproduce the proven reconciler-safe 80x24 help overlay and raw-Escape implementation, then independently verify it with a correctly structured multiline Expect PTY gate.",
+    "constraints": [
+      "Use repository-relative paths for all operations.",
+      "Only modify the four allowlisted help files; no Ink, dependency, lockfile, Marshal-state, commit, push, publication, network or subagent changes.",
+      "Reproduce the R5 semantics from the frozen requirements without reading prior run artifacts or worktrees: supported string/span TextNodeRenderable children, 80x24 bounded rows/footer, and useLayoutEffect registration/cleanup of a plain-Escape-only renderer input handler.",
+      "Use only supported string/span children in TextNodeRenderable and keep footer/hints visible at 80x24.",
+      "Use renderer addInputHandler/removeInputHandler while the overlay is active to consume only plain raw Escape and invoke onClose once; do not consume Ctrl+C or unrelated sequences.",
+      "Worker checks may use OpenTUI vitest, CLI typecheck/build and git diff --check only; native Bun/PTY belongs to verifier.",
+      "No broader visual redesign.",
+      "If denied, do not retry the denied path; use an allowed equivalent or report blocked."
+    ],
+    "context": [
+      "Direct Bun probes established that raw Escape reaches the overlay addInputHandler, closes the dialog, and Ctrl+C then exits.",
+      "The prior verification was a false negative because its braced Expect pattern/action clauses were written on one physical line.",
+      "Verifier requires ready → /help → footer → raw Esc → newly visible composer → Ctrl+C EOF with each Expect branch on its own line."
+    ],
+    "nonGoals": [
+      "No Backspace changes",
+      "No runtime gate changes",
+      "No Solid work"
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "opentui-tests",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 60000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-build",
+        "argv": ["npm", "run", "build", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "bun-help-ready-native-pty",
+        "argv": [
+          "/usr/bin/expect",
+          "-c",
+          "set timeout 90\nproc fail {code} {\n  catch {send -- \"\\\\003\"}\n  after 300\n  catch {close}\n  catch {wait}\n  exit $code\n}\nspawn env QWEN_TUI_RENDERER=opentui QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true bun packages/cli/dist/index.js\nexpect {\n  -re {ready} {}\n  -re {TextNodeRenderable only accepts|unexpected critical error|Error:} { fail 1 }\n  timeout { fail 2 }\n}\nsend -- \"/help\\\\r\"\nexpect {\n  -re {For.*more help:} {}\n  -re {TextNodeRenderable only accepts|unexpected critical error|Error:} { fail 3 }\n  timeout { fail 4 }\n}\nsend -- \"\\\\033\"\nexpect {\n  -re {Ask.*anything} {}\n  -re {TextNodeRenderable only accepts|unexpected critical error|Error:} { fail 5 }\n  timeout { fail 6 }\n}\nsend -- \"\\\\003\"\nexpect {\n  eof {}\n  timeout { fail 7 }\n}"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 1800,
+    "runTimeoutSeconds": 4200,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 12000000
+  },
+  "deliverables": [
+    {
+      "id": "native-help-fix",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/{help-*,dialog-mount.tsx}",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

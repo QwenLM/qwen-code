@@ -19,10 +19,13 @@ import {
   type OpenTuiCommandHost,
 } from './commands-context.js';
 
+// clear() must NOT call clearScreen(): the OpenTUI renderer owns the screen
+// (audit 01 G-20); the mock records any accidental raw-ANSI regression.
+const clearScreenMock = vi.fn();
 vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../utils/stdioHelpers.js')>();
-  return { ...actual, clearScreen: vi.fn() };
+  return { ...actual, clearScreen: clearScreenMock };
 });
 
 function createFakeHost(): OpenTuiCommandHost & {
@@ -91,12 +94,13 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
     logger: null,
   };
 
-  it('clear() runs the exact ink sequence ending with setSessionName(null)', () => {
+  it('clear() runs the ink sequence minus clearScreen, ending with setSessionName(null)', () => {
     const host = createFakeHost();
     const context = createOpenTuiCommandContext(host, services);
     context.ui.clear();
     // Ink: cancelBtw → clearPendingState → clearItems → clearScreen →
-    // refreshStatic → setSessionName(null).
+    // refreshStatic → setSessionName(null). The clearScreen step is skipped:
+    // clearItems already clears the renderer-level transcript.
     expect(host.calls).toEqual([
       'cancelBtw',
       'clearPendingState',
@@ -104,6 +108,7 @@ describe('createOpenTuiCommandContext (ink commandContext parity)', () => {
       'refreshStatic',
       'setSessionName',
     ]);
+    expect(clearScreenMock).not.toHaveBeenCalled();
     // Ink clears the session name as the final step.
     expect(host.sessionNames).toEqual([null]);
   });

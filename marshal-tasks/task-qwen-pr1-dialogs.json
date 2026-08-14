@@ -1,0 +1,76 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-PR1-DIALOGS",
+    "title": "PR1 切片3：对话框族 parity"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["packages/cli/src/ui/opentui/**"],
+    "allowSubmodules": false,
+    "denyPaths": [".marshal/**", "packages/cli/src/ui/components/**"],
+    "maxChangedFiles": 20,
+    "maxDiffBytes": 300000
+  },
+  "work": {
+    "objective": "PR1 切片3：对话框族 parity",
+    "constraints": [
+      "严格按验收标准执行；只创建本切片新文件（dialogs-*.ts*），不改/不删既有文件与 ink TUI；不安装依赖；不提交；勿向工作区外写文件；permission 拒绝不得重试。"
+    ],
+    "context": [
+      "【用户验收标准（原文）】“PR1 完全 parity + 全 E2E + 与原版完全一模一样；对照原版拆碎逐项 check 直至完全一样；开发完用 tmux 前后对比自测；一项不准差。” 对照清单：tui-research reports/pr1-parity-checklist.md。\n只新建 dialogs-* 文件。对照原版 35 对话框，优先实现：设置/模型/权限审批/主题/帮助/历史/扩展/MCP 的 opentui 版本（基于框架 DialogSelect/Dialog 模式，参照 opencode packages/tui 对应 dialog-*），键鼠均可操作；为每个对话框补 vitest 单测。\n"
+    ],
+    "nonGoals": ["不改 ink TUI", "不做其他切片"]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "tsc",
+        "argv": ["npx", "tsc", "--build", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "maxLogBytes": 20000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 5400,
+    "runTimeoutSeconds": 9000,
+    "maxAttempts": 4,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 2,
+    "maxOutputBytes": 32000000
+  },
+  "deliverables": [
+    {
+      "id": "d",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "required": false,
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "mergePolicy": "never",
+    "requiredChecks": []
+  }
+}

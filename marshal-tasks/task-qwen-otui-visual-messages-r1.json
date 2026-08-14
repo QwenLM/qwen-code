@@ -1,0 +1,156 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-VISUAL-MESSAGES-R1",
+    "title": "OpenTUI Ink-parity messages and Thought visual slice"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/opentui/messages.tsx",
+      "packages/cli/src/ui/opentui/messages.test.tsx",
+      "packages/cli/src/ui/opentui/live-session-model.ts",
+      "packages/cli/src/ui/opentui/live-session.test.ts"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/opentui/backend.tsx",
+      "packages/cli/src/ui/components/**",
+      "packages/cli/src/ui/model/**",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "packages/core/**",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 4,
+    "maxDiffBytes": 65000
+  },
+  "work": {
+    "objective": "Make the OpenTUI user, assistant, Thought and tool rows visually and semantically match the current Ink ConversationMessages/HistoryItemDisplay presentation while retaining the already validated OpenTUI mouse interaction.",
+    "constraints": [
+      "Use repository-relative paths for every read, search, edit and command.",
+      "Treat packages/cli/src/ui/components/messages/ConversationMessages.tsx, packages/cli/src/ui/components/HistoryItemDisplay.tsx, packages/cli/src/ui/components/shared/ToolStatusIndicator.tsx, packages/cli/src/ui/components/messages/ToolMessage.tsx and packages/cli/src/ui/constants.ts as the visual authority; they are read-only.",
+      "Only modify the four allowlisted OpenTUI message/model/test files; no backend, Ink, neutral streaming model, dependency, lockfile, Marshal-state, commit, push, publication, network or subagent changes.",
+      "Render user rows as an accent-colored > prefix and accent text with the Ink-equivalent two-column prefix reservation and turn spacing.",
+      "Render assistant rows with the accent-colored ◆ prefix, the same two-column content start, primary markdown body and Ink-equivalent turn spacing; do not add cards, borders or backgrounds.",
+      "Render Thought headers dim and italic: pending uses ∵ Thinking…; completed uses ∴ plus Thought briefly below 1000 ms or Thought for <formatted duration> at or above 1000 ms. Collapsed and expanded states must carry the same ctrl+o expand/collapse wording as Ink, with the click affordance included for the already mouse-enabled OpenTUI row.",
+      "Add the minimum OpenTUI-local model metadata needed to measure a Thought from its first thinking event until thinking-end. Keep foldLiveEvent deterministic under tests by accepting or otherwise exposing a controllable clock; do not modify backend or shared model APIs beyond the allowlist.",
+      "Expanded Thought content starts at the same two-column indentation and uses secondary/dim presentation. A collapsed completed Thought must not render its body.",
+      "Tool rows reserve exactly the Ink two-column status indicator width. Preserve the Ink glyph/status meanings and emphasis: pending o, executing ⊷, success ✓, confirming ?, canceled -, error x; status color, bold tool name, dim description and canceled strikethrough must match the readable Ink semantics available in the OpenTUI model.",
+      "Preserve click-to-expand behavior and selection safety. Do not regress assistant markdown streaming, tool args/result expansion, task rows, CJK/emoji width, or narrow wrapping.",
+      "Add focused tests that assert glyphs, two-column alignment, dim/italic attributes, Thought duration threshold and formatted labels, ctrl+o/click hints, collapsed-body behavior, tool status mapping and canceled strikethrough. Prefer pure metadata/model tests plus the smallest supported OpenTUI render test.",
+      "Do not duplicate a second message renderer in backend.tsx or broaden this slice into Header, Composer, LoadingIndicator, Footer or theme redesign.",
+      "Worker checks may use only the frozen acceptance commands. Do not mutate the Git index.",
+      "If an operation is denied, do not retry that path; use an allowed equivalent input or report blocked."
+    ],
+    "context": [
+      "The product baseline is feat/opentui-migrate after the accepted /help and Backspace fixes; no previously blocked or rejected Run may be copied or integrated.",
+      "The current OpenTUI messages.tsx already has the basic >, ◆, ∵/∴ and tool-card structure, but its completed Thought label omits Ink duration semantics and the slice lacks authoritative parity tests.",
+      "Ink completed Thought semantics are exact: duration below 1000 ms is Thought briefly; otherwise Thought for followed by formatDuration(durationMs). Collapsed VP text advertises click or ctrl+o to expand; expanded completed text advertises ctrl+o to collapse.",
+      "The backend-owned expanded Set and onToggle callback are the existing boundary for mouse/keyboard expansion state. This leaf slice must render both states correctly but must not change backend keyboard routing.",
+      "OpenTUI Text attributes use the installed renderer API; verify dim plus italic and strikethrough using supported attributes rather than ANSI escape strings."
+    ],
+    "nonGoals": [
+      "No Header, Tips, Composer, LoadingIndicator, Footer or global theme work",
+      "No backend event source, input routing or ctrl+o key-handler changes",
+      "No dialogs, slash commands, VP architecture or mouse protocol changes",
+      "No Solid renderer work",
+      "No release, commit, push or PR"
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "messages-vitest",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui/messages.test.tsx",
+          "packages/cli/src/ui/opentui/live-session.test.ts"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-build",
+        "argv": ["npm", "run", "build", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 1800,
+    "runTimeoutSeconds": 4200,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 12000000
+  },
+  "deliverables": [
+    {
+      "id": "messages-parity",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/messages*",
+      "minimumCount": 2,
+      "required": true
+    },
+    {
+      "id": "thought-duration-model-tests",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/live-session*",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

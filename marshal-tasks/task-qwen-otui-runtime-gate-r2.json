@@ -1,0 +1,134 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-RUNTIME-GATE-R2",
+    "title": "OpenTUI runtime preflight successor with executable verification"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "packages/cli/src/ui/render/**"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "package.json",
+      "package-lock.json",
+      "packages/cli/src/ui/opentui/**"
+    ],
+    "maxChangedFiles": 5,
+    "maxDiffBytes": 50000
+  },
+  "work": {
+    "objective": "Reproduce and independently verify the rejected R1 OpenTUI runtime preflight: unsupported Node runtimes must fail before native renderer import with an actionable Bun command, while Bun passes a real native FFI probe.",
+    "constraints": [
+      "Use repository-relative paths for all reads, edits, searches and commands.",
+      "Only modify the allowed UI dispatch/runtime files; do not change OpenTUI product components, dependencies, lockfiles, Ink behavior, commit, push, publish, use network access or start subagents.",
+      "Do not import or copy files from the rejected Marshal worktree; independently implement from the branch base and the frozen requirements.",
+      "Do not claim Node 24 support: the locked @opentui/core 0.5.1 requires Bun or a Node runtime that can actually load node:ffi.",
+      "If an operation is denied, do not retry that path; use an allowed equivalent or report blocked."
+    ],
+    "context": [
+      "R1 was rejected solely because its frozen ./node_modules/.bin/vitest acceptance executable remained unresolved in two independent verification rounds; its code was not integrated or accepted.",
+      "A real user reproduced Node v24.15.0 failing deep inside @opentui/core, while QWEN_TUI_RENDERER=opentui bun packages/cli/dist/index.js renders successfully.",
+      "Gate before importing the native-dependent OpenTUI renderer. Unsupported runtimes exit nonzero with the verified Bun command; default Ink remains unchanged.",
+      "Use a fail-closed node:ffi loadability probe rather than a version-only guess. Add focused tests and retain the real Bun resolveRenderLib gate."
+    ],
+    "nonGoals": [
+      "No subprocess bridge",
+      "No default-renderer switch",
+      "No dependency upgrade",
+      "No visual parity or Solid work"
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "renderer-tests",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/render"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 120,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "bun-native-ffi",
+        "argv": [
+          "bun",
+          "-e",
+          "import('@opentui/core').then((m) => { m.resolveRenderLib(); console.log('opentui-ffi-ok') })"
+        ],
+        "cwd": "packages/cli",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 2400,
+    "runTimeoutSeconds": 3600,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 12000000
+  },
+  "deliverables": [
+    {
+      "id": "runtime-preflight",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/render/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

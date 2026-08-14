@@ -23,17 +23,27 @@
  */
 
 import process from 'node:process';
+import { EventEmitter } from 'node:events';
 import {
   AuthType,
   getMCPServerStatus,
   isImageCapable,
   logModelSlashCommand,
+  matchesAnyServerPattern,
+  MCPOAuthProvider,
+  MCPOAuthTokenStorage,
+  mcpServerRequiresOAuth,
+  MCPServerStatus,
   ModelSlashCommandEvent,
+  OAUTH_AUTH_URL_EVENT,
+  OAUTH_DISPLAY_MESSAGE_EVENT,
   parseVisionModelSetting,
+  removeMCPServerStatus,
 } from '@qwen-code/qwen-code-core';
 import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
@@ -51,7 +61,12 @@ import {
   type OpenTuiModelEntry,
 } from './dialogs-model.js';
 import type { PermissionRuleEntry } from './dialogs-permissions.js';
-import type { McpServerInfo, McpToolInfo } from './dialogs-mcp.js';
+import type {
+  McpResourceInfo,
+  McpServerAction,
+  McpServerInfo,
+  McpToolInfo,
+} from './dialogs-mcp.js';
 import type { ExtensionRow } from './dialogs-extensions.js';
 
 /**
@@ -672,6 +687,229 @@ export function getMcpServerTools(
       ...(tool.description ? { description: tool.description } : {}),
       isValid: Boolean(tool.name && tool.description),
     }));
+}
+
+/** Resource feed for the MCP dialog's resource list step. */
+export function getMcpServerResources(
+  config: Config | null | undefined,
+  serverName: string,
+): McpResourceInfo[] {
+  const resources =
+    config?.getResourceRegistry?.()?.getResourcesByServer(serverName) ?? [];
+  return resources.map((resource) => {
+    const r = resource as { uri?: string; name?: string; title?: string };
+    return {
+      uri: r.uri ?? '',
+      ...(r.name ? { name: r.name } : {}),
+      ...(r.title ? { title: r.title } : {}),
+    };
+  });
+}
+
+/**
+ * Real OAuth token state (audit 01 G-6): ink's MCPManagementDialog reads
+ * `MCPOAuthTokenStorage.getCredentials` per server and derives `requiresAuth`
+ * from the 401 marker / declared-but-tokenless OAuth. `buildMcpServers` is
+ * synchronous, so this async pass enriches its output before mounting.
+ */
+export async function enrichMcpOAuthState(
+  config: Config | null | undefined,
+  servers: McpServerInfo[],
+): Promise<McpServerInfo[]> {
+  const mcpServers = config?.getMcpServers?.() ?? {};
+  const tokenStorage = new MCPOAuthTokenStorage();
+  const enriched: McpServerInfo[] = [];
+  for (const info of servers) {
+    let hasOAuthTokens = false;
+    try {
+      hasOAuthTokens = (await tokenStorage.getCredentials(info.name)) !== null;
+    } catch {
+      // Unreadable token store = no tokens.
+    }
+    const serverConfig = mcpServers[info.name] as
+      | { oauth?: { enabled?: boolean } }
+      | undefined;
+    const status = getMCPServerStatus(info.name);
+    const requiresAuth =
+      status !== MCPServerStatus.CONNECTED &&
+      (mcpServerRequiresOAuth.get(info.name) === true ||
+        (Boolean(serverConfig?.oauth?.enabled) && !hasOAuthTokens));
+    enriched.push({ ...info, status, hasOAuthTokens, requiresAuth });
+  }
+  return enriched;
+}
+
+export interface McpActionResult {
+  /** User-facing outcome line (null = silent success). */
+  message: string | null;
+  /** The server inventory changed and should be reloaded. */
+  changed: boolean;
+}
+
+/**
+ * Real server actions for the OpenTUI MCP dialog (audit 01 G-6 / 05 G-13),
+ * mirroring MCPManagementDialog's handlers: enable/disable via the
+ * extension-scoped flag or the user/workspace `mcp.excluded` lists,
+ * reconnect via re-discovery, clear-auth via the token storage + disconnect,
+ * approve via the gated-approval store, and authenticate via the real
+ * MCPOAuthProvider (auth URL surfaced through the returned message).
+ */
+export async function applyMcpServerAction(
+  config: Config | null | undefined,
+  settings: LoadedSettings,
+  server: McpServerInfo,
+  action: McpServerAction,
+): Promise<McpActionResult> {
+  if (!config) return { message: null, changed: false };
+  const toolRegistry = config.getToolRegistry();
+  try {
+    switch (action) {
+      case 'reconnect': {
+        if (toolRegistry) {
+          await toolRegistry.discoverToolsForServer(server.name);
+        }
+        return { message: `Reconnecting '${server.name}'…`, changed: true };
+      }
+      case 'clear-auth': {
+        const tokenStorage = new MCPOAuthTokenStorage();
+        await tokenStorage.deleteCredentials(server.name);
+        if (toolRegistry) {
+          await toolRegistry.disconnectServer(server.name);
+        }
+        return {
+          message: `Cleared OAuth tokens for '${server.name}'.`,
+          changed: true,
+        };
+      }
+      case 'approve': {
+        const serverConfig = (config.getMcpServers?.() ?? {})[server.name];
+        if (serverConfig) {
+          const approvals = loadMcpApprovals();
+          await approvals.setState(
+            config.getWorkingDir(),
+            server.name,
+            serverConfig,
+            'approved',
+          );
+        }
+        config.approveMcpServerForSession(server.name);
+        if (toolRegistry) {
+          await toolRegistry.discoverToolsForServer(server.name);
+        }
+        return { message: `Approved '${server.name}'.`, changed: true };
+      }
+      case 'toggle-disable': {
+        if (server.isDisabled) {
+          // Enable: clear the extension flag and both exclusion lists.
+          const rawConfig = (config.getMcpServers?.() ?? {})[server.name] as
+            | { extensionName?: string }
+            | undefined;
+          const extensionName = rawConfig?.extensionName;
+          if (extensionName) {
+            config
+              .getExtensionManager()
+              ?.setMcpServerDisabled(extensionName, server.name, false);
+          }
+          for (const scope of [SettingScope.User, SettingScope.Workspace]) {
+            const scopeSettings = settings.forScope(scope).settings;
+            const currentExcluded = scopeSettings.mcp?.excluded ?? [];
+            if (currentExcluded.includes(server.name)) {
+              settings.setValue(
+                scope,
+                'mcp.excluded',
+                currentExcluded.filter((name: string) => name !== server.name),
+              );
+            }
+          }
+          const currentExcluded = config.getExcludedMcpServers() ?? [];
+          config.setExcludedMcpServers(
+            currentExcluded.filter((name: string) => name !== server.name),
+          );
+          if (toolRegistry) {
+            await toolRegistry.discoverToolsForServer(server.name);
+          }
+          return { message: `Enabled '${server.name}'.`, changed: true };
+        }
+        // Disable.
+        if (server.source === 'extension') {
+          const rawConfig = (config.getMcpServers?.() ?? {})[server.name] as
+            | { extensionName?: string }
+            | undefined;
+          const extensionName = rawConfig?.extensionName;
+          const manager = config.getExtensionManager();
+          if (!extensionName || !manager) {
+            return {
+              message: `Cannot disable extension MCP server '${server.name}'.`,
+              changed: false,
+            };
+          }
+          manager.setMcpServerDisabled(extensionName, server.name, true);
+          await toolRegistry?.disconnectServer(server.name);
+          removeMCPServerStatus(server.name);
+          return { message: `Disabled '${server.name}'.`, changed: true };
+        }
+        // Scope by config location (ink parity): project → workspace.
+        const targetScope =
+          server.source === 'project'
+            ? SettingScope.Workspace
+            : SettingScope.User;
+        const scopeSettings = settings.forScope(targetScope).settings;
+        const currentExcluded = scopeSettings.mcp?.excluded ?? [];
+        if (!matchesAnyServerPattern(server.name, currentExcluded)) {
+          settings.setValue(targetScope, 'mcp.excluded', [
+            ...currentExcluded,
+            server.name,
+          ]);
+        }
+        if (toolRegistry) {
+          await toolRegistry.disableMcpServer(server.name);
+        }
+        return { message: `Disabled '${server.name}'.`, changed: true };
+      }
+      case 'authenticate': {
+        const rawConfig = (config.getMcpServers?.() ?? {})[server.name] as
+          | { oauth?: { enabled?: boolean }; url?: string }
+          | undefined;
+        const oauthConfig = rawConfig?.oauth ?? { enabled: false };
+        const events = new EventEmitter();
+        const notices: string[] = [];
+        events.on(OAUTH_DISPLAY_MESSAGE_EVENT, (message: unknown) => {
+          if (typeof message === 'string') notices.push(message);
+        });
+        events.on(OAUTH_AUTH_URL_EVENT, (url: unknown) => {
+          if (typeof url === 'string') {
+            notices.push(`Open this URL to authenticate:\n${url}`);
+          }
+        });
+        const provider = new MCPOAuthProvider(new MCPOAuthTokenStorage());
+        await provider.authenticate(
+          server.name,
+          oauthConfig,
+          rawConfig?.url,
+          events,
+        );
+        if (toolRegistry) {
+          await toolRegistry.discoverToolsForServer(server.name);
+        }
+        return {
+          message:
+            notices.length > 0
+              ? notices.join('\n')
+              : `Authenticated '${server.name}'.`,
+          changed: true,
+        };
+      }
+      default:
+        return { message: null, changed: false };
+    }
+  } catch (error) {
+    return {
+      message: `MCP action failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      changed: true,
+    };
+  }
 }
 
 /** Installed-extension rows for the extensions dialog. */

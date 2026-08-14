@@ -1,0 +1,110 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-EVIDENCE-RECOVERY-R2",
+    "title": "Recover and verify the PTY-backed OpenTUI parity harness"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-evidence-candidate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["scripts/tui-parity/**"],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/**",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 16,
+    "maxDiffBytes": 220000
+  },
+  "work": {
+    "objective": "Audit, repair if needed, and independently verify the recovered PTY-backed Ink versus OpenTUI evidence harness candidate.",
+    "constraints": [
+      "Use repository-relative paths for every read, search, edit and command.",
+      "Only modify scripts/tui-parity/**; do not modify product code, dependencies, lockfiles, Marshal state, commit, push, publish, use network access, or start subagents.",
+      "Do not use mktemp, shell-generated temporary directories, or permission probes. Tests must create and clean temporary directories using Node built-ins inside the allowed test path or the existing test helpers.",
+      "If an operation is denied, do not retry that path; use an allowed relative-path equivalent or report the exact blocker.",
+      "Do not claim real-product or visual parity from fixture-only evidence."
+    ],
+    "context": [
+      "This is the recovery successor to blocked Run qwen-otui-evidence-harness-20260811. Its accepted first review required four outcomes: real PTY-backed capture with TTY/size/input/timeout tests; one shared parameter set or a verified parameter fingerprint; complete timer/process-tree cleanup on timeout; and DEC 2026 claims no broader than measured per-event coverage.",
+      "The baseRef contains the recovered attempt-3 candidate from the blocked Run. Treat it as untrusted input: inspect all 16 files and run the required tests. Make only evidence-backed corrections.",
+      "Confirm that capture actually observes stdout.isTTY=true, terminal rows/columns, scripted input, bounded timeout, and descendant cleanup. Confirm mismatched base/fixed parameters fail. Confirm synchronization metrics cannot pass when only some redraw frames are bracketed.",
+      "If the candidate already satisfies every required outcome and all gates pass, return a no-change diagnostic result with precise file/test evidence."
+    ],
+    "nonGoals": [
+      "Do not modify OpenTUI or Ink product code.",
+      "Do not launch a real model or require credentials.",
+      "Do not work on Solid."
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": true,
+    "commands": [
+      {
+        "id": "harness-tests",
+        "argv": ["node", "--test", "scripts/tui-parity/test"],
+        "cwd": ".",
+        "timeoutSeconds": 120,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "harness-self-test",
+        "argv": ["node", "scripts/tui-parity/self-test.mjs"],
+        "cwd": ".",
+        "timeoutSeconds": 120,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 3600,
+    "runTimeoutSeconds": 5400,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 16000000
+  },
+  "deliverables": [
+    {
+      "id": "recovered-parity-harness",
+      "kind": "code",
+      "pathGlob": "scripts/tui-parity/**",
+      "minimumCount": 4,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-evidence-candidate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

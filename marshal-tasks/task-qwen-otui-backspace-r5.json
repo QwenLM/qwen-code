@@ -1,0 +1,169 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-BACKSPACE-R5",
+    "title": "OpenTUI Backspace real-event-path successor"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/opentui/input-prompt.tsx",
+      "packages/cli/src/ui/opentui/input-prompt-key.ts",
+      "packages/cli/src/ui/opentui/input-prompt-key.test.ts",
+      "packages/cli/src/ui/opentui/input-prompt.test.tsx"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/components/**",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 4,
+    "maxDiffBytes": 45000
+  },
+  "work": {
+    "objective": "Independently fix Bun/OpenTUI Backspace through an event route that actually fires in the real renderer, invoking supported native TextareaRenderable deletion and preserving printable input, Tab, Enter, history and completion behavior; leave real PTY proof exclusively to the verifier.",
+    "constraints": [
+      "Use repository-relative paths for every read, search, edit and command.",
+      "Only modify the four allowlisted input-prompt files; do not modify Ink, dependencies, lockfiles, Marshal state, commit, push, publish, use network access or start subagents.",
+      "Implement independently from the frozen base and stated evidence; do not read, list, compare, import or copy any previous Backspace Marshal worktree, patch, transcript, WorkerResult, ReviewPacket or run artifact.",
+      "Inspect the locally installed @opentui/react and @opentui/core APIs/types as needed to establish actual keyboard dispatch order and supported TextareaRenderable editing hooks.",
+      "Do not delete by slicing or reconstructing JavaScript strings. Use supported native TextareaRenderable deletion operations and prevent duplicate handling at the correct point in dispatch.",
+      "Do not assume raw DEL reaches useKeyboard: select and test an event path consistent with OpenTUI dispatch. Keep the solution production-safe; do not add debug logging or terminal-specific timing hacks.",
+      "Printable fallback must reject modifier/control/editing/navigation keys while preserving ASCII, CJK and emoji; Backspace, Tab and Enter must never be inserted as text.",
+      "Worker checks are limited to unit/OpenTUI vitest, CLI typecheck/build and git diff --check; do not launch Bun, expect, PTY diagnostics or background processes because the independent verifier owns native proof.",
+      "If an operation is denied, do not retry that path; use an allowed equivalent or report blocked."
+    ],
+    "context": [
+      "The user reproduced that Backspace cannot delete text in the Bun/OpenTUI composer.",
+      "Three independent real PTY verifications rendered ZXQ but never produced a post-DEL submission frame. The latest attempt classified raw 0x7f/0x08 in the global handler and called native deletion, yet the native gate still timed out, so the assumption that this event reaches or safely runs in useKeyboard is not established.",
+      "The verifier waits for ready, types ZXQ, sends raw DEL followed by Enter, requires submitted ZX, then sends Ctrl+C and requires EOF without critical errors.",
+      "Preserve the already verified no-flicker and mouse behavior."
+    ],
+    "nonGoals": [
+      "No visual redesign",
+      "No help changes",
+      "No runtime gate changes",
+      "No history/completion redesign",
+      "No Solid work"
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "backspace-unit",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui/input-prompt-key.test.ts",
+          "packages/cli/src/ui/opentui/input-prompt.test.tsx"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "opentui-tests",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 60000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-build",
+        "argv": ["npm", "run", "build", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "bun-backspace-native-pty",
+        "argv": [
+          "/usr/bin/expect",
+          "-c",
+          "set timeout 90\nspawn env QWEN_TUI_RENDERER=opentui QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true bun packages/cli/dist/index.js\nexpect { -re {ready} {} -re {unexpected critical error|Error:} { exit 1 } timeout { exit 2 } }\nsend -- \"ZXQ\"\nexpect { -re {ZXQ} {} timeout { exit 3 } }\nsend -- \"\\177\\r\"\nexpect { -re {❯.*ZX} {} -re {unexpected critical error|Error:} { exit 4 } timeout { exit 5 } }\nsend -- \"\\003\"\nexpect { eof {} timeout { exit 6 } }"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 2400,
+    "runTimeoutSeconds": 5400,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 16000000
+  },
+  "deliverables": [
+    {
+      "id": "backspace-fix",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/input-prompt*",
+      "minimumCount": 2,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}
