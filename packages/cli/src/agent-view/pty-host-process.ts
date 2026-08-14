@@ -287,26 +287,36 @@ function createRemotePtyHostHandle({
       const allowedSignal = killSignalValue(signal);
       void callAgentViewPtyHost(socketPath, authToken, 'kill', {
         signal: allowedSignal,
-      }).catch(() => {
-        child?.kill(allowedSignal);
-      });
-      // Only SIGKILL cannot be trapped, so it is the only kill that
-      // guarantees the worker is gone — resolve the exit tracker immediately
-      // for it. SIGINT/SIGTERM can be trapped and survived (the server-side
-      // kill op, unlike shutdown, has no SIGKILL escalation), so let the
-      // remote exit poller observe whether the worker actually exits.
-      if (!child && allowedSignal === 'SIGKILL') {
-        exitTracker.resolve({ exitCode: 1 });
-      }
+      }).then(
+        () => {
+          // Only SIGKILL cannot be trapped, so once the RPC has landed it is
+          // the only kill that guarantees the worker is gone — settle then,
+          // not before: an RPC that never lands must leave the exit poller
+          // running, exactly like the trappable SIGINT/SIGTERM cases.
+          if (!child && allowedSignal === 'SIGKILL') {
+            exitTracker.resolve({ exitCode: 1 });
+          }
+        },
+        () => {
+          child?.kill(allowedSignal);
+        },
+      );
     },
     shutdown(): void {
-      void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
-        child?.kill('SIGTERM');
-      });
+      void callAgentViewPtyHost(socketPath, authToken, 'shutdown').then(
+        () => {
+          // Only settle once the RPC has landed: a failed or lost shutdown
+          // leaves the host alive holding the socket lock, and resolving
+          // early would clear the liveness poller that can still detect it.
+          if (!child) {
+            exitTracker.resolve({ exitCode: 0 });
+          }
+        },
+        () => {
+          child?.kill('SIGTERM');
+        },
+      );
       attachSocket?.destroy();
-      if (!child) {
-        exitTracker.resolve({ exitCode: 0 });
-      }
     },
     dispose(): void {
       void callAgentViewPtyHost(socketPath, authToken, 'shutdown').catch(() => {
