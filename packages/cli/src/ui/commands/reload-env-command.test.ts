@@ -8,7 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { reloadEnvCommand } from './reload-env-command.js';
 import type { CommandContext } from './types.js';
-import { reloadEnvironment } from '../../config/settings.js';
+import {
+  reloadEnvironment,
+  type LoadedSettings,
+} from '../../config/settings.js';
 import type { EnvReloadResult } from '../../config/environment.js';
 
 vi.mock('../../config/settings.js', () => ({
@@ -16,12 +19,14 @@ vi.mock('../../config/settings.js', () => ({
   getUserSettingsPath: vi.fn(() => '/mock/.qwen/settings.json'),
 }));
 
-vi.mock('fs', () => ({
-  default: {
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
     existsSync: vi.fn(() => false),
     readFileSync: vi.fn(),
-  },
-}));
+  };
+});
 
 vi.mock('strip-json-comments', () => ({
   default: (s: string) => s,
@@ -50,12 +55,12 @@ describe('reloadEnvCommand', () => {
     const settings = {
       merged: {},
       reloadScopeFromDisk: vi.fn(),
-    };
+    } as unknown as LoadedSettings;
     const config = {
       getCwd: () => '/mock/cwd',
       getContentGeneratorConfig: () => ({ authType: 'gemini' }),
       getModelsConfig: () => ({
-        refreshApiKeyFromEnv,
+        refreshEnvSourcedCredentials: vi.fn(() => false),
       }),
       refreshAuth: vi.fn(async () => {}),
     } as unknown as Config;
@@ -120,6 +125,42 @@ describe('reloadEnvCommand', () => {
     expect(config.refreshAuth).toHaveBeenCalledWith('gemini');
   });
 
+  it('re-resolves env credentials before rebuilding the auth client', async () => {
+    vi.mocked(reloadEnvironment).mockReturnValue({
+      updatedKeys: ['TEST_API_KEY'],
+      removedKeys: [],
+    });
+
+    const order: string[] = [];
+    const refreshEnvSourcedCredentials = vi.fn(() => {
+      order.push('refreshEnvSourcedCredentials');
+      return true;
+    });
+    const refreshAuth = vi.fn(async () => {
+      order.push('refreshAuth');
+    });
+
+    const ctx = makeContext({
+      services: {
+        logger: null,
+        settings: {
+          merged: {},
+          reloadScopeFromDisk: vi.fn(),
+        } as unknown as LoadedSettings,
+        config: {
+          getCwd: () => '/mock/cwd',
+          getContentGeneratorConfig: () => ({ authType: 'gemini' }),
+          getModelsConfig: () => ({ refreshEnvSourcedCredentials }),
+          refreshAuth,
+        } as unknown as Config,
+      },
+    });
+    await reloadEnvCommand.action?.(ctx, '');
+
+    expect(refreshEnvSourcedCredentials).toHaveBeenCalledWith('gemini');
+    expect(order).toEqual(['refreshEnvSourcedCredentials', 'refreshAuth']);
+  });
+
   it('shows failure message when refreshAuth throws', async () => {
     process.env['TEST_API_KEY'] = 'sk-newkey123456';
     vi.mocked(reloadEnvironment).mockReturnValue({
@@ -151,12 +192,16 @@ describe('reloadEnvCommand', () => {
 
     const ctx = makeContext({
       services: {
-        settings: { merged: {}, reloadScopeFromDisk: vi.fn() } as unknown as LoadedSettings,
+        logger: null,
+        settings: {
+          merged: {},
+          reloadScopeFromDisk: vi.fn(),
+        } as unknown as LoadedSettings,
         config: {
-        settings: { merged: {}, reloadScopeFromDisk: vi.fn() } as unknown as LoadedSettings,
+          getCwd: () => '/mock/cwd',
           getContentGeneratorConfig: () => ({ authType: undefined }),
           getModelsConfig: () => ({
-            refreshApiKeyFromEnv: vi.fn(() => false),
+            refreshEnvSourcedCredentials: vi.fn(() => false),
           }),
           refreshAuth: vi.fn(async () => {}),
         } as unknown as Config,
@@ -202,7 +247,7 @@ describe('reloadEnvCommand', () => {
   });
 
   it('warns when settings file has invalid JSON', async () => {
-    const fs = (await import('fs')).default as unknown as {
+    const fs = (await import('node:fs')) as unknown as {
       existsSync: ReturnType<typeof vi.fn>;
       readFileSync: ReturnType<typeof vi.fn>;
     };

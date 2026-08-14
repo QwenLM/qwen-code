@@ -18,18 +18,11 @@ import {
 import { t } from '../../i18n/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import path from 'path';
 import stripJsonComments from 'strip-json-comments';
 
 const debugLogger = createDebugLogger('RELOAD_ENV');
 
 function getCurrentCwd(config: Config | null): string {
-  if (config?.getCwd) {
-    const cwd = config.getCwd();
-    if (cwd) return cwd;
-  }
-  return process.cwd();
-}
   if (config?.getCwd) {
     const cwd = config.getCwd();
     if (cwd) return cwd;
@@ -42,7 +35,11 @@ function validateSettingsFile(filePath: string): boolean {
     if (!fs.existsSync(filePath)) return true;
     const content = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(stripJsonComments(content));
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+    return (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+    );
   } catch {
     return false;
   }
@@ -55,20 +52,14 @@ export const reloadEnvCommand: SlashCommand = {
     return t(
       'Reload environment variables and API keys from settings.json and .env files without restarting',
     );
-// Add translation entries to en.js, zh.js, and zh-TW.js for:
-// - Command description (this line)
-// - 'Updated keys'
-// - 'Removed keys'
-// - 'No environment changes detected.'
-// - 'Environment reloaded and API client refreshed. New keys are live.'
-// - 'Environment reloaded. New API keys will take effect on the next request.'
+  },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
     const { services } = context;
     const settings = services.settings;
 
-    const cwd = await getCurrentCwd(services.config);
+    const cwd = getCurrentCwd(services.config);
 
     // Pre-check: validate settings files are parseable before reloading.
     // reloadScopeFromDisk swallows parse errors internally (debugLogger.warn
@@ -81,7 +72,7 @@ export const reloadEnvCommand: SlashCommand = {
     }
     const workspaceSettingsPath = path.join(cwd, '.qwen', 'settings.json');
     if (!validateSettingsFile(workspaceSettingsPath)) {
-    const workspaceSettingsPath = new Storage(cwd).getWorkspaceSettingsPath();
+      settingsWarnings.push(workspaceSettingsPath);
     }
 
     settings.reloadScopeFromDisk(SettingScope.User);
@@ -97,18 +88,25 @@ export const reloadEnvCommand: SlashCommand = {
       (result.updatedKeys.length > 0 || result.removedKeys.length > 0) &&
       services.config
     ) {
-    if ((result.updatedKeys.length > 0 || result.removedKeys.length > 0) && services.config) {
+      const cgConfig = services.config.getContentGeneratorConfig?.();
       if (cgConfig?.authType) {
         try {
-          // Re-resolve apiKey from process.env before refreshAuth.
-          // syncAfterAuthRefresh's credential preservation can skip env
-          // re-reads for non-registry models (e.g. bare OPENAI_API_KEY
-          // without modelProviders config), leaving the stale startup key
-          // in _generationConfig. This ensures the new key is present
-          // before the ContentGenerator is rebuilt.
-          services.config
-            .getModelsConfig()
-            .refreshApiKeyFromEnv(cgConfig.authType);
+          // Re-resolve env-sourced credentials from process.env before
+          // refreshAuth. syncAfterAuthRefresh's credential preservation can
+          // skip env re-reads for non-registry models (e.g. bare
+          // OPENAI_API_KEY without modelProviders config), leaving the stale
+          // startup key in _generationConfig. This ensures the new key is
+          // present before the ContentGenerator is rebuilt.
+          const modelsConfig = services.config.getModelsConfig();
+          const securityAuth = settings.merged.security?.auth;
+          if (securityAuth?.apiKey || securityAuth?.baseUrl) {
+            modelsConfig.refreshSettingsSourcedCredentials({
+              apiKey: securityAuth?.apiKey,
+              baseUrl: securityAuth?.baseUrl,
+              model: settings.merged.model?.name,
+            });
+          }
+          modelsConfig.refreshEnvSourcedCredentials(cgConfig.authType);
           await services.config.refreshAuth(cgConfig.authType);
           authState = 'success';
         } catch (err) {
@@ -130,8 +128,6 @@ export const reloadEnvCommand: SlashCommand = {
       const masked = result.updatedKeys.map((k) => {
         const val = process.env[k];
         const preview =
-          val && val.length > 8
-            ? val.slice(0, 4) + '...' + val.slice(-4)
           val && val.length > 16
             ? val.slice(0, 4) + '...' + val.slice(-4)
             : '***';
