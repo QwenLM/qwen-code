@@ -415,12 +415,22 @@ export function coverageFromTranscripts(
   // launched nothing has no current-session dir yet (the harness creates it on
   // the first launch), and this gate must read the prior attempt's evidence
   // rather than refusing as broken infrastructure. Only ENOENT is absorbed.
-  const records = readRunTranscripts(
+  const allRecords = readRunTranscripts(
     planPath,
     mtimeMs,
     env,
     plan.diffPathAbsolute,
     { currentDirOptional: true },
+  );
+  // A PRIOR attempt's agent that never returned did not review anything: the
+  // session died mid-flight, so its findings never existed. Dropped HERE, at
+  // the source, rather than in the coverage walk alone — the same record
+  // would otherwise still satisfy roster matching and the Step 4/5 delivery
+  // floor, and a gate reading a different evidence set than its siblings is
+  // how a review certifies work nobody did. An empty return in the CURRENT
+  // session is an agent still running, which the idle checks own.
+  const records = allRecords.filter(
+    (r) => !(r.fromPriorSession && r.finalText.trim() === ''),
   );
   const built = readRecordedPrompts(planPath);
 
@@ -716,16 +726,6 @@ export function coverageFromTranscripts(
     if (gaps.length > 0 && !gapsSuperseded(rec, chunk)) {
       budgetGaps.push({ agent: name, gaps });
     }
-
-    // A PRIOR attempt's agent that never returned did not review anything.
-    // Its transcript can look complete — verbatim prompt, a diff read — yet
-    // its findings never existed, because the session died mid-flight; the
-    // resumed run would then skip the relaunch and ship the chunk unread.
-    // Only prior records take this bar: an empty final text in the CURRENT
-    // session is an agent still running (or a whiff the idle checks own),
-    // and a single-session run cannot reach this state at all — its crash
-    // rewrites the plan and fences the record out.
-    if (rec.fromPriorSession && rec.finalText.trim() === '') continue;
 
     // What it was told to read, plus what it demonstrably read. The second
     // term is what lets an agent handed the bare diff path with no
@@ -1046,7 +1046,13 @@ export function coverageFromTranscripts(
   // non-capping continuity note, beside the other disclosed-but-not-capping
   // blocks (deferred lint, test-plan notes).
   const recoveredAgents = records.filter(
-    (r) => r.fromPriorSession && certifies(r),
+    (r) =>
+      r.fromPriorSession &&
+      certifies(r) &&
+      // Not if a CURRENT record already satisfied the same obligation: the
+      // count is what the continuity note reports, and announcing recovery
+      // for superseded work would misdescribe what this run reused.
+      !superseded(r, assignedChunk(r)),
   ).length;
 
   return {

@@ -2333,6 +2333,21 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(false);
   });
 
+  it('does not count prior work a current relaunch superseded', () => {
+    // The count is what the continuity note reports; claiming recovery for
+    // an obligation this run re-did would misdescribe what it reused.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1old', good(1), { calls: 2 });
+    moveToSession('a1old', 'S0');
+    transcript('a1', good(1), { calls: 3 });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(true);
+    expect(r.recoveredAgents).toBe(0);
+  });
+
   it('does NOT credit a prior agent that died mid-flight', () => {
     // Verbatim prompt, a logged diff read, and no return: the session was
     // killed before it reported. Crediting it would let the resumed run skip

@@ -5828,10 +5828,15 @@ describe('composeReview — a resumed run is continuity, not a coverage gap', ()
     // recovered work COUNTS as reviewed: no cap, no "Not reviewed:" entry —
     // a capping entry here downgraded every clean resumed run to COMMENT,
     // permanently, since the prior records never leave the ledger.
-    const p = coveredPlan();
-    rehomeToPriorSession(p, 'agent-a1.jsonl');
+    // Build the input FIRST: `base()`'s object literal evaluates its
+    // `planPath: coveredPlan()` default even when the caller overrides it,
+    // and `coveredPlan()` rewrites the current session's chunk-1 record —
+    // which would then supersede the prior one and (correctly) stop counting
+    // as recovered work.
+    const input = base({});
+    rehomeToPriorSession(input.planPath as string, 'agent-a1.jsonl');
 
-    const r = composeReview(base({ planPath: p }));
+    const r = composeReview(input);
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain('Resumed run (not a gap): 1 agent result(s)');
     expect(r.body).not.toContain('Not reviewed: review continuity');
