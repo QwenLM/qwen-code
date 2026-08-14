@@ -157,6 +157,26 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts the workflow agent retry marker as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('root', null),
+      record('retry', 'root', {
+        type: 'system',
+        subtype: 'agent_retry',
+        message: undefined,
+        systemPayload: { attempt: 2 },
+      }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'retry',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('accepts Realtime dialogue as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('realtime-user', null, {

@@ -5,6 +5,10 @@
 # --- CODEOWNERS file itself ---
 /.github/CODEOWNERS    @pomelo-nwu @wenshao
 
+# --- Primary npm release workflows require core maintainer approval ---
+/.github/workflows/release.yml          @pomelo-nwu @wenshao
+/.github/workflows/finalize-release.yml @pomelo-nwu @wenshao
+
 # --- Core package ---
 /packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan @doudouOUC
 
