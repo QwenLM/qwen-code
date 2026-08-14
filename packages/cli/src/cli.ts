@@ -18,7 +18,7 @@ import {
   TOP_LEVEL_DEPRECATED_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
 } from './config/top-level-options.js';
-import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
+import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
 import {

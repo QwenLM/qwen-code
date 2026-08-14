@@ -35,6 +35,7 @@ import {
   pushKittyProtocolFlags,
 } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
+import { installTerminalResizeReflow } from './utils/terminal-resize-reflow.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
 import {
   isInteractiveTerminal,
@@ -54,7 +55,7 @@ import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
 import {
   computeWindowTitle,
   writeTerminalTitle,
-} from '../utils/windowTitle.js';
+} from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
@@ -164,6 +165,15 @@ export async function startInteractiveUI(
     isInteractiveTerminal(),
   );
 
+  // On width shrink the terminal reflows the printed frame into more physical
+  // rows than Ink's stale erase count (issue #8557); amplify the clear to the
+  // reflowed height. Installed before render() so the resize listener runs
+  // ahead of Ink's resized().
+  const resizeReflow =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installTerminalResizeReflow(process.stdout, { virtualViewport: useVP })
+      : { restore: () => {}, repaint: () => {} };
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -195,6 +205,7 @@ export async function startInteractiveUI(
                         initializationResult={initializationResult}
                         initialUseVirtualViewport={useVP}
                         extensionRefreshState={options.extensionRefreshState}
+                        repaintViewport={resizeReflow.repaint}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
@@ -313,6 +324,10 @@ export async function startInteractiveUI(
     if (useVP) {
       process.stdout.setMaxListeners(stdoutMaxListeners);
     }
+    // Unwind the stdout.write wrapper stack in LIFO order (resizeReflow is
+    // installed last / outermost); the identity-guarded restores silently
+    // no-op and leak wrappers otherwise.
+    resizeReflow.restore();
     restoreSynchronizedOutput();
     restoreTerminalRedrawOptimizer();
     // If the ErrorBoundary caught a rendering error, echo it to stderr

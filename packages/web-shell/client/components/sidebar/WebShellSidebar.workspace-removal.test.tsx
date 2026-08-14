@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ReactNode } from 'react';
@@ -16,6 +17,7 @@ const {
   active,
   archived,
   useSessions,
+  useChannels,
   listWorkspaceSessions,
   archiveSessionsData,
   unarchiveSessionsData,
@@ -24,11 +26,16 @@ const {
   exportSession,
   exportArchivedSession,
   sessionActions,
+  channelState,
+  invalidateSessionCatalog,
+  renameSessionCatalog,
+  refreshSessionCatalogQueries,
+  useSessionCatalogPollingSpy,
 } = vi.hoisted(() => {
   const makeSessions = () => ({
     sessions: [] as DaemonSessionSummary[],
     loading: false,
-    error: null,
+    error: null as Error | null,
     reload: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(true),
     archiveSession: vi.fn().mockResolvedValue(true),
@@ -58,11 +65,41 @@ const {
   const active = makeSessions();
   const archived = makeSessions();
   const useSessions = vi.fn(
-    (options?: { archiveState?: string; sourceType?: string }) =>
-      options?.archiveState === 'archived' ? archived : active,
+    (options?: {
+      archiveState?: string;
+      sourceType?: string;
+      group?: string;
+    }) => (options?.archiveState === 'archived' ? archived : active),
   );
   const exportArchivedSession = vi.fn();
   const sessionActions = { renameSession: vi.fn() };
+  const channelState = {
+    error: undefined as Error | undefined,
+    data: undefined as
+      | {
+          catalog: Array<{
+            type: string;
+            displayName: string;
+            manageable: boolean;
+            fields: [];
+          }>;
+          snapshot: { revision: string; instances: Record<string, unknown> };
+        }
+      | undefined,
+    catalog: [] as Array<{
+      type: string;
+      displayName: string;
+      manageable: boolean;
+      fields: [];
+    }>,
+    channels: {} as Record<string, unknown>,
+    reload: vi.fn().mockResolvedValue(undefined),
+  };
+  const useChannels = vi.fn(() => channelState);
+  const invalidateSessionCatalog = vi.fn();
+  const renameSessionCatalog = vi.fn();
+  const refreshSessionCatalogQueries = vi.fn();
+  const useSessionCatalogPollingSpy = vi.fn();
   return {
     connection: {
       status: 'connected',
@@ -90,6 +127,10 @@ const {
         workspaceByCwd: vi.fn(() => ({
           listWorkspaceSessions,
           listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+          workspaceChannelTypes: vi.fn().mockResolvedValue([]),
+          workspaceChannels: vi
+            .fn()
+            .mockResolvedValue({ revision: '0', instances: {} }),
           archiveSessionsData,
           unarchiveSessionsData,
           exportArchivedSession,
@@ -105,6 +146,7 @@ const {
     active,
     archived,
     useSessions,
+    useChannels,
     listWorkspaceSessions,
     archiveSessionsData,
     unarchiveSessionsData,
@@ -113,6 +155,11 @@ const {
     exportSession,
     exportArchivedSession,
     sessionActions,
+    channelState,
+    invalidateSessionCatalog,
+    renameSessionCatalog,
+    refreshSessionCatalogQueries,
+    useSessionCatalogPollingSpy,
   };
 });
 
@@ -122,10 +169,151 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => workspace,
   useWorkspaceActions: () => workspaceActions,
   useSessions,
+  useChannels,
 }));
+
+vi.mock('../../session-catalog/session-catalog-hooks', () => {
+  const catalogListeners = new Set<(workspaceCwd: string) => void>();
+  return {
+    useWebShellSessions: (options?: {
+      enabled?: boolean;
+      archiveState?: string;
+      sourceType?: string;
+    }) => {
+      const state = useSessions(options);
+      const catalogQuery = {
+        routeKind: 'legacy',
+        workspaceCwd: connection.workspaceCwd,
+        options,
+      };
+      if (options?.enabled === false) {
+        return { ...state, sessions: [], data: undefined, catalogQuery };
+      }
+      // A useSessions implementation may model an unsettled catalog page with
+      // an explicit `data` key (undefined until the fetch settles), matching
+      // the real store's empty snapshot on a query-key change.
+      return {
+        ...state,
+        data:
+          'data' in state
+            ? (state as { data?: DaemonSessionSummary[] }).data
+            : state.sessions,
+        catalogQuery,
+      };
+    },
+    useSessionCatalogController: () => ({
+      refreshQueries: refreshSessionCatalogQueries,
+      invalidateWorkspace: (workspaceCwd: string) => {
+        invalidateSessionCatalog(workspaceCwd);
+        for (const listener of catalogListeners) listener(workspaceCwd);
+      },
+      renamed: (
+        workspaceCwd: string,
+        sessionId: string,
+        displayName: string,
+      ) => {
+        renameSessionCatalog(workspaceCwd, sessionId, displayName);
+        for (const listener of catalogListeners) listener(workspaceCwd);
+      },
+    }),
+    useSessionCatalogPolling: useSessionCatalogPollingSpy,
+    useSessionCatalogQuery: (
+      client: typeof workspace.client,
+      query: { workspaceCwd: string; options?: Record<string, unknown> },
+      options: { autoLoad?: boolean; enabled?: boolean },
+    ) => {
+      const [snapshot, setSnapshot] = React.useState({
+        sessions: [] as DaemonSessionSummary[],
+        loading: false,
+        error: undefined as Error | undefined,
+      });
+      const reload = React.useCallback(async () => {
+        const sessions = await client
+          .workspaceByCwd(query.workspaceCwd)
+          .listWorkspaceSessions(query.options);
+        setSnapshot({ sessions, loading: false, error: undefined });
+        return { sessions };
+      }, [client, query.options, query.workspaceCwd]);
+      React.useEffect(() => {
+        if (options.enabled === false || !options.autoLoad) return;
+        void reload().catch((error: Error) => {
+          setSnapshot((current) => ({ ...current, loading: false, error }));
+        });
+      }, [options.autoLoad, options.enabled, reload]);
+      React.useEffect(() => {
+        if (options.enabled === false) return;
+        const listener = (workspaceCwd: string) => {
+          if (workspaceCwd === query.workspaceCwd) void reload();
+        };
+        catalogListeners.add(listener);
+        return () => catalogListeners.delete(listener);
+      }, [options.enabled, query.workspaceCwd, reload]);
+      return { ...snapshot, reload };
+    },
+    useSessionCatalogQueries: (
+      client: typeof workspace.client,
+      queries: Array<{
+        workspaceCwd: string;
+        options?: Record<string, unknown>;
+      }>,
+      options: { autoLoad?: boolean; enabled?: boolean },
+    ) => {
+      const [snapshots, setSnapshots] = React.useState<
+        Array<{
+          page?: { sessions: DaemonSessionSummary[] };
+          loading: boolean;
+          stale: boolean;
+          error?: Error;
+        }>
+      >([]);
+      const reload = React.useCallback(async () => {
+        if (options.enabled === false || !options.autoLoad) {
+          setSnapshots([]);
+          return;
+        }
+        setSnapshots(queries.map(() => ({ loading: true, stale: true })));
+        const next = await Promise.all(
+          queries.map(async (query) => {
+            try {
+              const sessions = await client
+                .workspaceByCwd(query.workspaceCwd)
+                .listWorkspaceSessions(query.options);
+              return { page: { sessions }, loading: false, stale: false };
+            } catch (error) {
+              return {
+                loading: false,
+                stale: true,
+                error:
+                  error instanceof Error ? error : new Error(String(error)),
+              };
+            }
+          }),
+        );
+        setSnapshots(next);
+      }, [client, options.autoLoad, options.enabled, queries]);
+      React.useEffect(() => {
+        void reload();
+      }, [reload]);
+      React.useEffect(() => {
+        if (options.enabled === false) return;
+        const listener = (workspaceCwd: string) => {
+          if (queries.some((query) => query.workspaceCwd === workspaceCwd)) {
+            void reload();
+          }
+        };
+        catalogListeners.add(listener);
+        return () => catalogListeners.delete(listener);
+      }, [options.enabled, queries, reload]);
+      return snapshots;
+    },
+  };
+});
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
+const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
+  './collapsedSessionSections'
+);
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 if (!globalThis.PointerEvent) {
@@ -318,6 +506,98 @@ async function expandArchived(): Promise<void> {
   });
 }
 
+async function switchSessionSource(
+  label: 'Tasks' | 'Channels',
+): Promise<HTMLButtonElement> {
+  const tab = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+  ).find((button) => button.textContent?.trim() === label);
+  expect(tab).toBeDefined();
+  await act(async () => {
+    tab!.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+    );
+    tab!.click();
+    await Promise.resolve();
+  });
+  return tab!;
+}
+
+function enableChannelOrganization(): void {
+  const channelCapabilities = {
+    ...capabilities,
+    features: [
+      ...capabilities.features,
+      'channel_management',
+      'session_organization',
+    ],
+  };
+  connection.capabilities = channelCapabilities;
+  workspace.capabilities = channelCapabilities;
+  workspaceActions.listSessionGroups.mockResolvedValue({
+    groups: [],
+    colorOptions: [],
+  });
+}
+
+function setChannelCatalog(): void {
+  channelState.catalog = [
+    {
+      type: 'dingtalk',
+      displayName: 'DingTalk',
+      manageable: true,
+      fields: [],
+    },
+    {
+      type: 'feishu',
+      displayName: 'Feishu',
+      manageable: true,
+      fields: [],
+    },
+  ];
+  channelState.channels = {
+    'ding-one': {
+      name: 'ding-one',
+      config: { type: 'dingtalk' },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'connected' },
+    },
+    'feishu-one': {
+      name: 'feishu-one',
+      config: { type: 'feishu' },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'connected' },
+    },
+  };
+  channelState.data = {
+    catalog: channelState.catalog,
+    snapshot: { revision: '1', instances: channelState.channels },
+  };
+}
+
+async function settleGroupsCatalog(): Promise<void> {
+  await act(async () => {
+    await workspaceActions.listSessionGroups.mock.results.at(-1)?.value;
+    await Promise.resolve();
+  });
+}
+
+async function openSessionSearch(): Promise<HTMLInputElement> {
+  const searchButton = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('button'),
+  ).find((button) => button.getAttribute('aria-label') === 'Search sessions');
+  expect(searchButton).toBeDefined();
+  await act(async () => {
+    click(searchButton!);
+    await Promise.resolve();
+  });
+  const input = container.querySelector<HTMLInputElement>('input');
+  expect(input).not.toBeNull();
+  return input!;
+}
+
 function sessionAction(label: string): HTMLButtonElement | undefined {
   return Array.from(
     container.querySelectorAll<HTMLButtonElement>(
@@ -421,6 +701,7 @@ function dialogButton(label: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -462,6 +743,10 @@ beforeEach(() => {
   workspace.client.workspaceByCwd.mockImplementation(() => ({
     listWorkspaceSessions,
     listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    workspaceChannelTypes: vi.fn().mockResolvedValue([]),
+    workspaceChannels: vi
+      .fn()
+      .mockResolvedValue({ revision: '0', instances: {} }),
     archiveSessionsData,
     unarchiveSessionsData,
     deleteSessionsData,
@@ -473,6 +758,10 @@ beforeEach(() => {
   workspaceActions.removeWorkspace.mockResolvedValue({ removed: true });
   workspaceActions.addWorkspace.mockReset();
   workspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
+  invalidateSessionCatalog.mockReset();
+  renameSessionCatalog.mockReset();
+  refreshSessionCatalogQueries.mockReset();
+  useSessionCatalogPollingSpy.mockReset();
   active.reload.mockReset();
   active.reload.mockResolvedValue(undefined);
   active.deleteSession.mockReset();
@@ -485,8 +774,20 @@ beforeEach(() => {
   archived.reload.mockReset();
   archived.reload.mockResolvedValue(undefined);
   useSessions.mockClear();
+  useSessions.mockImplementation((options?: { archiveState?: string }) =>
+    options?.archiveState === 'archived' ? archived : active,
+  );
+  useChannels.mockClear();
   active.sessions.length = 0;
+  active.loading = false;
+  active.error = null;
   archived.sessions.length = 0;
+  channelState.error = undefined;
+  channelState.data = undefined;
+  channelState.catalog = [];
+  channelState.channels = {};
+  channelState.reload.mockReset();
+  channelState.reload.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -578,6 +879,18 @@ describe('WebShellSidebar workspace removal', () => {
     ).find((button) => button.textContent?.includes('Archived'));
     expect(archivedButton).toBeDefined();
     act(() => click(archivedButton!));
+    expect(refreshSessionCatalogQueries).toHaveBeenCalledWith([
+      expect.objectContaining({
+        routeKind: 'qualified',
+        workspaceCwd: '/tmp/other',
+        options: expect.objectContaining({ archiveState: 'archived' }),
+      }),
+    ]);
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ routeKind: 'legacy' }),
+      ]),
+    );
     const archivedCallIndex = listSecondarySessions.mock.calls.findIndex(
       ([options]) => options?.archiveState === 'archived',
     );
@@ -800,6 +1113,11 @@ describe('WebShellSidebar workspace removal', () => {
       await sessionActions.renameSession.mock.results.at(-1)?.value;
     });
     expect(sessionActions.renameSession).toHaveBeenCalledWith(
+      'Renamed locked current',
+    );
+    expect(renameSessionCatalog).toHaveBeenCalledWith(
+      '/tmp/other',
+      'locked-current',
       'Renamed locked current',
     );
   });
@@ -1155,6 +1473,9 @@ describe('WebShellSidebar workspace removal', () => {
       },
     });
     await expandWorkspace('other');
+    await expandArchived();
+
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
 
     expect(
       inlineSessionAction('Without rest capability', 'Pin'),
@@ -2312,6 +2633,7 @@ describe('WebShellSidebar workspace removal', () => {
       force: false,
     });
     expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+    expect(invalidateSessionCatalog).toHaveBeenCalledWith('/tmp/danger');
     expect(workspace.refreshCapabilities).toHaveBeenCalled();
   });
 
@@ -2377,7 +2699,7 @@ describe('WebShellSidebar workspace removal', () => {
 });
 
 describe('WebShellSidebar non-primary archive', () => {
-  it('archives a trusted secondary session and reconciles every catalog', async () => {
+  it('archives a trusted secondary session and reconciles its workspace catalogs', async () => {
     useWorkspaceSessionCatalog(async (cwd, options) => {
       if (cwd === '/tmp/other' && options?.archiveState === 'active') {
         return [
@@ -2419,8 +2741,8 @@ describe('WebShellSidebar non-primary archive', () => {
 
     expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/other');
     expect(archiveSessionsData).toHaveBeenCalledWith(['secondary-active']);
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
     expect(
       listWorkspaceSessions.mock.calls.filter(
         ([cwd, options]) =>
@@ -2492,8 +2814,8 @@ describe('WebShellSidebar non-primary archive', () => {
       expect.objectContaining({ message: 'scheduled task restore failed' }),
       'Failed to restore session',
     );
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
     expect(
       listWorkspaceSessions.mock.calls.filter(
         ([cwd, options]) =>
@@ -2541,8 +2863,8 @@ describe('WebShellSidebar non-primary archive', () => {
       expect.objectContaining({ message: 'agent close failed' }),
       'Failed to archive session',
     );
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
     expect(
       listWorkspaceSessions.mock.calls.filter(
         ([cwd, options]) =>
@@ -2574,7 +2896,7 @@ describe('WebShellSidebar non-primary archive', () => {
     );
 
     renderSidebar();
-    await expandWorkspace('project');
+    await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     expect(archiveButtonFor('Primary active')).toBeDefined();
     expect(archiveButtonFor('Secondary active')).toBeUndefined();
@@ -2786,7 +3108,7 @@ describe('WebShellSidebar non-primary archive', () => {
     });
 
     renderSidebar({ onError });
-    await expandWorkspace('project');
+    await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     const primaryArchiveButton = archiveButtonFor('Legacy primary shared');
     const archiveButton = archiveButtonFor('Secondary shared');
@@ -2802,8 +3124,8 @@ describe('WebShellSidebar non-primary archive', () => {
 
     expect(archiveSessionsData).toHaveBeenCalledWith(['shared-session']);
     expect(onError).not.toHaveBeenCalled();
-    expect(active.reload).toHaveBeenCalled();
-    expect(archived.reload).toHaveBeenCalled();
+    expect(active.reload).not.toHaveBeenCalled();
+    expect(archived.reload).not.toHaveBeenCalled();
   });
 
   it('keeps equal-id archive busy state scoped to its workspace', async () => {
@@ -2836,7 +3158,7 @@ describe('WebShellSidebar non-primary archive', () => {
     );
 
     renderSidebar();
-    await expandWorkspace('project');
+    await ensureWorkspaceExpanded('project');
     await expandWorkspace('other');
     const secondaryArchive = archiveButtonFor('Secondary pending');
     expect(secondaryArchive).toBeDefined();
@@ -2887,6 +3209,938 @@ describe('WebShellSidebar primary workspace header', () => {
     );
     expect(primaryBadges).toHaveLength(0);
     expect(container.textContent).toContain('project');
+  });
+});
+
+describe('WebShellSidebar session source switch', () => {
+  it('never renders primary sessions from the inactive source', async () => {
+    active.sessions.push(
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+      {
+        sessionId: 'channel-session',
+        displayName: 'Channel session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('Task session');
+    expect(container.textContent).not.toContain('Channel session');
+
+    await switchSessionSource('Channels');
+
+    expect(container.textContent).not.toContain('Task session');
+    expect(container.textContent).toContain('Channel session');
+  });
+
+  it('preserves channel completion state while the tasks source is active', async () => {
+    const channelSession: DaemonSessionSummary = {
+      sessionId: 'channel-session',
+      displayName: 'Channel session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      hasActivePrompt: true,
+    };
+    const taskSession: DaemonSessionSummary = {
+      sessionId: 'task-session',
+      displayName: 'Task session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    };
+    let channelResult = {
+      ...active,
+      sessions: [channelSession],
+      loading: false,
+    };
+    let taskResult = {
+      ...active,
+      sessions: [taskSession],
+      loading: false,
+    };
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') return archived;
+        return options?.sourceType === 'channel' ? channelResult : taskResult;
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = { ...channelResult, loading: false };
+    renderSidebar();
+    await switchSessionSource('Tasks');
+
+    channelResult = {
+      ...channelResult,
+      sessions: [taskSession],
+      loading: false,
+    };
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = {
+      ...channelResult,
+      sessions: [{ ...channelSession, hasActivePrompt: false }],
+      loading: false,
+    };
+    renderSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('Channel session'));
+    expect(row).toBeDefined();
+    expect(row!.querySelector('[class*="sessionStatusDot"]')).not.toBeNull();
+
+    // A Tasks-source reconcile while the channel marker exists must not wipe
+    // it: the marker belongs to the inactive source and must survive.
+    await switchSessionSource('Tasks');
+    taskResult = {
+      ...taskResult,
+      sessions: [
+        taskSession,
+        {
+          sessionId: 'second-task-session',
+          displayName: 'Second task session',
+          workspaceCwd: '/tmp/project',
+          sourceType: 'default',
+        },
+      ],
+    };
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, sessions: [...channelResult.sessions] };
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const restoredRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('Channel session'));
+    expect(restoredRow).toBeDefined();
+    expect(
+      restoredRow!.querySelector('[class*="sessionStatusDot"]'),
+    ).not.toBeNull();
+  });
+
+  it('applies the source switch to the archived list', async () => {
+    archived.sessions.push(
+      {
+        sessionId: 'archived-task-session',
+        displayName: 'Archived task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+        isArchived: true,
+      },
+      {
+        sessionId: 'archived-channel-session',
+        displayName: 'Archived channel session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        isArchived: true,
+      },
+    );
+    renderSidebar();
+    await expandArchived();
+
+    expect(container.textContent).toContain('Archived task session');
+    expect(container.textContent).not.toContain('Archived channel session');
+
+    await switchSessionSource('Channels');
+
+    // Both halves of the archived application: the request carries the
+    // channel sourceType, and the client-side dedupe filter keeps archived
+    // task sessions out of the Channels tab.
+    expect(
+      useSessions.mock.calls.findLast(
+        ([options]) => options?.archiveState === 'archived',
+      )?.[0]?.sourceType,
+    ).toBe('channel');
+    expect(container.textContent).toContain('Archived channel session');
+    expect(container.textContent).not.toContain('Archived task session');
+  });
+
+  it('switches primary and workspace-qualified lists from tasks to channels', async () => {
+    renderSidebar();
+
+    const sourceTabs = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    const tasksTab = sourceTabs.find(
+      (button) => button.textContent?.trim() === 'Tasks',
+    );
+    const channelsTab = sourceTabs.find(
+      (button) => button.textContent?.trim() === 'Channels',
+    );
+    expect(tasksTab?.getAttribute('data-state')).toBe('active');
+    expect(channelsTab).toBeDefined();
+    expect(
+      useSessions.mock.calls.find(
+        ([options]) =>
+          options?.archiveState === 'active' && options.group !== 'pinned',
+      )?.[0]?.sourceType,
+    ).toBe('default');
+
+    await switchSessionSource('Channels');
+
+    expect(channelsTab?.getAttribute('data-state')).toBe('active');
+    expect(
+      useSessions.mock.calls.findLast(
+        ([options]) =>
+          options?.archiveState === 'active' && options.group !== 'pinned',
+      )?.[0]?.sourceType,
+    ).toBe('channel');
+
+    await expandWorkspace('other');
+    expect(
+      listWorkspaceSessions.mock.calls.some(
+        ([options]) => options?.sourceType === 'channel',
+      ),
+    ).toBe(true);
+  });
+
+  it('hides the switch and keeps legacy session requests unfiltered', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: capabilities.features.filter(
+        (feature) => feature !== 'session_source_metadata',
+      ),
+    };
+    renderSidebar();
+
+    expect(container.querySelector('[aria-label="Session source"]')).toBeNull();
+    expect(
+      useSessions.mock.calls.every(
+        ([options]) => options?.sourceType === undefined,
+      ),
+    ).toBe(true);
+    await expandWorkspace('other');
+    expect(listWorkspaceSessions).toHaveBeenCalled();
+    expect(
+      listWorkspaceSessions.mock.calls.every(
+        ([options]) => options?.sourceType === undefined,
+      ),
+    ).toBe(true);
+  });
+
+  it('polls channel sessions on the active-session interval', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(window, 'clearInterval');
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    expect(useSessionCatalogPollingSpy).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      2_000,
+    );
+    expect(
+      setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 2_000),
+    ).toBe(false);
+    const channelsTab = await switchSessionSource('Channels');
+    expect(channelsTab?.getAttribute('data-state')).toBe('active');
+    // The channel source moves the primary session catalog onto the active
+    // polling interval through the catalog store...
+    expect(useSessionCatalogPollingSpy).toHaveBeenCalledWith(
+      workspace.client,
+      expect.anything(),
+      2_000,
+    );
+    // ...and the channel catalog rides its own interval at the same cadence.
+    const activePoll = setIntervalSpy.mock.calls.findLast(
+      ([, timeout]) => timeout === 2_000,
+    );
+    expect(activePoll).toBeDefined();
+    const activePollIndex = setIntervalSpy.mock.calls
+      .map(([, timeout]) => timeout)
+      .lastIndexOf(2_000);
+    const activePollId = setIntervalSpy.mock.results[activePollIndex]?.value;
+    channelState.reload.mockClear();
+
+    await act(async () => {
+      const callback = activePoll![0];
+      expect(callback).toBeTypeOf('function');
+      if (typeof callback === 'function') callback();
+      await Promise.resolve();
+    });
+
+    expect(channelState.reload).toHaveBeenCalledOnce();
+
+    // Leaving the Channels tab tears the interval down; otherwise the sidebar
+    // keeps reloading the channel catalog while the Tasks tab is active.
+    channelState.reload.mockClear();
+    await switchSessionSource('Tasks');
+    expect(clearIntervalSpy).toHaveBeenCalledWith(activePollId);
+  });
+
+  it('backs off the channel catalog poll while the channels hook errors', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    channelState.error = new Error('channels endpoint down');
+    const setIntervalSpy = vi.spyOn(window, 'setInterval');
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await switchSessionSource('Channels');
+
+    // A persistently failing channels endpoint must not be re-requested on
+    // the 2s active cadence; the poll downshifts like the sibling pollers.
+    expect(
+      setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 2_000),
+    ).toBe(false);
+    expect(
+      setIntervalSpy.mock.calls.some(([, timeout]) => timeout === 30_000),
+    ).toBe(true);
+  });
+
+  it('keeps a flat channel list when channel metadata is unavailable', async () => {
+    active.sessions.push({
+      sessionId: 'legacy-channel-session',
+      displayName: 'Legacy channel',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      sourceId: 'legacy-bot',
+    });
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await switchSessionSource('Channels');
+
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: false,
+      enabled: false,
+    });
+    expect(container.textContent).toContain('Legacy channel');
+    expect(container.querySelector('section[aria-label]')).toBeNull();
+  });
+
+  it('groups channel sessions by platform type and toggles each group', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    channelState.catalog = [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+      {
+        type: 'feishu',
+        displayName: 'Feishu',
+        manageable: true,
+        fields: [],
+      },
+    ];
+    channelState.channels = {
+      'ding-one': {
+        name: 'ding-one',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+      'ding-two': {
+        name: 'ding-two',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+      feishu: {
+        name: 'feishu',
+        config: { type: 'feishu' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+    };
+    channelState.data = {
+      catalog: channelState.catalog,
+      snapshot: { revision: '1', instances: channelState.channels },
+    };
+    active.sessions.push(
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+      {
+        sessionId: 'feishu-session',
+        displayName: 'Feishu one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'feishu',
+      },
+      {
+        sessionId: 'ding-two-session',
+        displayName: 'DingTalk two',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-two',
+        isPinned: true,
+      },
+      {
+        sessionId: 'legacy-channel-session',
+        displayName: 'Legacy channel',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await switchSessionSource('Channels');
+
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+    });
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(dingTalkGroup!.textContent).toContain('DingTalk one');
+    expect(dingTalkGroup?.textContent).toContain('DingTalk two');
+    expect(dingTalkGroup?.textContent).not.toContain('Feishu one');
+    expect(
+      container.querySelector('section[aria-label="Feishu"]')?.textContent,
+    ).toContain('Feishu one');
+    expect(
+      container.querySelector('section[aria-label="Other channels"]')
+        ?.textContent,
+    ).toContain('Legacy channel');
+
+    const toggle = dingTalkGroup?.querySelector<HTMLButtonElement>(
+      'button[aria-expanded="true"]',
+    );
+    await act(async () => click(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(dingTalkGroup?.textContent).not.toContain('DingTalk one');
+    await act(async () => click(toggle!));
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(dingTalkGroup?.textContent).toContain('DingTalk one');
+  });
+
+  it('starts channel sections expanded on the first Channels visit with organization enabled', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [
+        ...capabilities.features,
+        'channel_management',
+        'session_organization',
+      ],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: [],
+    });
+    channelState.catalog = [
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+      },
+    ];
+    channelState.channels = {
+      'ding-one': {
+        name: 'ding-one',
+        config: { type: 'dingtalk' },
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'connected' },
+      },
+    };
+    channelState.data = {
+      catalog: channelState.catalog,
+      snapshot: { revision: '1', instances: channelState.channels },
+    };
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    // Serve a distinct settled page per source (distinct identities), as the
+    // real resource does when the source-switch refetch resolves.
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    // Settle the groups catalog so the Tasks source consumes its own
+    // first-sync latch before the Channels visit.
+    await act(async () => {
+      await workspaceActions.listSessionGroups.mock.results.at(-1)?.value;
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Task session');
+
+    await switchSessionSource('Channels');
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(dingTalkGroup!.textContent).toContain('DingTalk one');
+    // The first Channels visit consumes the channel-source latch without
+    // treating the platform sections as brand-new mid-session additions.
+    expect(
+      dingTalkGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+
+  it('keeps channel sections expanded when the catalog settles before the sessions page', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    let channelPage: DaemonSessionSummary[] | undefined = undefined;
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          // The new source's catalog entry starts unsettled: no page until
+          // its fetch resolves, while the channel catalog is already loaded.
+          return {
+            ...active,
+            sessions: channelPage ?? [],
+            data: channelPage,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    await switchSessionSource('Channels');
+
+    // The channel catalog settled before the channel sessions page; no
+    // section may be registered or persisted yet.
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+
+    channelPage = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(dingTalkGroup!.textContent).toContain('DingTalk one');
+    expect(
+      dingTalkGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+
+  it('starts the first channel section expanded when it arrives after an empty settle', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    let channelSessions: DaemonSessionSummary[] = [];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    await switchSessionSource('Channels');
+
+    // The first Channels visit settles a defined empty catalog; the latch
+    // must stay set because channel sessions are externally driven.
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).toBeNull();
+
+    // The first incoming message creates the first channel session while the
+    // tab is open (the 2s poll picks it up).
+    channelSessions = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const dingTalkGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="DingTalk"]',
+    );
+    expect(dingTalkGroup).not.toBeNull();
+    expect(
+      dingTalkGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+
+  it('does not register the first channel catalog against a search filter', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+      {
+        sessionId: 'feishu-one-session',
+        displayName: 'Feishu one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'feishu-one',
+      },
+    ];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return { ...active, sessions: taskSessions, data: taskSessions };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    expect(container.textContent).toContain('Task session');
+
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'ding');
+      await Promise.resolve();
+    });
+    await switchSessionSource('Channels');
+
+    // Only the DingTalk section matches the search; the first-catalog latch
+    // must wait for an unfiltered settle instead of registering only it.
+    await act(async () => {
+      setInputValue(searchInput, '');
+      await Promise.resolve();
+    });
+
+    const feishuGroup = container.querySelector<HTMLElement>(
+      'section[aria-label="Feishu"]',
+    );
+    expect(feishuGroup).not.toBeNull();
+    expect(
+      feishuGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+  it('does not reconcile channel sections against the previous source page', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    const taskSession: DaemonSessionSummary = {
+      sessionId: 'task-session',
+      displayName: 'Task session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    };
+    const dingSession: DaemonSessionSummary = {
+      sessionId: 'ding-one-session',
+      displayName: 'DingTalk one',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      sourceId: 'ding-one',
+    };
+    const feishuSession: DaemonSessionSummary = {
+      sessionId: 'feishu-one-session',
+      displayName: 'Feishu one',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      sourceId: 'feishu-one',
+    };
+    // The source switch retains the previous page (identity unchanged) until
+    // the channel fetch settles, and that page still carries a channel row.
+    const retainedPage = [taskSession, dingSession];
+    let channelPage: DaemonSessionSummary[] | undefined = undefined;
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return channelPage
+            ? { ...active, sessions: channelPage, data: channelPage }
+            : { ...active, sessions: retainedPage, data: retainedPage };
+        }
+        return { ...active, sessions: retainedPage, data: retainedPage };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await settleGroupsCatalog();
+    expect(container.textContent).toContain('Task session');
+
+    await switchSessionSource('Channels');
+
+    // The settled page still belongs to the tasks source, so its DingTalk
+    // section must not consume the channel initial-catalog latch.
+    expect(container.querySelector('section[aria-label="Feishu"]')).toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+
+    channelPage = [dingSession, feishuSession];
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Both sections register against the true channel-source page: expanded,
+    // and not persisted as mid-session auto-collapses.
+    for (const label of ['DingTalk', 'Feishu']) {
+      const group = container.querySelector<HTMLElement>(
+        `section[aria-label="${label}"]`,
+      );
+      expect(group).not.toBeNull();
+      expect(
+        group!.querySelector('button[aria-expanded="true"]'),
+      ).not.toBeNull();
+    }
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('channel-type:');
+  });
+});
+
+describe('WebShellSidebar session list notices', () => {
+  it('keeps a settled filtered-empty view while a refresh is in flight', async () => {
+    active.sessions = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    active.loading = true;
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'no-match');
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Loading sessions...');
+  });
+
+  it('keeps a settled filtered-empty view when a refresh failed', async () => {
+    active.sessions = [
+      {
+        sessionId: 'task-session',
+        displayName: 'Task session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    active.error = new Error('daemon restarted');
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'no-match');
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Failed to load sessions');
+  });
+
+  it('shows the loading notice until the first page settles', async () => {
+    active.sessions = [];
+    active.loading = true;
+    useSessions.mockImplementation((options?: { archiveState?: string }) => {
+      const state = options?.archiveState === 'archived' ? archived : active;
+      return { ...state, data: undefined };
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('Loading sessions...');
+  });
+
+  it('keeps the settled empty notice while a background refresh is in flight', async () => {
+    active.sessions = [];
+    active.loading = true;
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Loading sessions...');
+  });
+
+  it('keeps the settled empty notice when a background refresh failed', async () => {
+    active.sessions = [];
+    active.error = new Error('daemon restarted');
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('No matching sessions.');
+    expect(container.textContent).not.toContain('Failed to load sessions');
+  });
+
+  it('offers a retry when the first page load failed', async () => {
+    active.sessions = [];
+    active.error = new Error('daemon restarted');
+    useSessions.mockImplementation((options?: { archiveState?: string }) => {
+      const state = options?.archiveState === 'archived' ? archived : active;
+      return { ...state, data: undefined };
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(container.textContent).toContain('Failed to load sessions');
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Failed to load sessions'));
+    expect(retry).toBeDefined();
+    await act(async () => {
+      click(retry!);
+      await Promise.resolve();
+    });
+    expect(active.reload).toHaveBeenCalled();
   });
 });
 
@@ -3126,5 +4380,127 @@ describe('WebShellSidebar archived session export', () => {
     });
     expect(URL.createObjectURL).toHaveBeenCalledTimes(2);
     expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('WebShellSidebar session toolbar archive action dedupe', () => {
+  function enableOrganization(): void {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+  }
+
+  // Sessions from a trusted secondary workspace resolve to the
+  // "restricted" scope: read-only rows that may still show pin and
+  // archive when the qualified REST core is enabled — the exact state
+  // that used to render two archive actions.
+  async function pinnedSecondaryCatalog(
+    cwd: string,
+    options?: { group?: string },
+  ): Promise<DaemonSessionSummary[]> {
+    return cwd === '/tmp/other' && options?.group === 'pinned'
+      ? [
+          {
+            sessionId: 'pinned-secondary',
+            workspaceCwd: cwd,
+            displayName: 'Pinned secondary',
+            isPinned: true,
+          },
+        ]
+      : [];
+  }
+
+  function sessionRow(label: string): HTMLElement {
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((candidate) => candidate.textContent?.includes(label));
+    expect(row).toBeDefined();
+    return row!;
+  }
+
+  function archiveButtonsInRow(label: string): HTMLButtonElement[] {
+    return Array.from(
+      sessionRow(label).querySelectorAll<HTMLButtonElement>(
+        'button[aria-label="Archive"]',
+      ),
+    );
+  }
+
+  async function settle(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  async function countArchiveMenuItemsInRow(label: string): Promise<number> {
+    const trigger = sessionAction(label);
+    expect(trigger).toBeDefined();
+    await act(async () => {
+      click(trigger!);
+      await Promise.resolve();
+    });
+    return Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).filter((item) => item.textContent?.includes('Archive')).length;
+  }
+
+  it('keeps one inline archive action when ownership changes', async () => {
+    enableOrganization();
+    useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
+
+    renderSidebar();
+    await settle();
+    expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
+    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(1);
+    expect(
+      sessionRow('Pinned secondary').querySelectorAll(
+        '[class*="sessionActions"]',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('keeps archive when the read-only cluster is the sole owner', async () => {
+    useWorkspaceSessionCatalog(async (cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'active'
+        ? [
+            {
+              sessionId: 'secondary-only',
+              workspaceCwd: cwd,
+              displayName: 'Secondary only',
+            },
+          ]
+        : [],
+    );
+    renderSidebar({
+      sessionActions: { items: ['archive'], inlineItems: ['archive'] },
+    });
+    await expandWorkspace('other');
+    expect(archiveButtonsInRow('Secondary only')).toHaveLength(1);
+    expect(
+      sessionRow('Secondary only').querySelectorAll(
+        '[class*="sessionActions"]',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('keeps exactly one archive menu item when archive is dropdown-only', async () => {
+    enableOrganization();
+    useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
+
+    renderSidebar({
+      sessionActions: { inlineItems: ['pin'] },
+    });
+    await settle();
+
+    expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
+    expect(
+      sessionRow('Pinned secondary').querySelectorAll(
+        'button[aria-label="More actions"]',
+      ),
+    ).toHaveLength(1);
+    expect(await countArchiveMenuItemsInRow('Pinned secondary')).toBe(1);
   });
 });

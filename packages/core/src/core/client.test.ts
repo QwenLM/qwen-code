@@ -100,6 +100,8 @@ import {
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
+import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
+import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
@@ -322,8 +324,20 @@ const mockUiTelemetryService = vi.hoisted(() => ({
 }));
 const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
 const mockInteractionTelemetry = vi.hoisted(() => ({
+  startInteractionSpan: vi.fn(),
+  endInteractionSpan: vi.fn(),
   getActiveInteractionSpan: vi.fn(),
+  recordInteractionActivity: vi.fn(),
+  addAgentInputMessageAttributes: vi.fn(),
   addUserPromptAttributes: vi.fn(),
+  outputCaptures: [] as Array<{
+    beginResponse: ReturnType<typeof vi.fn>;
+    appendText: ReturnType<typeof vi.fn>;
+    observeFinishReason: ReturnType<typeof vi.fn>;
+    restartAttempt: ReturnType<typeof vi.fn>;
+    commitResponse: ReturnType<typeof vi.fn>;
+    writeToSpan: ReturnType<typeof vi.fn>;
+  }>,
 }));
 vi.mock('../telemetry/tracer.js', () => ({
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
@@ -336,8 +350,26 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     ...actual,
     uiTelemetryService: mockUiTelemetryService,
     logMemoryRecallDelivery: mockLogMemoryRecallDelivery,
+    startInteractionSpan: mockInteractionTelemetry.startInteractionSpan,
+    endInteractionSpan: mockInteractionTelemetry.endInteractionSpan,
     getActiveInteractionSpan: mockInteractionTelemetry.getActiveInteractionSpan,
+    recordInteractionActivity:
+      mockInteractionTelemetry.recordInteractionActivity,
+    addAgentInputMessageAttributes:
+      mockInteractionTelemetry.addAgentInputMessageAttributes,
     addUserPromptAttributes: mockInteractionTelemetry.addUserPromptAttributes,
+    AgentOutputMessageCapture: class {
+      beginResponse = vi.fn();
+      appendText = vi.fn();
+      observeFinishReason = vi.fn();
+      restartAttempt = vi.fn();
+      commitResponse = vi.fn();
+      writeToSpan = vi.fn();
+
+      constructor() {
+        mockInteractionTelemetry.outputCaptures.push(this);
+      }
+    },
     // We keep the real implementations of logChatCompression, etc.
     // but we can spy on QwenLogger if needed
   };
@@ -465,6 +497,8 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    mockInteractionTelemetry.outputCaptures.length = 0;
+    mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue({});
     // The client concatenates these with the auto-memory suffix, so the
     // default mock must return a string, not undefined.
     vi.mocked(getCoreSystemPrompt).mockReturnValue('');
@@ -633,6 +667,7 @@ describe('Gemini Client (client.ts)', () => {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      getSessionRestoreRuntime: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
@@ -643,6 +678,7 @@ describe('Gemini Client (client.ts)', () => {
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getJsonSchema: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
@@ -705,6 +741,46 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('initializes from the selective runtime projection without the full transcript', async () => {
+      const seedResumeTokenCountsSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'seedResumeTokenCounts',
+      );
+      const apiHistory = [
+        { role: 'user' as const, parts: [{ text: 'projected history' }] },
+      ];
+      const uiEvent = { type: 'projected-event' };
+      vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+        apiHistory,
+        resumeTokenCounts: {
+          promptTokenCount: 321,
+          outputTokenCount: 45,
+          isEstimated: false,
+        },
+        uiTelemetryEvents: [uiEvent],
+        recording: {
+          lastCompletedUuid: 'record-1',
+          turnParentUuids: [],
+        },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+
+      const resumedClient = new GeminiClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getHistory().at(-1)).toEqual(apiHistory[0]);
+      expect(uiTelemetryService.resetSession).toHaveBeenCalledWith(
+        'test-session-id',
+      );
+      expect(uiTelemetryService.addEvent).toHaveBeenCalledWith(
+        uiEvent,
+        'test-session-id',
+      );
+      expect(seedResumeTokenCountsSpy).toHaveBeenCalledWith(321, 45, false);
+    });
+
     it('seeds resumed chat with replayed prompt token count', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {
@@ -1335,6 +1411,9 @@ describe('Gemini Client (client.ts)', () => {
             {
               functionCall: { name: 'cron_create', args: {} },
             } as never,
+            {
+              functionCall: { name: 'removed_deferred_tool', args: {} },
+            } as never,
           ],
         },
       ]);
@@ -1342,6 +1421,33 @@ describe('Gemini Client (client.ts)', () => {
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('cron_create');
       // cron_list NOT in history → must NOT be revealed by the resume scan.
       expect(reg.revealDeferredTool).not.toHaveBeenCalledWith('cron_list');
+      // A historical call whose tool is no longer registered must stay absent.
+      expect(reg.revealDeferredTool).not.toHaveBeenCalledWith(
+        'removed_deferred_tool',
+      );
+      expect(mockClientDebugLogger.debug).toHaveBeenCalledWith(
+        '[DEFERRED_TOOLS] revealed from history: cron_create',
+      );
+    });
+
+    it('does not scan resumed history again from startChat setTools', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' ? ({} as never) : null,
+      );
+      const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
+
+      await client.startChat([
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'cron_create', args: {} } } as never],
+        },
+      ]);
+
+      expect(getHistorySpy).not.toHaveBeenCalled();
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
@@ -1870,6 +1976,19 @@ describe('Gemini Client (client.ts)', () => {
       }
     }
 
+    it('avoids reading history without hidden deferred tools and resolves one summary', async () => {
+      const reg = getRegistryMock();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      const getHistorySpy = vi.spyOn(client, 'getHistoryShallow');
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      reg.getDeferredToolSummary.mockClear();
+
+      await client.setTools();
+
+      expect(getHistorySpy).not.toHaveBeenCalled();
+      expect(reg.getDeferredToolSummary).toHaveBeenCalledTimes(1);
+    });
+
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder =
         '<system-reminder>unfinished todo: run tests</system-reminder>';
@@ -2193,6 +2312,88 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('does not announce a still-registered tool as removed after history reveals it', async () => {
+      const reg = getRegistryMock();
+      const tool = {
+        name: 'mcp__calculator__add',
+        description: 'Add two numbers',
+        serverName: 'calculator',
+      };
+      let revealed = false;
+      let registered = true;
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' || (name === tool.name && registered)
+          ? ({} as never)
+          : null,
+      );
+      reg.getDeferredToolSummary.mockImplementation(() =>
+        registered ? [tool] : [],
+      );
+      reg.isDeferredToolRevealed.mockImplementation(
+        (name: string) => name === tool.name && revealed,
+      );
+      reg.revealDeferredTool.mockImplementation((name: string) => {
+        if (name === tool.name) revealed = true;
+      });
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+      const reminderState = client as unknown as {
+        announcedDeferredToolNames: Set<string>;
+        announcedMcpToolNames: Set<string>;
+      };
+      reminderState.announcedDeferredToolNames = new Set([tool.name]);
+      reminderState.announcedMcpToolNames = new Set([tool.name]);
+
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { name: tool.name, args: { a: 1, b: 2 } },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: tool.name,
+                response: { output: '3' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      await client.setTools();
+      await runTurn();
+
+      expect(revealed).toBe(true);
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+
+      registered = false;
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      addHistorySpy.mockClear();
+
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        [tool.name],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged mcp: added= removed=mcp__calculator__add\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
     it('keeps queued MCP changes when the reminder builder returns null', () => {
       const priv = client as unknown as {
         pendingAddedMcpTools: Map<
@@ -2209,6 +2410,58 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(priv.pendingRemovedMcpToolNames).toEqual(
         new Set(['mcp__gone__do']),
+      );
+    });
+
+    it('re-reveals MCP tools from resumed history after progressive discovery', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'tool_search' ? ({} as never) : null,
+      );
+
+      // The resumed chat is constructed before progressive MCP discovery, so
+      // startChat() cannot match this historical call until the server's tools
+      // are registered. setTools() is the common refresh path once they are.
+      client.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-resumed-mcp',
+                name: 'mcp__calculator__add',
+                args: { a: 1, b: 2 },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-resumed-mcp',
+                name: 'mcp__calculator__add',
+                response: { output: '3' },
+              },
+            },
+          ],
+        },
+      ]);
+      reg.getDeferredToolSummary.mockReturnValue([
+        {
+          name: 'mcp__calculator__add',
+          description: 'Add two numbers',
+          serverName: 'calculator',
+        },
+      ]);
+      reg.revealDeferredTool.mockClear();
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith(
+        'mcp__calculator__add',
       );
     });
 
@@ -5260,6 +5513,398 @@ hello
           docs_selected: 1,
           latency_ms: expect.any(Number),
         }),
+      );
+    });
+
+    it('keeps one interaction open across multiple tool-result continuations', async () => {
+      const promptId = 'prompt-tool-loop';
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockImplementation(
+        (id?: string) =>
+          id === undefined || id === promptId ? owner : undefined,
+      );
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-1',
+              name: 'read_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'use a tool' }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(mockConfig, expect.objectContaining({ promptId }));
+      expect(
+        mockInteractionTelemetry.endInteractionSpan,
+      ).not.toHaveBeenCalled();
+
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'call-2',
+              name: 'write_file',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'read_file', response: { ok: true } } }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.recordInteractionActivity,
+      ).toHaveBeenCalledWith(promptId, owner);
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        mockInteractionTelemetry.endInteractionSpan,
+      ).not.toHaveBeenCalled();
+
+      mockTurnRunFn.mockReturnValueOnce(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'done' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [
+            {
+              functionResponse: { name: 'write_file', response: { ok: true } },
+            },
+          ],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledTimes(1);
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId },
+      );
+    });
+
+    it('starts Retry as a fresh agent invocation', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'retried' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'retry' }],
+          new AbortController().signal,
+          'retry-prompt',
+          { type: SendMessageType.Retry },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          promptId: 'retry-prompt',
+          messageType: SendMessageType.Retry,
+        }),
+      );
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId: 'retry-prompt' },
+      );
+      expect(
+        mockInteractionTelemetry.addAgentInputMessageAttributes,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('traces a UserQuery that is blocked before model admission', async () => {
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by hook' },
+        }),
+        response: vi.fn(),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+        messageBus as unknown as ReturnType<Config['getMessageBus']>,
+      );
+      vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+        (event: string) => event === 'UserPromptSubmit',
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'expanded prompt' }],
+          new AbortController().signal,
+          'prompt-blocked-before-model',
+          {
+            type: SendMessageType.UserQuery,
+            submittedPrompt: 'raw prompt',
+          },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ promptId: 'prompt-blocked-before-model' }),
+      );
+      expect(
+        mockInteractionTelemetry.addAgentInputMessageAttributes,
+      ).toHaveBeenCalledWith(mockConfig, owner, 'raw prompt');
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'cancelled',
+        { promptId: 'prompt-blocked-before-model' },
+      );
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('captures only the final physical response for an agent invocation', async () => {
+      const owner = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'final answer' };
+          yield {
+            type: GeminiEventType.Finished,
+            value: { reason: 'STOP' },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'expanded request' }],
+          new AbortController().signal,
+          'prompt-agent-messages',
+          {
+            type: SendMessageType.UserQuery,
+            submittedPrompt: 'raw @file prompt',
+          },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.addAgentInputMessageAttributes,
+      ).toHaveBeenCalledWith(mockConfig, owner, 'raw @file prompt');
+      const capture = mockInteractionTelemetry.outputCaptures[0]!;
+      expect(capture.beginResponse).toHaveBeenCalledOnce();
+      expect(capture.appendText).toHaveBeenCalledWith('final answer');
+      expect(capture.observeFinishReason).toHaveBeenCalledWith('STOP');
+      expect(capture.commitResponse).toHaveBeenCalledWith(false);
+      expect(capture.writeToSpan).toHaveBeenCalledWith(owner);
+    });
+
+    it('does not write to a replacement interaction with the same prompt id', async () => {
+      const owner = {};
+      const replacement = {};
+      mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(owner);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'stale answer' };
+          mockInteractionTelemetry.getActiveInteractionSpan.mockReturnValue(
+            replacement,
+          );
+          yield {
+            type: GeminiEventType.Finished,
+            value: { reason: 'STOP' },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'request' }],
+          new AbortController().signal,
+          'reused-prompt-id',
+          { type: SendMessageType.UserQuery, submittedPrompt: 'request' },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.outputCaptures[0]!.writeToSpan,
+      ).not.toHaveBeenCalled();
+      expect(
+        mockInteractionTelemetry.endInteractionSpan,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('resets failed provider attempts while preserving continuation retries', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'discarded' };
+          yield { type: GeminiEventType.Retry, isContinuation: false };
+          yield { type: GeminiEventType.Content, value: 'kept ' };
+          yield { type: GeminiEventType.Retry, isContinuation: true };
+          yield { type: GeminiEventType.Content, value: 'continuation' };
+          yield {
+            type: GeminiEventType.Finished,
+            value: { reason: 'STOP' },
+          };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'request' }],
+          new AbortController().signal,
+          'provider-retry-prompt',
+          { type: SendMessageType.UserQuery, submittedPrompt: 'request' },
+        ),
+      );
+
+      const capture = mockInteractionTelemetry.outputCaptures[0]!;
+      expect(capture.restartAttempt).toHaveBeenNthCalledWith(1, false);
+      expect(capture.restartAttempt).toHaveBeenNthCalledWith(2, true);
+      expect(capture.appendText.mock.calls).toEqual([
+        ['discarded'],
+        ['kept '],
+        ['continuation'],
+      ]);
+      expect(capture.commitResponse).toHaveBeenCalledWith(false);
+    });
+
+    it('starts Goal as a fresh agent invocation', async () => {
+      const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+      const finishTurn = vi.fn().mockResolvedValue(undefined);
+      const goalRuntime = {
+        getSnapshot: () => emptyGoalSnapshot(),
+        permitForTurn: vi.fn(() => permit),
+        subscribe: vi.fn(() => vi.fn()),
+        finishTurn,
+      } as unknown as GoalRuntime;
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(goalRuntime);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'goal progress' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'continue the goal' }],
+          new AbortController().signal,
+          'goal-prompt',
+          {
+            type: SendMessageType.Goal,
+            goalPermit: permit,
+            goalTurnKey: 'goal-runtime:turn-1',
+          },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          promptId: 'goal-prompt',
+          messageType: SendMessageType.Goal,
+        }),
+      );
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId: 'goal-prompt' },
+      );
+      expect(finishTurn).toHaveBeenCalledWith(permit);
+    });
+
+    it('keeps a Steer continuation in the original invocation', async () => {
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+      const getSteerInput = vi
+        .fn<() => Promise<SteerInput | undefined>>()
+        .mockResolvedValueOnce({
+          parts: [{ text: 'steer prompt' }],
+          accept: vi.fn(),
+          restore: vi.fn(),
+        })
+        .mockResolvedValue(undefined);
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'initial prompt' }],
+          new AbortController().signal,
+          'prompt-steer-continuation',
+          { type: SendMessageType.UserQuery, getSteerInput },
+        ),
+      );
+
+      expect(
+        mockInteractionTelemetry.startInteractionSpan,
+      ).toHaveBeenCalledTimes(1);
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'ok',
+        { promptId: 'prompt-steer-continuation' },
+      );
+    });
+
+    it('marks a JSON Schema invocation as failed when no structured output is produced', async () => {
+      vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
+        type: 'object',
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'plain text' };
+        })(),
+      );
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'return structured output' }],
+          new AbortController().signal,
+          'prompt-schema-missing',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-schema-missing',
+          errorMessage: 'model did not produce structured output',
+          errorType: 'structured_output_missing',
+        },
       );
     });
 
@@ -8370,6 +9015,14 @@ Other open files:
 
       // Assert
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
+      expect(mockInteractionTelemetry.endInteractionSpan).toHaveBeenCalledWith(
+        'error',
+        {
+          promptId: 'prompt-id-error',
+          errorMessage: 'unknown error',
+          errorType: 'api_error',
+        },
+      );
     });
 
     it('should not call checkNextSpeaker when turn.run() yields a value then an error', async () => {
@@ -9635,6 +10288,12 @@ Other open files:
         expect(events).not.toContainEqual(
           expect.objectContaining({ type: GeminiEventType.LoopDetected }),
         );
+        expect(
+          mockInteractionTelemetry.startInteractionSpan,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          mockInteractionTelemetry.endInteractionSpan,
+        ).toHaveBeenCalledWith('ok', { promptId: 'prompt-stop-hook-budget' });
       });
 
       it('emits one active_goal null when the blocking cap aborts an active goal', async () => {
@@ -10674,6 +11333,12 @@ Other open files:
 
       it('restores an attached ToolResult steer when UserPromptSubmit blocks it', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        const activeSpanSpy = vi
+          .spyOn(telemetryIndex, 'getActiveInteractionSpan')
+          .mockReturnValue({} as never);
+        const endSpanSpy = vi
+          .spyOn(telemetryIndex, 'endInteractionSpan')
+          .mockImplementation(() => {});
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({
             output: { decision: 'block', reason: 'blocked by hook' },
@@ -10709,6 +11374,50 @@ Other open files:
         expect(mockTurnRunFn).not.toHaveBeenCalled();
         expect(accept).not.toHaveBeenCalled();
         expect(restore).toHaveBeenCalledOnce();
+        expect(activeSpanSpy).toHaveBeenCalledWith(
+          'prompt-attached-steer-blocked',
+        );
+        expect(endSpanSpy).toHaveBeenCalledWith('cancelled', {
+          promptId: 'prompt-attached-steer-blocked',
+        });
+      });
+
+      it('ends an attached ToolResult interaction when UserPromptSubmit throws', async () => {
+        vi.spyOn(telemetryIndex, 'getActiveInteractionSpan').mockReturnValue(
+          {} as never,
+        );
+        const endSpanSpy = vi
+          .spyOn(telemetryIndex, 'endInteractionSpan')
+          .mockImplementation(() => {});
+        const mockMessageBus = {
+          request: vi.fn().mockRejectedValue(new Error('sensitive hook error')),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'tool result' }],
+              new AbortController().signal,
+              'prompt-tool-result-hook-error',
+              { type: SendMessageType.ToolResult },
+            ),
+          ),
+        ).rejects.toThrow('sensitive hook error');
+
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
+        expect(endSpanSpy).toHaveBeenCalledWith('error', {
+          promptId: 'prompt-tool-result-hook-error',
+          errorMessage: 'UserPromptSubmit hook failed',
+          errorType: 'Error',
+        });
       });
 
       it('forwards steerInput through the Steer continuation for early settling', async () => {

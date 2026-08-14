@@ -350,6 +350,8 @@ async function runSpeculativeLoop(
                 toolName: canonicalToolName(name),
                 args: invocation.params as Record<string, unknown>,
                 signal: state.abortController!.signal,
+                sessionId: config.getSessionId(),
+                cwd: config.getTargetDir(),
                 ...(invocationContext ? { invocationContext } : {}),
               },
             );

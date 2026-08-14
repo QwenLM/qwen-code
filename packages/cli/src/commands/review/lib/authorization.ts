@@ -44,6 +44,13 @@ export interface WriteAuthorizationRequest {
    */
   userAuthorized: boolean;
   /**
+   * The standing `review.comment` setting, resolved by the caller from
+   * settings. When on, a PR review is treated as if `--comment` was passed —
+   * the target binding below still applies, so the write remains authorised
+   * only for the PR the recorded arguments name.
+   */
+  defaultComment?: boolean;
+  /**
    * Test seam only (there is no session id under vitest). Ignored whenever a
    * session id is present — honouring a caller-supplied path in a real run
    * would hand the gate back the model-writable file the design removed.
@@ -79,11 +86,12 @@ export interface WriteAuthorizationRequest {
 }
 
 /**
- * Exactly two things authorise a public write, and both are facts rather than
+ * Exactly three things authorise a public write, and all are facts rather than
  * impressions: `--comment` in the arguments the user typed (re-parsed from the
- * CLI's verbatim record), or `--user-authorized`. Authorisation is for a
- * *target*, not a mood: the recorded arguments must name the same pull request
- * (and, for a URL target, the same repo and host) as the write being attempted.
+ * CLI's verbatim record), the standing `review.comment` setting, or
+ * `--user-authorized`. Authorisation is for a *target*, not a mood: the
+ * recorded arguments must name the same pull request (and, for a URL target,
+ * the same repo and host) as the write being attempted.
  */
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
@@ -102,21 +110,38 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   } catch {
     // No args file means no arguments — which means no `--comment`. Fail
     // closed: a missing authorisation record is not an absent objection.
+    // The wording must not send a setting-driven operator to type a flag
+    // they never needed: with `review.comment` on, the real blocker is that
+    // no recorded invocation names a pull request to bind the write to, and
+    // a plain re-run of the review fixes that — typing `--comment` does not.
     return {
       ok: false,
       why:
-        `no review arguments were recorded at ${path}, so this run cannot ` +
-        'show that `--comment` was requested',
+        req.defaultComment === true
+          ? `no review arguments were recorded at ${path}, so no recorded ` +
+            'invocation names a pull request to bind this write to — re-run ' +
+            'the review naming the pull request'
+          : `no review arguments were recorded at ${path}, so this run ` +
+            'cannot show that `--comment` was requested',
     };
   }
 
-  const verdict = parseReviewArgs(raw);
+  const verdict = parseReviewArgs(raw, { comment: req.defaultComment });
   if (!verdict.comment.effective) {
+    // The refusal must name the REAL blocker. When comment was requested —
+    // by the flag or the standing `review.comment` setting — but the target
+    // is not a PR, effective is false because the arguments name no pull
+    // request to bind the write to; blaming a missing `--comment` flag the
+    // operator never typed (and implying typing one would fix it) misdirects.
+    const commentRequested =
+      verdict.comment.requested || req.defaultComment === true;
     return {
       ok: false,
-      why:
-        '`--comment` was not in the review arguments ' +
-        `(${JSON.stringify(raw.trim())})`,
+      why: commentRequested
+        ? `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
+          'pull request, so they cannot authorise posting to one'
+        : '`--comment` was not in the review arguments ' +
+          `(${JSON.stringify(raw.trim())})`,
     };
   }
 
@@ -167,6 +192,8 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
 
   return {
     ok: true,
-    why: `\`--comment\` was in the review arguments for #${authorisedPr}`,
+    why: verdict.comment.requested
+      ? `\`--comment\` was in the review arguments for #${authorisedPr}`
+      : `\`review.comment\` is enabled in settings, and the review arguments name #${authorisedPr}`,
   };
 }

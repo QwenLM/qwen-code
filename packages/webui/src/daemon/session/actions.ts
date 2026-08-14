@@ -14,6 +14,7 @@ import type {
   CreateSessionRequest,
   DaemonForkSessionResult,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptSummary,
   DaemonRewindResult,
@@ -27,7 +28,11 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus } from './httpErrors.js';
-import { mapSupportedCommands } from './mappers.js';
+import {
+  mapReasoningControls,
+  mapSessionContextReasoning,
+  mapSupportedCommands,
+} from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
   clearPassiveAssistantDoneTimer,
@@ -83,6 +88,10 @@ function clearPendingLoadTimeout(load: PendingSessionLoad): void {
   if (load.timeout !== undefined) clearTimeout(load.timeout);
 }
 
+export function normalizeWorkspaceIdentity(value: string | undefined): string {
+  return value ? value.replace(/\\/g, '/').replace(/\/+$/, '') || '/' : '';
+}
+
 export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
@@ -90,6 +99,7 @@ export interface CreateDaemonSessionActionsArgs {
   settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
+  sessionConfigGeneration: WeakMap<DaemonSessionClient, number>;
   heartbeatSupportedRef: RefBox<boolean>;
   manualSessionClearRef: RefBox<boolean>;
   skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
@@ -134,6 +144,7 @@ export function getConnectionAfterSessionClear(
     // check refetch fresh data for the next session.
     delete next.supportedCommands;
     delete next.context;
+    delete next.reasoning;
     // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
     // MCP-prompt and workflow slash commands all live at the workspace/config
     // level, not the session), so they stay valid after the session is
@@ -161,6 +172,7 @@ export function createDaemonSessionActions({
   settledPromptsRef,
   pendingSessionLoadRef,
   pendingSessionLoadIdRef,
+  sessionConfigGeneration,
   heartbeatSupportedRef,
   manualSessionClearRef,
   skipNextCleanupDetachSessionRef,
@@ -183,6 +195,44 @@ export function createDaemonSessionActions({
   clearLiveJournalRepair = () => undefined,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
   const silentHardFailureNoticeKeys = new Set<string>();
+  let noticeOwner = sessionRef.current;
+  let reasoningActionToken = 0;
+  let appliedReasoningActionToken = 0;
+  let modelMutationGeneration = 0;
+
+  function trackSessionConfigMutation<T>(
+    session: DaemonSessionClient,
+    operation: Promise<T>,
+  ): Promise<T> {
+    sessionConfigGeneration.set(
+      session,
+      (sessionConfigGeneration.get(session) ?? 0) + 1,
+    );
+    void operation.then(
+      () => finishSessionConfigMutation(session),
+      () => finishSessionConfigMutation(session),
+    );
+    return operation;
+  }
+
+  function finishSessionConfigMutation(session: DaemonSessionClient): void {
+    sessionConfigGeneration.set(
+      session,
+      (sessionConfigGeneration.get(session) ?? 0) + 1,
+    );
+  }
+
+  const ignoreStaleNotice: AddDaemonSessionNotice = (notice) => ({
+    ...notice,
+    id: notice.id ?? 'stale-session-notice',
+    createdAt: notice.createdAt ?? 0,
+  });
+  const noticeForSession = (session: DaemonSessionClient) => {
+    if (sessionRef.current !== session) return ignoreStaleNotice;
+    if (noticeOwner !== session) silentHardFailureNoticeKeys.clear();
+    noticeOwner = session;
+    return addNotice;
+  };
 
   function clearActiveSessionState() {
     clearLiveJournalRepair();
@@ -244,17 +294,22 @@ export function createDaemonSessionActions({
               if (pendingSessionLoadRef.current?.id === loadId) {
                 pendingSessionLoadRef.current = undefined;
                 if (sessionRef.current?.sessionId !== sessionId) {
-                  setConnection((current) =>
-                    current.status === 'connecting' &&
-                    current.sessionId === sessionId
-                      ? {
-                          ...current,
-                          status: 'disconnected',
-                          loadingTranscript: undefined,
-                          catchingUp: undefined,
-                        }
-                      : current,
-                  );
+                  manualSessionClearRef.current = true;
+                  setRestoreSessionId(undefined);
+                  setRestoreWorkspaceCwd(undefined);
+                  setConnection((current) => {
+                    if (
+                      current.status !== 'connecting' ||
+                      current.sessionId !== sessionId
+                    ) {
+                      return current;
+                    }
+                    return {
+                      ...getConnectionAfterSessionClear(current, sessionId),
+                      status: 'disconnected',
+                      sessionId: undefined,
+                    };
+                  });
                 }
                 reject(
                   dispatchActionError(
@@ -305,6 +360,7 @@ export function createDaemonSessionActions({
       signal,
       replaySource,
     );
+    const pendingLoad = pendingSessionLoadRef.current;
     const currentSession = sessionRef.current;
     const currentSessionId = currentSession?.sessionId;
     const activePrompt = currentSessionId
@@ -317,8 +373,17 @@ export function createDaemonSessionActions({
       activePromptsRef.current.delete(currentSessionId);
     }
     resetCurrentSessionActivePrompt();
+    const targetWorkspaceCwd =
+      workspaceCwd ??
+      currentSession?.workspaceCwd ??
+      // A failed switch leaves the target's workspace on the connection for
+      // error rendering; never let the next workspace-less load inherit it.
+      (getConnection().error ? undefined : getConnection().workspaceCwd);
     const reloadingCurrentSession =
-      mode === 'load' && currentSessionId === sessionId;
+      mode === 'load' &&
+      currentSessionId === sessionId &&
+      normalizeWorkspaceIdentity(currentSession?.workspaceCwd) ===
+        normalizeWorkspaceIdentity(targetWorkspaceCwd);
     if (currentSession) {
       const detachCurrentSession = () =>
         currentSession.detach().catch((error: unknown) => {
@@ -346,6 +411,7 @@ export function createDaemonSessionActions({
         ...current,
         status: 'connecting',
         sessionId,
+        workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
         error: undefined,
@@ -361,12 +427,24 @@ export function createDaemonSessionActions({
     if (!reloadingCurrentSession) store.reset();
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
-    setRestoreWorkspaceCwd(workspaceCwd ?? getConnection().workspaceCwd);
+    setRestoreWorkspaceCwd(targetWorkspaceCwd);
     setRestoreSessionNonce((nonce) => nonce + 1);
     return loadPromise.catch((error: unknown) => {
-      if (!isAbortError(error)) {
+      // The failed target stays visible (sessionId + workspaceCwd) so the UI
+      // can render the load error in context. Only mark the connection as
+      // failed; the next switch's workspace derivation skips a failed
+      // connection so it cannot inherit this target's workspace. While this
+      // load is still the current one — a superseding load has already
+      // replaced the connecting state.
+      if (
+        !isAbortError(error) &&
+        (pendingSessionLoadRef.current === undefined ||
+          pendingSessionLoadRef.current === pendingLoad)
+      ) {
         setConnection((current) => ({
           ...current,
+          error: error instanceof Error ? error.message : String(error),
+          errorStatus: extractHttpStatus(error),
           loadingTranscript: undefined,
           catchingUp: undefined,
         }));
@@ -594,12 +672,55 @@ export function createDaemonSessionActions({
         'switch_model',
       );
       try {
+        const modelRequest = session.setModel(modelId);
+        const contextRequest = trackSessionConfigMutation(
+          session,
+          modelRequest.then(() => session.context()),
+        );
         const result = await withActionTimeout(
-          session.setModel(modelId),
+          modelRequest,
           'Set model timed out',
         );
-        if (sessionRef.current === session) {
-          setConnection((current) => ({ ...current, currentModel: modelId }));
+        const modelGeneration =
+          sessionRef.current === session
+            ? ++modelMutationGeneration
+            : undefined;
+        if (modelGeneration !== undefined) {
+          setConnection((current) => {
+            if (
+              sessionRef.current !== session ||
+              modelGeneration !== modelMutationGeneration
+            ) {
+              return current;
+            }
+            return { ...current, currentModel: modelId, reasoning: undefined };
+          });
+        }
+        const context = await withActionTimeout(
+          contextRequest,
+          'Refresh model context timed out',
+        ).catch(() => undefined);
+        if (
+          modelGeneration !== undefined &&
+          sessionRef.current === session &&
+          modelGeneration === modelMutationGeneration
+        ) {
+          setConnection((current) => {
+            if (
+              sessionRef.current !== session ||
+              modelGeneration !== modelMutationGeneration ||
+              current.currentModel !== modelId
+            ) {
+              return current;
+            }
+            return {
+              ...current,
+              context: context ?? current.context,
+              reasoning: context
+                ? mapSessionContextReasoning(context)
+                : undefined,
+            };
+          });
         }
         return result;
       } catch (error) {
@@ -608,6 +729,66 @@ export function createDaemonSessionActions({
           'Set model failed',
           error,
           'switch_model',
+        );
+      }
+    },
+
+    async setReasoningEffort(value) {
+      const actionToken = ++reasoningActionToken;
+      const sourceModel = getConnection().currentModel;
+      const sourceModelGeneration = modelMutationGeneration;
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Set reasoning effort failed',
+        'set_reasoning_effort',
+      );
+      try {
+        const result = await withActionTimeout(
+          trackSessionConfigMutation(
+            session,
+            session.setConfigOption('reasoning_effort', value),
+          ),
+          'Set reasoning effort timed out',
+        );
+        const current = getConnection();
+        if (
+          sessionRef.current === session &&
+          sourceModelGeneration === modelMutationGeneration &&
+          current.currentModel === sourceModel &&
+          actionToken > appliedReasoningActionToken
+        ) {
+          appliedReasoningActionToken = actionToken;
+          setConnection((current) => {
+            if (
+              sessionRef.current !== session ||
+              sourceModelGeneration !== modelMutationGeneration ||
+              current.currentModel !== sourceModel
+            ) {
+              return current;
+            }
+            const configOptions = result.configOptions;
+            return {
+              ...current,
+              reasoning: mapReasoningControls(
+                configOptions,
+                current.reasoning?.effort,
+              ),
+              context: current.context
+                ? {
+                    ...current.context,
+                    state: { ...current.context.state, configOptions },
+                  }
+                : current.context,
+            };
+          });
+        }
+      } catch (error) {
+        throw dispatchActionError(
+          noticeForSession(session),
+          'Set reasoning effort failed',
+          error,
+          'set_reasoning_effort',
         );
       }
     },
@@ -753,6 +934,32 @@ export function createDaemonSessionActions({
       worktree?: { slug?: string };
       branch?: { name: string };
     }) {
+      let rawCreateStarted = false;
+      let rawCreateSettled = false;
+      let retireLateResult = false;
+      const trackCreate = <T>(
+        request: Promise<T>,
+        retire: (created: T) => Promise<unknown>,
+      ) => {
+        rawCreateStarted = true;
+        void request.then(
+          (created) => {
+            rawCreateSettled = true;
+            if (retireLateResult) {
+              void retire(created).catch((error: unknown) => {
+                console.warn(
+                  '[DaemonSessionActions] detach after timed-out create failed:',
+                  error,
+                );
+              });
+            }
+          },
+          () => {
+            rawCreateSettled = true;
+          },
+        );
+        return request;
+      };
       try {
         manualSessionClearRef.current = false;
         // Fold the initial approval mode into the create request so the daemon
@@ -780,13 +987,20 @@ export function createDaemonSessionActions({
             : undefined;
         if (activeSession) {
           const nextSession = await withActionTimeout(
-            activeSession.client.createOrAttachSession({
-              ...getCreateSessionRequest(),
-              ...(options?.workspaceCwd !== undefined
-                ? { workspaceCwd: options.workspaceCwd }
-                : {}),
-              ...requestOverrides,
-            }),
+            trackCreate(
+              activeSession.client.createOrAttachSession({
+                ...getCreateSessionRequest(),
+                ...(options?.workspaceCwd !== undefined
+                  ? { workspaceCwd: options.workspaceCwd }
+                  : {}),
+                ...requestOverrides,
+              }),
+              (created) =>
+                activeSession.client.detachSession(
+                  created.sessionId,
+                  created.clientId,
+                ),
+            ),
             'Create session timed out',
           );
           persistStableClientId(nextSession.clientId, nextSession.sessionId);
@@ -794,7 +1008,10 @@ export function createDaemonSessionActions({
         }
 
         const nextSession = await withActionTimeout(
-          createDetachedSession(options?.workspaceCwd, requestOverrides),
+          trackCreate(
+            createDetachedSession(options?.workspaceCwd, requestOverrides),
+            (created) => created.detach(),
+          ),
           'Create session timed out',
         );
         if (manualSessionClearRef.current) {
@@ -826,6 +1043,7 @@ export function createDaemonSessionActions({
         }));
         return nextSession;
       } catch (error) {
+        if (rawCreateStarted && !rawCreateSettled) retireLateResult = true;
         throw dispatchActionError(
           addNotice,
           `Create session failed${
@@ -957,21 +1175,33 @@ export function createDaemonSessionActions({
         'Load context failed',
         'load_context',
       );
+      const configGeneration = sessionConfigGeneration.get(session) ?? 0;
       try {
         const context = await withActionTimeout(
           session.context(),
           'Load context timed out',
         );
-        if (sessionRef.current === session) {
-          setConnection((current) => ({
+        setConnection((current) => {
+          if (
+            sessionRef.current !== session ||
+            configGeneration % 2 !== 0 ||
+            (sessionConfigGeneration.get(session) ?? 0) !== configGeneration
+          ) {
+            return current;
+          }
+          return {
             ...current,
             context,
             currentMode:
               getModeFromSessionContext(context) ?? current.currentMode,
             currentModel:
               getModelFromSessionContext(context) ?? current.currentModel,
-          }));
-        }
+            reasoning: mapSessionContextReasoning(
+              context,
+              current.reasoning?.effort,
+            ),
+          };
+        });
         return context;
       } catch (error) {
         throw dispatchActionError(
@@ -1141,19 +1371,18 @@ export function createDaemonSessionActions({
 
     async enqueueMidTurnMessage(
       message: string,
-      opts?: { signal?: AbortSignal },
+      opts?: { signal?: AbortSignal; messageId?: string },
     ): Promise<DaemonMidTurnMessageResult> {
-      // Best-effort and silent: no session / idle session / transport failure /
-      // abort all resolve `{ accepted: false }` so the caller falls back to its
-      // own next-turn queue. Never raises a user-facing notice — a queued
-      // message typed mid-turn is an optimization, not a user-initiated action.
-      // `opts.signal` lets the caller abort a still-in-flight push when the turn
-      // it was meant for settles, so a late arrival can't land in the next turn.
+      // Calls without an id are the old-daemon compatibility path and fall back
+      // locally. With a stable id, transport failure is ambiguous (the POST may
+      // already have committed), so let the caller reconcile instead of
+      // reporting a false rejection.
       const session = sessionRef.current;
       if (!session) return { accepted: false };
       try {
         return await session.enqueueMidTurnMessage(message, opts);
       } catch (err) {
+        if (opts?.messageId) throw err;
         // An abort is the designed settle-time cancel (the message stays in the
         // browser queue for the next turn), not a failure — stay silent. Any
         // OTHER error (daemon down, 4xx/5xx, network, timeout) silently disables
@@ -1161,7 +1390,7 @@ export function createDaemonSessionActions({
         // without raising a user-facing notice.
         if (!(err instanceof DOMException && err.name === 'AbortError')) {
           console.debug(
-            '[enqueueMidTurnMessage] push failed; kept for next turn',
+            '[enqueueMidTurnMessage] legacy push failed; kept for next turn',
             err,
           );
         }
@@ -1176,15 +1405,8 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
-        // The bridge removes a mid-turn message only on an exact originator
-        // match. The originator is the client id that was attached to the
-        // TARGET session when the message was queued — with per-session client
-        // ids that differs from the currently selected session's id, so
-        // forwarding our own id would resolve to a foreign originator and the
-        // bridge would reject a valid removal after a session switch. Prefer
-        // the target session's persisted id; fall back to our own when nothing
-        // is persisted (a shared caller-provided client id covers every
-        // session).
+        // Authenticate against the target session when editing a row restored
+        // after a session switch.
         const targetClientId =
           getPersistedClientId(opts.sessionId) ?? session.clientId;
         return await session.client.removeMidTurnMessage(
@@ -1196,6 +1418,28 @@ export function createDaemonSessionActions({
         );
       }
       return await session.removeMidTurnMessage(messageId);
+    },
+
+    async getMidTurnMessages(opts?: {
+      signal?: AbortSignal;
+    }): Promise<DaemonMidTurnMessagesResult | undefined> {
+      // Best-effort and silent, like `enqueueMidTurnMessage`: reconciliation
+      // is a bookkeeping recovery aid (page refresh / missed echo), not a
+      // user-initiated action. `undefined` means callers preserve their
+      // current state because delivery is unknown.
+      const session = sessionRef.current;
+      if (!session) return undefined;
+      try {
+        return await session.getMidTurnMessages(opts);
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.debug(
+            '[getMidTurnMessages] reconciliation query failed; keeping current state',
+            err,
+          );
+        }
+        return undefined;
+      }
     },
 
     async getPendingPrompts(opts) {
@@ -1397,6 +1641,9 @@ export function createDaemonSessionActions({
         void startSessionSwitch(result.sessionId, 'load').catch(
           (switchError: unknown) => {
             if (isAbortError(switchError)) return;
+            void session.client
+              .detachSession(result.sessionId, result.clientId)
+              .catch(() => undefined);
             dispatchActionError(
               addNotice,
               'Branch session failed',

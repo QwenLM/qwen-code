@@ -315,24 +315,8 @@ export interface DaemonMidTurnMessageInjectedData {
   messages: string[];
   messageIds?: string[];
   /**
-   * Trusted client id that queued these messages, so a consumer dedupes only its
-   * OWN pending queue — a peer attached to the same session must not drop a
-   * coincidentally-equal entry it didn't queue. Absent for anonymous pushes.
-   *
-   * CONTRACT: a consumer that dedupes on this event MUST compare this id against
-   * its own client id and skip frames originated by a different client. The
-   * daemon broadcasts the frame to every SSE subscriber on the session and does
-   * NOT route by originator, so a consumer that dedupes unconditionally will drop
-   * another client's coincidentally-equal pending message (double delivery).
-   *
-   * IMPORTANT — wire location: unlike the permission/settings events (which the
-   * session reducer's `mergeOriginator` step copies from the envelope INTO
-   * `data`), this event is NOT reduced, so the daemon leaves the id ONLY on the
-   * SSE envelope (`event.originatorClientId`) and never populates it here. A raw
-   * SDK consumer must read `event.originatorClientId`; `data.originatorClientId`
-   * is filled in only by a consumer that lifts it off the envelope itself (the
-   * web-shell's `parseSidechannelMidTurnInjected` does this). The field lives on
-   * this shape so that lifted representation is well-typed.
+   * Present only on events from older daemons. New daemons publish one
+   * session-wide batch and clients reconcile it by message id.
    */
   originatorClientId?: string;
   [key: string]: unknown;
@@ -838,6 +822,7 @@ export interface DaemonTurnErrorData {
   message: string;
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
+  loopType?: string;
   promptId?: string;
   [key: string]: unknown;
 }
