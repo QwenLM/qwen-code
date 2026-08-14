@@ -4109,13 +4109,26 @@ export class Session implements SessionContext {
                 return { stopReason: 'cancelled' };
               }
 
-              parts = await this.#processSlashCommandResult(
-                slashCommandResult,
-                modelPromptBlocks,
-                pendingSend.signal,
-                onFullTurnModel,
-                shouldRecordSlashCommand,
-              );
+              try {
+                parts = await this.#processSlashCommandResult(
+                  slashCommandResult,
+                  modelPromptBlocks,
+                  pendingSend.signal,
+                  onFullTurnModel,
+                  shouldRecordSlashCommand,
+                );
+              } catch (error) {
+                if (slashCommandName === 'advisor') {
+                  logConversationFinishedEvent(
+                    this.config,
+                    new ConversationFinishedEvent(
+                      this.config.getApprovalMode(),
+                      0,
+                    ),
+                  );
+                }
+                throw error;
+              }
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
               // Return early without sending to the model

@@ -4537,6 +4537,103 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('normalizes responseJsonSchema before strict OpenAI output', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              verdict: { type: 'string', minLength: 1 },
+            },
+            required: ['verdict'],
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema: {
+                type: 'object',
+                properties: { verdict: { type: 'string' } },
+                required: ['verdict'],
+                additionalProperties: false,
+              },
+              strict: true,
+            },
+          },
+        }),
+        'test-prompt-id',
+      );
+    });
+
+    it('uses json_schema for compatible Gemini responseSchema configs', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: { ok: { type: 'BOOLEAN' } },
+            required: ['ok'],
+            additionalProperties: false,
+          },
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      expect(mockProvider.buildRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'response',
+              schema: {
+                type: 'object',
+                properties: { ok: { type: 'boolean' } },
+                required: ['ok'],
+                additionalProperties: false,
+              },
+              strict: true,
+            },
+          },
+        }),
+        'test-prompt-id',
+      );
+    });
+
     it('adds an official OpenAI session cache key to regular requests', async () => {
       mockContentGeneratorConfig.baseUrl = 'https://api.openai.com/v1';
       mockContentGeneratorConfig.model = 'gpt-5.5';

@@ -14745,6 +14745,28 @@ describe('Session', () => {
         expect(finishedSpy).toHaveBeenCalledTimes(1);
       });
 
+      it('records completion when /advisor returns an error message', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'message',
+          messageType: 'error',
+          content: 'Advisor review failed: provider rejected schema',
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/advisor' }],
+          }),
+        ).rejects.toThrow('Advisor review failed: provider rejected schema');
+
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
+      });
+
       it('preserves an expanded slash prompt cancelled before model send', async () => {
         const finishedSpy = vi
           .spyOn(core, 'logConversationFinishedEvent')
