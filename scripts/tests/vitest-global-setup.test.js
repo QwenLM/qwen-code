@@ -10,18 +10,20 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
+import checkUnitTestPrerequisites, {
   DIST_PREREQUISITES,
   GENERATED_PREREQUISITES,
   checkAndReport,
   findMissingPrerequisites,
   formatPrerequisiteMessage,
   normalizePackageKey,
+  repoRoot,
 } from '../vitest-global-setup.js';
 
 // Mirrors the real manifest shapes: most channel packages declare their entry
@@ -226,12 +228,11 @@ describe('checkAndReport', () => {
     expect(printed).toContain('packages/channels/base');
   });
 
-  it('derives the key from cwd relative to root (win32 separators tolerated)', () => {
+  it('yields silently when cwd matches the repo root (no known package key)', () => {
     root = buildFixtureRoot();
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    // cwd deeper than the package dir still resolves to the package key only
-    // when it is exactly the package dir; a mismatched cwd yields no known
-    // key and therefore no prerequisites (guard yields silently by design).
+    // cwd equal to the repo root yields no known package key, so the guard
+    // yields silently by design.
     expect(checkAndReport({ cwd: root, root })).toBe(0);
     expect(errSpy).not.toHaveBeenCalled();
   });
@@ -245,10 +246,11 @@ function registryChannelEntries() {
     ),
   );
   const source = readFileSync(registryPath, 'utf8');
-  // npm package names may contain digits; the class must tolerate them or a
-  // future builtin channel silently escapes this drift check.
+  // npm package names may contain digits, underscores and dots; the class
+  // must tolerate them or a future builtin channel silently escapes this
+  // drift check.
   const specifiers = [
-    ...source.matchAll(/import\('@qwen-code\/(channel-[a-z0-9-]+)'\)/g),
+    ...source.matchAll(/import\('@qwen-code\/(channel-[a-z0-9._-]+)'\)/g),
   ].map((match) => match[1]);
   return specifiers.map(
     (name) => `packages/channels/${name.replace('channel-', '')}`,
@@ -279,5 +281,97 @@ describe('DIST_PREREQUISITES stays in sync with channel-registry', () => {
         `stale prerequisite entry ${entry}: no matching channel-registry import`,
       ).toContain(entry);
     }
+  });
+});
+
+describe('guard probe edge cases (round 3)', () => {
+  let root;
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+    root = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it('reports a package whose manifest exposes no dist entry to probe', () => {
+    root = buildFixtureRoot();
+    writeFileSync(
+      path.join(root, 'packages/core', 'package.json'),
+      JSON.stringify({
+        name: 'fake-core',
+        exports: { '.': { require: './dist/index.cjs' } },
+      }),
+    );
+
+    const missing = findMissingPrerequisites('packages/core', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('exposes no dist/ entry files to check');
+  });
+
+  it('distinguishes a partial build from an unbuilt package', () => {
+    root = buildFixtureRoot();
+    writeFileSync(
+      path.join(root, 'packages/core', 'package.json'),
+      JSON.stringify({
+        name: 'fake-core',
+        exports: {
+          '.': { import: './dist/index.js' },
+          './stale': { import: './dist/stale.js' },
+        },
+      }),
+    );
+
+    const missing = findMissingPrerequisites('packages/core', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('build output is');
+    expect(missing[0]).toContain('stale.js');
+    expect(missing[0]).toContain("check the package's exports entries");
+    expect(missing[0]).not.toContain('has not been built');
+  });
+
+  it('derives the package key when cwd reaches the root through a symlink', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/channels/base/dist/index.js'));
+    const link = `${root}-link`;
+    symlinkSync(root, link);
+    try {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(
+        checkAndReport({ cwd: path.join(link, 'packages/cli'), root }),
+      ).toBe(1);
+      expect(errSpy.mock.calls[0][0]).toContain('packages/channels/base');
+    } finally {
+      rmSync(link);
+    }
+  });
+});
+
+describe('default export (the vitest globalSetup entry)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('extracts the project root and does not exit when prerequisites are ready', () => {
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    checkUnitTestPrerequisites({
+      config: { root: path.join(repoRoot, 'packages/cli') },
+    });
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to process.cwd() when invoked without a project', () => {
+    vi.spyOn(process, 'cwd').mockReturnValue(
+      path.join(repoRoot, 'packages/cli'),
+    );
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    checkUnitTestPrerequisites(undefined);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
   });
 });

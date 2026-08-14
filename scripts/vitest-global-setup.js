@@ -19,7 +19,7 @@
  * See https://github.com/QwenLM/qwen-code/issues/9149.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -135,11 +135,29 @@ export function findMissingPrerequisites(packageRelPath, root = repoRoot) {
       );
       continue;
     }
+    if (entryFiles.length === 0) {
+      // Zero enumeration means the manifest exposes no ./dist/ target the
+      // probe understands (e.g. a require-only or nested-condition entry).
+      // Fail loud instead of silently passing — a stale probe must not
+      // resurrect the raw resolution error this guard exists to replace.
+      missing.push(
+        `  - ${rel}: package.json exposes no dist/ entry files to check` +
+          ' (guard probe may be stale)',
+      );
+      continue;
+    }
     const absent = entryFiles.find((file) => !existsSync(file));
     if (absent) {
+      const partiallyBuilt = entryFiles.some((file) => existsSync(file));
       missing.push(
-        `  - ${rel}: workspace package "${name}" has not been built` +
-          ` (missing ${path.relative(root, absent)})`,
+        partiallyBuilt
+          ? `  - ${rel}: workspace package "${name}" build output is` +
+              ' incomplete or package.json exports points at a file the' +
+              ` build does not emit (missing ${path.relative(root, absent)})` +
+              ' — re-run "npm run build"; if it still fails, check the' +
+              " package's exports entries"
+          : `  - ${rel}: workspace package "${name}" has not been built` +
+              ` (missing ${path.relative(root, absent)})`,
       );
     }
   }
@@ -170,13 +188,30 @@ export function formatPrerequisiteMessage(missing) {
   ].join('\n');
 }
 
+function realpathOrSelf(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 /**
  * Checks prerequisites for `cwd` against `root`, prints the actionable
  * message when something is missing, and returns the intended exit code
  * (0 = ready, 1 = missing prerequisites).
  */
 export function checkAndReport({ cwd = process.cwd(), root = repoRoot } = {}) {
-  const missing = findMissingPrerequisites(path.relative(root, cwd), root);
+  // Realpath both ends before deriving the key: `repoRoot` descends from
+  // import.meta.url, which Node resolves through symlinks, while vitest
+  // resolves `root` with a plain path.resolve — comparing them raw lets a
+  // symlinked ancestor spell the same directory two ways and silently
+  // disable the guard.
+  const realRoot = realpathOrSelf(root);
+  const missing = findMissingPrerequisites(
+    path.relative(realRoot, realpathOrSelf(cwd)),
+    realRoot,
+  );
   if (missing.length === 0) {
     return 0;
   }
