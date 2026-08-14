@@ -1298,7 +1298,7 @@ export function buildRoleBrief(
         '```',
         '',
         '**If the report says work is left, run it again with `--resume`.** The ' +
-          '600-second ceiling is per CALL, not per run: this repo needs more than ' +
+          `${SHELL_TOOL_MAX_TIMEOUT_MS / 1000}-second ceiling is per CALL, not per run: this repo needs more than ` +
           'one call to finish its suites (install, the builds, then `packages/core` ' +
           'at 106s and `packages/cli` at 401s, before the rest). Work is left when ' +
           '`testScope.notRun` is non-empty, or when any `test[]` entry has ' +

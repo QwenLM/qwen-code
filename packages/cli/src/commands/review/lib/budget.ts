@@ -435,34 +435,59 @@ const COMPLETION_TAIL = `(?:\\s+${BUDGET_QUALIFIED})?`;
  * published `Not explored to full depth (tool budget reached)` quoting that
  * very sentence — the disclosure asserted the opposite of its own evidence.
  *
- * Shapes are the English branch's, narrowed the same way:
+ * Shapes are the English branch's, narrowed the same way — and the narrowing
+ * is the whole of it, because the two errors are not symmetric here either:
+ * dropping a REAL Chinese gap certifies depth nobody reached, while keeping a
+ * placeholder only over-discloses.
  *
  *  - a bare token (`无`, `没有`, `不适用`), optionally with the noun the brief
  *    uses (`无缺口`, `没有跳过的检查`);
- *  - a token, a dash or comma, then a completion clause the text ENDS with
- *    (`无 — 所有检查均完成`), tolerating a trailing budget adverbial
- *    (`未触及工具预算上限`).
+ *  - a token, a dash or comma, an ALL-DONE head (`所有`/`全部`/`一切`/`均`),
+ *    then a completion word the text ENDS with (`无 — 所有检查均完成`),
+ *    tolerating one trailing budget adverbial (`未触及工具预算上限`).
+ *
+ * The first cut of this branch had none of that structure, and a live review
+ * of this very change probed eight real disclosures it swallowed. Each rule
+ * below answers one of them:
+ *
+ *  - **The all-done head.** Without it the span before the completion word
+ *    swallows a gap clause: `无 — 3 项未运行，其余完成` and `无 — 渗透测试失败，
+ *    单元测试完成` both read as "nothing to disclose". The English branch has
+ *    required this head from the start; the copy that claimed to mirror it did
+ *    not.
+ *  - **`没有` in the negation lookbehind.** The lookbehinds see one character,
+ *    so `还没有完成` passed them — the char before `完成` is `有`. A sentence
+ *    saying a check is NOT done was classified as saying every check was.
+ *  - **The tail is the budget adverbial, not forty free characters.** A span
+ *    that accepts anything after the completion word swallows the clause that
+ *    carries the gap: `无 — 安全检查完成，渗透测试未进行`. The English side ends
+ *    at the completion word and allows only a budget phrase after it; so does
+ *    this one now.
  *
  * The token needs an explicit boundary — Chinese has no `\b`. `无` is a
  * prefix of `无法…` ("unable to…"), which is a REAL gap and must survive, so
  * a token is only a token when what follows it is punctuation, whitespace,
- * or the end of the text. And as on the English side, the completion clause
- * must not cross an exception (`但`, `除`) or a negation of the completion
- * itself (`未完成`, `均未完成`).
+ * or the end of the text. And as on the English side, neither span may cross
+ * an exception (`但`, `除`).
  */
 const ZH_TOKEN = '(?:无|没有|不适用|暂无)(?:缺口|跳过的?检查|检查)?';
 const ZH_EXCEPTION = '但|除|除了|例外';
 const ZH_COMPLETION = '(?:完成|完毕|结束)';
+/** "every check", the head the completion clause must open with. */
+const ZH_ALL_DONE = '(?:所有|全部|一切|均|全都|统统)';
+/** The one thing allowed after the completion word: a budget adverbial. */
+const ZH_BUDGET_TAIL =
+  '(?:[，,、]?\\s*(?:未触及|未达到|未超出|在|不超过)[^，,。．.!！…;；]{0,20}预算[^，,。．.!！…;；]{0,10})?';
 const ZH_TAIL = '[。．.!！…,，;；:：\\s]*$';
-// Both spans are BOUNDED, unlike the English branch's `.*`: this classifier
-// runs on every agent return before the length cap applies, and two unbounded
-// quantifiers separated by a literal is the shape that backtracks. A real
-// "nothing to disclose" sentence fits in far less than 40 characters a side.
+// The pre-completion span is BOUNDED, unlike the English branch's `.*`: this
+// classifier runs on every agent return before the length cap applies, and two
+// unbounded quantifiers separated by a literal is the shape that backtracks.
+// A real "nothing to disclose" sentence fits in far less than 40 characters.
 const ZH_PLACEHOLDER =
   `${ZH_TOKEN}(?:${ZH_TAIL}` +
-  `|\\s*[-—–、,，]\\s*(?:(?!${ZH_EXCEPTION}).){0,40}` +
-  `(?<!未)(?<!没)(?<!无法)${ZH_COMPLETION}` +
-  `(?:(?!${ZH_EXCEPTION}).){0,40}${ZH_TAIL})`;
+  `|\\s*[-—–、,，]\\s*${ZH_ALL_DONE}(?:(?!${ZH_EXCEPTION}).){0,40}` +
+  `(?<!未)(?<!没)(?<!没有)(?<!无法)(?<!尚未)${ZH_COMPLETION}` +
+  `${ZH_BUDGET_TAIL}${ZH_TAIL})`;
 
 const PLACEHOLDER_GAP_RE = new RegExp(
   '^(?:<[^>]*>$' +

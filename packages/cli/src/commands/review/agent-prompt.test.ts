@@ -2346,13 +2346,25 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // call teaches the agent to report a truncated dimension as a finished
     // one — which is what three live reviews did.
     const p = buildRoleBrief(PR_PLAN, '7', { planPath: '/abs/tmp/plan.json' });
-    expect(p).toContain('--resume');
     expect(p).toContain('testScope.notRun');
     expect(p).toContain('"clamped": true');
+
+    // Asserted on the CONTINUATION BLOCK ALONE, which is the whole point. The
+    // first cut of this test searched the entire prompt: `--resume` matched the
+    // prose, the window ran to the end of the prompt, and every assertion was
+    // satisfied by text the sibling brief bullet and the FIRST invocation block
+    // already supply — so deleting the continuation block outright left it
+    // green. The block is the last fenced command in the role-7 prompt.
+    const fences = [...p.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
+    const resumeBlock = fences.filter((f) => f.includes('--resume'));
+    expect(resumeBlock).toHaveLength(1);
     // The continuation runs the same command, so the block must carry the same
     // plan and out paths — an agent that has to re-derive them gets them wrong.
-    const resumeBlock = p.slice(p.indexOf('--resume') - 400);
-    expect(resumeBlock).toContain('/abs/tmp/plan.json');
+    expect(resumeBlock[0]).toContain('review build-test');
+    expect(resumeBlock[0]).toContain('--plan /abs/tmp/plan.json');
+    expect(resumeBlock[0]).toContain(
+      '--out /abs/tmp/qwen-review-pr-6766-build-test.json',
+    );
   });
 
   it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {

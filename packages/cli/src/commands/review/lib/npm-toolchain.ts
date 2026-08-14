@@ -97,6 +97,28 @@ export function unresolvedWorkspaceDeps(
 const succeeded = (r: CommandResult): boolean => r.exitCode === 0;
 
 /**
+ * The sentence a report must open with when the install exited non-zero and
+ * left a usable tree anyway.
+ *
+ * Shared, because a CONTINUATION owes it too and the first cut of `--resume`
+ * dropped it: the merged note replaced the previous one wholesale, so a report
+ * carrying `install.exitCode: 1` arrived at the agent with nothing telling it
+ * that failure is infrastructure — and the brief's standing rule is to
+ * correlate failures with the diff. The structured field alone was already
+ * judged insufficient here (that is why the fresh path prepends this on every
+ * return); a continuation is not the place to start relying on it.
+ */
+function installFailureFraming(install: CommandResult | null): string {
+  if (!install || install.exitCode === 0) return '';
+  return (
+    `\`${install.command}\` exited ${install.exitCode} but left a usable ` +
+    '`node_modules`, so the run went ahead. ' +
+    'The install failure is an environment/infrastructure result — report it as ' +
+    'informational, never as a Critical, and never against this PR. '
+  );
+}
+
+/**
  * Continue a previous call's run: the suites it could not reach, and the ones
  * it killed on a deadline its budget had shortened.
  *
@@ -176,18 +198,24 @@ function resumeNpmToolchain(
   const ranDirs: string[] = [];
   const fresh: CommandResult[] = [];
   const stillPending: string[] = [];
+  /** Retries the budget never reached — they carry no dir, so `notRun` cannot
+   *  hold them, and the first cut dropped them from the accounting entirely. */
+  const unattemptedRetries: string[] = [];
   for (let i = 0; i < work.length; i++) {
     const { command, dir } = work[i];
     const remaining = remainingMs();
     if (remaining < BUDGET_MIN_ATTEMPT_MS) {
       // Same floor the first call uses: below it an attempt cannot boot npm,
       // and a fake timeout is worse than an honest "still to run".
-      stillPending.push(
-        ...work
-          .slice(i)
-          .map((w) => w.dir)
-          .filter((d): d is string => d !== null),
-      );
+      //
+      // Both kinds of unfinished work are counted here. `notRun` is a list of
+      // WORKSPACES, so a retry — which is a command, not a dir — cannot go in
+      // it; dropping it on that technicality left a suite that is neither run
+      // nor named, and a caveat that miscounted what was left.
+      for (const left of work.slice(i)) {
+        if (left.dir !== null) stillPending.push(left.dir);
+        else unattemptedRetries.push(left.command);
+      }
       break;
     }
     const deadline = Math.min(perCommandMs, remaining);
@@ -220,13 +248,19 @@ function resumeNpmToolchain(
         ...(prevScope.caveat ? { caveat: prevScope.caveat } : {}),
       }
     : undefined;
+  /** Suites this call left provisional: killed again on a shortened deadline,
+   *  or never reached. They are what makes a further continuation worth it. */
+  const stillClamped = mergedTest
+    .filter((t) => t.clamped)
+    .map((t) => t.command);
+  const left = stillPending.length + unattemptedRetries.length;
   if (testScope) {
     // The caveat the previous call wrote names suites this one has now run;
     // leaving it would tell the reader the review skipped work it did.
     const resumedNote =
-      stillPending.length > 0
+      left > 0
         ? `a --resume call ran ${ranDirs.length + replaced.size} more command(s); ` +
-          `${stillPending.length} suite(s) still to run: ${stillPending.join(', ')}`
+          `${left} still to run: ${[...stillPending, ...unattemptedRetries].join(', ')}`
         : `a --resume call ran the remaining ${ranDirs.length + replaced.size} command(s)`;
     testScope.caveat = testScope.caveat
       ? `${testScope.caveat}; ${resumedNote}`
@@ -253,7 +287,13 @@ function resumeNpmToolchain(
     // agent trusts the prose it is handed. The structured fields (`install`,
     // `build`, `notBuilt`, `testScope`) carry everything the old note
     // summarised; this one describes the run as it now stands.
-    note: resumedNote(previous, mergedTest, timedOut, stillPending),
+    note: resumedNote(
+      previous,
+      mergedTest,
+      timedOut,
+      [...stillPending, ...unattemptedRetries],
+      stillClamped,
+    ),
     ...(testScope ? { testScope } : {}),
   };
   return merged;
@@ -265,10 +305,15 @@ function resumedNote(
   test: CommandResult[],
   timedOut: string[],
   stillPending: string[],
+  stillClamped: string[],
 ): string {
   const failures = test.filter((r) => !succeeded(r) && !r.timedOut);
   const parts = [
-    `Continued from a previous build-test call (install and build reused: ` +
+    // The install framing rides through the merge. A continuation that drops
+    // it hands the agent `install.exitCode: 1` with no reading of it, against
+    // a brief whose standing rule is to correlate failures with the diff.
+    installFailureFraming(previous.install) +
+      `Continued from a previous build-test call (install and build reused: ` +
       `${previous.build.length} build command(s) already ran).`,
   ];
   if (failures.length > 0) {
@@ -284,15 +329,32 @@ function resumedNote(
         `defect in the diff.`,
     );
   }
+  // "Every suite has now run" is a claim, and two things can falsify it: a
+  // suite this call never reached, and one it reached and killed AGAIN on a
+  // deadline its own budget shortened. The first cut counted only the first,
+  // so a re-clamped retry — the ordinary outcome when a 401s suite is admitted
+  // with 169s left — was reported as a completed run holding a provisional
+  // result. An agent trusting that prose stops resuming, and a suite the diff
+  // may have broken keeps a timeout as its final verdict.
   if (stillPending.length > 0) {
     parts.push(
-      `The budget was spent with ${stillPending.length} suite(s) still to ` +
+      `The budget was spent with ${stillPending.length} command(s) still to ` +
         `run — not run: ${stillPending.join(', ')}. Resume again to reach them.`,
     );
-  } else if (failures.length === 0 && timedOut.length === 0) {
-    parts.push('Every suite in scope has now run, and everything passed.');
-  } else {
-    parts.push('Every suite in scope has now run.');
+  }
+  if (stillClamped.length > 0) {
+    parts.push(
+      `${stillClamped.length} command(s) are still provisional — killed on a ` +
+        `deadline the budget shortened, not on their own: ` +
+        `${stillClamped.join(', ')}. Resume again to give them a full one.`,
+    );
+  }
+  if (stillPending.length === 0 && stillClamped.length === 0) {
+    parts.push(
+      failures.length === 0 && timedOut.length === 0
+        ? 'Every suite in scope has now run, and everything passed.'
+        : 'Every suite in scope has now run.',
+    );
   }
   return parts.join(' ');
 }
@@ -639,14 +701,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // and without the framing the agent can file the install failure as an
   // additional Critical against the PR.
   const frameInstallFailure = (): void => {
-    if (results.install && results.install.exitCode !== 0) {
-      results.note =
-        `\`${results.install.command}\` exited ${results.install.exitCode} but left a usable ` +
-        '`node_modules`, so the run went ahead. ' +
-        'The install failure is an environment/infrastructure result — report it as ' +
-        'informational, never as a Critical, and never against this PR. ' +
-        results.note;
-    }
+    results.note = installFailureFraming(results.install) + results.note;
   };
 
   // The same preflight before the build phase, at a lower floor. A warm tree

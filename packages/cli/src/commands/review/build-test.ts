@@ -396,11 +396,23 @@ function previousReport(out: string | undefined): BuildTestReport {
         `--resume first.`,
     );
   }
+  const shape = parsed as {
+    test?: unknown;
+    build?: unknown;
+    timedOut?: unknown;
+  };
+  // Every array the continuation walks, not just the one that names the work.
+  // A report carrying `test` alone cleared the old gate and then died on a raw
+  // `Cannot read properties of undefined (reading 'filter')` deep inside the
+  // merge — the structured refusal this function exists for, replaced by a
+  // stack trace at the moment the caller most needs to be told what to do.
   if (
     typeof parsed !== 'object' ||
     parsed === null ||
     Array.isArray(parsed) ||
-    !Array.isArray((parsed as { test?: unknown }).test)
+    !Array.isArray(shape.test) ||
+    !Array.isArray(shape.build) ||
+    !Array.isArray(shape.timedOut)
   ) {
     throw new Error(
       `build-test: --resume expected a build-test report at ${out}, and that ` +
@@ -543,10 +555,12 @@ export const buildTestCommand: CommandModule = {
           'the call — install and build time count against it (default: ' +
           `${DEFAULT_WHOLE_CALL_BUDGET_S}s, what the shell tool's hard 600s ` +
           'ceiling leaves after headroom for process startup and the report ' +
-          'write). A suite the budget cannot give a full deadline is left to ' +
-          'notRun rather than started and killed, and --resume continues it in ' +
-          'the next call. A partial report survives where the outer shell kill ' +
-          'would discard the whole one.',
+          'write). A suite still gets whatever remains — a partial attempt is ' +
+          'signal where a never-attempted suite is none — but a kill at that ' +
+          'boundary is recorded as clamped: provisional, not "too slow", and ' +
+          '--resume gives it a full deadline in the next call. Only suites the ' +
+          'budget cannot attempt at all are named notRun. A partial report ' +
+          'survives where the outer shell kill would discard the whole one.',
       })
       .option('install', {
         type: 'boolean',

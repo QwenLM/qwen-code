@@ -1008,10 +1008,15 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
   ) as RawReview[];
 
-  // Recover the previous round's machine ledger from this account's own last
-  // posted review, and persist it beside the context file: compose-review reads
-  // the side file for the round number, and Step 6 owes each entry a ruling.
-  // Best-effort — offline/unauthenticated just means no ledger, never a failure.
+  // Recover the previous round's machine ledger from the LATEST posted review
+  // carrying one, whoever posted it, and persist it beside the context file:
+  // compose-review reads the side file for the round number, and Step 6 owes
+  // each entry a ruling. The trust surface is split at the seam below, not
+  // here: a marker from another account keeps its work list and loses its
+  // anchor (see `latestLedger`), because a work list is re-ruled entry by entry
+  // against the code while an anchor decides which lines are never looked at
+  // again. Best-effort — offline/unauthenticated just means no ledger, never a
+  // failure.
   let prevLedger: Ledger | null = null;
   let prevLedgerAuthor: string | null = null;
   try {

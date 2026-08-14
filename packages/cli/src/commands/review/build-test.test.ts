@@ -3138,6 +3138,249 @@ describe('runBuildTest', () => {
       expect(rep.note).not.toContain('reached every suite');
     });
 
+    it('keeps reporting work left when a retry is killed AGAIN by the budget', () => {
+      // The ordinary outcome when an expensive suite is admitted late: it is
+      // re-clamped rather than finished. Reporting that as a completed run
+      // (the first cut did) stops the next continuation and leaves a
+      // provisional timeout as the suite's final verdict.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const clampedEntry = (dir: string) => ({
+        command: `npm test --workspace="${dir}"`,
+        exitCode: null,
+        seconds: 100,
+        timedOut: true,
+        output: '',
+        deadlineMs: 100_000,
+        clamped: true,
+      });
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [clampedEntry('packages/core'), clampedEntry('packages/a')],
+          ok: false,
+          timedOut: [
+            'npm test --workspace="packages/core"',
+            'npm test --workspace="packages/a"',
+          ],
+          note: '2 command(s) ran out of time',
+          testScope: { workspaces: ['packages/core', 'packages/a'] },
+        }),
+      );
+
+      // The first retry finishes; the second is admitted with what is left and
+      // killed again, so it stays provisional.
+      let call = 0;
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        budget: 61,
+        install: true,
+        resume: true,
+        exec: (command, _cwd, timeoutMs) => {
+          call += 1;
+          if (call === 1) {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+            return okResult(command);
+          }
+          return {
+            command,
+            exitCode: null,
+            seconds: 1,
+            timedOut: true,
+            output: '',
+            deadlineMs: timeoutMs,
+          };
+        },
+      });
+
+      expect(rep.note).not.toContain('Every suite in scope has now run');
+      expect(rep.note).toContain('still provisional');
+      expect(rep.note).toContain('Resume again');
+      // The still-clamped entry survives so a further continuation finds it.
+      expect(rep.test.filter((t) => t.clamped)).toHaveLength(1);
+    });
+
+    it('counts an unattempted RETRY as work left, not as nothing', () => {
+      // A retry is a command, not a workspace, so `notRun` cannot hold it —
+      // and dropping it on that technicality left a suite that was neither run
+      // nor named, with a caveat that miscounted what remained.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [
+            {
+              command: 'npm test --workspace="packages/core"',
+              exitCode: null,
+              seconds: 100,
+              timedOut: true,
+              output: '',
+              deadlineMs: 100_000,
+              clamped: true,
+            },
+            {
+              command: 'npm test --workspace="packages/a"',
+              exitCode: null,
+              seconds: 100,
+              timedOut: true,
+              output: '',
+              deadlineMs: 100_000,
+              clamped: true,
+            },
+          ],
+          ok: false,
+          timedOut: [],
+          note: 'two clamped',
+          testScope: { workspaces: ['packages/core', 'packages/a'] },
+        }),
+      );
+
+      // Budget below the attempt floor after the first retry: the second is
+      // never started.
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        budget: 16,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+          return okResult(command);
+        },
+      });
+
+      expect(rep.note).not.toContain('Every suite in scope has now run');
+      expect(rep.note).toContain('npm test --workspace="packages/a"');
+    });
+
+    it('carries the install-failure framing through the merge', () => {
+      // The framing exists because the structured field alone was judged
+      // insufficient: the brief's standing rule is to correlate failures with
+      // the diff, so a continuation that drops it hands the agent an install
+      // that exited non-zero and nothing telling it that is infrastructure.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a'],
+          widenedWith: [],
+          install: {
+            command: 'npm ci --no-audit --no-fund',
+            exitCode: 1,
+            seconds: 20,
+            timedOut: false,
+            output: 'prepare hook failed',
+          },
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'the install failure is infrastructure',
+          testScope: {
+            workspaces: ['packages/core'],
+            notRun: ['packages/a'],
+          },
+        }),
+      );
+
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: okResult,
+      });
+
+      expect(rep.note).toContain(
+        'never as a Critical, and never against this PR',
+      );
+      expect(rep.note).toContain('Continued from a previous build-test call');
+    });
+
+    it('refuses a report missing the arrays the merge walks', () => {
+      // Shape-checking only the array that names the work let a report through
+      // that then died on a raw TypeError deep in the merge — a stack trace
+      // where the caller needed the named fix.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      for (const partial of [
+        { toolchain: 'npm', test: [] },
+        { toolchain: 'npm', test: [], build: [] },
+        { toolchain: 'npm', test: [], timedOut: [] },
+      ]) {
+        writeFileSync(outPath, JSON.stringify(partial));
+        expect(() =>
+          runBuildTest({
+            plan: planPath,
+            worktree: root,
+            out: outPath,
+            timeout: 60,
+            install: true,
+            resume: true,
+            exec: okResult,
+          }),
+        ).toThrow(/is not one/);
+      }
+    });
+
+    it('says so when the report it continues scoped no npm toolchain', () => {
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'unsupported',
+          affected: [],
+          buildSet: [],
+          widenedWith: [],
+          install: null,
+          build: [],
+          test: [],
+          ok: true,
+          timedOut: [],
+          note: 'no npm project here to scope',
+        }),
+      );
+      const calls: string[] = [];
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          calls.push(command);
+          return okResult(command);
+        },
+      });
+      expect(calls).toEqual([]);
+      expect(rep.note).toContain('did not scope an npm');
+    });
+
     it('says so when the run it continues had already finished', () => {
       threePackages();
       const outPath = join(root, 'report.json');

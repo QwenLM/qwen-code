@@ -377,6 +377,29 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
     }
   });
 
+  it('keeps the REAL Chinese gaps the first cut of this branch swallowed', () => {
+    // Probed on a live review of this very change (PR #9175, R1-1). Each line
+    // is a real disclosure the unnarrowed branch classified as "nothing to
+    // disclose", which is the direction that certifies depth nobody reached.
+    for (const line of [
+      // The lookbehinds see ONE character: the char before 完成 is 有.
+      'Budget gap: 无 — 检查还没有完成',
+      'Budget gap: 无 — 单元测试尚未完成',
+      // A gap clause AFTER the completion word: the tail is a budget
+      // adverbial, not forty free characters.
+      'Budget gap: 无 — 安全检查完成，渗透测试未进行',
+      'Budget gap: 无 — 所有单元测试完成，集成测试没有运行',
+      // A gap clause BEFORE it: the completion clause must open with an
+      // all-done head, exactly as the English branch requires.
+      'Budget gap: 无 — 3 项未运行，其余完成',
+      'Budget gap: 无 — 渗透测试失败，单元测试完成',
+      'Budget gap: 无 — 除 Windows 矩阵外均已完成',
+      'Budget gap: 无 — 所有检查均未完成',
+    ]) {
+      expect(budgetGapDisclosures(line)).toHaveLength(1);
+    }
+  });
+
   it('keeps a REAL Chinese gap — 无法 is a prefix of the token, not the token', () => {
     // Chinese has no word boundary, so a token is only a token when
     // punctuation, whitespace or end-of-text follows it. `无法验证…`
