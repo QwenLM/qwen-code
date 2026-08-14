@@ -3115,6 +3115,8 @@ export function WebShellSidebar({
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
         sessionActionItems.has('archive') && canMutateSessionArchive(session);
+      const showReadOnlyArchive = readOnly && showArchive && !showPin;
+      const showSharedArchive = showArchive && !showReadOnlyArchive;
       const showRename = sessionActionItems.has('rename') && mutableScope;
       const activeExportScope = getActiveExportScope(session);
       const showExport =
@@ -3219,7 +3221,7 @@ export function WebShellSidebar({
                     ) : !attentionLabel ? (
                       <span className={styles.sessionTime}>{time}</span>
                     ) : null}
-                    {readOnly && showArchive && (
+                    {showReadOnlyArchive && (
                       <div
                         className={styles.sessionActions}
                         onClick={(event) => event.stopPropagation()}
@@ -3322,7 +3324,8 @@ export function WebShellSidebar({
                                 ? t('sidebar.archiveCurrentDisabled')
                                 : t('sidebar.archive'),
                               visible:
-                                showArchive && inlineActionItems.has('archive'),
+                                showSharedArchive &&
+                                inlineActionItems.has('archive'),
                               onClick: () => handleArchive(session),
                             },
                             {
@@ -3394,7 +3397,8 @@ export function WebShellSidebar({
                             ));
                         })()}
                         {(showPin && !inlineActionItems.has('pin')) ||
-                        (showArchive && !inlineActionItems.has('archive')) ||
+                        (showSharedArchive &&
+                          !inlineActionItems.has('archive')) ||
                         sessionActionItems.has('details') ||
                         (showRename && !inlineActionItems.has('rename')) ||
                         canOrganizeSession(session, 'group') ||
@@ -3436,7 +3440,7 @@ export function WebShellSidebar({
                                       : t('sidebar.pin')}
                                   </DropdownMenuItem>
                                 )}
-                                {showArchive &&
+                                {showSharedArchive &&
                                   !inlineActionItems.has('archive') && (
                                     <DropdownMenuItem
                                       disabled={busy || isCurrent}

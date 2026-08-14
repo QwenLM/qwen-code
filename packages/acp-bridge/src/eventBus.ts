@@ -34,6 +34,8 @@ export interface SessionReplaySnapshot {
   degraded?: true;
 }
 
+export type LiveReplayMode = 'full' | 'summary';
+
 export interface CompactionEngine {
   /**
    * `byteLength` is the serialized size the bus already computed for the
@@ -43,13 +45,13 @@ export interface CompactionEngine {
    */
   ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
-  snapshot(): SessionReplaySnapshot;
+  snapshot(liveReplayMode?: LiveReplayMode): SessionReplaySnapshot;
   /**
    * In-flight journal only — events ingested since the last turn
    * boundary — without flattening the compacted replay window. Optional:
    * consumers fall back to `snapshot()` semantics when absent.
    */
-  liveJournalSnapshot?(): BridgeEvent[];
+  liveJournalSnapshot?(liveReplayMode?: LiveReplayMode): BridgeEvent[];
   close(): void;
   /**
    * Current live-journal caps — may exceed the configured baseline when
@@ -400,8 +402,10 @@ export class EventBus {
     this.onCompactionError = opts.onCompactionError;
   }
 
-  snapshotReplay(): SessionReplaySnapshot | undefined {
-    const snapshot = this.compactionEngine?.snapshot();
+  snapshotReplay(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): SessionReplaySnapshot | undefined {
+    const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
     if (snapshot && this.compactionDegraded) {
       return { ...snapshot, degraded: true };
     }
@@ -414,8 +418,10 @@ export class EventBus {
    * Undefined when no compaction engine is wired or it exposes no journal
    * snapshot.
    */
-  liveJournalSnapshot(): BridgeEvent[] | undefined {
-    return this.compactionEngine?.liveJournalSnapshot?.();
+  liveJournalSnapshot(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): BridgeEvent[] | undefined {
+    return this.compactionEngine?.liveJournalSnapshot?.(liveReplayMode);
   }
 
   /**
