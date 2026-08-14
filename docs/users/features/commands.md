@@ -119,7 +119,7 @@ Commands for managing AI tools and models.
 | `/arena`              | Manage Arena sessions                                                                 | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
 | `/goal`               | Set a goal — keep working until condition met                                         | `/goal <condition>`, `/goal clear`                                                                        |
 | `/tasks`              | List background tasks                                                                 | `/tasks`                                                                                                  |
-| `/workflows`          | Inspect workflow runs                                                                 | `/workflows`, `/workflows <runId>`                                                                        |
+| `/workflows`          | Inspect workflow runs; cooperatively pause/resume a background run                    | `/workflows`, `/workflows <runId>`, `/workflows p <runId>`                                                |
 | `/lsp`                | Show LSP server status                                                                | `/lsp`                                                                                                    |
 | `/trust`              | Manage folder trust settings                                                          | `/trust`                                                                                                  |
 
@@ -139,12 +139,13 @@ Commands for managing AI tools and models.
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command      | Description                                                 | Usage Examples                                                            |
-| ------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `/review`    | Multi-agent code review (12 parallel agents at high effort) | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
-| `/loop`      | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                                                |
-| `/simplify`  | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`                             |
-| `/qc-helper` | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`                                      |
+| Command       | Description                                                   | Usage Examples                                                            |
+| ------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `/review`     | Multi-agent code review (12 parallel agents at high effort)   | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
+| `/coordinate` | Coordinate read-only workers and one optional worktree writer | `/coordinate investigate and fix the authentication regression`           |
+| `/loop`       | Run a prompt on a recurring schedule                          | `/loop 5m check the build`                                                |
+| `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                             |
+| `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                      |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
 

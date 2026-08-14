@@ -35,18 +35,27 @@ import {
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
 } from '../acp-session-bridge.js';
+import type {
+  BridgeChannelQuarantinedError,
+  RestoreInProgressError,
+  SessionRestoreTimeoutError,
+} from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import {
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
-import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  REQUESTED_SESSION_ID_META_KEY,
+  type HttpAcpBridge,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../live/session-source.js';
+} from '../conversations/session-source.js';
 import {
   translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,
@@ -76,6 +85,10 @@ import {
   readPermissionRuleSet,
 } from '../../config/permission-settings.js';
 import { loadSettings } from '../../config/settings.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../../config/session-id.js';
 import { WorkspaceVoiceError } from '../../services/voice-service.js';
 import { SetupGithubError, setupGithub } from '../../services/setup-github.js';
 import {
@@ -93,6 +106,10 @@ import {
   type WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
 import { extractRememberErrorCode } from '../../runtime/workspace-remember-errors.js';
+import {
+  RequestedSessionIdAdmissionError,
+  type RequestedSessionIdAdmission,
+} from '../session-id-admission.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../../runtime/workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
@@ -103,6 +120,7 @@ import {
 } from '../workspace-agents.js';
 import {
   InvalidCursorError,
+  invalidateWorkspaceSessionListCache,
   listWorkspaceSessionsForResponse,
 } from '../server.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
@@ -327,6 +345,9 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
 ]);
 
 const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
+  'session/new',
+  'session/load',
+  'session/resume',
   `${QWEN_METHOD_NS}workspace/init`,
   `${QWEN_METHOD_NS}workspace/trust/request`,
   `${QWEN_METHOD_NS}workspace/permissions/set`,
@@ -385,7 +406,28 @@ const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
 const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 const MAX_FILE_LINE_LIMIT = 2000;
 
+/**
+ * Config-option ids this HTTP transport's `session/set_config_option` can
+ * route. Shared by `configOptionsFor`'s advertisement filter and the
+ * setter's rejection message so the advertised set and the set reported as
+ * supported cannot drift apart.
+ */
+const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = ['model', 'mode'];
+
 class AcpParamError extends Error {}
+
+class InvalidRequestedSessionIdError extends Error {}
+
+class RequestedSessionIdNotHonoredError extends Error {
+  constructor(
+    readonly requestedSessionId: string,
+    readonly actualSessionId: string,
+  ) {
+    super(
+      `The ACP agent returned session "${actualSessionId}" instead of requested session "${requestedSessionId}".`,
+    );
+  }
+}
 
 function parseOptionalPositiveInteger(
   value: unknown,
@@ -574,6 +616,38 @@ export function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  if (err instanceof InvalidRequestedSessionIdError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: { httpStatus: 400, errorKind: 'invalid_session_id' },
+    };
+  }
+  if (err instanceof RequestedSessionIdAdmissionError) {
+    const unavailable = err.code === 'session_id_admission_unavailable';
+    return {
+      code: unavailable ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        httpStatus: unavailable ? 503 : 409,
+        errorKind: err.code,
+        sessionId: err.sessionId,
+        ...err.details,
+      },
+    };
+  }
+  if (err instanceof RequestedSessionIdNotHonoredError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: {
+        httpStatus: 500,
+        errorKind: 'session_id_not_honored',
+        requestedSessionId: err.requestedSessionId,
+        actualSessionId: err.actualSessionId,
+      },
+    };
+  }
   if (err instanceof DaemonDrainingError) {
     return {
       code: RPC.INTERNAL_ERROR,
@@ -699,6 +773,62 @@ export function toRpcError(err: unknown): {
   }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
+    case 'SessionRestoreTimeoutError': {
+      const restoreError = err as SessionRestoreTimeoutError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: restoreError.message,
+        data: {
+          code: 'session_restore_timeout',
+          errorKind: 'restore_timeout',
+          httpStatus: 504,
+          retryable: true,
+          retryAfterSeconds: restoreRetryAfterSeconds(restoreError.timeoutMs),
+          sessionId: restoreError.sessionId,
+          action: restoreError.action,
+          timeoutMs: restoreError.timeoutMs,
+        },
+      };
+    }
+    case 'RestoreInProgressError': {
+      // Without this case the fence degrades to the default arm — an opaque
+      // `internal` 500 with no code, reason, or hint. SDK transport
+      // negotiation prefers acp-ws and acp-http over REST, so unpinned
+      // clients land exactly here: they cannot distinguish a retryable fence
+      // from a genuine internal error, and cannot honor the longer backoff
+      // the protocol reference tells them to.
+      const fenceError = err as RestoreInProgressError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: fenceError.message,
+        data: {
+          code: 'restore_in_progress',
+          errorKind: 'restore_in_progress',
+          httpStatus: 409,
+          retryable: true,
+          reason: fenceError.reason,
+          retryAfterSeconds: fenceError.retryAfterSeconds,
+          sessionId: fenceError.sessionId,
+          activeAction: fenceError.activeAction,
+          requestedAction: fenceError.requestedAction,
+        },
+      };
+    }
+    case 'BridgeChannelQuarantinedError': {
+      const unavailableError = err as BridgeChannelQuarantinedError;
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: unavailableError.message,
+        data: {
+          code: 'acp_channel_unavailable',
+          errorKind: 'acp_channel_unavailable',
+          httpStatus: 503,
+          retryable: true,
+          reason: unavailableError.reason,
+          retryAfterSeconds: unavailableError.retryAfterSeconds,
+        },
+      };
+    }
     case 'SessionArchivedError':
       return {
         code: RPC.INTERNAL_ERROR,
@@ -804,6 +934,12 @@ export interface LiveSessionIsolation {
   isSessionActive?(sessionId: string): boolean;
 }
 
+interface AcpSessionRuntimeContext {
+  readonly bridge: HttpAcpBridge;
+  readonly sessionRuntimeBaseDir: string;
+  readonly workspaceId?: string;
+}
+
 /**
  * Routes JSON-RPC messages between the HTTP transport and the
  * `HttpAcpBridge`. Inbound client messages map to bridge calls; the
@@ -819,6 +955,7 @@ export class AcpDispatcher {
     private readonly getEnv: () => Readonly<NodeJS.ProcessEnv>,
     private readonly workspace: DaemonWorkspaceService,
     private readonly workspaceRememberLane: WorkspaceRememberTaskLane,
+    private readonly requestedSessionIdAdmission: RequestedSessionIdAdmission,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
     private readonly deviceFlowRegistry?: DeviceFlowRegistry,
     private readonly sessionShellCommandEnabled: boolean = false,
@@ -830,29 +967,64 @@ export class AcpDispatcher {
       | undefined = () => undefined,
     private readonly liveSessionIsolation?: LiveSessionIsolation,
     private readonly sessionRuntimeBaseDir: string = Storage.getRuntimeBaseDir(),
+    private readonly getSessionRuntimeContext: () => AcpSessionRuntimeContext = () => ({
+      bridge,
+      sessionRuntimeBaseDir,
+    }),
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
+  }
+
+  private invalidateSessionLists(
+    archiveStates: readonly SessionArchiveState[],
+  ): void {
+    invalidateWorkspaceSessionListCache({
+      runtimeBaseDir: this.sessionRuntimeBaseDir,
+      workspaceCwd: this.boundWorkspace,
+      archiveStates,
+    });
+  }
+
+  private async runWithSessionListInvalidation<T>(
+    archiveStates: readonly SessionArchiveState[],
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await mutation();
+    } finally {
+      this.invalidateSessionLists(archiveStates);
+    }
+  }
+
+  private removeOrphanSession(
+    sessionId: string,
+    removePersistedSession = false,
+    runtime: AcpSessionRuntimeContext = this.getSessionRuntimeContext(),
+  ): Promise<unknown> {
+    const cleanup = removePersistedSession
+      ? deleteDaemonSessionIfOrphan({
+          sessionId,
+          service: new SessionService(this.boundWorkspace, {
+            runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          }),
+          bridge: runtime.bridge,
+          coordinator: this.archiveCoordinator,
+        })
+      : runtime.bridge.killSession(sessionId, { requireZeroAttaches: true });
+    return cleanup.catch((err) => {
+      writeStderrLine(
+        `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
+      );
+      return undefined;
+    });
   }
 
   private killOrphanSession(
     sessionId: string,
     removePersistedSession = false,
+    runtime?: AcpSessionRuntimeContext,
   ): void {
-    const cleanup = removePersistedSession
-      ? deleteDaemonSessionIfOrphan({
-          sessionId,
-          service: new SessionService(this.boundWorkspace, {
-            runtimeBaseDir: this.sessionRuntimeBaseDir,
-          }),
-          bridge: this.bridge,
-          coordinator: this.archiveCoordinator,
-        })
-      : this.bridge.killSession(sessionId, { requireZeroAttaches: true });
-    void cleanup.catch((err) =>
-      writeStderrLine(
-        `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
-      ),
-    );
+    void this.removeOrphanSession(sessionId, removePersistedSession, runtime);
   }
 
   /**
@@ -981,19 +1153,31 @@ export class AcpDispatcher {
   }
 
   /**
-   * The session's ACP-shaped config options (model/mode/…), read from the
-   * child's own session state. Returned in `session/new` and as the result
-   * of `session/set_config_option`. Best-effort — `undefined` on error.
+   * The session's ACP-shaped config options supported by this HTTP transport
+   * (currently model and mode), read from the child's own session state.
+   * Every response built from this helper (`session/new`,
+   * `session/load`/`session/resume`, `session/fork`, and the
+   * `session/set_config_option` result) is gated to the ids the transport
+   * can route. Raw-state surfaces (context status, REST load/resume state)
+   * intentionally carry the child's full unfiltered set — they report session
+   * state. Best-effort — `undefined` on error.
    */
   private async configOptionsFor(
     sessionId: string,
+    bridge: HttpAcpBridge = this.bridge,
   ): Promise<unknown[] | undefined> {
     try {
-      const ctx = (await this.bridge.getSessionContextStatus(sessionId)) as {
+      const ctx = (await bridge.getSessionContextStatus(sessionId)) as {
         state?: { configOptions?: unknown };
       };
       const co = ctx?.state?.configOptions;
-      return Array.isArray(co) ? co : undefined;
+      return Array.isArray(co)
+        ? co.filter(
+            (option) =>
+              isObject(option) &&
+              HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string),
+          )
+        : undefined;
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp configOptionsFor(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
@@ -1264,10 +1448,15 @@ export class AcpDispatcher {
     if (!isRequest(msg) && !isNotification(msg)) return;
 
     const method = msg.method;
-    const params = (isObject(msg.params) ? msg.params : {}) as Record<
-      string,
-      unknown
-    >;
+    const params = {
+      ...((isObject(msg.params) ? msg.params : {}) as Record<string, unknown>),
+    };
+    if (typeof params['sessionId'] === 'string') {
+      params['sessionId'] = normalizeSessionIdForLookup(params['sessionId']);
+    }
+    const normalizedSessionHeader = sessionHeader
+      ? normalizeSessionIdForLookup(sessionHeader)
+      : undefined;
     const id = isRequest(msg) ? msg.id : undefined;
 
     const generationScoped =
@@ -1300,9 +1489,9 @@ export class AcpDispatcher {
     // `sessionId` param MUST agree — reject divergence rather than let a
     // POST act on a session other than the one the header names.
     if (
-      sessionHeader &&
+      normalizedSessionHeader &&
       typeof params['sessionId'] === 'string' &&
-      params['sessionId'] !== sessionHeader
+      params['sessionId'] !== normalizedSessionHeader
     ) {
       if (id !== undefined) {
         conn.sendConn(
@@ -1325,6 +1514,19 @@ export class AcpDispatcher {
           return;
 
         case 'session/new': {
+          const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
+          const parsedSessionId = parseCallerSuppliedSessionId(
+            meta?.[REQUESTED_SESSION_ID_META_KEY],
+          );
+          if (parsedSessionId.kind === 'invalid') {
+            throw new InvalidRequestedSessionIdError(
+              `\`_meta["${REQUESTED_SESSION_ID_META_KEY}"]\` must be an RFC UUID v1-v5`,
+            );
+          }
+          const requestedSessionId =
+            parsedSessionId.kind === 'valid'
+              ? parsedSessionId.sessionId
+              : undefined;
           const cwd = this.parseSessionWorkspaceCwd(params);
           if (this.liveSessionIsolation) {
             if (id !== undefined) {
@@ -1339,6 +1541,7 @@ export class AcpDispatcher {
             }
             return;
           }
+          const sessionRuntime = this.getSessionRuntimeContext();
           const source = parseSessionSource(
             params['sourceType'],
             params['sourceId'],
@@ -1361,55 +1564,113 @@ export class AcpDispatcher {
             }
             return;
           }
-          // ACP standard: session/new MUST create a new isolated session.
-          // Always use sessionScope 'thread' regardless of client params.
-          // The REST surface (POST /session) supports 'single' for
-          // backward compat, but the ACP endpoint follows the standard.
-          const session = await this.bridge.spawnOrAttach({
-            workspaceCwd: cwd,
-            clientId: conn.clientId,
-            sessionScope: 'thread',
-            ...source,
-          });
-          // Teardown raced the spawn: the connection was destroyed while the
-          // bridge call was in flight, so nothing will tear this session down.
-          // Kill the orphan (no other client could have attached yet).
-          if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId, true);
+          const reservation = requestedSessionId
+            ? await this.requestedSessionIdAdmission.reserveCreate(
+                requestedSessionId,
+                {
+                  bridge: sessionRuntime.bridge,
+                  workspaceCwd: cwd,
+                  ...(sessionRuntime.workspaceId
+                    ? { workspaceId: sessionRuntime.workspaceId }
+                    : {}),
+                },
+              )
+            : undefined;
+          try {
+            assertGenerationOpen?.();
+            // ACP standard: session/new MUST create a new isolated session.
+            // Always use sessionScope 'thread' regardless of client params.
+            // The REST surface (POST /session) supports 'single' for
+            // backward compat, but the ACP endpoint follows the standard.
+            const session = await sessionRuntime.bridge.spawnOrAttach({
+              workspaceCwd: cwd,
+              clientId: conn.clientId,
+              sessionScope: 'thread',
+              ...source,
+              ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
+            });
+            const rollbackSession = async (): Promise<void> => {
+              if (session.attached) {
+                await sessionRuntime.bridge
+                  .detachClient(session.sessionId, session.clientId)
+                  .catch(() => {});
+              } else {
+                await this.removeOrphanSession(
+                  session.sessionId,
+                  true,
+                  sessionRuntime,
+                );
+              }
+            };
+            try {
+              assertGenerationOpen?.();
+            } catch (error) {
+              await rollbackSession();
+              throw error;
+            }
+            if (
+              requestedSessionId !== undefined &&
+              session.sessionId !== requestedSessionId
+            ) {
+              await rollbackSession();
+              throw new RequestedSessionIdNotHonoredError(
+                requestedSessionId,
+                session.sessionId,
+              );
+            }
+            // Teardown raced the spawn: the connection was destroyed while the
+            // bridge call was in flight, so nothing will tear this session down.
+            // Kill the orphan (no other client could have attached yet).
+            if (conn.destroyed) {
+              this.killOrphanSession(session.sessionId, true, sessionRuntime);
+              return;
+            }
+            const configOptions = await this.configOptionsFor(
+              session.sessionId,
+              sessionRuntime.bridge,
+            );
+            try {
+              assertGenerationOpen?.();
+            } catch (error) {
+              await rollbackSession();
+              throw error;
+            }
+            if (conn.destroyed) {
+              this.killOrphanSession(session.sessionId, true, sessionRuntime);
+              return;
+            }
+            conn.getOrCreateSession(session.sessionId).clientId =
+              session.clientId;
+            conn.ownSession(session.sessionId);
+            // Build ACP-standard models/modes from configOptions.
+            // configOptions carry model/mode as category-tagged entries;
+            // the standard also expects top-level models/modes objects.
+            const models = this.extractModelState(configOptions);
+            const modes = this.extractModeState(configOptions);
+            this.replyConn(conn, id, {
+              sessionId: session.sessionId,
+              ...(session.sourceType ? { sourceType: session.sourceType } : {}),
+              ...(session.sourceId !== undefined
+                ? { sourceId: session.sourceId }
+                : {}),
+              ...(session.sourcePersisted !== undefined
+                ? { sourcePersisted: session.sourcePersisted }
+                : {}),
+              ...(configOptions ? { configOptions } : {}),
+              ...(models ? { models } : {}),
+              ...(modes ? { modes } : {}),
+            });
             return;
+          } finally {
+            reservation?.release();
           }
-          conn.getOrCreateSession(session.sessionId).clientId =
-            session.clientId;
-          conn.ownSession(session.sessionId);
-          const configOptions = await this.configOptionsFor(session.sessionId);
-          if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId, true);
-            return;
-          }
-          // Build ACP-standard models/modes from configOptions.
-          // configOptions carry model/mode as category-tagged entries;
-          // the standard also expects top-level models/modes objects.
-          const models = this.extractModelState(configOptions);
-          const modes = this.extractModeState(configOptions);
-          this.replyConn(conn, id, {
-            sessionId: session.sessionId,
-            ...(session.sourceType ? { sourceType: session.sourceType } : {}),
-            ...(session.sourceId !== undefined
-              ? { sourceId: session.sourceId }
-              : {}),
-            ...(session.sourcePersisted !== undefined
-              ? { sourcePersisted: session.sourcePersisted }
-              : {}),
-            ...(configOptions ? { configOptions } : {}),
-            ...(models ? { models } : {}),
-            ...(modes ? { modes } : {}),
-          });
-          return;
         }
 
         case 'session/load':
         case 'session/resume': {
-          const sessionId = String(params['sessionId'] ?? '');
+          const sessionId = normalizeSessionIdForLookup(
+            String(params['sessionId'] ?? ''),
+          );
           if (!sessionId) {
             if (id !== undefined) {
               conn.sendConn(
@@ -1438,177 +1699,225 @@ export class AcpDispatcher {
             return;
           }
           const cwd = this.parseSessionWorkspaceCwd(params);
-          const restored = await this.archiveCoordinator.runSharedMany(
-            [sessionId],
-            async () => {
-              await assertSessionLoadable(cwd, sessionId);
-              // Re-seed the persisted parent lineage so a restored sub-session
-              // still reports its parent over the ACP transport (parity with the
-              // REST restore handler); the bridge creates the entry without it.
-              const sessionService = new SessionService(cwd);
-              const metadata = this.liveSessionIsolation
-                ? await readLoadableLiveConversationMetadata(
-                    sessionId,
-                    (candidateId) =>
-                      sessionService.readCreationMetadata(candidateId),
-                  )
-                : await sessionService.readCreationMetadata(sessionId);
-              if (metadata === undefined) {
-                throw new SessionNotFoundError(sessionId);
-              }
-              const liveConversationCwd = this.liveSessionIsolation
-                ? await this.liveSessionIsolation.materializeConversationDirectory(
-                    sessionId,
-                  )
-                : undefined;
-              const session =
-                method === 'session/load'
-                  ? await this.bridge.loadSession({
-                      sessionId,
-                      workspaceCwd: cwd,
-                      clientId: conn.clientId,
-                      historyReplay: 'response',
-                      ...metadata,
-                    })
-                  : await this.bridge.resumeSession({
-                      sessionId,
-                      workspaceCwd: cwd,
-                      clientId: conn.clientId,
-                      ...metadata,
-                    });
-              // Live creation and cold restore reserve this relocation before
-              // returning an id that can be prompted. An active entry has
-              // therefore already crossed the same isolation boundary.
-              if (liveConversationCwd === undefined) {
-                return session;
-              }
-              if (session.hasActivePrompt) {
-                if (session.currentCwd === liveConversationCwd) return session;
-                try {
-                  if (session.clientId) {
-                    await this.bridge.detachClient(
-                      session.sessionId,
-                      session.clientId,
-                    );
-                  }
-                } catch {
-                  // Preserve the isolation error. Never kill an active owner.
-                }
-                throw new Error(
-                  'Active Live session is outside its isolated conversation directory.',
-                );
-              }
-              try {
-                const changed = await this.bridge.changeSessionCwd(sessionId, {
-                  path: liveConversationCwd,
-                  allowedRoots: [cwd],
-                  managedRelocation: 'live-conversation',
-                });
-                if (changed.newCwd !== liveConversationCwd) {
-                  throw new Error(
-                    'Live conversation directory relocation was rejected.',
-                  );
-                }
-                session.currentCwd = changed.newCwd;
-              } catch (error) {
-                try {
-                  if (session.attached && session.clientId) {
-                    await this.bridge.detachClient(
-                      session.sessionId,
-                      session.clientId,
-                    );
-                  } else if (!session.attached) {
-                    await this.bridge.killSession(session.sessionId, {
-                      requireZeroAttaches: true,
-                    });
-                  }
-                } catch {
-                  // Preserve the relocation error.
-                }
-                throw error;
-              }
-              return session;
+          const sessionRuntime = this.getSessionRuntimeContext();
+          const reservation = this.requestedSessionIdAdmission.reserveRestore(
+            sessionId,
+            {
+              bridge: sessionRuntime.bridge,
+              workspaceCwd: cwd,
+              ...(sessionRuntime.workspaceId
+                ? { workspaceId: sessionRuntime.workspaceId }
+                : {}),
             },
           );
-          // Teardown raced the restore — EITHER the whole connection was
-          // destroyed (`conn.destroyed`) OR a `session/close` for this id
-          // started DURING the await (`closingSessions`); in the latter the
-          // close's `finally` teardown would destroy the binding we're about
-          // to create. Both need the same cleanup; only the client reply
-          // differs. Cleanup depends on what restore did:
-          //  - attached:true  → detachClient rolls back just our attach.
-          //  - attached:false → restore SPAWNED a fresh session from disk;
-          //    detachClient only decrements attachCount and does NOT reap
-          //    (reaping is the spawn-owner's job) — so kill it.
-          const closeRaced = conn.closingSessions.has(sessionId);
-          if (conn.destroyed || closeRaced) {
-            const cleanup = restored.attached
-              ? this.bridge.detachClient(sessionId, restored.clientId)
-              : this.bridge.killSession(sessionId, {
-                  requireZeroAttaches: true,
+          try {
+            const restored = await this.archiveCoordinator.runSharedMany(
+              [sessionId],
+              async () => {
+                assertGenerationOpen?.();
+                await assertSessionLoadable(
+                  cwd,
+                  sessionId,
+                  sessionRuntime.sessionRuntimeBaseDir,
+                );
+                // Re-seed the persisted parent lineage so a restored sub-session
+                // still reports its parent over the ACP transport (parity with the
+                // REST restore handler); the bridge creates the entry without it.
+                const sessionService = new SessionService(cwd, {
+                  runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
                 });
-            void cleanup.catch((err) =>
-              writeStderrLine(
-                `qwen serve: /acp orphan ${restored.attached ? 'detach' : 'kill'}(${logSafe(sessionId)}) teardown-race: ${logSafe(errMsg(err))}`,
-              ),
+                const metadata = this.liveSessionIsolation
+                  ? await readLoadableLiveConversationMetadata(
+                      sessionId,
+                      (candidateId) =>
+                        sessionService.readCreationMetadata(candidateId),
+                    )
+                  : await sessionService.readCreationMetadata(sessionId);
+                if (metadata === undefined) {
+                  throw new SessionNotFoundError(sessionId);
+                }
+                const liveConversationCwd = this.liveSessionIsolation
+                  ? await this.liveSessionIsolation.materializeConversationDirectory(
+                      sessionId,
+                    )
+                  : undefined;
+                assertGenerationOpen?.();
+                const session =
+                  method === 'session/load'
+                    ? await sessionRuntime.bridge.loadSession({
+                        sessionId,
+                        workspaceCwd: cwd,
+                        clientId: conn.clientId,
+                        historyReplay: 'response',
+                        ...metadata,
+                      })
+                    : await sessionRuntime.bridge.resumeSession({
+                        sessionId,
+                        workspaceCwd: cwd,
+                        clientId: conn.clientId,
+                        ...metadata,
+                      });
+                // Live creation and cold restore reserve this relocation before
+                // returning an id that can be prompted. An active entry has
+                // therefore already crossed the same isolation boundary.
+                if (liveConversationCwd === undefined) {
+                  return session;
+                }
+                if (session.hasActivePrompt) {
+                  if (session.currentCwd === liveConversationCwd)
+                    return session;
+                  try {
+                    if (session.clientId) {
+                      await sessionRuntime.bridge.detachClient(
+                        session.sessionId,
+                        session.clientId,
+                      );
+                    }
+                  } catch {
+                    // Preserve the isolation error. Never kill an active owner.
+                  }
+                  throw new Error(
+                    'Active Live session is outside its isolated conversation directory.',
+                  );
+                }
+                try {
+                  const changed = await sessionRuntime.bridge.changeSessionCwd(
+                    sessionId,
+                    {
+                      path: liveConversationCwd,
+                      allowedRoots: [cwd],
+                      managedRelocation: 'live-conversation',
+                    },
+                  );
+                  if (changed.newCwd !== liveConversationCwd) {
+                    throw new Error(
+                      'Live conversation directory relocation was rejected.',
+                    );
+                  }
+                  session.currentCwd = changed.newCwd;
+                } catch (error) {
+                  try {
+                    if (session.attached && session.clientId) {
+                      await sessionRuntime.bridge.detachClient(
+                        session.sessionId,
+                        session.clientId,
+                      );
+                    } else if (!session.attached) {
+                      await sessionRuntime.bridge.killSession(
+                        session.sessionId,
+                        {
+                          requireZeroAttaches: true,
+                        },
+                      );
+                    }
+                  } catch {
+                    // Preserve the relocation error.
+                  }
+                  throw error;
+                }
+                return session;
+              },
             );
-            // Connection-still-alive close race → tell the client to retry.
-            // Same rationale as the pre-await guard: a transient server-side
-            // race, so INTERNAL_ERROR (-32603), not INVALID_PARAMS.
-            if (closeRaced && !conn.destroyed && id !== undefined) {
-              conn.sendConn(
-                error(
-                  id,
-                  RPC.INTERNAL_ERROR,
-                  `session ${sessionId} was closed during load; retry`,
+            const rollbackRestore = async (): Promise<void> => {
+              if (restored.attached) {
+                await sessionRuntime.bridge
+                  .detachClient(sessionId, restored.clientId)
+                  .catch(() => {});
+              } else {
+                await sessionRuntime.bridge
+                  .killSession(sessionId, { requireZeroAttaches: true })
+                  .catch(() => {});
+              }
+            };
+            try {
+              assertGenerationOpen?.();
+            } catch (error) {
+              await rollbackRestore();
+              throw error;
+            }
+            // ACP standard: load/resume response includes configOptions + models + modes
+            const loadConfigOptions = await this.configOptionsFor(
+              sessionId,
+              sessionRuntime.bridge,
+            );
+            const loadModels = this.extractModelState(loadConfigOptions);
+            const loadModes = this.extractModeState(loadConfigOptions);
+            const loadState = restored.state ?? {};
+            const loadMeta = isObject(loadState._meta)
+              ? loadState._meta
+              : undefined;
+            const loadQwenMeta = isObject(loadMeta?.[QWEN_META_KEY])
+              ? loadMeta[QWEN_META_KEY]
+              : undefined;
+            const replayStatus =
+              method === 'session/load' && restored.partial === true
+                ? {
+                    partial: true as const,
+                    ...(typeof restored.replayError === 'string'
+                      ? { replayError: restored.replayError }
+                      : {}),
+                  }
+                : undefined;
+            try {
+              assertGenerationOpen?.();
+            } catch (error) {
+              await rollbackRestore();
+              throw error;
+            }
+            // Teardown raced the restore — EITHER the whole connection was
+            // destroyed (`conn.destroyed`) OR a `session/close` for this id
+            // started while the restore response was being assembled. Cleanup
+            // depends on what restore did: an attach is rolled back, while a
+            // freshly restored session must be killed by the spawn owner.
+            const closeRaced = conn.closingSessions.has(sessionId);
+            if (conn.destroyed || closeRaced) {
+              void rollbackRestore().catch((err) =>
+                writeStderrLine(
+                  `qwen serve: /acp orphan ${restored.attached ? 'detach' : 'kill'}(${logSafe(sessionId)}) teardown-race: ${logSafe(errMsg(err))}`,
                 ),
               );
+              // Connection-still-alive close race → tell the client to retry.
+              // Same rationale as the pre-await guard: a transient server-side
+              // race, so INTERNAL_ERROR (-32603), not INVALID_PARAMS.
+              if (closeRaced && !conn.destroyed && id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    RPC.INTERNAL_ERROR,
+                    `session ${sessionId} was closed during load; retry`,
+                  ),
+                );
+              }
+              return;
             }
-            return;
-          }
-          conn.getOrCreateSession(sessionId).clientId = restored.clientId;
-          if (method === 'session/load') {
-            conn.markInitialReplayPending(sessionId);
-          }
-          conn.ownSession(sessionId);
-          // ACP standard: load/resume response includes configOptions + models + modes
-          const loadConfigOptions = await this.configOptionsFor(sessionId);
-          const loadModels = this.extractModelState(loadConfigOptions);
-          const loadModes = this.extractModeState(loadConfigOptions);
-          const loadState = restored.state ?? {};
-          const loadMeta = isObject(loadState._meta)
-            ? loadState._meta
-            : undefined;
-          const loadQwenMeta = isObject(loadMeta?.[QWEN_META_KEY])
-            ? loadMeta[QWEN_META_KEY]
-            : undefined;
-          const replayStatus =
-            method === 'session/load' && restored.partial === true
-              ? {
-                  partial: true as const,
-                  ...(typeof restored.replayError === 'string'
-                    ? { replayError: restored.replayError }
-                    : {}),
-                }
-              : undefined;
-          this.replyConn(conn, id, {
-            ...loadState,
-            ...(replayStatus
-              ? {
-                  _meta: {
-                    ...(loadMeta ?? {}),
-                    [QWEN_META_KEY]: {
-                      ...(loadQwenMeta ?? {}),
-                      sessionLoadReplay: replayStatus,
+            conn.getOrCreateSession(sessionId).clientId = restored.clientId;
+            if (method === 'session/load') {
+              conn.markInitialReplayPending(sessionId);
+            }
+            conn.ownSession(sessionId);
+            this.replyConn(conn, id, {
+              ...loadState,
+              ...(replayStatus
+                ? {
+                    _meta: {
+                      ...(loadMeta ?? {}),
+                      [QWEN_META_KEY]: {
+                        ...(loadQwenMeta ?? {}),
+                        sessionLoadReplay: replayStatus,
+                      },
                     },
-                  },
-                }
-              : {}),
-            ...(loadConfigOptions ? { configOptions: loadConfigOptions } : {}),
-            ...(loadModels ? { models: loadModels } : {}),
-            ...(loadModes ? { modes: loadModes } : {}),
-          });
-          return;
+                  }
+                : {}),
+              ...(loadConfigOptions
+                ? { configOptions: loadConfigOptions }
+                : {}),
+              ...(loadModels ? { models: loadModels } : {}),
+              ...(loadModes ? { modes: loadModes } : {}),
+            });
+            return;
+          } finally {
+            reservation.release();
+          }
         }
 
         case 'session/list': {
@@ -1677,19 +1986,33 @@ export class AcpDispatcher {
           if ('error' in parsedSource) {
             throw new AcpParamError(parsedSource.error);
           }
-          const result = await listWorkspaceSessionsForResponse(
-            this.bridge,
-            workspaceCwd,
-            {
-              cursor,
-              size: metaSize,
-              archiveState,
-              view,
-              group,
-              parentSessionId,
-              ...parsedSource,
-            },
-          );
+          let result: Awaited<
+            ReturnType<typeof listWorkspaceSessionsForResponse>
+          >;
+          try {
+            conn.abortSignal.throwIfAborted();
+            result = await listWorkspaceSessionsForResponse(
+              this.bridge,
+              workspaceCwd,
+              {
+                cursor,
+                size: metaSize,
+                archiveState,
+                view,
+                group,
+                parentSessionId,
+                ...parsedSource,
+              },
+              {
+                runtimeBaseDir: this.sessionRuntimeBaseDir,
+                signal: conn.abortSignal,
+              },
+            );
+            conn.abortSignal.throwIfAborted();
+          } catch (error) {
+            if (conn.abortSignal.aborted) return;
+            throw error;
+          }
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
               sessionId: s.sessionId,
@@ -1785,6 +2108,7 @@ export class AcpDispatcher {
             throw err;
           } finally {
             conn.closingSessions.delete(sessionId);
+            this.invalidateSessionLists(['active']);
           }
           closeLocalSessionStream();
           this.replyConn(conn, id, {});
@@ -2230,6 +2554,8 @@ export class AcpDispatcher {
                 ctx,
               );
             } else {
+              // Ids advertised by raw-state surfaces but unroutable here
+              // (e.g. reasoning_effort) must fail loud, not fall into mode.
               if (id !== undefined) {
                 this.replySession(
                   conn,
@@ -2239,7 +2565,7 @@ export class AcpDispatcher {
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    `Unknown configId: ${configId}`,
+                    `ConfigId not supported by this transport: ${configId} (supported: ${HTTP_ACP_CONFIG_OPTION_IDS.join(', ')})`,
                   ),
                 );
               }
@@ -2369,13 +2695,18 @@ export class AcpDispatcher {
             const metadata = isObject(params['metadata'])
               ? (params['metadata'] as Record<string, unknown>)
               : {};
-            const result = this.bridge.updateSessionMetadata(
-              sessionId,
-              metadata as unknown as Parameters<
-                HttpAcpBridge['updateSessionMetadata']
-              >[1],
-              this.sessionCtx(conn, sessionId, loopback),
-            );
+            let result: ReturnType<HttpAcpBridge['updateSessionMetadata']>;
+            try {
+              result = this.bridge.updateSessionMetadata(
+                sessionId,
+                metadata as unknown as Parameters<
+                  HttpAcpBridge['updateSessionMetadata']
+                >[1],
+                this.sessionCtx(conn, sessionId, loopback),
+              );
+            } finally {
+              this.invalidateSessionLists(['active']);
+            }
             this.replyConn(conn, id, result as unknown);
           });
           return;
@@ -4038,19 +4369,23 @@ export class AcpDispatcher {
           const ids = this.parseSessionIds(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace);
-          const result = await deleteDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            bridge: this.bridge,
-            coordinator: this.archiveCoordinator,
-            onError: ({ phase, sessionId, error }) => {
-              const safeSessionId = logSafe(sessionId.slice(0, 8));
-              const safeMessage = logSafe(error);
-              writeStderrLine(
-                `qwen serve: /acp sessions/delete ${phase}Session(${safeSessionId}) failed: ${safeMessage}`,
-              );
-            },
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              deleteDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                bridge: this.bridge,
+                coordinator: this.archiveCoordinator,
+                onError: ({ phase, sessionId, error }) => {
+                  const safeSessionId = logSafe(sessionId.slice(0, 8));
+                  const safeMessage = logSafe(error);
+                  writeStderrLine(
+                    `qwen serve: /acp sessions/delete ${phase}Session(${safeSessionId}) failed: ${safeMessage}`,
+                  );
+                },
+              }),
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -4061,12 +4396,16 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
-          const result = await archiveDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            bridge: this.bridge,
-            coordinator: this.archiveCoordinator,
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              archiveDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                bridge: this.bridge,
+                coordinator: this.archiveCoordinator,
+              }),
+          );
           this.replyConn(conn, id, {
             archived: result.archived,
             alreadyArchived: result.alreadyArchived,
@@ -4081,11 +4420,15 @@ export class AcpDispatcher {
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
-          const result = await unarchiveDaemonSessions({
-            sessionIds: ids,
-            service: svc,
-            coordinator: this.archiveCoordinator,
-          });
+          const result = await this.runWithSessionListInvalidation(
+            ['active', 'archived'],
+            () =>
+              unarchiveDaemonSessions({
+                sessionIds: ids,
+                service: svc,
+                coordinator: this.archiveCoordinator,
+              }),
+          );
           this.replyConn(conn, id, {
             unarchived: result.unarchived,
             alreadyActive: result.alreadyActive,

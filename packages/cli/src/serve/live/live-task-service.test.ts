@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
@@ -15,7 +16,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { LiveTaskService } from './live-task-service.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from '../conversations/session-source.js';
 
 const persistedSessions = vi.hoisted(() => new Map<string, unknown>());
 const persistedSessionOwners = vi.hoisted(() => new Map<string, string>());
@@ -31,6 +32,7 @@ const sessionSources = vi.hoisted(
 const removeSessionMock = vi.hoisted(() =>
   vi.fn(async (_sessionId: string) => true),
 );
+const removeSessionRuntimeBaseDirs = vi.hoisted(() => new Array<string>());
 const listWorkspaceSessionsForResponse = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -71,6 +73,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       }
 
       removeSession(sessionId: string) {
+        removeSessionRuntimeBaseDirs.push(actual.Storage.getRuntimeBaseDir());
         return removeSessionMock(sessionId);
       }
     },
@@ -247,6 +250,7 @@ function makeHarness() {
   const runtime = {
     workspaceId: 'conversations',
     workspaceCwd: '/conversations',
+    sessionRuntimeBaseDir: '/runtime/conversations',
     provenance: 'live-conversation',
     bridge,
   } as WorkspaceRuntime;
@@ -254,6 +258,7 @@ function makeHarness() {
   const projectRuntime = {
     workspaceId: 'project-1',
     workspaceCwd: '/project',
+    sessionRuntimeBaseDir: '/runtime/project',
     bridge: projectBridge,
   } as WorkspaceRuntime;
   const registry = {
@@ -291,6 +296,7 @@ function makeHarness() {
   return {
     service,
     bridge,
+    projectBridge,
     runtime,
     summaries,
     resident,
@@ -307,6 +313,7 @@ beforeEach(() => {
   parentSessions.clear();
   sessionSources.clear();
   removeSessionMock.mockClear();
+  removeSessionRuntimeBaseDirs.length = 0;
   listWorkspaceSessionsForResponse.mockReset();
   listWorkspaceSessionsForResponse.mockResolvedValue({
     sessions: [],
@@ -365,6 +372,23 @@ describe('LiveTaskService', () => {
       ],
       threads: [{ id: 'ordinary', status: 'idle', updatedAt: 1_785_369_601 }],
     });
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      1,
+      harness.bridge,
+      '/conversations',
+      expect.objectContaining({ view: 'organized', group: 'all' }),
+      { runtimeBaseDir: '/runtime/conversations' },
+    );
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      2,
+      harness.projectBridge,
+      '/project',
+      expect.objectContaining({ view: 'organized', group: 'all' }),
+      { runtimeBaseDir: '/runtime/project' },
+    );
+    expect(listWorkspaceSessionsForResponse.mock.calls[1]?.[0]).toBe(
+      harness.projectBridge,
+    );
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
@@ -897,6 +921,10 @@ describe('LiveTaskService', () => {
     expect(harness.bridge.killSession).toHaveBeenCalledWith('new-task', {
       requireZeroAttaches: true,
     });
+    expect(removeSessionMock).toHaveBeenCalledWith('new-task');
+    expect(removeSessionRuntimeBaseDirs).toEqual([
+      path.resolve('/runtime/conversations'),
+    ]);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
   });
 });

@@ -14,13 +14,15 @@ import type {
   ToolResultDisplay,
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
+  GoalSnapshotV2,
+  GoalStateCause,
   HistoryGap,
-  UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
+  isGoalCheckpointBookkeepingRecord,
   parseGoalStateRecordPayloadV2,
-  stripTrailingUserPromptSubmitContextPart,
+  projectUserTranscriptForDisplay,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
@@ -43,31 +45,9 @@ import {
 } from './inline-image-parts.js';
 
 /**
- * Projects a plain user record to its display text.
- *
- * Prefers the `displayText` recorded when a UserPromptSubmit hook augmented
- * the model-bound parts. For records that carry the reserved tag but no
- * payload (written by other/newer writers), drops a trailing part that is
- * entirely a tagged hook-context block. Legacy records with bare injected
- * text fall back to the raw part concatenation.
- */
-function extractUserRecordDisplayText(
-  record: ConversationRecord['messages'][number],
-): string {
-  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
-  if (payload?.displayText) {
-    return payload.displayText;
-  }
-  const parts = (record.message?.parts as Part[] | undefined) ?? [];
-  return extractTextFromParts([
-    ...stripTrailingUserPromptSubmitContextPart(parts),
-  ]);
-}
-
-/**
  * Extracts text content from a Content object's parts (excluding thought parts).
  */
-function extractTextFromParts(parts: Part[] | undefined): string {
+function extractTextFromParts(parts: readonly Part[] | undefined): string {
   if (!parts) return '';
 
   const textParts: string[] = [];
@@ -209,6 +189,8 @@ function convertToHistoryItems(
   const gapByChildUuid = indexGapsByChild(historyGaps);
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
+  let lastGoalStateSnapshot: GoalSnapshotV2 | undefined;
+  let lastGoalStateCause: GoalStateCause | undefined;
 
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
@@ -292,30 +274,44 @@ function convertToHistoryItems(
         items.push({ type: 'tool_group', tools: [...currentToolGroup] });
         currentToolGroup = [];
       }
-      // Reset pending @-command state at the boundary as well: the divider
-      // means the records below begin a fresh reachable island, so an
-      // unconsumed pre-gap at_command must never be shift()-paired with the
-      // post-gap user turn (which would attach @file reads to a turn the user
-      // never wrote them on). Today reconstructHistory truncates to the tail,
-      // so the buffer is already empty here; this keeps the invariant if that
-      // ever changes.
+      // Reset pending @-command state and the Goal card baseline at the
+      // boundary as well: the divider means the records below begin a fresh
+      // reachable island, so an unconsumed pre-gap at_command must never be
+      // shift()-paired with the post-gap user turn (which would attach @file
+      // reads to a turn the user never wrote them on), and a pre-gap Goal
+      // snapshot must not suppress a post-gap lifecycle card that happens to
+      // be shape-equal to it (e.g. resume after a gap-swallowed pause). Today
+      // reconstructHistory truncates to the tail, so the at-command buffer is
+      // already empty here; this keeps the invariant if that ever changes.
       pendingAtCommands.length = 0;
+      lastGoalStateSnapshot = undefined;
+      lastGoalStateCause = undefined;
       items.push(createHistoryGapItem(gap));
     }
 
     if (record.type === 'system') {
       if (record.subtype === 'goal_state') {
         const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
-        if (payload && shouldDisplayGoalStateCause(payload.cause)) {
-          if (currentToolGroup.length > 0) {
-            items.push({ type: 'tool_group', tools: [...currentToolGroup] });
-            currentToolGroup = [];
-          }
-          items.push({
-            type: 'goal_state',
-            snapshot: payload.snapshot,
+        if (payload) {
+          const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
             cause: payload.cause,
+            previousCause: lastGoalStateCause,
+            previous: lastGoalStateSnapshot,
+            next: payload.snapshot,
           });
+          lastGoalStateCause = payload.cause;
+          lastGoalStateSnapshot = payload.snapshot;
+          if (shouldDisplayGoalStateCause(payload.cause) && !bookkeepingOnly) {
+            if (currentToolGroup.length > 0) {
+              items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+              currentToolGroup = [];
+            }
+            items.push({
+              type: 'goal_state',
+              snapshot: payload.snapshot,
+              cause: payload.cause,
+            });
+          }
         }
         continue;
       }
@@ -332,7 +328,11 @@ function convertToHistoryItems(
           | SlashCommandRecordPayload
           | undefined;
         if (!payload) continue;
-        if (payload.phase === 'invocation' && payload.rawCommand) {
+        if (
+          payload.phase === 'invocation' &&
+          payload.rawCommand &&
+          !payload.hiddenInvocation
+        ) {
           const sentToModel =
             typeof payload.sentToModel === 'boolean'
               ? payload.sentToModel
@@ -407,7 +407,10 @@ function convertToHistoryItems(
           }
 
           const payload = pendingAtCommands.shift()!;
-          const text = payload.userText || extractUserRecordDisplayText(record);
+          const projection = projectUserTranscriptForDisplay(record);
+          const text =
+            payload.userText ||
+            (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -430,7 +433,9 @@ function convertToHistoryItems(
           currentToolGroup = [];
         }
 
-        const text = extractUserRecordDisplayText(record);
+        const projection = projectUserTranscriptForDisplay(record);
+        const text =
+          projection.displayText ?? extractTextFromParts(projection.parts);
         if (text) {
           items.push({ type: 'user', text });
         }

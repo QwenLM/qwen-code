@@ -15,6 +15,7 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import {
+  isValidSessionId,
   loadCliConfig,
   parseArguments,
   SessionIdConflictError,
@@ -251,6 +252,29 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       respectQwenIgnore: true,
     },
   };
+});
+
+describe('isValidSessionId', () => {
+  it.each([
+    ['a canonical UUID', 'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d'],
+    [
+      'an agent-suffixed UUID',
+      'b2a1c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d-agent-qwen',
+    ],
+  ])('accepts %s', (_, value) => {
+    expect(isValidSessionId(value)).toBe(true);
+  });
+
+  // These shapes are paste-into-shell payloads for the exit-time resume
+  // echo, so the production gate must reject them.
+  it.each([
+    ['newline', 'evil\nrm -rf ~'],
+    ['escape sequence', 'evil\u001B]52;c;pwned\u0007session'],
+    ['leading dash', '-cafebabe0123456789abcdef01234567'],
+    ['non-UUID token', 'abc123'],
+  ])('rejects a payload with a %s', (_, value) => {
+    expect(isValidSessionId(value)).toBe(false);
+  });
 });
 
 describe('parseArguments', () => {
@@ -901,10 +925,22 @@ describe('parseArguments', () => {
     expect(argv.channel).toBe('desktop');
   });
 
-  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
-    process.argv = ['node', 'script.js', '--acp'];
+  it('should accept daemon as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'daemon'];
     const argv = await parseArguments();
-    expect(argv.channel).toBe('ACP');
+    expect(argv.channel).toBe('daemon');
+  });
+
+  it('should default ACP mode to the ACP channel when no channel is provided', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('ACP');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps an explicit --channel when combined with --acp (the desktop invocation)', async () => {
@@ -914,6 +950,41 @@ describe('parseArguments', () => {
     // channel with the ACP default.
     expect(argv.channel).toBe('desktop');
     expect(argv.acp).toBe(true);
+  });
+
+  it('reports the daemon channel for daemon-spawned ACP children', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('daemon');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('reports the desktop channel for the Tauri desktop shell', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_DESKTOP', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('desktop');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an explicit --channel over the daemon markers', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp', '--channel', 'VSCode'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('VSCode');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('should reject invalid --approval-mode values', async () => {
@@ -1668,6 +1739,107 @@ describe('loadCliConfig', () => {
     );
     expect(mockSessionServiceInstance.loadSession).toHaveBeenCalledWith(
       config.getSessionId(),
+    );
+  });
+
+  it('rebinds a selective restore projection to the forked session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn(async (sessionId: string) => ({
+      sessionId,
+      filePath: `/mock/${sessionId}.jsonl`,
+      startTime: '2026-08-13T00:00:00.000Z',
+      lastUpdated: '2026-08-13T00:00:00.000Z',
+      runtime: {
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        recording: { lastCompletedUuid: 'leaf', turnParentUuids: [] },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      },
+    }));
+
+    const config = await loadCliConfig(
+      {},
+      { resume: sourceSessionId, forkSession: true } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { sessionRestore: { projectionSource } },
+    );
+
+    const forkedSessionId = config.getSessionId();
+    expect(mockSessionServiceInstance.forkSession).toHaveBeenCalledWith(
+      sourceSessionId,
+      forkedSessionId,
+    );
+    expect(projectionSource).toHaveBeenCalledOnce();
+    expect(projectionSource).toHaveBeenCalledWith(forkedSessionId);
+    expect(mockSessionServiceInstance.loadSession).not.toHaveBeenCalled();
+    const configParams = mockConfigConstructorParams.mock.calls.at(-1)?.[0];
+    expect(configParams).toEqual(
+      expect.objectContaining({
+        sessionId: forkedSessionId,
+        sessionData: undefined,
+        sessionRestoreProjection: expect.objectContaining({
+          sessionId: forkedSessionId,
+        }),
+        sessionRestoreProjectionSource: expect.any(Function),
+      }),
+    );
+
+    const deferredProjection =
+      await configParams.sessionRestoreProjectionSource();
+    expect(deferredProjection).toEqual(
+      expect.objectContaining({ sessionId: forkedSessionId }),
+    );
+    expect(projectionSource).toHaveBeenNthCalledWith(2, forkedSessionId);
+  });
+
+  it('preloads a selective projection when a non-ACP host cannot acquire a writer lease', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const projectionSource = vi.fn(async (sessionId: string) => ({
+      sessionId,
+      filePath: `/mock/${sessionId}.jsonl`,
+      startTime: '2026-08-13T00:00:00.000Z',
+      lastUpdated: '2026-08-13T00:00:00.000Z',
+      runtime: {
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        recording: { lastCompletedUuid: 'leaf', turnParentUuids: [] },
+        goalRecords: [],
+        initialTurn: 0,
+        backgroundNotificationTaskIds: [],
+      },
+    }));
+
+    await loadCliConfig(
+      { experimental: { sessionWriterLease: true } },
+      { resume: sourceSessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { sessionRestore: { projectionSource } },
+    );
+
+    expect(projectionSource).toHaveBeenCalledOnce();
+    expect(projectionSource).toHaveBeenCalledWith(sourceSessionId);
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        experimentalZedIntegration: false,
+        sessionWriterLeaseEnabled: true,
+        sessionRestoreProjection: expect.objectContaining({
+          sessionId: sourceSessionId,
+        }),
+      }),
     );
   });
 

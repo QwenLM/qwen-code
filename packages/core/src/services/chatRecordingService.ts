@@ -57,6 +57,7 @@ const debugLogger = createDebugLogger('CHAT_RECORDING');
  * retrying across turns.
  */
 const AUTO_TITLE_ATTEMPT_CAP = 3;
+const MAX_TITLE_USER_DISPLAY_TEXTS = 20;
 const SESSION_FILE_DIFF_AGGREGATE_CHAR_LIMIT = 100_000;
 const SESSION_FILE_DIFF_CHAR_LIMIT = 50_000;
 const SESSION_FILE_CONTENT_CHAR_LIMIT = 16_000;
@@ -293,6 +294,7 @@ export interface ChatRecord {
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
+    | 'agent_retry'
     | 'file_history_snapshot'
     | 'user_text_elements'
     | 'session_artifact_event'
@@ -353,6 +355,7 @@ export interface ChatRecord {
     | UserPromptRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
+    | AgentRetryRecordPayload
     | FileHistorySnapshotRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
@@ -393,19 +396,6 @@ export interface ChatRecord {
   };
 }
 
-/**
- * Stored payload for user-prompt records whose model-bound parts were
- * augmented by a UserPromptSubmit hook. `message` keeps the exact
- * model-bound Content (resume must replay what the model actually saw);
- * this payload preserves the user-authored projection for UI/resume
- * display. Hook-injected text stays recoverable from the tagged part in
- * `message.parts` via `isUserPromptSubmitContextPartText`.
- */
-export interface UserPromptRecordPayload {
-  /** Pre-injection projection of the user's own prompt text. */
-  displayText?: string;
-}
-
 export interface NotificationRecordPayload {
   displayText: string;
   backgroundTask?: {
@@ -413,7 +403,22 @@ export interface NotificationRecordPayload {
     status: string;
     kind: 'agent' | 'monitor' | 'shell';
     toolUseId?: string;
+    /** Structured fields for i18n rendering (persisted for page refresh). */
+    description?: string;
+    commandLabel?: string;
+    eventCount?: number;
+    droppedLines?: number;
   };
+}
+
+export interface UserPromptRecordPayload {
+  /**
+   * TUI submittedPrompt projection when available; otherwise the expanded
+   * pre-hook prompt.
+   */
+  displayText: string;
+  /** Sanitized hook context duplicated from the tagged model-bound part. */
+  hookContext: string;
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -435,6 +440,11 @@ export interface AgentBootstrapRecordPayload {
    * this field and resume resolves tool names through the current registry.
    */
   tools?: Array<string | FunctionDeclaration>;
+}
+
+export interface AgentRetryRecordPayload {
+  /** 1-based attempt number this attach resumes with (2+ on a retry). */
+  attempt: number;
 }
 
 /**
@@ -459,6 +469,11 @@ export interface SlashCommandRecordPayload {
   rawCommand: string;
   /** Whether the visible slash-command invocation reached model history. */
   sentToModel?: boolean;
+  /**
+   * Whether the UI intentionally hid this invocation from visible history,
+   * so resume/preview reconstruction skips the user row as well.
+   */
+  hiddenInvocation?: boolean;
   /**
    * History items the UI displayed for this command, in the same shape used by
    * the CLI (without IDs). Stored as plain objects for replay on resume.
@@ -566,6 +581,16 @@ export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
 
+export interface ChatRecordingRestoreState {
+  lastCompletedUuid: string;
+  turnParentUuids: Array<string | null>;
+  customTitle?: string;
+  titleSource?: TitleSource;
+  parentSessionId?: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -646,6 +671,7 @@ export class ChatRecordingService {
   /** Immutable creator attribution once recorded. */
   private currentSourceType: string | undefined;
   private currentSourceId: string | undefined;
+  private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -707,25 +733,31 @@ export class ChatRecordingService {
     writerLeaseRequired = config.isSessionWriterLeaseEnabled?.() ??
       config.getExperimentalZedIntegration?.() ??
       true,
+    restoreState?: ChatRecordingRestoreState,
   ) {
     this.config = config;
     this.writerLeaseRequired = writerLeaseRequired;
     const resumed = config.getResumedSessionData();
     if (writerLeaseRequired) {
-      this.lastRecordUuid = resumed?.lastCompletedUuid ?? null;
+      this.lastRecordUuid =
+        restoreState?.lastCompletedUuid ?? resumed?.lastCompletedUuid ?? null;
       this.lastPersistedRecordUuid = this.lastRecordUuid;
     } else {
       this.state = 'active';
       this.acceptingWrites = true;
-      this.restoreSessionState(
-        resumed
-          ? {
-              conversation: resumed.conversation ?? { messages: [] },
-              lastCompletedUuid: resumed.lastCompletedUuid,
-            }
-          : undefined,
-        resumed ? this.readPersistedTitleInfo() : undefined,
-      );
+      if (restoreState) {
+        this.restoreProjectedState(restoreState);
+      } else {
+        this.restoreSessionState(
+          resumed
+            ? {
+                conversation: resumed.conversation ?? { messages: [] },
+                lastCompletedUuid: resumed.lastCompletedUuid,
+              }
+            : undefined,
+          resumed ? this.readPersistedTitleInfo() : undefined,
+        );
+      }
     }
   }
 
@@ -812,9 +844,16 @@ export class ChatRecordingService {
     this.currentParentSessionId = undefined;
     this.currentSourceType = undefined;
     this.currentSourceId = undefined;
+    this.userDisplayTextsForTitle.length = 0;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
+      if (record.type === 'user' && record.subtype === undefined) {
+        this.trackUserDisplayTextForTitle(
+          (record.systemPayload as UserPromptRecordPayload | undefined)
+            ?.displayText,
+        );
+      }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
         const payload = record.systemPayload as
@@ -843,6 +882,27 @@ export class ChatRecordingService {
     }
   }
 
+  private trackUserDisplayTextForTitle(displayText: string | undefined): void {
+    this.userDisplayTextsForTitle.push(displayText);
+    if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
+      this.userDisplayTextsForTitle.shift();
+    }
+  }
+
+  private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    this.lastRecordUuid = state.lastCompletedUuid;
+    this.lastPersistedRecordUuid = state.lastCompletedUuid;
+    this.turnParentUuids = [...state.turnParentUuids];
+    this.currentCustomTitle = state.customTitle;
+    this.currentTitleSource = state.titleSource;
+    this.currentParentSessionId = state.parentSessionId;
+    this.currentSourceType = state.sourceType;
+    this.currentSourceId = state.sourceId;
+    if (this.currentCustomTitle) {
+      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+    }
+  }
+
   activate(
     lease: SessionWriterLease,
     sessionData?: {
@@ -850,6 +910,7 @@ export class ChatRecordingService {
       lastCompletedUuid: string | null;
     },
     persistedTitleInfo?: { title?: string; source?: TitleSource },
+    restoreState?: ChatRecordingRestoreState,
   ): void {
     if (
       !this.writerLeaseRequired ||
@@ -859,7 +920,11 @@ export class ChatRecordingService {
       throw new SessionWriterUnavailableError();
     }
     this.binding = { sessionId: lease.sessionId, lease };
-    this.restoreSessionState(sessionData, persistedTitleInfo);
+    if (restoreState) {
+      this.restoreProjectedState(restoreState);
+    } else {
+      this.restoreSessionState(sessionData, persistedTitleInfo);
+    }
     this.state = 'active';
     this.acceptingWrites = true;
   }
@@ -1287,24 +1352,31 @@ export class ChatRecordingService {
    * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object as used with the API
+   * @param goalContext Goal identity and turn that own this message
+   * @param promptPayload User-authored display text and hook-context provenance
    */
   recordUserMessage(
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
-    payload?: UserPromptRecordPayload,
+    promptPayload?: UserPromptRecordPayload,
   ): void {
     try {
+      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
-        ...(payload ? { systemPayload: payload } : {}),
+        ...(promptPayload ? { systemPayload: promptPayload } : {}),
       };
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
+  }
+
+  getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
+    return this.userDisplayTextsForTitle;
   }
 
   recordGoalRuntimeMessage(
@@ -1566,6 +1638,7 @@ export class ChatRecordingService {
         const outcome = await tryGenerateSessionTitle(
           this.config,
           controller.signal,
+          this.userDisplayTextsForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -1749,6 +1822,13 @@ export class ChatRecordingService {
     try {
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
+      const projectionStart = Math.max(
+        0,
+        this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
+      );
+      this.userDisplayTextsForTitle.splice(
+        Math.max(0, targetTurnIndex - projectionStart),
+      );
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
       // The previous attribution snapshot now sits on the abandoned

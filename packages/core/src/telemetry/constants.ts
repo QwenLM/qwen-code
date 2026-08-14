@@ -9,11 +9,15 @@ export const SERVICE_NAME = 'qwen-code';
 export const EVENT_USER_PROMPT = 'qwen-code.user_prompt';
 export const EVENT_USER_RETRY = 'qwen-code.user_retry';
 export const EVENT_TOOL_CALL = 'qwen-code.tool_call';
+export const EVENT_REPEATED_TOOL_FAILURE_GUARD =
+  'qwen-code.repeated_tool_failure_guard';
 export const EVENT_API_REQUEST = 'qwen-code.api_request';
 export const EVENT_API_ERROR = 'qwen-code.api_error';
 export const EVENT_API_CANCEL = 'qwen-code.api_cancel';
 export const EVENT_API_RESPONSE = 'qwen-code.api_response';
 export const EVENT_CLI_CONFIG = 'qwen-code.config';
+export const EVENT_SESSION_START = 'session.start';
+export const EVENT_SESSION_END = 'session.end';
 export const EVENT_EXTENSION_DISABLE = 'qwen-code.extension_disable';
 export const EVENT_EXTENSION_ENABLE = 'qwen-code.extension_enable';
 export const EVENT_EXTENSION_INSTALL = 'qwen-code.extension_install';

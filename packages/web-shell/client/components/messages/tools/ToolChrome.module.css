@@ -41,13 +41,15 @@
 }
 
 .chatSummary:hover,
-.chatSummary:focus-visible {
+.chatSummary:focus-visible,
+.chatSummary[aria-expanded='true'] {
   color: var(--primary);
   outline: none;
 }
 
 .chatSummary:hover .chatSummaryTextActive,
-.chatSummary:focus-visible .chatSummaryTextActive {
+.chatSummary:focus-visible .chatSummaryTextActive,
+.chatSummary[aria-expanded='true'] .chatSummaryTextActive {
   background-image: none;
   -webkit-text-fill-color: currentColor;
 }
@@ -70,6 +72,7 @@
   width: 14px;
   height: 14px;
   display: block;
+  flex-shrink: 0;
 }
 
 .chatSummaryText {
@@ -330,8 +333,18 @@
   padding: 8px 12px 8px;
 }
 
+.expandedCardTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .expandedCardTitle {
   flex-shrink: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--foreground);
   font-size: 12px;
   font-weight: 500;
@@ -426,33 +439,4 @@
 
 .expandedCardBody .todoBody {
   padding: 0;
-}
-
-.compactGroup {
-  margin-bottom: 12px;
-  padding: 8px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.compactHeader {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  font-weight: 400;
-}
-
-.compactCount {
-  color: var(--muted-foreground);
-  font-size: 13px;
-  flex-shrink: 0;
-}
-
-.compactHint {
-  font-size: 12px;
-  color: var(--muted-foreground);
-  margin-top: 4px;
 }

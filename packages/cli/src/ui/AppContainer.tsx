@@ -78,6 +78,7 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
+import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
@@ -155,6 +156,7 @@ import * as fs from 'node:fs';
 import { basename } from 'node:path';
 import {
   formatSessionWindowTitle,
+  titleStatusPrefix,
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
@@ -624,6 +626,13 @@ interface AppContainerProps {
   initializationResult: InitializationResult;
   initialUseVirtualViewport?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
+  /**
+   * VP wake/SIGCONT repaint: clear the viewport and replay the last frame
+   * (Ink skips unchanged-output redraws, so a bare clear would blank the
+   * screen). Absent under QWEN_CODE_LEGACY_RESIZE_ERASE: the VP wake path
+   * stays write-free (static remount bump only), matching pre-PR behavior.
+   */
+  repaintViewport?: () => void;
 }
 
 /**
@@ -639,8 +648,13 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult, initialUseVirtualViewport } =
-    props;
+  const {
+    settings,
+    config,
+    initializationResult,
+    initialUseVirtualViewport,
+    repaintViewport,
+  } = props;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
@@ -1287,15 +1301,16 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // In VP mode (ui.useTerminalBuffer) the React tree fully owns the visible
-  // region via ink 7 native overflow clipping. Writing clearTerminal /
-  // cursorTo+eraseDown would be a wasted flash and would also corrupt the
-  // in-app scroll position. The remount-key bump is also a near-no-op for
-  // VP: nothing in the VP render path is keyed by historyRemountKey, so
-  // keeping the bump is harmless because the startup-scoped VP decision
-  // is intentionally restart-only to match Ink's alternateScreen lifetime.
-  // The visible refresh in VP mode comes for free from the React tree
-  // re-reading `mergedHistory` / `allVirtualItems` on whatever state
-  // change triggered refreshStatic (Ctrl+O, model change, etc.).
+  // region via ink 7 native overflow clipping. The remount-key bump is
+  // write-free but not inert: one-shot <Static> output keyed by it (agent
+  // tab history in AgentChatContent) is only re-emitted on a bump.
+  // refreshStatic must stay write-free in VP: ordinary callers (Ctrl+O,
+  // model change, /clear, ...) get their visible refresh from the state
+  // change that triggered them, and replaying the pre-change frame would
+  // flash stale content. Only the wake/SIGCONT path (wakeRepaint below) does
+  // a physical clear-and-replay, because there the terminal buffer may be
+  // stale or rearranged while Ink both erases with a stale relative count
+  // and skips redraws whose output is unchanged.
   const [useTerminalBuffer] = useState(
     () =>
       initialUseVirtualViewport ??
@@ -1305,13 +1320,68 @@ export const AppContainer = (props: AppContainerProps) => {
         isInteractiveTerminal(),
       ),
   );
+
+  // The VP post-shrink clear window (terminal-resize-reflow) wipes one-shot
+  // <Static> content from the viewport just like the wake path; pair it with
+  // the same remount bump so keyed statics (agent tab history) re-emit. The
+  // window's CLEAR_VIEWPORT substitutes wipe the just-re-emitted statics on
+  // every in-window redraw, so bump again once the window closes.
+  const prevTerminalWidthRef = useRef(terminalWidth);
+  const shrinkRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  useEffect(() => {
+    const prev = prevTerminalWidthRef.current;
+    prevTerminalWidthRef.current = terminalWidth;
+    if (useTerminalBuffer && terminalWidth < prev) {
+      remountStaticHistory();
+      if (shrinkRemountTimerRef.current) {
+        clearTimeout(shrinkRemountTimerRef.current);
+      }
+      // Slightly past CLEAR_WINDOW_MS (600) so the last window clear lands
+      // before the re-emit.
+      shrinkRemountTimerRef.current = setTimeout(remountStaticHistory, 650);
+    }
+  }, [terminalWidth, useTerminalBuffer, remountStaticHistory]);
+  useEffect(
+    () => () => {
+      if (shrinkRemountTimerRef.current) {
+        clearTimeout(shrinkRemountTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
     }
+    // VP stays write-free for ordinary callers (/clear, model change, Ctrl+O,
+    // ...): replaying the pre-change frame would flash stale content. Their
+    // visible refresh comes from the state change that triggered them. The
+    // wake/SIGCONT path repaints separately via useWakeRepaint below.
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
+
+  // Wake/SIGCONT: the terminal buffer may be stale or rearranged, and Ink
+  // both erases with a stale relative count and skips redraws whose output
+  // is unchanged — so VP repaints by replaying the last frame over a clean
+  // viewport (viewport-only: clearTerminal's 3J would destroy scrollback /
+  // Warp history) and bumps the static remount key so one-shot <Static>
+  // history (agent tabs) is re-emitted over the clear. Static mode uses the
+  // ordinary refreshStatic. Selection extracted (buildWakeRepaint) for unit
+  // coverage.
+  const wakeRepaint = useMemo(
+    () =>
+      buildWakeRepaint({
+        isVP: useTerminalBuffer,
+        repaintViewport,
+        refreshStatic,
+        remountStaticHistory,
+      }),
+    [useTerminalBuffer, repaintViewport, refreshStatic, remountStaticHistory],
+  );
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -1359,6 +1429,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setThemeError,
     historyManager.addItem,
     initializationResult.themeError,
+    config,
   );
 
   const {
@@ -1418,7 +1489,12 @@ export const AppContainer = (props: AppContainerProps) => {
     openEditorDialog,
     handleEditorSelect,
     exitEditorDialog,
-  } = useEditorSettings(settings, setEditorError, historyManager.addItem);
+  } = useEditorSettings(
+    settings,
+    setEditorError,
+    historyManager.addItem,
+    config,
+  );
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
@@ -3402,7 +3478,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but
   // Ink's frame-diff state still reflects the pre-sleep output, so the next
   // render strands border characters on screen.
-  useWakeRepaint(refreshStatic);
+  useWakeRepaint(wakeRepaint);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -4236,7 +4312,11 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     const folderName = basename(config.getTargetDir());
-    const title = formatSessionWindowTitle(sessionName, folderName);
+    const title = formatSessionWindowTitle(
+      sessionName,
+      folderName,
+      titleStatusPrefix(streamingState),
+    );
 
     // Only update the title if it's different from the last value we set
     if (lastTitleRef.current !== title) {
@@ -4249,6 +4329,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // Exit cleanup is handled by setWindowTitle() in gemini.tsx → process.on('exit')
   }, [
     sessionName,
+    streamingState,
     settings.merged.ui?.hideWindowTitle,
     settings.merged.ui?.showStatusInTitle,
     config,

@@ -14,6 +14,7 @@ import {
   type MutableRefObject,
 } from 'react';
 import { type PartListUnion } from '@google/genai';
+import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
 import {
@@ -76,6 +77,7 @@ import {
 } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
+import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -119,7 +121,57 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'btw',
   'history',
 ]);
+const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
+  'auth',
+  'diff',
+  'editor',
+  'help',
+  'settings',
+  'status',
+  'stats',
+  'theme',
+]);
+const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
+  'effort',
+  'model',
+  'statusline',
+]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+
+function shouldHideSlashCommandInvocation(
+  command: SlashCommand | undefined,
+  canonicalPath: string[],
+  args: string,
+): boolean {
+  if (command?.kind !== CommandKind.BUILT_IN) {
+    return false;
+  }
+
+  // Bare-root match only: subcommands that produce output (e.g. `/status
+  // paths`) keep their invocation like any other work-performing command.
+  if (
+    canonicalPath.length === 1 &&
+    SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(canonicalPath[0] ?? '')
+  ) {
+    // NO_COLOR prevents the theme dialog from opening, so /theme prints
+    // feedback instead and keeps its invocation like any work-performing
+    // command.
+    if (canonicalPath[0] === 'theme' && process.env['NO_COLOR']) {
+      return false;
+    }
+    return true;
+  }
+
+  const path = canonicalPath.join(' ');
+  if (BARE_SLASH_COMMANDS_HIDE_INVOCATION.has(path)) {
+    if (path === 'model') {
+      return isPickerOnlyModelInvocation(args);
+    }
+    return args.trim() === '';
+  }
+
+  return false;
+}
 
 function getSkillCommandName(command: SlashCommand): string {
   return command.skillDetail?.name ?? command.name;
@@ -841,6 +893,12 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
+      const {
+        commandToExecute,
+        args,
+        canonicalPath: resolvedCommandPath,
+      } = parseSlashCommand(trimmed, commands);
+
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
         recordedItems.push(item);
@@ -862,20 +920,37 @@ export const useSlashCommandProcessor = (
       const userMessageTimestamp = Date.now();
       let invocationItemId = existingInvocationItemId;
       let invocationSentToModel = false;
-      if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
+      let hideInvocation =
+        isBtwCommand(trimmed) ||
+        shouldHideSlashCommandInvocation(
+          commandToExecute,
+          resolvedCommandPath,
+          args,
+        );
+      if (!hideInvocation && invocationItemId === undefined) {
         invocationItemId = addItemWithRecording(
           { type: MessageType.USER, text: trimmed, sentToModel: false },
           userMessageTimestamp,
         );
       }
 
+      const revealHiddenInvocation = () => {
+        if (
+          resolvedCommandPath.join(' ') !== 'model' ||
+          !hideInvocation ||
+          invocationItemId !== undefined
+        ) {
+          return;
+        }
+        hideInvocation = false;
+        invocationItemId = addItemWithRecording(
+          { type: MessageType.USER, text: trimmed, sentToModel: false },
+          userMessageTimestamp,
+        );
+      };
+
       let hasError = false;
       let delegatedToRecursiveInvocation = false;
-      const {
-        commandToExecute,
-        args,
-        canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, commands);
 
       const subcommand =
         resolvedCommandPath.length > 1
@@ -906,6 +981,7 @@ export const useSlashCommandProcessor = (
           const combinedContent: PartListUnion[] = [];
           let firstModelOverride: string | undefined;
           const onCompleteCallbacks: Array<() => Promise<void>> = [];
+          let refreshContextFilesOnWrite = false;
 
           for (const skill of stackedResult.skills) {
             if (!skill.action) continue;
@@ -922,6 +998,9 @@ export const useSlashCommandProcessor = (
             if (skillResult?.type === 'submit_prompt') {
               combinedContent.push(skillResult.content);
               firstModelOverride ??= skillResult.modelOverride;
+              refreshContextFilesOnWrite ||= Boolean(
+                skillResult.refreshContextFilesOnWrite,
+              );
               if (skillResult.onComplete) {
                 onCompleteCallbacks.push(skillResult.onComplete);
               }
@@ -974,6 +1053,9 @@ export const useSlashCommandProcessor = (
             content: mergedContent,
             ...(firstModelOverride
               ? { modelOverride: firstModelOverride }
+              : {}),
+            ...(refreshContextFilesOnWrite
+              ? { refreshContextFilesOnWrite: true }
               : {}),
             ...(onCompleteCallbacks.length
               ? {
@@ -1056,24 +1138,25 @@ export const useSlashCommandProcessor = (
                     toolArgs: result.toolArgs,
                   };
                 case 'message':
+                  // Picker-shaped commands can still reject their arguments
+                  // before opening a dialog. Keep those failures paired with
+                  // the invocation in both live and reconstructed history.
+                  revealHiddenInvocation();
                   if (result.messageType === 'info') {
-                    addMessage({
-                      type: MessageType.INFO,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.INFO, text: result.content },
+                      Date.now(),
+                    );
                   } else if (result.messageType === 'warning') {
-                    addMessage({
-                      type: MessageType.WARNING,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.WARNING, text: result.content },
+                      Date.now(),
+                    );
                   } else {
-                    addMessage({
-                      type: MessageType.ERROR,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    addItemWithRecording(
+                      { type: MessageType.ERROR, text: result.content },
+                      Date.now(),
+                    );
                   }
                   return { type: 'handled' };
                 case 'goal_control': {
@@ -1290,8 +1373,8 @@ export const useSlashCommandProcessor = (
                       output.getAdditionalContext(),
                     );
                   }
+                  invocationSentToModel = true;
                   if (invocationItemId !== undefined) {
-                    invocationSentToModel = true;
                     debugLogger.debug(
                       `Marked slash command invocation as model-sent: /${resolvedCommandPath.join(
                         ' ',
@@ -1309,6 +1392,8 @@ export const useSlashCommandProcessor = (
                     content,
                     onComplete: result.onComplete,
                     modelOverride: result.modelOverride,
+                    refreshContextFilesOnWrite:
+                      result.refreshContextFilesOnWrite,
                   };
                 }
                 case 'confirm_shell_commands': {
@@ -1462,6 +1547,7 @@ export const useSlashCommandProcessor = (
                 phase: 'invocation',
                 rawCommand: trimmed,
                 sentToModel: invocationSentToModel,
+                hiddenInvocation: hideInvocation,
               });
               const outputItems = recordedItems
                 .filter((item) => item.type !== 'user')

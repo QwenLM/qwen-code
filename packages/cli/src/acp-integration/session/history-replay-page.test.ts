@@ -6,6 +6,7 @@
 
 import type {
   ChatRecord,
+  GoalRecord,
   GoalSnapshotV2,
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
@@ -240,6 +241,37 @@ describe('history replay page', () => {
     ]);
   });
 
+  it('fails incrementally before collecting an update above the count limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: Number.MAX_SAFE_INTEGER, maxUpdates: 0 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'updates',
+      observed: 1,
+      limit: 0,
+    });
+  });
+
+  it('fails incrementally before retaining serialized updates above the byte limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: 2, maxUpdates: 1 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'bytes',
+      limit: 2,
+    });
+  });
+
   it('filters malformed replay state before encoding the next cursor', async () => {
     const logger = { warn: vi.fn() };
     const encodeCursor = vi.fn(() => 'next-cursor');
@@ -351,6 +383,7 @@ describe('history replay page', () => {
           pendingToolCalls: [],
           cumulativeUsage: createReplayCumulativeUsage(),
           goalState: GOAL_STATE,
+          goalCause: 'verifier_reject',
         },
       });
 
@@ -358,7 +391,7 @@ describe('history replay page', () => {
       sessionId: SESSION_ID,
       page: recordPage({
         direction: 'backward',
-        replay: { goalState: GOAL_STATE },
+        replay: { goalState: GOAL_STATE, goalCause: 'verifier_reject' },
       }),
       encodeCursor: vi.fn(),
     });
@@ -368,6 +401,7 @@ describe('history replay page', () => {
       finalizeDangling: true,
       gaps: [],
       goalState: GOAL_STATE,
+      goalCause: 'verifier_reject',
     });
   });
 
@@ -401,6 +435,106 @@ describe('history replay page', () => {
       finalizeDangling: true,
       gaps: [],
     });
+  });
+
+  it('drops a malformed goalCause from replay state and warns', async () => {
+    const logger = { warn: vi.fn() };
+    const replayPage = vi
+      .spyOn(HistoryReplayer.prototype, 'replayPage')
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+        },
+      });
+
+    await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        replay: { goalState: GOAL_STATE, goalCause: 'bogus' },
+      }),
+      encodeCursor: vi.fn(),
+      logger,
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[transcript] replay state dropped a malformed Goal cause',
+    );
+    expect(replayPage).toHaveBeenCalledWith([], {
+      pendingToolCalls: [],
+      finalizeDangling: true,
+      gaps: [],
+      goalState: GOAL_STATE,
+    });
+  });
+
+  it('keeps checkpoint bookkeeping suppressed across a page boundary', async () => {
+    // Regression: the replay state carried across a page handoff must include
+    // the last goal_state cause, or the next page's machine cannot tell a
+    // shape-equal bookkeeping re-commit from a genuine rejection card.
+    const goal = GOAL_STATE.goal as GoalRecord;
+    const rejectedGoal = { ...goal, lastReason: 'More work remains' };
+    const goalRecord = (
+      uuid: string,
+      cause: string,
+      snapshotGoal: GoalRecord,
+    ): ChatRecord =>
+      ({
+        uuid,
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: TIMESTAMP,
+        type: 'system',
+        subtype: 'goal_state',
+        systemPayload: {
+          v: 2,
+          cause,
+          snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+        },
+      }) as unknown as ChatRecord;
+
+    let nextReplay: unknown;
+    const firstPage = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        hasMore: true,
+        nextCursorState: cursorState(),
+        records: [
+          goalRecord('goal-create', 'create', goal),
+          goalRecord('goal-reject', 'verifier_reject', rejectedGoal),
+        ],
+      }),
+      encodeCursor: (state) => {
+        nextReplay = state.replay;
+        return 'next-cursor';
+      },
+    });
+    expect(firstPage.updates).toHaveLength(2);
+    expect(nextReplay).toMatchObject({ goalCause: 'verifier_reject' });
+
+    const recommittedGoal = {
+      ...rejectedGoal,
+      activeTimeMs: goal.activeTimeMs + 100,
+      updatedAt: goal.updatedAt + 1,
+    };
+    const secondPage = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [
+          goalRecord(
+            'goal-reject-checkpoint',
+            'verifier_reject',
+            recommittedGoal,
+          ),
+        ],
+        replay: nextReplay,
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    expect(secondPage.updates).toEqual([]);
   });
 
   it('seeds backward replay so a cleared Goal keeps its prior condition', async () => {

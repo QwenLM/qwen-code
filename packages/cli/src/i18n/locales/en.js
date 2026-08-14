@@ -1892,6 +1892,7 @@ export default {
   'Ctrl+Q to queue · ↑ to edit queued messages':
     'Ctrl+Q to queue · ↑ to edit queued messages',
   'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  '{{count}} queued': '{{count}} queued',
   'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
@@ -2048,7 +2049,16 @@ export default {
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
   Running: 'Running',
+  Pausing: 'Pausing',
   Paused: 'Paused',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Pause/resume was rejected; the workflow state changed. Try again.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.',
   Completed: 'Completed',
   Failed: 'Failed',
   Stopped: 'Stopped',
@@ -2817,4 +2827,5 @@ export default {
     'Auto-skill curator changes are disabled in safe mode.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
+  'Kept model as {{model}}': 'Kept model as {{model}}',
 };

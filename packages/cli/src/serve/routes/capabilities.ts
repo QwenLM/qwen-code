@@ -8,6 +8,7 @@ import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
+import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
@@ -29,6 +30,7 @@ interface RegisterCapabilitiesRoutesDeps {
   maxSessionsPerWorkspace: ServeOptions['maxSessions'];
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
+  sessionRestoreTimeoutMs: number;
   languageCodes: string[];
 }
 
@@ -68,6 +70,10 @@ export function registerCapabilitiesRoutes(
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),
+        sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
+        ...(features.includes('workspace_file_upload')
+          ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
+          : {}),
         ...(multiWorkspace
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(

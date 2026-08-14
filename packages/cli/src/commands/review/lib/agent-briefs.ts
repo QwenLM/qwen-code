@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { renderShellLayerBriefList } from './audit-layers.js';
+
 // The review's roles, and what each one is asked to do.
 //
 // These briefs used to live in the skill, as prose telling the orchestrator what
@@ -163,6 +165,19 @@ export interface Brief {
    * instructs exactly as it counts the brief's.
    */
   acceptsFindings?: boolean;
+  /**
+   * This role's brief never carries the soft tool-call ceiling
+   * (`agentToolBudget`).
+   *
+   * Declarative for the same reason `acceptsChunk` is: the exemption used to
+   * be three role names hardcoded in the prompt builder, which is exactly how
+   * a later role whose mandatory work does not scale with the diff would
+   * silently receive a diff-derived ceiling. Each exemption carries its own
+   * reason at the role's entry; a new role decides here, next to everything
+   * else it declares, and the roster test walks `BRIEFS` so the exempt set
+   * cannot drift unpinned.
+   */
+  budgetExempt?: boolean;
   /** The agent-facing text. */
   brief: string;
 }
@@ -176,8 +191,30 @@ export interface Brief {
 export const REVERSE_AUDIT_EXAMPLE_RECEIPT =
   "No issues found — re-walked the reconnect state machine and the two changed exports' call sites; every gap I checked was already in the list";
 
+/**
+ * The model-of-EXECUTION divergence lens: the hunt for a guard, sandbox, or
+ * interpreter whose model of another system's runtime STATE drifts from the real
+ * thing. Agent 2 carries it on a 3A dimension fan-out; on a 3B territory fan-out
+ * Agent 2 does not run, so `buildChunkAgentPrompt` attaches this same lens to
+ * each chunk agent when the manifest declares the diff a modeled executable
+ * system — one source, both topologies. Written self-contained (no back-reference
+ * to a preceding bullet) so it reads correctly in either place.
+ */
+export const MODELED_SYSTEM_EXECUTION_LENS = `- **A model of another system's EXECUTION, diverging in state — not only its syntax.** Beyond a parser that *reads* a format two ways, an *interpreter* — a guard, sandbox, or permission model that re-implements how another system (a shell, git, a query engine) RUNS — can have its model of that system's runtime state drift from the real thing. Syntax divergence is one token read two ways; **state divergence** is the model carrying the wrong VALUE across a boundary the real system crosses differently, so the guard allows what it would have denied. Enumerate the boundaries where the modeled system carries state across a call, and for each ask what the real system does that the model does not: what SURVIVES a function call or \`eval\` (working directory, exported vars, shell options, defined functions) that a subshell or \`$(…)\` does NOT propagate back but DOES inherit; what name-resolution order applies (a function shadowing \`git\`/\`cd\`, \`command\`/\`builtin\` bypassing it, \`export -f\` importing a function into a child shell); which options (\`set -a\`) a child or substitution inherits. The bug shape is a recursive evaluator that computes a nested body's post-state and then DISCARDS or fails to merge it, so a later check runs against state the real system has already moved past. **A second bug shape is state that only ACCUMULATES:** the real system has operations that DELETE what earlier ones added — \`unset -f\`/\`unalias\`/\`export -n -f\` remove a definition or its export attribute, \`set +a\`/\`+o\` clears an option, \`cd -\`/\`popd\` walks a directory back — so a model that grows an add-only map of definitions, export attributes, or options and never removes an entry diverges the moment the real system removes one (a \`git\` function defined, then \`unset -f\`'d, still replayed against a stale body while the real shell resolves the external program). For every piece of modeled state, check the model has a REMOVAL path for every ADD path the real system does. **When the boundary is subtle, do not argue it — run it:** build the payload, execute it against the real system (\`run_shell_command\` real bash/git in the worktree), trace the same payload through the model, and state the divergence with BOTH observed behaviours. A guard that models an executable system and is reviewed only by reading is judged against the very model of that system whose gaps are the vulnerability — the reading and the code share the blind spot by construction.`;
+
+// The enumeration-trap lens — one source for both delivery paths, mirroring
+// MODELED_SYSTEM_EXECUTION_LENS: interpolated into Agent 3b's whole-diff brief
+// (3A) and injected into the chunk brief (3B) by buildChunkAgentPrompt, each
+// under its own scope framing. Scope-neutral body; the wrapping text supplies
+// "for the whole change" vs "for your territory".
+export const ENUMERATION_TRAP_LENS = `A change that HAND-ROLLS parsing or matching of a surface whose **entrance space is unbounded** — untrusted input read a rendered format's way, a re-implemented general grammar, \`indexOf\`/\`slice\`/regex over structured input whose per-corner special-cases keep accumulating ("match what the renderer renders" logic, a growing hand-listed case set) — has **no last corner**, so enumerating cases never converges. (Adversarial input alone does NOT make a surface unbounded: a small, exhaustively specified grammar has a bounded, enumerable set of productions and IS closable by exhaustive validation — do not demand a structural replacement there. The trigger is unboundedness of the entrance space, not the mere hostility of the input.) The finding is the SHAPE, not the current corner: name the class-closing fix — defer to a real parser, the tool's own authoritative structured output, or a fail-closed decision — and file it ONCE, in place of enumerating cases. **Carry ONE demonstrated corner as the finding's witness** — the concrete input/state and the line(s) that produce the wrong outcome, executed against the real code where you can — so a verifier can confirm it at high confidence and it posts; that corner is the class's evidence, not a separate finding. Severity follows the risk the shape carries — a hand-rolled parser that can be fooled into a wrong result is **Critical**.`;
+
 export const BRIEFS: Record<RoleId, Brief> = {
   '0': {
+    // Budget-exempt: Issue-sized mandatory work, not diff-sized: a small bugfix
+    // referencing many issues would exhaust a diff-derived ceiling on
+    // required fetches alone.
+    budgetExempt: true,
     label: 'Agent 0: Issue fidelity & root-cause ownership',
     publicLabel: 'the linked-issue fidelity pass',
     publicLabelZh: '关联 issue 一致性检查',
@@ -293,7 +330,8 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 - CSRF and clickjacking, for web changes
 - **A borrowed protection idiom, missing what made it work at home.** When the diff lifts a defensive construct from elsewhere in the codebase — an escaping call, an encoding, a filter — go READ the source context, and check which of its surroundings did the actual protecting. A live case: an \`@\` → \`&#64;\` rewrite was lifted from a workflow whose output landed inside \`<code>\` — the code ancestor is what made mentions inert; the entity was belt-and-braces. In prose, GitHub decodes the entity before the mention filter runs, so the copied half protects nothing and the review that traced only the copied line would call it sound. Name what the original context provided and whether the new site has it.
 - **Authorization that pattern-matches SHAPE instead of PROVENANCE.** A gate that grants by recognising a canonical-looking string, config stanza, or marker — anything a model or user can write — authorizes whoever can imitate the shape. Probe it three ways: a canary action through the legitimate path, a forged input of the canonical shape through the illegitimate one, and a no-grant control; the fix is binding the grant to provenance the writer cannot fake (a CLI-created record, a receipt), never a stricter pattern.
-- **A second parser for a format someone else authoritatively parses.** When the diff implements its own model of another system's syntax — a sanitizer's fence scanner over markdown GitHub will parse, an escaper's tokenizer, a validator's URL splitter — the finding to hunt is an INPUT THE TWO PARSE DIFFERENTLY: every divergence is a bypass, because the sanitizer transforms what it saw while the authoritative parser renders what IS. Probe the corners the model simplifies (nesting, container prefixes, things that change meaning mid-stream: a fence opener inside a raw-HTML block, a quote inside an attribute) — and probe the sharpest corner FIRST: **the format's own delimiters inside a payload**. A non-greedy, no-escaping extractor fed a value that legitimately contains its close tag terminates the match early and truncates SILENTLY — a measured live case wrote a truncated file with no warning when the content contained a literal \`</parameter>\`. State the divergent input concretely — "these disagree somewhere" is not a finding.`,
+- **A second parser for a format someone else authoritatively parses.** When the diff implements its own model of another system's syntax — a sanitizer's fence scanner over markdown GitHub will parse, an escaper's tokenizer, a validator's URL splitter — the finding to hunt is an INPUT THE TWO PARSE DIFFERENTLY: every divergence is a bypass, because the sanitizer transforms what it saw while the authoritative parser renders what IS. Probe the corners the model simplifies (nesting, container prefixes, things that change meaning mid-stream: a fence opener inside a raw-HTML block, a quote inside an attribute) — and probe the sharpest corner FIRST: **the format's own delimiters inside a payload**. A non-greedy, no-escaping extractor fed a value that legitimately contains its close tag terminates the match early and truncates SILENTLY — a measured live case wrote a truncated file with no warning when the content contained a literal \`</parameter>\`. State the divergent input concretely — "these disagree somewhere" is not a finding.
+${MODELED_SYSTEM_EXECUTION_LENS}`,
   },
 
   // Code quality was one agent holding six unrelated checks — reuse, sibling
@@ -334,7 +372,7 @@ Not your dimension: whether the change is at the right depth (3b owns altitude a
     publicLabel: 'the altitude and abstraction pass',
     publicLabelZh: '修复层次与抽象合理性检查',
     readsDiff: true,
-    brief: `You are **Agent 3b: Altitude & Abstraction Fit**. One question, walked to the end: **is each change at the right depth?**
+    brief: `You are **Agent 3b: Altitude & Abstraction Fit**. One question, walked to the end: **is each change at the right depth, and the right SHAPE for what it re-implements?**
 
 Altitude is the failure that reads as correct at every individual line and is wrong as a whole. For each change ask where the problem it addresses actually lives, and compare that to where the fix was written:
 
@@ -342,6 +380,7 @@ Altitude is the failure that reads as correct at every individual line and is wr
 - **Too shallow in the other direction — the wrong owner.** The defect is upstream (another module, another service, the data's producer) and the diff compensates for it downstream. Say whose bug it is.
 - **Too deep — over-engineering.** A new abstraction, indirection layer, options object, or configuration point serving exactly one call site; a generalisation for a second case that does not exist. The cost is real and concrete: every future reader pays for the indirection, and the shape is fixed by a single example that may be unrepresentative.
 - **Blast radius.** When a change to shared infrastructure exists to serve one caller, name the *other* callers it now also affects, and what it means for them.
+- **Wrong shape — the enumeration trap.** ${ENUMERATION_TRAP_LENS} Filed here as this change's altitude finding, once, in place of enumerating its cases.
 
 Every finding needs the concrete cost, not an aesthetic judgement: what breaks next, what has to be repeated, who else is affected. "This should be more general" with no named next caller is not a finding.
 
@@ -481,6 +520,10 @@ You are undirected on purpose. Do not restrict yourself to the list.`,
   },
 
   '7': {
+    // Budget-exempt: Deterministic build/test commands — the run costs what the
+    // project scripts cost, and stopping early is the one thing it must
+    // never do.
+    budgetExempt: true,
     label: 'Agent 7: Build & test verification',
     publicLabel: 'the build-and-test check',
     publicLabelZh: '构建与测试验证',
@@ -527,7 +570,7 @@ This file is largely rewritten, and reviewing it as a diff is the wrong frame. T
 
 - **Mutable fields.** For every field assigned outside the constructor: is it set on every path that should set it, and cleared on **every** exit, teardown, and error path? A flag set on entry to a retry and cleared only on the success path is a leak. Enumerate the fields first, then check each against every \`return\`, \`throw\`, \`catch\`, \`close\`, and teardown path.
 - **Timers.** For every \`setTimeout\`/\`setInterval\`: is it cancelled on every \`close\`, \`disconnect\`, \`delete\`, and error path? And when it *is* cancelled, does cancelling **discard data the callback had already captured** in its closure — a buffer, a payload, a pending flush? Trace what each callback closes over.
-- **Collections.** For every \`Map\`/\`Set\` insert: is there a matching delete on teardown and on the entity's removal? Are the deletes ordered correctly when one key derives from another (deleting an index before the entry it indexes)?
+- **Collections.** For every \`Map\`/\`Set\` insert: is there a matching delete on teardown and on the entity's removal? Are the deletes ordered correctly when one key derives from another (deleting an index before the entry it indexes)? **If the collection MODELS another system's mutable state** — a map of shell functions, aliases, exported names, or options — the matching delete is owed for every REMOVAL OPERATION that system has (\`unset -f\`, \`unalias\`, \`export -n\`), not only for object teardown: an add-only model of definitions replays a stale entry after the real system removed it (a \`git\` function defined, then \`unset -f\`'d, still shadowing the external program).
 
 Report a **Critical** for each violation, and give **both** locations that together make it a bug (\`<file>:<lineA>\` and \`<file>:<lineB>\`), not just one.`,
   },
@@ -566,11 +609,15 @@ This file is largely rewritten, and reviewing it as a diff is the wrong frame. T
 
 - **Config fields.** Enumerate every config option this file reads. For each, find every path that ought to consult it, and check that it does. Two shapes to hunt: a capability, permission, intent, or subscription requested **unconditionally** while the config names a narrower mode; and a mode one handler honours that a sibling handler silently ignores.
 - **Early returns.** Does any early return skip a side effect a later path depends on — a cache populated, an id extracted and stored, a sequence number bumped? Pay particular attention to a blank/empty-input guard placed **before** a side effect rather than after it.
+- **A recursive evaluator's state-return contract.** If this file interprets, visits, or evaluates another system's semantics (a shell, git, a protocol) by recursing into nested bodies — functions, \`eval\`, subshells, command substitutions, pipelines — enumerate every piece of state the REAL system threads across such a boundary (working directory, exported variables, shell options, defined functions/aliases) and every recursive call site. For each, check the caller MERGES back exactly what the real system propagates and isolates exactly what it isolates: a same-shell function or \`eval\` must carry its body's cwd, exports, and definitions back to the caller; a subshell or \`$(…)\` must INHERIT the caller's options while NOT propagating its mutations out. A caller that discards a nested body's computed post-state — or initializes the nested scope to a default instead of inheriting the caller's — lets a later check run against stale state the real system has already left, which for a security guard is a silent bypass. This is the early-return failure one level up: the state is computed and then dropped, not by an early \`return\` but by a caller that never reads the return.
 
 Report a **Critical** for each violation, and give **both** locations that together make it a bug (\`<file>:<lineA>\` and \`<file>:<lineB>\`), not just one.`,
   },
 
   verify: {
+    // Budget-exempt: Its per-finding re-trace must not stop early; `verifyShard`
+    // already governs its load.
+    budgetExempt: true,
     reviewsCode: true,
     output: 'verdicts',
     acceptsFindings: true,
@@ -596,6 +643,8 @@ For each finding you were given:
 - **The observation is the verdict, not your reading of it.** The probe *ran* the code, so its output is the confirmation a Critical needs — cite the observed values (\`sendShellCommand called twice with ["git push"]\`). A probe that shows the **correct** outcome is exactly the "quote the contradicting code" that lets you reject a Critical: the code demonstrably does not do what the finding claims. A probe that could not be run, or could not be shown to flip, confirms nothing — fall back to the reading-based verdict and its low-confidence floor.
 
 **When the fix IS a threshold, measure the threshold.** A guard built on a ratio or length cutoff makes the fix's coverage an empirical number, not a reading: hold every other variable fixed, vary the guarded quantity, and binary-search the boundary where behaviour flips. Then put that number next to what the linked issue actually reports — a live verification of a prose-ratio guard measured the minimum recovering payload at ~473 chars with the issue's own preamble held fixed, which proved the fix covered the issue's \`edit\`/\`write_file\` half and silently declined its \`run_shell_command\` half. "Fix is narrower than its claim, here is the boundary, here is the half it misses" is a finding no amount of code-reading produces.
+
+**When the defect is mechanically enumerable, sweep the real population — the count is the verdict.** For a claim about a pattern, a predicate, or a parser ("this misclassifies X", "this mishandles shape Y"), do not stop at the one reported instance: run the check over every real instance this repo holds (every workflow step body, every call site, every input the code will actually see) and report the count. "195 of 434 real \`run:\` bodies reach this path" confirms the finding, sizes its severity, and hands the author a number they can re-run rather than argue with — and a count of **zero** is the quoted contradiction that rejects it. Two rules keep a sweep evidence rather than theatre: its oracle must be an **external authority** — the real parser, the real tool, \`bash -n\` — never your own reimplementation of the logic under test, because a mirror shares the blind spots of what it mirrors and mirrored sweeps have manufactured false findings out of their own bugs; and spot-check one hit by reading it before you quote a nonzero count.
 
 **A suggested fix you did not run is a hypothesis; say which one you are giving.** When a finding's fix is cheap to apply, patch it in, re-run the same probe/harness to show it works, then revert — and state that every other number in your report comes from the unmodified PR (the contamination line is what lets a reader trust the rest). A fix too costly to verify is still worth proposing, labeled untested.
 
@@ -657,6 +706,8 @@ Return, for each finding, one verdict:
 - **confirmed (low confidence)** — the mechanism is real but the trigger is uncertain (timing, environment, configuration). Say what would confirm it. Carry the severity.
 - **rejected** — the code does not do what the finding claims (**quote the contradicting code**), or it matches an Exclusion Criterion (one-line reason).
 
+**A confirmed Critical returns its witness.** Alongside the verdict, include a \`witness:\` line quoting the observed output that settled it — the probe's two sides, the A/B's \`BASE:\`/\`PR:\` pair, the extracted step's run, the sweep count — trimmed to the deciding lines. When every run-capability above is genuinely inapplicable and the confirmation rests on the trace alone, write the one line \`witness: not run — <why no run could settle this claim>\` instead; writing that line is also the moment you notice when the claim was runnable after all. This is mechanical downstream — enforced in code at the findings canonicalization, not merely by the orchestrator's read of its rules: a confirmed Critical returning neither the witness nor the reason line is filed at **low confidence** — terminal-only, never posted — whatever your prose argued, because the evidence a run produced is the one part of a Critical its author can act on without re-deriving the bug.
+
 **Rejecting a Critical carries a higher bar than anything else, and it is one-way.** A rejected Critical is gone — no later stage revisits it, it vanishes from both the pull request and the terminal. To reject one you must **quote the specific code that contradicts the claim**. A passing test, a plausible-looking guard, or "I could not reproduce the reasoning" is not enough — when you cannot quote the contradiction, the floor is \`confirmed (low confidence)\`, never rejection. Downgrading is reversible; a human still sees a low-confidence finding under "Needs Human Review". Rejection is not.
 
 **For anything non-Critical, when uncertain, downgrade to low confidence rather than rejecting.** Reserve outright rejection for a finding that clearly does not match the code (it describes behaviour the code does not have) or matches an Exclusion Criterion. Low confidence is for "likely real, needs human judgement", not for "I have no idea" — a vague suspicion with no concrete evidence in the code can still be rejected.
@@ -683,6 +734,7 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
 
 - **Read your scope in full** with the diff reads the message gives you — page a truncated read rather than reasoning from its first screenful. A reverse audit that saw a fraction of its scope and returned "No issues found" is worse than none: it ends the loop on a lie.
 - **Focus exclusively on what is not already in the finding list.** Assume the obvious defects are found; look where a first pass does not: the interaction between two changes, the assumption that holds in the common case and breaks in the rare one, the removed guard whose replacement is three files away.
+- **If this diff MODELS an executable system — a guard, sandbox, interpreter, or permission model that re-implements how a shell, git, or a protocol RUNS — cover it by defect LAYER, not by gut feel.** A "no new gaps" return is evidence about the layer you walked and silent about the ones you did not, and the abundant surface-layer bypasses (a comment token, a glob, a bundled flag) will fill a round while a deeper layer goes untouched — that is how a converged loop ships a whole class unreviewed (measured; the cross-worktree guard whose token-layer bypasses were found and whose state-propagation layer was not). Walk each layer and **receipt it on its own line** — the \`Budget gap:\` discipline, a line the tooling reads, not a phrase to bury in prose — in the fixed form \`Layer walked: <id> — <what you examined or found>\`, whether it yielded a finding or you examined it clear. For a shell/git execution model the layers are: ${renderShellLayerBriefList()}. For each state layer, walk BOTH sides — the operation that ESTABLISHES state and the one that REMOVES or resets it (\`unset -f\`, \`unalias\`, \`export -n\`, \`set +a\`, \`cd -\`): a model that only accumulates and never removes is the add-only shape, and it diverges the instant the real system removes an entry (a \`git\` function defined then \`unset -f\`'d, still replayed stale). A layer you leave unwalked is owed scope, not a pass: name it as one so it reaches \`unreviewedDimensions\` rather than hiding behind a dry round. (This layer list is the shell/git execution model, and the automated coverage cap measures only that set today. A different modeled system — a SQL planner, a markdown sanitizer, a codec — has its own layers: walk and receipt them by name under the same rule, but the deterministic cap does not yet read a manifest-declared taxonomy for a non-shell system, so the automated cap is shell/git-scoped for now.)
 - **Report only Critical or Suggestion.** Do not report Nice to have.
 - A found gap uses the standard finding format (with \`Source: [review]\`), including its failure scenario — your findings go through the same verification as any other, so they must carry the evidence a verifier can trace.
 

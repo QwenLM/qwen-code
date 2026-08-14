@@ -201,7 +201,7 @@ function isRetryAbortError(error: unknown): boolean {
 // malformed or circular chain from an unbounded traversal.
 const MAX_TRANSPORT_CAUSE_DEPTH = 4;
 
-function getTransportCode(error: unknown): string | undefined {
+export function getTransportCode(error: unknown): string | undefined {
   let current: unknown = error;
   for (let depth = 0; depth <= MAX_TRANSPORT_CAUSE_DEPTH; depth++) {
     if (typeof current !== 'object' || current === null) {

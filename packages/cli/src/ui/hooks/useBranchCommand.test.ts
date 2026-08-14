@@ -32,6 +32,7 @@ describe('useBranchCommand', () => {
   let addItem: ReturnType<typeof vi.fn>;
   let backgroundTaskRegistry: {
     hasRunningTasks: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   let monitorRegistry: {
@@ -40,11 +41,14 @@ describe('useBranchCommand', () => {
   };
   let backgroundShellRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
+    getAll: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
   };
   let workflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -102,6 +106,7 @@ describe('useBranchCommand', () => {
     addItem = vi.fn();
     backgroundTaskRegistry = {
       hasRunningTasks: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
     };
     monitorRegistry = {
@@ -110,11 +115,14 @@ describe('useBranchCommand', () => {
     };
     backgroundShellRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
+      getAll: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
     };
     workflowRunRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
+      abortAll: vi.fn(),
     };
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
@@ -139,6 +147,15 @@ describe('useBranchCommand', () => {
 
   it('refuses to branch while background work is running', async () => {
     backgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
+    backgroundTaskRegistry.getAll.mockReturnValue([
+      {
+        agentId: 'bg_ab12cd34',
+        isBackgrounded: true,
+        status: 'running',
+        description: 'long-running research',
+        startTime: Date.now(),
+      },
+    ]);
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -148,13 +165,14 @@ describe('useBranchCommand', () => {
     expect(finalize).not.toHaveBeenCalled();
     expect(forkSession).not.toHaveBeenCalled();
     expect(startNewSessionConfig).not.toHaveBeenCalled();
-    expect(addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'error',
-        text: expect.stringContaining('running background tasks'),
-      }),
-      expect.any(Number),
-    );
+    expect(addItem).toHaveBeenCalledTimes(1);
+    const blockedItem = addItem.mock.calls[0]?.[0] as {
+      type: string;
+      text: string;
+    };
+    expect(blockedItem.type).toBe('error');
+    expect(blockedItem.text).toContain('running background tasks');
+    expect(blockedItem.text).toContain('[bg_ab12cd34]');
   });
 
   it('clears terminal background state after the branch initializes', async () => {

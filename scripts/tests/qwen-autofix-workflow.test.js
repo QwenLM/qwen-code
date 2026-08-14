@@ -18,6 +18,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { getWorkflowJob } from './workflow-helpers.js';
+
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
@@ -84,6 +86,10 @@ const publishPrStep =
 const pushAndReportStep =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
+  )?.[0] ?? '';
+const prepareStep =
+  workflow.match(
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
   )?.[0] ?? '';
 const reportDryRunFailureSteps =
   workflow.match(
@@ -178,6 +184,80 @@ const nodeSetupSteps =
   workflow.match(/- name: 'Set up Node.js'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
 
+// GitHub Actions expressions return operand VALUES from &&/||, not
+// booleans: && yields the first falsy operand (else the last operand), ||
+// the first truthy (else the last), '' is falsy, and && binds tighter
+// than ||. A ternary can therefore read right and evaluate wrong, which
+// text pins cannot see — so the cache choice is also pinned semantically
+// with this minimal evaluator.
+function evalGhaExpression(expression, facts) {
+  let pos = 0;
+  const truthy = (value) =>
+    value !== false && value !== null && value !== 0 && value !== '';
+  const skipSpace = () => {
+    while (/\s/.test(expression[pos] ?? '')) {
+      pos += 1;
+    }
+  };
+  const parsePrimary = () => {
+    skipSpace();
+    if (expression[pos] === "'") {
+      const end = expression.indexOf("'", pos + 1);
+      const value = expression.slice(pos + 1, end);
+      pos = end + 1;
+      return value;
+    }
+    const name = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(expression.slice(pos))[0];
+    pos += name.length;
+    if (name === 'true') {
+      return true;
+    }
+    if (name === 'false') {
+      return false;
+    }
+    if (name === 'null') {
+      return null;
+    }
+    return facts[name];
+  };
+  const parseComparison = () => {
+    const left = parsePrimary();
+    skipSpace();
+    const op = expression.slice(pos, pos + 2);
+    if (op !== '==' && op !== '!=') {
+      return left;
+    }
+    pos += 2;
+    const right = parsePrimary();
+    return op === '==' ? left === right : left !== right;
+  };
+  const parseAnd = () => {
+    let left = parseComparison();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '&&') {
+        return left;
+      }
+      pos += 2;
+      const right = parseComparison();
+      left = truthy(left) ? right : left;
+    }
+  };
+  const parseOr = () => {
+    let left = parseAnd();
+    for (;;) {
+      skipSpace();
+      if (expression.slice(pos, pos + 2) !== '||') {
+        return left;
+      }
+      pos += 2;
+      const right = parseAnd();
+      left = truthy(left) ? left : right;
+    }
+  };
+  return parseOr();
+}
+
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
@@ -205,6 +285,16 @@ function writeWorkdirStub(dir, lines) {
     'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
     ...lines,
   ]);
+}
+
+function qwenResultLine({ result, errorMessage, isError = false }) {
+  return `${JSON.stringify({
+    type: 'result',
+    subtype: isError ? 'error_during_execution' : 'success',
+    is_error: isError,
+    ...(result === undefined ? {} : { result }),
+    ...(errorMessage === undefined ? {} : { error: { message: errorMessage } }),
+  })}\n`;
 }
 
 function runAutofixRunner(args) {
@@ -323,7 +413,8 @@ describe('qwen-autofix workflow', () => {
     expect(authRounds).toBeLessThan(strictRounds);
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
-    expect(reviewScanJob).toContain('not an open main-targeting PR');
+    expect(reviewScanJob).toContain('Forced PR #${FORCED_PR} rejected:');
+    expect(reviewScanJob).toContain('forced_admission_reason');
     // Candidates fail CLOSED on the fork field, matching the forced path
     // and the NOTE that documents the jq // false trap.
     expect(reviewScanJob).toContain('select(.isCrossRepository == false)');
@@ -338,11 +429,19 @@ describe('qwen-autofix workflow', () => {
     // that it exists AND still binds below MAX_TARGETS_PER_SCAN is pinned by
     // 'bounds fleet-wide simultaneity below the per-scan target budget'.
     // Asserting the literal number here only detected edits, not breakage.
-    expect(workflow).toMatch(/max-parallel: \d+/);
+    expect(workflow).toMatch(
+      /max-parallel: '\$\{\{ fromJSON\(vars\.QWEN_AUTOFIX_MAX_PARALLEL \|\| \d+\) \}\}'/,
+    );
     // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
     // bounds runtime and API usage, not just matrix size), the deferral is
     // LOGGED, and the next scan picks up the remainder.
-    expect(workflow).toContain("MAX_TARGETS_PER_SCAN: '10'");
+    // Operator-tunable via a repository variable so the loop can be re-sized
+    // as the takeover pool grows without a code change; the literal is the
+    // fallback. Both halves are asserted so the knob cannot silently lose
+    // either its variable or its default.
+    expect(workflow).toMatch(
+      /MAX_TARGETS_PER_SCAN: '\$\{\{ vars\.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN \|\| \d+ \}\}'/,
+    );
     expect(reviewScanJob).toContain(
       'deferring the remaining candidates to the next scan',
     );
@@ -403,7 +502,11 @@ describe('qwen-autofix workflow', () => {
         const sel = seg.slice(0, 400);
         return (
           !/startswith\("review-address"\)/.test(sel) &&
-          !/!= "Qwen Autofix"/.test(sel)
+          !/!= "Qwen Autofix"/.test(sel) &&
+          // The review-in-flight gate (#8888) selects BY NAME for the LLM
+          // review check — a liveness probe, not a feedback selector, so it
+          // needs neither the review-address carve-out nor the workflow guard.
+          !/== "review-pr"/.test(sel)
         );
       });
     expect(guardlessSelectors).toEqual([]);
@@ -457,6 +560,9 @@ describe('qwen-autofix workflow', () => {
       '.github/workflows/qwen-code-pr-review.yml',
       'utf8',
     );
+    expect(reviewWorkflow.split('\n')[0]).toBe(
+      "name: '🧐 Qwen Pull Request Review'",
+    );
     for (const name of nonBlocking) {
       expect(reviewWorkflow).toContain(`\n  ${name}:\n`);
     }
@@ -503,6 +609,212 @@ describe('qwen-autofix workflow', () => {
     expect(run([llm, build])).toBe('true');
     // Unchanged: the branch-mutating sibling in the same workflow still blocks.
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
+  });
+
+  it('holds a round while review-pr is in flight on the head (#8888)', () => {
+    // Every head mutation the scan can make (a stale-base update-branch, an
+    // address push) is a synchronize event that cancels the in-flight review
+    // via qwen-code-pr-review.yml's cancel-in-progress, discarding up to ~3h
+    // of review work — the self-reinforcing cancellation loop of PR #8830.
+    // The gate skips the PR entirely while review-pr is live on its head; the
+    // watermark is not advanced on the skip, so the feedback stays visible.
+    // It is deliberately separate from HAS_PENDING_CHECKS (no aging out, no
+    // NON_BLOCKING_CHECKS revert — that would re-block on the conclusion and
+    // reintroduce #7416's wait).
+    expect(reviewScanJob).toContain('REVIEW_PR_LIVE=');
+    expect(reviewScanJob).toContain(
+      'review-pr in flight on this head — holding this round',
+    );
+    expect(reviewScanJob).toContain('fleet_row "${PR}" \'review-in-flight\'');
+    // The gate must sit BEFORE the stale-base update (a merge-main is exactly
+    // the push that killed two reviews on #8830) and the feedback dispatch.
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('Auto-rerun a check that died on INFRASTRUCTURE'),
+    );
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
+    );
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('N_FAILED_CHECKS='),
+    );
+    expect(
+      reviewScanJob.lastIndexOf('if [[ "${REVIEW_PR_LIVE}" == "true" ]]'),
+    ).toBeGreaterThan(reviewScanJob.indexOf('if [[ "${ROUND}" -ge'));
+
+    // Replay the REAL extracted liveness filter over rollup fixtures.
+    const filter = reviewScanJob.match(
+      /REVIEW_PR_LIVE="\$\(jq -r[\s\S]*?<<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(filter).toBeTruthy();
+    const run = (checks) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CHECKS_JSON='${JSON.stringify(checks)}'\n${filter}\nprintf '%s' "$REVIEW_PR_LIVE"`,
+        ],
+        { env: { ...process.env }, encoding: 'utf8' },
+      );
+    const started = '2026-08-10T10:05:49Z';
+    // A live review-pr blocks — in every pending-ish status the rollup uses.
+    for (const status of [
+      'QUEUED',
+      'IN_PROGRESS',
+      'PENDING',
+      'WAITING',
+      'REQUESTED',
+    ]) {
+      expect(
+        run([
+          {
+            name: 'review-pr',
+            workflowName: '🧐 Qwen Pull Request Review',
+            status,
+            startedAt: started,
+          },
+        ]),
+      ).toBe('true');
+    }
+    expect(
+      run([
+        {
+          name: 'review-pr',
+          workflowName: 'Other',
+          status: 'IN_PROGRESS',
+        },
+      ]),
+    ).toBe('false');
+    // A concluded review does NOT block (that would reintroduce #7416's wait).
+    expect(
+      run([
+        {
+          name: 'review-pr',
+          workflowName: '🧐 Qwen Pull Request Review',
+          status: 'COMPLETED',
+          conclusion: 'SUCCESS',
+        },
+      ]),
+    ).toBe('false');
+    // Other checks in flight are this gate's business as usual — not live.
+    expect(
+      run([{ name: 'Test (ubuntu-latest, Node 22.x)', status: 'IN_PROGRESS' }]),
+    ).toBe('false');
+
+    // Delay-window fallback: during the review workflow's 10-minute delay the
+    // review-pr check-run does not exist yet, so the rollup alone misses it;
+    // the scan falls back to queued runs of the review workflow by head SHA.
+    expect(reviewScanJob).toContain('REVIEW_WF_ID=');
+    expect(reviewScanJob).toContain(
+      'actions/workflows/${REVIEW_WF_ID}/runs?per_page=100',
+    );
+    expect(reviewScanJob).not.toContain(
+      'REVIEW_RUNS_JSON="$(gh api --paginate',
+    );
+    expect(reviewScanJob).toContain(
+      'IN("queued", "waiting", "pending", "requested", "in_progress")',
+    );
+    expect(reviewScanJob).not.toContain(
+      "grep -qE '^(queued|waiting|pending)$'",
+    );
+    expect(reviewScanJob).toContain('REVIEW_RUN_STARTED_AT=');
+    expect(reviewScanJob).toContain('.run_started_at // .created_at');
+    expect(reviewScanJob).toContain('any(.pull_requests[]?');
+    expect(reviewScanJob).toContain(
+      'select((.event // "") == "pull_request_target")',
+    );
+
+    // Replay the REAL runs-API fallback filter over fixtures (R1-8): the
+    // toContain pins above would still pass if the jq body were dead.
+    const runsFilter = reviewScanJob.match(
+      /REVIEW_RUN_STARTED_AT="\$\(jq -r[\s\S]*?<<< "\$\{REVIEW_RUNS_JSON\}"\)"/,
+    )?.[0];
+    expect(runsFilter).toBeTruthy();
+    const runRuns = (runs) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `REVIEW_WF_ID='77' PR='42' PR_HEAD_OID='abc123'\nREVIEW_RUNS_JSON='${JSON.stringify(runs)}'\n${runsFilter}\nprintf '%s' "$REVIEW_RUN_STARTED_AT"`,
+        ],
+        { env: { ...process.env }, encoding: 'utf8' },
+      );
+    const runs = (...overrides) => ({
+      workflow_runs: overrides.map((o) => ({
+        workflow_id: 77,
+        event: 'pull_request_target',
+        status: 'in_progress',
+        head_sha: 'abc123',
+        head_branch: 'feat/x',
+        run_started_at: '2026-08-13T01:00:00Z',
+        pull_requests: [],
+        ...o,
+      })),
+    });
+    // A live automatic review on the head blocks — every pending-ish status
+    // the runs API uses, including requested/in_progress (R2-2).
+    for (const status of [
+      'queued',
+      'waiting',
+      'pending',
+      'requested',
+      'in_progress',
+    ]) {
+      expect(runRuns(runs({ status }))).toBe('2026-08-13T01:00:00Z');
+    }
+    // An explicit-trigger run is NOT cancelable by synchronize — no hold (R2-1).
+    expect(runRuns(runs({ event: 'issue_comment' }))).toBe('');
+    // A run of another workflow id never blocks (R2-1 binding).
+    expect(runRuns(runs({ workflow_id: 99 }))).toBe('');
+    // A concluded run does not block.
+    expect(runRuns(runs({ status: 'completed' }))).toBe('');
+    // A fork-controlled bare branch name alone is not identity.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'other',
+          head_branch: 'feat/x',
+          pull_requests: [],
+        }),
+      ),
+    ).toBe('');
+    // Immutable head SHA alone is still enough.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'abc123',
+          head_branch: 'other',
+          pull_requests: [],
+        }),
+      ),
+    ).toBe('2026-08-13T01:00:00Z');
+    // Matching also works via pull_requests association, not only head SHA.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'other',
+          head_branch: 'other',
+          pull_requests: [{ number: 42 }],
+        }),
+      ),
+    ).toBe('2026-08-13T01:00:00Z');
+
+    // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
+    // visible acknowledgment per in-flight review run (marker keyed on the
+    // review-pr check's startedAt); the review bot's own findings never ack.
+    expect(reviewScanJob).toContain('"${REVIEW_SENDER}" != "${REVIEW_BOT}"');
+    expect(reviewScanJob).toContain('autofix-review-deferred');
+    expect(reviewScanJob).toContain('select((.user.login // "") == $ab)');
+    expect(reviewScanJob).toContain(
+      '[[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"',
+    );
+    expect(workflow).toContain(
+      "review_sender: '${{ github.event.review.user.login }}'",
+    );
+    // An empty startedAt must skip the ack, not arm an always-matching marker.
+    expect(reviewScanJob).toContain('select(. != "") ] | first // ""');
+    expect(reviewScanJob).toContain(
+      'has no startedAt yet (queued); a later scan acks once it starts',
+    );
   });
 
   it('auto-updates a PR red only from a stale base, gated on green-on-main', () => {
@@ -931,6 +1243,7 @@ describe('qwen-autofix workflow', () => {
       rerunOk = true,
       crName = 'E2E',
       wfName = 'CI',
+      reviewLive = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'infra-'));
       const bin = join(dir, 'bin');
@@ -977,6 +1290,7 @@ describe('qwen-autofix workflow', () => {
             PR: '1',
             PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
             PR_HEAD_OID: 'headSHA',
+            REVIEW_PR_LIVE: reviewLive ? 'true' : 'false',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
@@ -1010,6 +1324,16 @@ describe('qwen-autofix workflow', () => {
       run({
         checks: [FAIL],
         annotations: 'Expected 1 argument but got 2 — src/foo.ts:10',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // A live review-pr must win: rerunning review-address can push and cancel
+    // that review, so the infra recovery waits for the next scan.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          'The self-hosted runner lost communication with the server',
+        reviewLive: true,
       }),
     ).toEqual({ reran: false, continued: false });
     // Already reran once (attempt 2) and still infra-failing → persistent, do
@@ -1312,10 +1636,17 @@ describe('qwen-autofix workflow', () => {
     // raising it to the target budget, both let one backlog open every agent
     // run at once — which is the thing the cap exists to prevent, and neither
     // would fail any other test.
+    // Both are repository variables now, so what is checkable here is the
+    // FALLBACK pair — the values that apply until an operator sets them.
+    // Keeping the relation true for the fallbacks means an unconfigured repo
+    // is still correctly bounded; for configured ones it is an operator
+    // invariant, stated at both definitions.
     expect(reviewAddressJob).toContain('matrix:');
-    const parallel = Number(reviewAddressJob.match(/max-parallel: (\d+)/)?.[1]);
+    const parallel = Number(
+      reviewAddressJob.match(/max-parallel:.*?\|\|\s*(\d+)/)?.[1],
+    );
     const targetBudget = Number(
-      workflow.match(/MAX_TARGETS_PER_SCAN: '(\d+)'/)?.[1],
+      workflow.match(/MAX_TARGETS_PER_SCAN:.*?\|\|\s*(\d+)/)?.[1],
     );
     expect(Number.isInteger(parallel)).toBe(true);
     expect(parallel).toBeGreaterThan(0);
@@ -1803,13 +2134,13 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain(
       'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
     );
-    // In-repo PRs are managed only when the bot authored them; forks only
-    // under the scan's takeover rules (allow-edits + bot fork or the label).
+    // In-repo PRs are managed only when the bot authored them. Forks are not
+    // managed from this event at all — it carries no repository secrets, so
+    // nothing downstream of it could authenticate ('declines fork PRs at the
+    // real-time review trigger' replays that).
     expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
-    expect(routeStep).toContain('.maintainerCanModify == true');
-    expect(routeStep).toContain('index($t) != null');
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
     );
@@ -1817,7 +2148,7 @@ describe('qwen-autofix workflow', () => {
       "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
     );
     expect(routeStep).toContain(
-      'review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits',
+      'fork review noted for #${PR_NUMBER_EVENT} — this event carries no repository secrets',
     );
   });
 
@@ -1841,7 +2172,11 @@ describe('qwen-autofix workflow', () => {
     // Per-TARGET keys: cron ticks coalesce with each other; review events
     // coalesce per PR (near-simultaneous reviews on one PR route once, without
     // events on OTHER PRs cancelling this one); issue events per issue;
-    // dispatches unique and never cancelled.
+    // dispatches unique and never cancelled — fork-bridge dispatches
+    // included: `source` is a public workflow_dispatch input, so no dispatch
+    // may claim trusted per-PR coalescing by asserting an origin; fork-review
+    // bursts coalesce upstream instead (the signal per PR, the bridge per
+    // conclusion+head).
     expect(routeJob).toContain("'qwen-autofix-route-cron'");
     expect(routeJob).toContain(
       "format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)",
@@ -1852,6 +2187,12 @@ describe('qwen-autofix workflow', () => {
     expect(routeJob).toContain(
       "format('qwen-autofix-route-{0}', github.run_id)",
     );
+    // The public `source` marker must not buy any dispatch a shared group or
+    // cancellation rights: pin the forkbridge branch OUT (order-blind
+    // substring pins cannot see a re-added disjunct before the run-id
+    // fallback, but an absent one cannot hide).
+    expect(routeJob).not.toContain('forkbridge');
+    expect(routeJob).not.toContain("inputs.source == 'fork-bridge'");
     expect(routeJob).toContain(
       "cancel-in-progress: |-\n        ${{ github.event_name != 'workflow_dispatch' }}",
     );
@@ -2293,13 +2634,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("HEAD_REPO: '${{ matrix.target.head_repo }}'");
     expect(reviewScanJob).toContain('head_repo: $hr');
     expect(workflow).toContain(
-      'git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
+      'git -c http.sslVerify=true -c credential.helper= fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
     expect(workflow).toContain(
       'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
     expect(workflow).toContain(
-      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
     // prove push access BEFORE an agent round is spent, discarding
@@ -2308,7 +2649,7 @@ describe('qwen-autofix workflow', () => {
     // `push --no-verify …` match would still satisfy): the host-scoped
     // credential prefix must immediately precede the push.
     expect(workflow).toMatch(
-      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+      /git -c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify --dry-run "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
     );
     expect(workflow).toContain('fork push preflight failed');
     // First-pickup engage ack anchors the window when the label path could
@@ -2576,9 +2917,16 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(13);
+    expect(workflow.split('--paginate').length - 1).toBe(15);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
-    // report COMMENTS_JSON fallback = nine normalized fetch sites.
+    // report COMMENTS_JSON fallback = nine normalized fetch sites. The
+    // blocked-takeover status lookup is deliberately NOT among them: like the
+    // sibling STATUS_ID read, it consumes the page stream inline via
+    // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
+    // so piping it through `jq -s 'add // []'` would wrap the id stream in an
+    // array and break the tail-1 consumer. The #8888 deferred-review ack
+    // dedup is the same class: `--jq '.[].body'` feeds a grep, never a
+    // WORKDIR file, so it bumps the total pin but not the normalizer count.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -2774,9 +3122,27 @@ describe('qwen-autofix workflow', () => {
     // spammed 7 refusals on #7836 — those stay covered by the
     // once-per-window pause notice. No dedup on the dispatch itself: the
     // shepherd sends at most one per head, and a human asking twice
-    // deserves two answers.
+    // deserves two answers. fork-bridge dispatches are the one
+    // dispatch-shaped exception — they are fork-PR reviews laundered into
+    // dispatch form, so answering each one loudly would post one refusal
+    // per review on a capped fork PR (the exact #7836 spam this gate
+    // prevents). But `source` is a public workflow_dispatch input a manual
+    // dispatch can set, so the silence is honored ONLY on positive proof of
+    // origin: a recent SUCCESSFUL fork-bridge run whose title names this
+    // exact PR. Unverified markers are answered like explicit dispatches.
     expect(reviewScanJob).toContain(
-      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' ]]; then',
+      "DISPATCH_SOURCE: \"${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}\"",
+    );
+    expect(reviewScanJob).toContain('FORK_BRIDGE_VERIFIED=false');
+    expect(reviewScanJob).toContain(
+      '--workflow qwen-autofix-fork-bridge.yml --limit 20 --json conclusion,createdAt,displayTitle',
+    );
+    expect(reviewScanJob).toContain(
+      'startswith("fork-bridge: fork-signal: PR \\($pr) reviewed by ")',
+    );
+    expect(reviewScanJob).toContain('fork-bridge provenance unverified');
+    expect(reviewScanJob).toContain(
+      'if [[ -n "${FORCED_PR}" && "${FORCED_PR}" == "${PR}" && "${EVENT_NAME}" == \'workflow_dispatch\' && "${FORK_BRIDGE_VERIFIED}" != \'true\' ]]; then',
     );
     expect(reviewScanJob).toContain('<!-- takeover-cap-refused -->');
     expect(reviewScanJob).toContain('Dispatch refused');
@@ -2784,25 +3150,76 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain(
       'cap-refused notice skipped: PAT authenticates as',
     );
+    // Provenance is a GitHub-records check: success conclusion, a title
+    // naming the exact PR (no prefix collisions), and a recent createdAt.
+    // Replay the extracted jq program VERBATIM so a dropped predicate fails
+    // the test, not just a substring.
+    const provenanceJq = reviewScanJob.match(
+      /jq -e --arg pr "\$\{PR\}" --arg cutoff "\$\{BRIDGE_CUTOFF\}" '([\s\S]*?)' <<< "\$\{BRIDGE_RUNS\}"/,
+    )?.[1];
+    expect(provenanceJq).toBeTruthy();
+    const verifies = (runs, pr = '7836', cutoff = '2026-08-07T04:00:00Z') =>
+      spawnSync(
+        'jq',
+        ['-e', '--arg', 'pr', pr, '--arg', 'cutoff', cutoff, provenanceJq],
+        {
+          input: JSON.stringify(runs),
+          encoding: 'utf8',
+        },
+      ).status === 0;
+    const bridgeRun = (displayTitle, over = {}) => ({
+      conclusion: 'success',
+      createdAt: '2026-08-07T10:00:00Z',
+      displayTitle,
+      ...over,
+    });
+    const MATCHING = 'fork-bridge: fork-signal: PR 7836 reviewed by wenshao';
+    expect(verifies([bridgeRun(MATCHING)])).toBe(true);
+    // A different PR's bridge run proves nothing.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 999 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // No prefix collision: PR 78366 is not PR 7836.
+    expect(
+      verifies([
+        bridgeRun('fork-bridge: fork-signal: PR 78366 reviewed by wenshao'),
+      ]),
+    ).toBe(false);
+    // Only SUCCESSFUL bridge runs count, and only recent ones.
+    expect(verifies([bridgeRun(MATCHING, { conclusion: 'failure' })])).toBe(
+      false,
+    );
+    expect(
+      verifies([bridgeRun(MATCHING, { createdAt: '2026-08-07T03:00:00Z' })]),
+    ).toBe(false);
+    expect(verifies([])).toBe(false);
     // The loud refusal is gated on workflow_dispatch (FORCED_PR is also set
-    // for trusted review submissions). Replay the guard VERBATIM so a
-    // dropped EVENT_NAME condition fails the test, not just a substring: a
-    // dispatch is answered, a review submission is left to the pause notice.
+    // for trusted review submissions) and EXCLUDES only PROVENANCE-VERIFIED
+    // fork-bridge dispatches. Replay the guard VERBATIM so a dropped
+    // condition fails the test, not just a substring: an explicit dispatch
+    // is answered, a verified fork-bridge dispatch stays silent, and a
+    // fork-bridge MARKER without verification is answered like an explicit
+    // dispatch (the replay cannot call the API — verification state rides
+    // FORK_BRIDGE_VERIFIED, set by the jq program replayed above).
     const refusedGuard = reviewScanJob.match(
-      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' \]\]; then)/,
+      /(if \[\[ -n "\$\{FORCED_PR\}" && "\$\{FORCED_PR\}" == "\$\{PR\}" && "\$\{EVENT_NAME\}" == 'workflow_dispatch' && "\$\{FORK_BRIDGE_VERIFIED\}" != 'true' \]\]; then)/,
     )?.[1];
     expect(refusedGuard).toBeTruthy();
-    const refuses = (eventName) =>
+    const refuses = (eventName, forkBridgeVerified = 'false') =>
       execFileSync('bash', ['-c', `${refusedGuard}\necho REFUSED\nfi`], {
         env: {
           ...process.env,
           FORCED_PR: '7836',
           PR: '7836',
           EVENT_NAME: eventName,
+          FORK_BRIDGE_VERIFIED: forkBridgeVerified,
         },
         encoding: 'utf8',
       }).trim();
     expect(refuses('workflow_dispatch')).toContain('REFUSED');
+    expect(refuses('workflow_dispatch', 'true')).not.toContain('REFUSED');
     expect(refuses('pull_request_review')).not.toContain('REFUSED');
     // The standard-mode pause and the refusal both point at the actual
     // recovery command as a printf ARG (the takeover variant keeps its
@@ -3102,7 +3519,7 @@ describe('qwen-autofix workflow', () => {
     // no-op, a skip-labeled add refuses, and a fork refuses — neither posts
     // a toggle.
     const toggle = workflow.match(
-      /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n {14}gh pr edit "\$\{PR\}" --repo "\$\{REPO\}" --remove-label "\$\{TAKEOVER_LABEL\}"\n[\s\S]*?\n {10}fi)/,
+      /(if ! PR_INFO="\$\(gh pr view[\s\S]*?— nothing to do"\n {12}else\n[\s\S]*?gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/[\s\S]*?\n {10}fi)/,
     )?.[1];
     expect(toggle).toBeTruthy();
     const runToggle = ({
@@ -3114,6 +3531,8 @@ describe('qwen-autofix workflow', () => {
       state = 'OPEN',
       base = 'main',
       author = 'fork-owner',
+      postFails = '',
+      deleteFails = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-toggle-'));
       try {
@@ -3131,7 +3550,14 @@ describe('qwen-autofix workflow', () => {
             '#!/bin/bash',
             `if [[ "$1" == "api" && "$2" == */collaborators/*/permission ]]; then printf '%s' '${authorPerm}';`,
             `elif [[ "$1" == "pr" && "$2" == "view" ]]; then printf '%s' '${prJson}';`,
-            `elif [[ "$1" == "pr" && "$2" == "edit" ]]; then echo "EDIT $*" >> '${join(dir, 'writes.log')}';`,
+            // Label mutations are REST gh api calls (gh pr edit's
+            // projectCards lookup errors on older gh builds); record them.
+            // The TOGGLE_*_FAILS knobs make the matching call exit 1 with
+            // the knob value on stderr (like a real gh HTTP error), pinning
+            // the block's two failure policies instead of the stub
+            // universally exiting 0.
+            `elif [[ "$1" == "label" && "$2" == "create" ]]; then echo "LABEL-CREATE $*" >> '${join(dir, 'writes.log')}';`,
+            `elif [[ "$1" == "api" ]]; then echo "API $*" >> '${join(dir, 'writes.log')}'; if [[ "$2" == "-X" && "$3" == "POST" && -n "\${TOGGLE_POST_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_POST_FAILS}" >&2; exit 1; fi; if [[ "$2" == "-X" && "$3" == "DELETE" && -n "\${TOGGLE_DELETE_FAILS:-}" ]]; then printf '%s' "\${TOGGLE_DELETE_FAILS}" >&2; exit 1; fi`,
             `elif [[ "$1" == "pr" && "$2" == "comment" ]]; then echo "COMMENT $*" >> '${join(dir, 'writes.log')}';`,
             'fi',
           ].join('\n'),
@@ -3140,7 +3566,16 @@ describe('qwen-autofix workflow', () => {
         writeFileSync(join(dir, 'writes.log'), '');
         const stdout = execFileSync(
           'bash',
-          ['-c', `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`],
+          // -eo pipefail like the runner's bash default: the replay must
+          // reproduce the step's failure semantics — the engage POST is
+          // deliberately loud, and plain `bash -c` would swallow its exit
+          // status.
+          [
+            '-eo',
+            'pipefail',
+            '-c',
+            `${toggle.replace(/\n {10}/g, '\n')}\nprintf 'DONE'`,
+          ],
           {
             env: {
               ...process.env,
@@ -3153,6 +3588,8 @@ describe('qwen-autofix workflow', () => {
               TAKEOVER_COMMAND: '@qwen-code /takeover',
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               GITHUB_TOKEN: 'x',
+              TOGGLE_POST_FAILS: postFails,
+              TOGGLE_DELETE_FAILS: deleteFails,
             },
             encoding: 'utf8',
           },
@@ -3162,6 +3599,14 @@ describe('qwen-autofix workflow', () => {
           log: stdout,
           writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
         };
+      } catch (error) {
+        // A throwing replay must stay INSPECTABLE: the engage arm's whole
+        // ordering claim (no public ack for an unlabeled PR) lives in what
+        // was written BEFORE the failure, and the finally below deletes it.
+        error.writes = existsSync(join(dir, 'writes.log'))
+          ? readFileSync(join(dir, 'writes.log'), 'utf8')
+          : '';
+        throw error;
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -3171,22 +3616,33 @@ describe('qwen-autofix workflow', () => {
     // (#7999, #8002), so the user-visible ack cannot depend on that
     // round-trip. In-repo PRs get no fork note.
     const addAbsent = runToggle({ cmd: 'add' });
-    expect(addAbsent.writes).toContain('EDIT pr edit 7165');
-    expect(addAbsent.writes).toContain('--add-label');
+    expect(addAbsent.writes).toContain(
+      'API api -X POST repos/QwenLM/qwen-code/issues/7165/labels',
+    );
+    // Idempotent create precedes the POST: the REST add would otherwise
+    // silently create a missing label with a random color.
+    expect(addAbsent.writes).toContain('LABEL-CREATE label create');
+    expect(addAbsent.writes.indexOf('LABEL-CREATE')).toBeLessThan(
+      addAbsent.writes.indexOf('API api -X POST'),
+    );
+    expect(addAbsent.writes).toContain('labels[]=autofix/takeover');
     expect(addAbsent.writes).toContain('<!-- takeover-ack engaged -->');
     expect(addAbsent.writes).not.toContain('next scheduled scan');
     expect(addAbsent.writes).not.toContain('定时扫描');
     // add + present → re-arm ack, label untouched.
     const rearm = runToggle({ cmd: 'add', labels: ['autofix/takeover'] });
     expect(rearm.writes).toContain('COMMENT');
-    expect(rearm.writes).not.toContain('EDIT');
+    expect(rearm.writes).not.toContain('API');
     expect(rearm.log).toContain('re-armed');
-    // remove + present → label removed.
+    // remove + present → label removed, through the URI-encoded path segment
+    // (real jq runs in the substitution, so the %2F is the executed truth).
     const removePresent = runToggle({
       cmd: 'remove',
       labels: ['autofix/takeover'],
     });
-    expect(removePresent.writes).toContain('--remove-label');
+    expect(removePresent.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // Release acks directly too — the exact mirror of the engage side: a
     // loud add next to a mute stop re-creates the lost-event ambiguity on
     // the release side (and fork/non-main releases have no other ack path
@@ -3216,14 +3672,14 @@ describe('qwen-autofix workflow', () => {
     // skip present vetoes engagement — refusal comment, never a toggle.
     const skipBlocked = runToggle({ cmd: 'add', labels: ['autofix/skip'] });
     expect(skipBlocked.writes).toContain('COMMENT');
-    expect(skipBlocked.writes).not.toContain('EDIT');
+    expect(skipBlocked.writes).not.toContain('API');
     // Fork WITHOUT allow-edits refuses with the actionable ask, never
     // toggling; fork WITH allow-edits is fully manageable and toggles.
     const forkRefused = runToggle({ cmd: 'add', fork: true, canModify: false });
     expect(forkRefused.writes).toContain('COMMENT');
-    expect(forkRefused.writes).not.toContain('EDIT');
+    expect(forkRefused.writes).not.toContain('API');
     const forkManaged = runToggle({ cmd: 'add', fork: true });
-    expect(forkManaged.writes).toContain('--add-label');
+    expect(forkManaged.writes).toContain('labels[]=autofix/takeover');
     // Fork label events carry no secrets, so no other job could ever ack a
     // fork engage — the command's own ack is the ONLY one, and it sets the
     // expectation that the first round comes from the next scheduled scan.
@@ -3243,7 +3699,7 @@ describe('qwen-autofix workflow', () => {
     // nothing ever manages it) — the command refuses with the adoption ask.
     const forkGhost = runToggle({ cmd: 'add', fork: true, authorPerm: 'read' });
     expect(forkGhost.writes).toContain('COMMENT');
-    expect(forkGhost.writes).not.toContain('EDIT');
+    expect(forkGhost.writes).not.toContain('API');
     expect(forkGhost.log).toContain('below write');
     // Release is NEVER blocked by engage-side fork requirements: stop on an
     // allow-edits-revoked fork still removes the label.
@@ -3253,7 +3709,9 @@ describe('qwen-autofix workflow', () => {
       canModify: false,
       labels: ['autofix/takeover'],
     });
-    expect(forkStop.writes).toContain('--remove-label');
+    expect(forkStop.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // Fork unlabeled events carry no secrets, so this is the ONLY possible
     // release ack for a fork — it must post here.
     expect(forkStop.writes).toContain('<!-- takeover-ack released -->');
@@ -3262,7 +3720,7 @@ describe('qwen-autofix workflow', () => {
     const stacked = runToggle({ cmd: 'add', base: 'feat/base-pr' });
     expect(stacked.writes).toContain('<!-- takeover-ack base-refused -->');
     expect(stacked.writes).toContain('`feat/base-pr`');
-    expect(stacked.writes).not.toContain('EDIT');
+    expect(stacked.writes).not.toContain('API');
     // …but a stop on a non-main PR PROCEEDS: removing a stuck label is
     // harmless and matches the latest intent (previously dropped, leaving a
     // manually-applied label with no command able to remove it).
@@ -3271,7 +3729,9 @@ describe('qwen-autofix workflow', () => {
       base: 'feat/base-pr',
       labels: ['autofix/takeover'],
     });
-    expect(stackedStop.writes).toContain('--remove-label');
+    expect(stackedStop.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
     // A non-main release never reaches the ack job (route ignores it), so
     // the command's own ack is the only voice here too.
     expect(stackedStop.writes).toContain('<!-- takeover-ack released -->');
@@ -3279,6 +3739,46 @@ describe('qwen-autofix workflow', () => {
     const closed = runToggle({ cmd: 'add', state: 'CLOSED' });
     expect(closed.writes.trim()).toBe('');
     expect(closed.log).toContain('no longer an open PR');
+    // Failure policies, pinned like the pr-self-report-label suite: the
+    // engage POST is deliberately LOUD — under the runner's -e a failing
+    // apply aborts the step BEFORE the engage ack, so no comment can claim
+    // "engaged" for an unlabeled PR. The throw alone does not pin the
+    // ORDER (an ack posted before a failing POST also throws) — the
+    // captured writes must show no engage ack ever landed.
+    let engageFailure;
+    try {
+      runToggle({ cmd: 'add', postFails: 'HTTP 500' });
+    } catch (error) {
+      engageFailure = error;
+    }
+    expect(engageFailure).toBeTruthy();
+    expect(engageFailure.writes).not.toContain('takeover-ack engaged');
+    // The release DELETE tolerates the 404 race (a concurrent removal
+    // already reached the end state): the release ack still posts, no
+    // warning.
+    const releaseRace = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 404: Not Found',
+    });
+    expect(releaseRace.writes).toContain(
+      'API api -X DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Ftakeover',
+    );
+    expect(releaseRace.writes).toContain('takeover-ack released');
+    expect(releaseRace.log).not.toContain('::warning::');
+    // Any other DELETE failure must not drop the release ack either — a
+    // later `/takeover stop` retries the removal — but it MUST warn:
+    // masked, the ack reads "released" while the loop keeps managing the
+    // PR.
+    const releaseFailed = runToggle({
+      cmd: 'remove',
+      labels: ['autofix/takeover'],
+      deleteFails: 'HTTP 500',
+    });
+    expect(releaseFailed.writes).toContain('takeover-ack released');
+    expect(releaseFailed.log).toContain('::warning::');
+    expect(releaseFailed.log).toContain('removal failed');
+    expect(releaseFailed.log).toContain('HTTP 500');
     // Both ack posts keep their non-fatal fallback: under bash -e a failed
     // gh pr comment would otherwise abort the step RED after the label was
     // already toggled — a worse signal than the silence being fixed. A
@@ -3381,33 +3881,33 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
-    // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
+    // Extract the forced-PR classifier VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip
     // vetoes even a takeover-labeled PR; closed PRs never pass. A fork PR
     // passes the structural predicate only with maintainer edits allowed — the
     // live write+ author gate is a shell step below (asserted separately),
     // mirroring the scheduled scan's per-candidate fork admission.
-    const okProgram = reviewScanJob.match(
-      /OK="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg take "\$\{TAKEOVER_LABEL\}" --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)'/,
+    const classifier = reviewScanJob.match(
+      /(forced_admission_reason\(\) \{[\s\S]*?\n {10}\})/,
     )?.[1];
-    expect(okProgram).toBeTruthy();
-    const ok = (meta) =>
+    expect(classifier).toBeTruthy();
+    const reason = (meta) =>
       execFileSync(
-        'jq',
+        'bash',
         [
-          '-r',
-          '--arg',
-          'ab',
-          'qwen-code-dev-bot',
-          '--arg',
-          'take',
-          'autofix/takeover',
-          '--arg',
-          'skip',
-          'autofix/skip',
-          okProgram,
+          '-c',
+          `${classifier.replace(/\n {10}/g, '\n')}\nforced_admission_reason`,
         ],
-        { encoding: 'utf8', input: JSON.stringify(meta) },
+        {
+          encoding: 'utf8',
+          input: JSON.stringify(meta),
+          env: {
+            ...process.env,
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            SKIP_LABEL: 'autofix/skip',
+          },
+        },
       ).trim();
     const meta = (author, labels = [], extra = {}) => ({
       state: 'OPEN',
@@ -3417,46 +3917,51 @@ describe('qwen-autofix workflow', () => {
       labels: labels.map((name) => ({ name })),
       ...extra,
     });
-    expect(ok(meta('qwen-code-dev-bot'))).toBe('true');
-    expect(ok(meta('human', ['autofix/takeover']))).toBe('true');
-    expect(ok(meta('human'))).toBe('false');
-    expect(ok(meta('human', ['autofix/takeover', 'autofix/skip']))).toBe(
-      'false',
+    expect(reason(meta('qwen-code-dev-bot'))).toBe('eligible');
+    expect(reason(meta('human', ['autofix/takeover']))).toBe('eligible');
+    expect(reason(meta('human'))).toBe('unmanaged_author');
+    expect(reason(meta('human', ['autofix/takeover', 'autofix/skip']))).toBe(
+      'skip_label',
     );
-    expect(ok(meta('qwen-code-dev-bot', ['autofix/skip']))).toBe('false');
-    expect(ok(meta('human', ['autofix/takeover'], { state: 'CLOSED' }))).toBe(
-      'false',
+    expect(reason(meta('qwen-code-dev-bot', ['autofix/skip']))).toBe(
+      'skip_label',
     );
+    expect(
+      reason(meta('human', ['autofix/takeover'], { state: 'CLOSED' })),
+    ).toBe('not_open');
+    expect(
+      reason(meta('human', ['autofix/takeover'], { baseRefName: 'next' })),
+    ).toBe('wrong_base');
     // Fork PRs: admitted structurally only when maintainer edits are allowed
     // (the bot's own fork or a takeover-labelled fork). The live write+ author
     // check is the shell gate asserted below; without allow-edits a fork still
     // fails closed here.
     expect(
-      ok(
+      reason(
         meta('human', ['autofix/takeover'], {
           isCrossRepository: true,
           maintainerCanModify: true,
         }),
       ),
-    ).toBe('true');
+    ).toBe('eligible');
     expect(
-      ok(
+      reason(
         meta('qwen-code-dev-bot', [], {
           isCrossRepository: true,
           maintainerCanModify: true,
         }),
       ),
-    ).toBe('true');
+    ).toBe('eligible');
     expect(
-      ok(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
-    ).toBe('false');
+      reason(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
+    ).toBe('maintainer_edits_disabled');
     // A missing isCrossRepository fails CLOSED. This case is why the
     // predicate reads `.isCrossRepository == false`: jq's // treats false as
     // empty, so the previous `(.isCrossRepository // true) | not` was false
     // for EVERY input and silently green-no-op'd all forced dispatches.
     const missing = meta('qwen-code-dev-bot');
     delete missing.isCrossRepository;
-    expect(ok(missing)).toBe('false');
+    expect(reason(missing)).toBe('cross_repo_state_missing');
     expect(reviewScanJob).toContain('.isCrossRepository == false');
     expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
     // The forced path queries maintainerCanModify and re-checks a fork author's
@@ -3467,7 +3972,756 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewScanJob).toContain('forced fork PR #${FORCED_PR} admitted');
     expect(reviewScanJob).toContain(
-      'gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission"',
+      'gh api "repos/${REPO}/collaborators/${login}/permission"',
+    );
+  });
+
+  it('recovers transient forced-target reads and reports terminal takeover blocks', () => {
+    const readMeta = reviewScanJob.match(
+      /(read_forced_pr_meta\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const reportBlocked = reviewScanJob.match(
+      /(report_forced_takeover_blocked\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(readMeta).toBeTruthy();
+    expect(readPermission).toBeTruthy();
+    expect(reportBlocked).toBeTruthy();
+
+    const runReader = (reader, command, successOutput) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-admission-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\ncount_file='${dir}/count'\ncount=0\n[[ -f "$count_file" ]] && count="$(cat "$count_file")"\ncount=$((count + 1))\nprintf '%s' "$count" > "$count_file"\nif [[ "$count" -eq 1 ]]; then exit 1; fi\nprintf '%s' '${successOutput}'\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            // Production shell options (defaults.run.shell: bash → `bash
+            // --noprofile --norc -eo pipefail`), with the call made through
+            // `|| exit $?` so errexit is suspended inside the helper exactly
+            // as the `if !` call sites suspend it.
+            [
+              'set -eo pipefail',
+              'sleep() { :; }',
+              reader.replace(/\n {10}/g, '\n'),
+              `${command} || exit $?`,
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return result;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    const meta = JSON.stringify({
+      number: 8320,
+      state: 'OPEN',
+      author: { login: 'qqqys' },
+      headRefName: 'topic',
+      baseRefName: 'main',
+      isCrossRepository: true,
+      labels: [{ name: 'autofix/takeover' }],
+      maintainerCanModify: true,
+    });
+    const metaResult = runReader(readMeta, 'read_forced_pr_meta', meta);
+    expect(metaResult.status).toBe(0);
+    expect(metaResult.stdout).toBe(meta);
+    const permissionResult = runReader(
+      readPermission,
+      'read_live_permission qqqys',
+      'write',
+    );
+    expect(permissionResult.status).toBe(0);
+    expect(permissionResult.stdout).toBe('write');
+
+    const failingDir = mkdtempSync(join(tmpdir(), 'autofix-admission-fail-'));
+    try {
+      writeFileSync(join(failingDir, 'gh'), '#!/bin/bash\nexit 1\n');
+      chmodSync(join(failingDir, 'gh'), 0o755);
+      const failedPermission = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'sleep() { :; }',
+            readPermission.replace(/\n {10}/g, '\n'),
+            'read_live_permission qqqys || exit $?',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${failingDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(failedPermission.status).toBe(1);
+      expect(failedPermission.stderr).toContain('(attempt 3/3)');
+
+      const failedMeta = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'sleep() { :; }',
+            readMeta.replace(/\n {10}/g, '\n'),
+            'read_forced_pr_meta || exit $?',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${failingDir}:${process.env.PATH}`,
+            REPO: 'QwenLM/qwen-code',
+            FORCED_PR: '8320',
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(failedMeta.status).toBe(1);
+      expect(failedMeta.stderr).toContain('(attempt 3/3)');
+    } finally {
+      rmSync(failingDir, { recursive: true, force: true });
+    }
+
+    const reporterDir = mkdtempSync(join(tmpdir(), 'autofix-reporter-'));
+    try {
+      const callsFile = join(reporterDir, 'calls');
+      writeFileSync(
+        join(reporterDir, 'gh'),
+        `#!/bin/bash
+printf '%q ' "$@" >> '${callsFile}'
+printf '\n' >> '${callsFile}'
+if [[ "$1 $2" == 'api user' ]]; then
+  if [[ "\${FAIL_ACTOR_ONCE:-false}" == 'true' && ! -f '${reporterDir}/actor-failed' ]]; then
+    printf '1' > '${reporterDir}/actor-failed'
+    exit 1
+  fi
+  printf '%s' "\${STUB_ACTOR:-qwen-code-dev-bot}"
+  exit 0
+fi
+if [[ "$1 $2" == 'api repos/QwenLM/qwen-code/issues/8320/comments' ]]; then
+  # CONNECTION-level failure: nothing on stdout at all. This is the shape that
+  # needs pipefail — a downstream \`jq -rs\` reads empty input, prints nothing
+  # and exits 0, so without it the caller cannot tell this from success.
+  if [[ "\${FAIL_STATUS_LOOKUP:-false}" == 'true' ]]; then
+    printf 'gh: Server Error (HTTP 502)\\n' >&2
+    exit 1
+  fi
+  # HTTP-level failure: gh puts the error BODY on stdout, so jq chokes on it
+  # and fails on its own. This path never depended on pipefail; pinned so the
+  # two halves stay distinguishable.
+  if [[ "\${FAIL_STATUS_LOOKUP_HTTP:-false}" == 'true' ]]; then
+    printf '%s' '{"message":"Server Error"}'
+    printf 'gh: Server Error (HTTP 502)\\n' >&2
+    exit 1
+  fi
+  [[ "\${NO_STATUS_MARKER:-false}" == 'true' ]] && { printf '%s' '[]'; exit 0; }
+  # A realistic page: gh emits the comment objects, not bare ids, and a
+  # deleted-body comment really does arrive as "body": null.
+  printf '%s' "\${STATUS_PAGE}"
+  exit 0
+fi
+if [[ "$1 $2 $3" == 'api --method PATCH' ]]; then
+  if [[ "\${FAIL_PATCH_ONCE:-false}" == 'true' && ! -f '${reporterDir}/patch-failed' ]]; then
+    printf '1' > '${reporterDir}/patch-failed'
+    exit 1
+  fi
+  exit 0
+fi
+if [[ "$1 $2" == 'pr comment' ]]; then
+  if [[ "\${FAIL_COMMENT_ONCE:-false}" == 'true' && ! -f '${reporterDir}/comment-failed' ]]; then
+    printf '1' > '${reporterDir}/comment-failed'
+    exit 1
+  fi
+  exit 0
+fi
+exit 1
+`,
+      );
+      chmodSync(join(reporterDir, 'gh'), 0o755);
+      // One page carrying a null-bodied comment alongside the real status
+      // comment: the shape the production filter must survive.
+      const statusPage = JSON.stringify([
+        { id: 1, user: { login: 'qwen-code-dev-bot' }, body: null },
+        { id: 2, user: { login: 'wenshao' }, body: 'looks good' },
+        {
+          id: 123,
+          user: { login: 'qwen-code-dev-bot' },
+          body: '<!-- autofix-status -->\n\n🔄 working',
+        },
+      ]);
+      const runReporter = (
+        extraEnv = {},
+        reason = 'permission_lookup_failed',
+        shellOpts = 'set -eo pipefail',
+      ) =>
+        spawnSync(
+          'bash',
+          [
+            '-c',
+            // Production runs this block under `bash --noprofile --norc -eo
+            // pipefail` (defaults.run.shell: bash, pinned below), and every
+            // call site is an `if !` / `||` context, which suspends errexit
+            // inside the call. Reproduce BOTH halves: the harness sets -eo
+            // pipefail and calls the function through `|| exit $?`, exactly as
+            // the gate does. `shellOpts` is overridable so one case can drop
+            // the ambient pipefail and prove the helper carries its own.
+            [
+              shellOpts,
+              'sleep() { :; }',
+              reportBlocked.replace(/\n {10}/g, '\n'),
+              `report_forced_takeover_blocked ${reason} || exit $?`,
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${reporterDir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+              DRY_RUN: 'false',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              GITHUB_RUN_ID: '30778039590',
+              GITHUB_SERVER_URL: 'https://ghes.example.com',
+              STATUS_PAGE: statusPage,
+              META: meta,
+              ...extraEnv,
+            },
+            encoding: 'utf8',
+          },
+        );
+      const reporter = runReporter();
+      expect({ status: reporter.status, stderr: reporter.stderr }).toEqual({
+        status: 0,
+        stderr: '',
+      });
+      const calls = readFileSync(callsFile, 'utf8');
+      // Picking 123 out of a page whose FIRST bot comment has `body: null` is
+      // the whole point: without the `// ""` guard jq aborts the program
+      // (rc=5), gh exits non-zero, all three attempts fail, and the run reds
+      // out without ever posting the blocked status it exists to post.
+      expect(calls).toContain('repos/QwenLM/qwen-code/issues/comments/123');
+      expect(calls).toContain('autofix-status');
+      expect(calls).toContain('AutoFix blocked');
+      expect(calls).toContain('permission_lookup_failed');
+      expect(calls).toContain('A later scheduled scan will retry');
+      // The run link resolves from GITHUB_SERVER_URL like every other status
+      // writer; a hardcoded github.com is the one broken link on GHES.
+      expect(calls).toContain(
+        'https://ghes.example.com/QwenLM/qwen-code/actions/runs/30778039590',
+      );
+      expect(calls).not.toContain('https://github.com/QwenLM');
+
+      writeFileSync(callsFile, '');
+      const transientActorReporter = runReporter({ FAIL_ACTOR_ONCE: 'true' });
+      expect(transientActorReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8').match(/api user/g)).toHaveLength(
+        2,
+      );
+
+      writeFileSync(callsFile, '');
+      const transientPatchReporter = runReporter({ FAIL_PATCH_ONCE: 'true' });
+      expect(transientPatchReporter.status).toBe(0);
+      expect(
+        readFileSync(callsFile, 'utf8').match(/api --method PATCH/g),
+      ).toHaveLength(2);
+
+      writeFileSync(callsFile, '');
+      const transientCommentReporter = runReporter({
+        NO_STATUS_MARKER: 'true',
+        FAIL_COMMENT_ONCE: 'true',
+      });
+      expect(transientCommentReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8').match(/pr comment/g)).toHaveLength(
+        2,
+      );
+
+      writeFileSync(callsFile, '');
+      const maintainerEditsReporter = runReporter(
+        {},
+        'maintainer_edits_disabled',
+      );
+      expect(maintainerEditsReporter.status).toBe(0);
+      const maintainerEditsCalls = readFileSync(callsFile, 'utf8');
+      expect(maintainerEditsCalls).toContain(
+        'Re-enable maintainer edits on the fork PR to resume takeover',
+      );
+      expect(maintainerEditsCalls).not.toContain(
+        'A later scheduled scan will retry',
+      );
+
+      writeFileSync(callsFile, '');
+      const authorPermissionReporter = runReporter(
+        {},
+        'author_permission_read',
+      );
+      expect(authorPermissionReporter.status).toBe(0);
+      const authorPermissionCalls = readFileSync(callsFile, 'utf8');
+      expect(authorPermissionCalls).toContain(
+        'Grant the fork author write access',
+      );
+      expect(authorPermissionCalls).toContain(
+        'remove the autofix/takeover label',
+      );
+      expect(authorPermissionCalls).not.toContain(
+        'A later scheduled scan will retry',
+      );
+
+      writeFileSync(callsFile, '');
+      const botManagedMeta = JSON.stringify({
+        ...JSON.parse(meta),
+        author: { login: 'qwen-code-dev-bot' },
+        labels: [],
+      });
+      const botManagedReporter = runReporter(
+        { META: botManagedMeta },
+        'maintainer_edits_disabled',
+      );
+      expect(botManagedReporter.status).toBe(0);
+      expect(readFileSync(callsFile, 'utf8')).toContain('AutoFix blocked');
+
+      writeFileSync(callsFile, '');
+      const failedReporter = runReporter({ FAIL_STATUS_LOOKUP: 'true' });
+      expect(failedReporter.status).toBe(1);
+      // Warnings go to stderr like the two reader helpers, so the reporter is
+      // safe to wrap in $( ) and its warnings never pollute a captured value.
+      expect(failedReporter.stdout).toBe('');
+      expect(failedReporter.stderr).toContain('(attempt 3/3)');
+      expect(failedReporter.stderr).toContain(
+        'Failed to read takeover status comments',
+      );
+      // gh's own diagnosis rides along instead of going to /dev/null — the
+      // rule this same block states for read_live_permission.
+      expect(failedReporter.stderr).toContain('HTTP 502');
+      // Nothing was read, so nothing may be written: a "post a new one" here
+      // would be the duplicate ⛔ comment beside the stale ✅ one.
+      expect(readFileSync(callsFile, 'utf8')).not.toContain('AutoFix blocked');
+
+      // Same connection-level failure with the ambient pipefail REMOVED. The
+      // status read is the one `if` in this helper that tests a PIPELINE, and
+      // `jq -rs` turns gh's empty stdout into a silent exit 0 — so without a
+      // local `set -o pipefail` the loop breaks on attempt 1, status_lookup_ok
+      // goes true on nothing read, and the empty id routes the writer to the
+      // "no status comment yet" branch: a DUPLICATE blocked comment, run green
+      // at exit 0. defaults.run.shell (pinned below) makes production pipefail
+      // today; this case is what keeps the helper correct without it.
+      writeFileSync(callsFile, '');
+      const failedNoPipefail = runReporter(
+        { FAIL_STATUS_LOOKUP: 'true' },
+        'permission_lookup_failed',
+        'set -e',
+      );
+      expect(failedNoPipefail.status).toBe(1);
+      expect(failedNoPipefail.stderr).toContain('(attempt 3/3)');
+      expect(failedNoPipefail.stderr).toContain(
+        'Failed to read takeover status comments',
+      );
+      const noPipefailCalls = readFileSync(callsFile, 'utf8');
+      expect(noPipefailCalls.match(/issues\/8320\/comments/g)).toHaveLength(3);
+      expect(noPipefailCalls).not.toContain('AutoFix blocked');
+
+      // The HTTP-status half of the same failure, also without ambient
+      // pipefail: gh writes the error body to stdout, jq chokes on it and
+      // fails by itself. This path was already correct — pinned so a future
+      // "simplification" cannot conclude the pipefail above is what carries it
+      // and drop it.
+      writeFileSync(callsFile, '');
+      const failedHttpNoPipefail = runReporter(
+        { FAIL_STATUS_LOOKUP_HTTP: 'true' },
+        'permission_lookup_failed',
+        'set -e',
+      );
+      expect(failedHttpNoPipefail.status).toBe(1);
+      expect(failedHttpNoPipefail.stderr).toContain('(attempt 3/3)');
+      expect(
+        readFileSync(callsFile, 'utf8').match(/issues\/8320\/comments/g),
+      ).toHaveLength(3);
+
+      // 'The PAT is not the bot' is the riskiest new branch and had no
+      // coverage in either direction. It is still a hard stop (return 1), so
+      // the mismatch cannot be mistaken for a delivered status comment.
+      writeFileSync(callsFile, '');
+      const wrongActorReporter = runReporter({ STUB_ACTOR: 'some-human' });
+      expect(wrongActorReporter.status).toBe(1);
+      expect(wrongActorReporter.stderr).toContain(
+        "PAT authenticates as 'some-human'",
+      );
+      expect(readFileSync(callsFile, 'utf8')).not.toContain('AutoFix blocked');
+    } finally {
+      rmSync(reporterDir, { recursive: true, force: true });
+    }
+
+    expect(
+      reviewScanJob.match(
+        /report_forced_takeover_blocked "\$\{ADMISSION_REASON\}"/g,
+      ),
+    ).toHaveLength(2);
+    expect(reviewScanJob).toContain('metadata_fetch_failed');
+    expect(reviewScanJob).toContain('permission_lookup_failed');
+    expect(reviewScanJob).toContain(
+      'fleet_row "${FPR}" \'blocked\' "author_permission_${FPERM:-none}"',
+    );
+    expect(reviewScanJob).toContain('report_forced_takeover_blocked');
+    expect(reviewScanJob).toContain('<!-- autofix-status -->');
+    expect(reviewScanJob).toContain('AutoFix blocked');
+    expect(reviewScanJob).toContain('exit 1');
+
+    // The status read is the only `if` in this helper testing a PIPELINE, so
+    // it carries pipefail itself instead of inheriting it. Pinned textually
+    // because the behavioural case above can only observe its ABSENCE by
+    // dropping the ambient option — a reader of the YAML alone would not see
+    // why one command substitution differs from its neighbours.
+    expect(reviewScanJob).toContain(
+      'if status_ids="$(set -o pipefail; gh api "repos/${REPO}/issues/${FORCED_PR}/comments" --paginate',
+    );
+    // And the ambient half: `shell: bash` is what expands to `bash --noprofile
+    // --norc -eo pipefail`, which every other gh|jq pipeline in this file (the
+    // scan's `| jq -s 'add // []'` writers) relies on WITHOUT saying so. Drop
+    // this default and those go silently green on empty input; the harnesses
+    // above would keep passing, since they set the option themselves.
+    expect(workflow).toMatch(/\ndefaults:\n {2}run:\n {4}shell: 'bash'\n/);
+
+    const runBlock = reviewScanJob.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(runBlock).toBeTruthy();
+    const syntax = spawnSync('bash', ['-n'], {
+      encoding: 'utf8',
+      input: runBlock.replace(/^ {10}/gm, ''),
+    });
+    expect({ status: syntax.status, stderr: syntax.stderr }).toEqual({
+      status: 0,
+      stderr: '',
+    });
+  });
+
+  it('answers terminal permission states without retrying them', () => {
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(readPermission).toBeTruthy();
+    // 'none' MUST be in the accepted set. Without it the `case *)` arms that
+    // render author_permission_${FPERM:-none} are unreachable dead code and
+    // every bot/org author falls through to permission_lookup_failed instead.
+    expect(readPermission).toContain(
+      '^(admin|maintain|write|triage|read|none)$',
+    );
+
+    const runPermission = (ghBody, login = 'qqqys') => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-perm-'));
+      try {
+        const callsFile = join(dir, 'calls');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash\nprintf 'call\\n' >> '${callsFile}'\n${ghBody}\n`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -eo pipefail',
+              'sleep() { :; }',
+              readPermission.replace(/\n {10}/g, '\n'),
+              `read_live_permission '${login}' || exit $?`,
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+            },
+            encoding: 'utf8',
+          },
+        );
+        const calls = existsSync(callsFile)
+          ? readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).length
+          : 0;
+        return {
+          status: result.status,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          calls,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Bot-type logins (dependabot[bot], github-actions[bot], renovate[bot])
+    // and org logins answer HTTP 200 with permission 'none' — a definitive
+    // "holds nothing here", settled in ONE call.
+    expect(runPermission("printf '%s' 'none'\nexit 0")).toMatchObject({
+      status: 0,
+      stdout: 'none',
+      calls: 1,
+    });
+    // A login that does not exist answers HTTP 404 — equally definitive.
+    expect(
+      runPermission("printf 'gh: Not Found (HTTP 404)\\n' >&2\nexit 1"),
+    ).toMatchObject({ status: 0, stdout: 'none', calls: 1 });
+    // An empty login can only ever 404, so it is answered without a call.
+    expect(runPermission("printf '%s' 'write'\nexit 0", '')).toMatchObject({
+      status: 0,
+      stdout: 'none',
+      calls: 0,
+    });
+    // Every real grant level passes through verbatim, one call each.
+    for (const permission of ['admin', 'maintain', 'write', 'triage', 'read']) {
+      expect(
+        runPermission(`printf '%s' '${permission}'\nexit 0`),
+      ).toMatchObject({ status: 0, stdout: permission, calls: 1 });
+    }
+    // A genuinely transient answer still burns the full retry budget and
+    // reports failure: collapsing 5xx into 'none' would silently reject an
+    // author who actually holds write.
+    const transient = runPermission(
+      "printf 'gh: Server Error (HTTP 502)\\n' >&2\nexit 1",
+    );
+    expect(transient.status).toBe(1);
+    expect(transient.calls).toBe(3);
+    expect(transient.stderr).toContain('(attempt 3/3)');
+    // gh's own diagnosis rides along instead of being discarded to /dev/null —
+    // a rate limit, an expired PAT and a 5xx are indistinguishable without it.
+    expect(transient.stderr).toContain('HTTP 502');
+  });
+
+  it('wires forced admission end to end: reader, classifier, permission gate, reporter', () => {
+    // The four pieces are unit-pinned above; this runs the ACTUAL gate that
+    // joins them, so a rewiring (wrong reason string, a gate that exits 1 on a
+    // routine rejection, a reporter that never sees the reason) fails here.
+    const readMeta = reviewScanJob.match(
+      /(read_forced_pr_meta\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const readPermission = reviewScanJob.match(
+      /(read_live_permission\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const classifier = reviewScanJob.match(
+      /(forced_admission_reason\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const reportBlocked = reviewScanJob.match(
+      /(report_forced_takeover_blocked\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    const gate = reviewScanJob.match(
+      /(if ! META="\$\(read_forced_pr_meta\)"; then[\s\S]*?\n {14}exit 0\n {12}fi)/,
+    )?.[1];
+    expect(readMeta).toBeTruthy();
+    expect(readPermission).toBeTruthy();
+    expect(classifier).toBeTruthy();
+    expect(reportBlocked).toBeTruthy();
+    expect(gate).toBeTruthy();
+
+    const forkMeta = JSON.stringify({
+      number: 8320,
+      state: 'OPEN',
+      author: { login: 'renovate[bot]' },
+      headRefName: 'topic',
+      baseRefName: 'main',
+      isCrossRepository: true,
+      labels: [{ name: 'autofix/takeover' }],
+      maintainerCanModify: true,
+    });
+
+    const inRepoMeta = JSON.stringify({
+      ...JSON.parse(forkMeta),
+      author: { login: 'qqqys' },
+      isCrossRepository: false,
+    });
+    const statusPage = JSON.stringify([
+      {
+        id: 123,
+        user: { login: 'qwen-code-dev-bot' },
+        body: '<!-- autofix-status -->\n\n🔄 working',
+      },
+    ]);
+
+    // permission 'transient' makes every collaborator lookup answer HTTP 502,
+    // the only input that reaches permission_lookup_failed.
+    const runGate = (permission, metaJson = forkMeta) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-wiring-'));
+      try {
+        const callsFile = join(dir, 'calls');
+        const outputFile = join(dir, 'github-output');
+        writeFileSync(outputFile, '');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+printf '%q ' "$@" >> '${callsFile}'
+printf '\\n' >> '${callsFile}'
+case "$1 $2" in
+  'pr view') printf '%s' '${metaJson}'; exit 0 ;;
+  'api user') printf '%s' 'qwen-code-dev-bot'; exit 0 ;;
+esac
+case "$2" in
+  *collaborators/*/permission)
+    if [[ '${permission}' == 'transient' ]]; then
+      printf 'gh: Server Error (HTTP 502)\\n' >&2
+      exit 1
+    fi
+    printf '%s' '${permission}'; exit 0 ;;
+  */issues/8320/comments) printf '%s' '${statusPage}'; exit 0 ;;
+esac
+[[ "$1 $2 $3" == 'api --method PATCH' ]] && exit 0
+exit 1
+`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const result = spawnSync(
+          'bash',
+          [
+            '-c',
+            [
+              // Production shell options: `bash --noprofile --norc -eo
+              // pipefail` (defaults.run.shell: bash). The gate runs at top
+              // level there, so errexit is live for it here too.
+              'set -eo pipefail',
+              'sleep() { :; }',
+              readMeta.replace(/\n {10}/g, '\n'),
+              readPermission.replace(/\n {10}/g, '\n'),
+              classifier.replace(/\n {10}/g, '\n'),
+              reportBlocked.replace(/\n {10}/g, '\n'),
+              gate.replace(/\n {12}/g, '\n'),
+              'echo "ADMITTED:${ADMISSION_REASON}"',
+            ].join('\n'),
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '8320',
+              DRY_RUN: 'false',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              GITHUB_RUN_ID: '30778039590',
+              GITHUB_SERVER_URL: 'https://ghes.example.com',
+              GITHUB_OUTPUT: outputFile,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          status: result.status,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          calls: readFileSync(callsFile, 'utf8'),
+          output: readFileSync(outputFile, 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A fork author holding nothing is a ROUTINE rejection: green run, the
+    // reason names the actual permission, and the blocked comment carries the
+    // remedy that can actually clear it. Before 'none' was a terminal answer
+    // this exited 1 and promised a scheduled retry that could never succeed.
+    const rejected = runGate('none');
+    expect(rejected.status).toBe(0);
+    expect(rejected.stdout).toContain('rejected: author_permission_none');
+    expect(rejected.stdout).not.toContain('permission_lookup_failed');
+    expect(rejected.output).toContain('has_targets=false');
+    expect(rejected.calls).toContain('Grant the fork author write access');
+    // The gate never reaches the 'ADMITTED' echo — it exits inside the block.
+    expect(rejected.stdout).not.toContain('ADMITTED:');
+
+    // A write-holding fork author falls through the gate as eligible.
+    const admitted = runGate('write');
+    expect(admitted.status).toBe(0);
+    expect(admitted.stdout).toContain('admitted (author renovate[bot]=write)');
+    expect(admitted.stdout).toContain('ADMITTED:eligible');
+    expect(admitted.calls).not.toContain('--method');
+
+    // In-repo PRs are gated by author/label ALONE — the live-permission call
+    // is fork-only. Without this case, deleting the `isCrossRepository == true`
+    // conjunct keeps the whole suite green while an in-repo takeover PR whose
+    // author was demoted gets rejected as author_permission_read.
+    const inRepo = runGate('read', inRepoMeta);
+    expect(inRepo.status).toBe(0);
+    expect(inRepo.stdout).toContain('ADMITTED:eligible');
+    expect(inRepo.calls).not.toContain('collaborators');
+    expect(inRepo.calls).not.toContain('AutoFix blocked');
+
+    // A genuinely transient permission answer is the ONE path that still reds
+    // the run, and it must post the blocked status before it does. Without
+    // this case, flipping that `exit 1` to `exit 0` ships green and restores
+    // the silent-success failure mode this PR exists to remove.
+    const lookupFailed = runGate('transient');
+    expect(lookupFailed.status).toBe(1);
+    expect(lookupFailed.stdout).not.toContain('ADMITTED:');
+    expect(lookupFailed.calls).toContain('permission_lookup_failed');
+    expect(lookupFailed.calls).toContain('A later scheduled scan will retry');
+    expect(lookupFailed.calls).toContain(
+      'repos/QwenLM/qwen-code/issues/comments/123',
+    );
+  });
+
+  it('serializes forced status writes with the matching address job', () => {
+    // The prefix is a LITERAL on both sides: job-level `concurrency` cannot
+    // read the `env` context, so the two jobs cannot share a constant. Compare
+    // the extracted prefixes instead of pinning two independent literals —
+    // renaming one side alone silently re-opens the lost-update race on the
+    // status comment, and nothing else in the suite would notice.
+    // Either quote style: the scan side is double-quoted because its
+    // expression embeds `'true'`, which Prettier will not leave escaped.
+    const groupOf = (text) =>
+      text.match(/\n {4}concurrency:\n {6}group: ['"]([a-z-]+?)-\$\{\{/)?.[1];
+    const scanLock = groupOf(reviewScanJob);
+    const addressLock = groupOf(reviewAddressJob);
+    expect(scanLock).toBeTruthy();
+    expect(scanLock).toBe(addressLock);
+
+    // Each side must still key the group on the PR number — a shared prefix
+    // with a per-run suffix would serialise nothing.
+    expect(reviewScanJob).toContain(
+      `group: "${scanLock}-\${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"`,
+    );
+    expect(reviewAddressJob).toContain(
+      `group: '${addressLock}-\${{ matrix.target.pr }}'`,
+    );
+    expect(reviewScanJob).toContain('cancel-in-progress: false');
+    expect(reviewAddressJob).toContain('cancel-in-progress: false');
+  });
+
+  // GitHub evaluates concurrency BEFORE the job `if`, so a predicate broader
+  // than the job's own condition lets a run that will only skip take the
+  // shared per-PR slot. `route` emits pr_number unconditionally, so without
+  // the do_review conjunct a `phase: issue` dispatch carrying pr_number: N
+  // queues this skipped job behind PR N's in-flight address round — and
+  // `issue-autofix` needs review-scan, so the dispatched issue phase idles
+  // with only a "queued" badge to explain it.
+  it('keeps the forced-scan lock as narrow as the job condition', () => {
+    const groupLine = reviewScanJob.match(/\n {6}group: ['"].*['"]/)?.[0] ?? '';
+    expect(groupLine).toContain("needs.route.outputs.do_review == 'true'");
+    // A skipped run must fall to a per-run group, never the shared per-PR one.
+    expect(groupLine).toContain('github.run_id');
+    // The gate the group must mirror, matched on the job's own `if:` block so
+    // this stays a comparison and not a restatement of the group line.
+    expect(reviewScanJob).toContain(
+      "if: |-\n      ${{ needs.route.outputs.do_review == 'true' }}",
     );
   });
 
@@ -3500,9 +4754,11 @@ describe('qwen-autofix workflow', () => {
     expect(cmdBranch).toBeTruthy();
     expect(cmdBranch).not.toContain('DO_REVIEW=true');
     expect(cmdBranch).toContain('TAKEOVER_CMD="${CMD}"');
-    // The toggle job is presence-aware and PAT-verified.
+    // The toggle job is presence-aware and PAT-verified. Label mutations
+    // are REST — on older gh builds `gh pr edit` exits 1 on its projectCards
+    // lookup.
     expect(workflow).toMatch(
-      /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?--add-label "\$\{TAKEOVER_LABEL\}"[\s\S]*?--remove-label "\$\{TAKEOVER_LABEL\}"/,
+      /takeover-command:[\s\S]*?CI_DEV_BOT_PAT identity[\s\S]*?-f "labels\[\]=\$\{TAKEOVER_LABEL\}"[\s\S]*?gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\//,
     );
     // No other command surface exists.
     expect(workflow).not.toContain('pull_request_review_comment');
@@ -3665,11 +4921,12 @@ describe('qwen-autofix workflow', () => {
     expect(routeStep).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
-    // Non-main targets are rejected; forks are admitted only under the scan's
-    // own takeover rules (allow-edits + bot fork or takeover label).
+    // Non-main targets are rejected, and so is every fork — this event holds
+    // no repository secrets, so an admitted fork PR reaches a scan that cannot
+    // authenticate. The scheduled scan owns them instead.
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
     expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
-    expect(routeStep).toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
     // Must set ROUTE_PR from the event payload.
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
@@ -3680,7 +4937,7 @@ describe('qwen-autofix workflow', () => {
         /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n[ ]{6}- name: )/,
       )?.[0] ?? '';
     expect(reviewScanStep).toContain('isCrossRepository');
-    expect(reviewScanStep).toContain('(.baseRefName // "") == "main"');
+    expect(reviewScanStep).toContain('(.baseRefName // "") != "main"');
     expect(reviewScanStep).toContain('--base main');
     // review-address must check out trusted base, not PR merge ref.
     expect(workflow).toContain("'Checkout trusted base'");
@@ -3689,13 +4946,18 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('admits managed fork PRs to the real-time review trigger, not just in-repo bot PRs', () => {
-    // The */10 schedule is throttled to 40-70min on this repo, so a takeover PR
-    // that only the scan could pick up waited up to an hour for feedback the
-    // event already carried. Real-time pickup now applies the scan's OWN fork
-    // admission (allow-edits + the bot's own fork or an explicit takeover
-    // label); review-address still re-verifies allow-edits, a live write+
-    // author and a matching head repo before touching the branch.
+  it('declines fork PRs at the real-time review trigger, admits in-repo bot PRs', () => {
+    // Real-time pickup for fork PRs was intended to spare a takeover PR the
+    // 40-70min the throttled */10 schedule really takes — but it could never
+    // work: GitHub gives a run tied to a fork PR NO repository secrets
+    // (`Secret source: None`), so CI_DEV_BOT_PAT was empty and the admitted
+    // PR reached a review-scan that failed three unauthenticated metadata
+    // reads and exited 1 on metadata_fetch_failed. Every review of a fork PR
+    // reddened the workflow while changing nothing.
+    // Route declines here instead, mirroring the pull_request label branch,
+    // which already refuses forks for the same reason. The latency it was
+    // trying to remove comes back until a credentialed lane exists; nothing
+    // that ever functioned is lost.
     const block = routeStep.match(
       /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request_review' \]\]; then[\s\S]*?\n {14}fi/,
     )?.[0];
@@ -3773,41 +5035,80 @@ describe('qwen-autofix workflow', () => {
     expect(run({ headRepo: IN_REPO, author: 'someone' })).toContain(
       'DO_REVIEW=false',
     );
-    // NEW: the bot's own fork, and a takeover-labelled human fork, are admitted
-    // in real time and route to that exact PR.
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'DO_REVIEW=true',
-    );
-    expect(
-      run({ headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] }),
-    ).toContain('DO_REVIEW=true');
-    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
-      'ROUTE_PR=7259',
-    );
-    // Still rejected: no allow-edits, an unlabelled human fork, a non-main
-    // base, and an untrusted sender.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false }),
-    ).toContain('DO_REVIEW=false');
-    expect(run({ headRepo: FORK, author: 'wenshao' })).toContain(
-      'DO_REVIEW=false',
-    );
+    // Every fork shape is declined now — including the two that used to be
+    // admitted. The bot's own fork and a takeover-labelled human fork were the
+    // whole point of the removed branch, so they are the cases that prove it
+    // is gone rather than merely narrowed.
+    for (const forkCase of [
+      { headRepo: FORK, author: 'qwen-code-dev-bot' },
+      { headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] },
+      { headRepo: FORK, author: 'wenshao' },
+      { headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false },
+    ]) {
+      const out = run(forkCase);
+      expect(out).toContain('DO_REVIEW=false');
+      expect(out).toContain('ROUTE_PR=');
+      expect(out).not.toContain('ROUTE_PR=7259');
+    }
+    // Declined without asking the API anything. The removed branch spent a
+    // `gh pr view` and a collaborator-permission call to reach a verdict this
+    // event can never act on; a decline that still paid for them would be the
+    // same waste with a quieter log.
+    expect(routeStep).not.toContain('--json labels,maintainerCanModify');
+    expect(routeStep).toContain('fork review noted for #${PR_NUMBER_EVENT}');
+    // In-repo routing is untouched: a non-main base and an untrusted sender
+    // are still refused, so this change narrowed the fork case alone.
     expect(
       run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', base: 'release' }),
     ).toContain('DO_REVIEW=false');
     expect(
-      run({
-        headRepo: FORK,
-        author: 'wenshao',
-        labels: ['autofix/takeover'],
-        perm: 'read',
-      }),
+      run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', perm: 'read' }),
     ).toContain('DO_REVIEW=false');
-    // A metadata read failure fails CLOSED: the event is ignored rather than
-    // admitting a fork whose allow-edits/labels could not be verified.
-    expect(
-      run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
-    ).toContain('DO_REVIEW=false');
+  });
+
+  it('reds an unauthenticated scan instead of reporting an empty fleet', () => {
+    // Route declines the one event GitHub is known to run without secrets, but
+    // no job `if:` can read the `secrets` context, so a deleted or renamed
+    // CI_DEV_BOT_PAT — or a lane nobody has modelled — is invisible until the
+    // step itself looks. It must stop there: unauthenticated `gh pr list`
+    // answers as if the repository held no PRs, and the scan would read that
+    // as a healthy fleet of zero and stay green while the loop is dead.
+    const credGuard = reviewScanJob.match(
+      /(if \[\[ -z "\$\{GITHUB_TOKEN\}" \]\]; then[\s\S]*?\n {10}fi)/,
+    )?.[1];
+    expect(credGuard).toBeTruthy();
+    // Worthless once an API call has already been made and believed.
+    expect(reviewScanJob.indexOf(credGuard)).toBeLessThan(
+      reviewScanJob.indexOf('gh pr view'),
+    );
+
+    const runGuard = (token) =>
+      spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            credGuard.replace(/\n {10}/g, '\n'),
+            // Reached only by a guard that falls through.
+            'echo SCANNED',
+          ].join('\n'),
+        ],
+        {
+          env: { ...process.env, EVENT_NAME: 'schedule', GITHUB_TOKEN: token },
+          encoding: 'utf8',
+        },
+      );
+
+    const missing = runGuard('');
+    expect(missing.status).toBe(1);
+    expect(missing.stdout).toContain('::error::CI_DEV_BOT_PAT is empty');
+    expect(missing.stdout).not.toContain('SCANNED');
+    // Negative control: a present PAT falls straight through, so the guard
+    // cannot swallow a scan that was going to work.
+    const present = runGuard('ghp_stub');
+    expect(present.status).toBe(0);
+    expect(present.stdout).toContain('SCANNED');
   });
 
   it('refuses a takeover on a non-main base out loud instead of only in the job log', () => {
@@ -4143,29 +5444,38 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('switches to Critical-only feedback after ten change rounds', () => {
-    // ROUND counts change-producing rounds, so 9 still starts the tenth
-    // suggestion-capable change while 10 starts the first Critical-only round.
-    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '10'");
+  it('switches to Critical-only feedback after five change rounds', () => {
+    // ROUND counts change-producing rounds, so 4 still starts the fifth
+    // suggestion-capable change while 5 starts the first Critical-only round.
+    expect(workflow).toContain("CRITICAL_ONLY_AFTER_ROUND: '5'");
     expect(workflow).not.toContain('TAKEOVER_CRITICAL_ONLY_AFTER_ROUND');
     expect(prepareBranchAndFeedbackStep).toContain(
       '[[ "${ROUND}" -ge "${CRITICAL_ONLY_AFTER_ROUND}" ]]',
     );
     const modeBlock = prepareBranchAndFeedbackStep.match(
-      /(CRITICAL_ONLY='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+fi)/,
+      /(CRITICAL_ONLY='false'\n\s+CRITICAL_ONLY_ROUNDS='false'\n\s+CRITICAL_ONLY_GROWTH='false'\n\s+if \[\[ "\$\{ROUND\}" -ge "\$\{CRITICAL_ONLY_AFTER_ROUND\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_ROUNDS='true'\n\s+fi\n\s+if \[\[ "\$\{GROWTH_SRC\}" -gt "\$\{GROWTH_BUDGET_SRC_LINES\}" \|\| "\$\{GROWTH_TEST\}" -gt "\$\{GROWTH_BUDGET_TEST_LINES\}" \]\]; then\n\s+CRITICAL_ONLY='true'\n\s+CRITICAL_ONLY_GROWTH='true'\n\s+fi)/,
     )?.[1];
     expect(modeBlock).toBeTruthy();
-    const modeAt = (round) =>
+    const modeAt = (round, growthSrc = 0, growthTest = 0) =>
       execFileSync(
         'bash',
         [
           '-c',
-          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=10\n${modeBlock}\nprintf '%s' "$CRITICAL_ONLY"`,
+          `ROUND=${round}\nCRITICAL_ONLY_AFTER_ROUND=5\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\n${modeBlock}\nprintf '%s %s %s' "$CRITICAL_ONLY" "$CRITICAL_ONLY_ROUNDS" "$CRITICAL_ONLY_GROWTH"`,
         ],
         { encoding: 'utf8' },
       );
-    expect(modeAt(9)).toBe('false');
-    expect(modeAt(10)).toBe('true');
+    expect(modeAt(4)).toBe('false false false');
+    expect(modeAt(5)).toBe('true true false');
+    // The growth brake trips the SAME mode before the round threshold. AT
+    // budget is within budget (exclusive boundary), either dimension alone
+    // trips, both causes can hold at once, and a shrinking window (negative
+    // growth) never engages.
+    expect(modeAt(0, 400, 400)).toBe('false false false');
+    expect(modeAt(0, 401, 0)).toBe('true false true');
+    expect(modeAt(0, 0, 401)).toBe('true false true');
+    expect(modeAt(5, 401, 0)).toBe('true true true');
+    expect(modeAt(0, -900, -900)).toBe('false false false');
 
     // Once the boundary is crossed, only an explicit Critical inline finding
     // or a formal changes-requested review is actionable. Suggestion and
@@ -4891,6 +6201,463 @@ describe('qwen-autofix workflow', () => {
     expect(skill).toContain('Deferred non-Critical feedback');
   });
 
+  it('anchors a per-window growth baseline and splits src/test nets against a real repo', () => {
+    // Budgets are repo-variable tunables with a sanitize fallback at the
+    // read site, mirroring the scan budgets.
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'",
+    );
+    expect(workflow).toContain(
+      "GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'",
+    );
+    // The sanitize fallback is REPLAYED, not just pinned: it is the sole
+    // protection against a malformed repo variable reaching the octal-
+    // parsing [[ -gt ]] comparisons, in both failure directions.
+    const sanitizeBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ ! "\$\{GROWTH_BUDGET_SRC_LINES\}"[\s\S]*?GROWTH_BUDGET_TEST_LINES=400\n\s+fi)/,
+    )?.[1];
+    expect(sanitizeBlock).toBeTruthy();
+    // Last line only: the fallback path also emits its ::warning:: lines.
+    const sanitized = (src, test) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BUDGET_SRC_LINES='${src}'\nGROWTH_BUDGET_TEST_LINES='${test}'\n${sanitizeBlock}\nprintf '\\n%s %s' "$GROWTH_BUDGET_SRC_LINES" "$GROWTH_BUDGET_TEST_LINES"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .split('\n')
+        .pop();
+    // Plain counts (zero included) pass through untouched.
+    expect(sanitized('400', '0')).toBe('400 0');
+    // Garbage falls back…
+    expect(sanitized('400abc', 'twelve')).toBe('400 400');
+    // …and so do zero-padded values: bash [[ -gt ]] would read '0400' as
+    // octal 256 and raise on '0900', silently disabling the brake.
+    expect(sanitized('0400', '0900')).toBe('400 400');
+    // The 7-digit cap is load-bearing: past it bash integer literals wrap
+    // at 64 bits and comparisons go silently wrong.
+    expect(sanitized('9999999', '10000000')).toBe('9999999 400');
+
+    // Measurement: replay the real block against a real repo. Test lines are
+    // *.test.* / *.spec.* files, __snapshots__/, __tests__/, test-utils/, and
+    // integration-tests/ (by DIRECTORY, not file naming); binary files count
+    // as zero; deletions subtract; mechanical churn (root and nested
+    // lockfiles, the regenerated settings schema) never burns the budget —
+    // on EITHER side of the src/test split, even under a test directory.
+    const measureBlock = prepareBranchAndFeedbackStep.match(
+      /(# Binary files report[\s\S]*?NET_SRC=\$\(\( NET_TOTAL - NET_TEST \)\))/,
+    )?.[1];
+    expect(measureBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-growth-'));
+    try {
+      const git = (...args) =>
+        execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'test@test');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'src', 'app.ts'), 'a1\na2\na3\n');
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+      git('checkout', '-qb', 'pr');
+      mkdirSync(join(dir, 'src', '__snapshots__'));
+      mkdirSync(join(dir, 'src', 'test-utils'));
+      mkdirSync(join(dir, 'integration-tests'));
+      mkdirSync(join(dir, 'assets'));
+      // src: full rewrite, +7/-3 = net +4
+      writeFileSync(join(dir, 'src', 'app.ts'), 'b1\nb2\nb3\nb4\nb5\nb6\nb7\n');
+      // tests: +3 appended, +5 spec, +4 snapshot, +2 test-utils, +2
+      // integration-tests helper (a non-test filename proves the directory
+      // pathspec) plus +2 __tests__ setup below = net +18
+      writeFileSync(join(dir, 'src', 'app.test.ts'), 't1\nt2\nt3\nt4\nt5\n');
+      writeFileSync(join(dir, 'src', 'util.spec.ts'), 's1\ns2\ns3\ns4\ns5\n');
+      writeFileSync(
+        join(dir, 'src', '__snapshots__', 'app.snap'),
+        'n1\nn2\nn3\nn4\n',
+      );
+      writeFileSync(join(dir, 'src', 'test-utils', 'helper.ts'), 'h1\nh2\n');
+      writeFileSync(join(dir, 'integration-tests', 'helper.ts'), 'i1\ni2\n');
+      // __tests__/ helper without a .test./.spec. suffix is test code…
+      mkdirSync(join(dir, 'src', '__tests__'));
+      writeFileSync(join(dir, 'src', '__tests__', 'setup.ts'), 'u1\nu2\n');
+      // …and a lockfile under a test directory is mechanical churn on BOTH
+      // sides of the split, or NET_SRC would be corrupted by the subtraction.
+      writeFileSync(
+        join(dir, 'integration-tests', 'package-lock.json'),
+        'k1\nk2\nk3\nk4\nk5\nk6\n',
+      );
+      writeFileSync(
+        join(dir, 'assets', 'logo.bin'),
+        Buffer.from([0x00, 0x01, 0x02, 0x00]),
+      );
+      // Mechanical churn: a ROOT lockfile (proves '**/' glob-magic matches
+      // at depth zero), a nested one, and the exact generated-schema path —
+      // all excluded, so none of them shift the expected nets below.
+      writeFileSync(join(dir, 'package-lock.json'), 'l1\nl2\nl3\nl4\nl5\n');
+      mkdirSync(join(dir, 'packages', 'vscode-ide-companion', 'schemas'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(dir, 'packages', 'vscode-ide-companion', 'package-lock.json'),
+        'm1\nm2\nm3\n',
+      );
+      writeFileSync(
+        join(
+          dir,
+          'packages',
+          'vscode-ide-companion',
+          'schemas',
+          'settings.schema.json',
+        ),
+        'g1\ng2\ng3\ng4\n',
+      );
+      git('add', '-A');
+      git('commit', '-qm', 'pr');
+      // Advance main PAST the divergence before measuring: with main
+      // unmoved a two-dot regression produces identical numbers, so only a
+      // moved main pins the merge-base (three-dot) semantics.
+      git('checkout', '-q', 'main');
+      writeFileSync(join(dir, 'mainline.ts'), 'm1\nm2\nm3\nm4\nm5\n');
+      git('add', '-A');
+      git('commit', '-qm', 'main-moves');
+      git('checkout', '-q', 'pr');
+      git('update-ref', 'refs/remotes/origin/main', 'main');
+      const measured = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -e\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(measured).toBe('22 18 4');
+      // Fail-open: an orphan-history branch has no merge base, the three-dot
+      // diff exits 128, and under the workflow's real shell options the
+      // block must still complete with zero nets (brake skipped) instead of
+      // killing the prepare step every round.
+      git('update-ref', '-d', 'refs/remotes/origin/main');
+      const orphan = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s %s %s' "$NET_TOTAL" "$NET_TEST" "$NET_SRC"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphan).toBe('0 0 0');
+      // Unmeasured is a STATE: no bogus anchor may be written.
+      const orphanFlag = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${measureBlock}\nprintf '%s' "$NET_MEASURED"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(orphanFlag).toBe('false');
+      // A fork head literally named 'main' skips measurement out loud.
+      const forkMain = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\nBRANCH=main\n${measureBlock}\nprintf '\\n%s %s' "$NET_MEASURED" "$NET_TOTAL"`,
+        ],
+        { encoding: 'utf8', cwd: dir },
+      );
+      expect(forkMain.split('\n').pop()).toBe('false 0');
+      expect(measureBlock).toContain(
+        "GENERATED_EXCLUDES=(':(exclude,glob)**/package-lock.json' ':(exclude,glob)**/npm-shrinkwrap.json' ':(exclude)packages/vscode-ide-companion/schemas/settings.schema.json')",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // Baseline parse: bot-only, window-keyed, FIRST-wins — a duplicate
+    // marker in the same window cannot move an anchored baseline, a spoofed
+    // marker from another login is ignored, negative nets round-trip, and a
+    // window with no marker yields empty (this round anchors it).
+    const baselineJq = prepareBranchAndFeedbackStep.match(
+      /GROWTH_BASELINE="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg key "\$\{LIVE_REARM_KEY\}" --arg baseupd "\$\{BASE_UPD_AT\}" '([\s\S]*?)' "\$\{WORKDIR\}\/ic\.json"\)"/,
+    )?.[1];
+    expect(baselineJq).toBeTruthy();
+    const baselineComments = [
+      {
+        user: { login: 'mallory' },
+        created_at: '2026-01-01T00:00:00Z',
+        body: '<!-- autofix-growth-base src=1 test=1 key=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T01:00:00Z',
+        body: 'report\n\n<!-- autofix-eval ts=2026-01-01T00:59:00Z acted=true round=1 win=WIN0 -->\n<!-- autofix-growth-base src=7 test=8 key=WIN0 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T02:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=50 test=-60 key=WIN1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-01-01T03:00:00Z',
+        body: 'report\n\n<!-- autofix-growth-base src=100 test=200 key=WIN1 -->',
+      },
+    ];
+    const baselineFor = (key, baseupd = '') =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'ab',
+          'qwen-code-dev-bot',
+          '--arg',
+          'key',
+          key,
+          '--arg',
+          'baseupd',
+          baseupd,
+          baselineJq,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(baselineComments) },
+      ).trimEnd();
+    expect(baselineFor('WIN1')).toBe('50 -60');
+    expect(baselineFor('WIN2')).toBe('');
+    // A base update newer than an anchor invalidates it (the merge base it
+    // was measured against moved); a later anchor survives first-wins.
+    expect(baselineFor('WIN1', '2026-01-01T02:30:00Z')).toBe('100 200');
+    expect(baselineFor('WIN1', '2026-01-01T04:00:00Z')).toBe('');
+
+    // The baseline marker is written into this window's FIRST report only
+    // (pushed and no-op branches), rides the same comment as autofix-eval so
+    // every feedback filter already excludes it, and never touches the
+    // POSITIONAL autofix-eval parsers. Exactly one more occurrence exists:
+    // the prepare-side scan() parse.
+    expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
+    expect(
+      pushAndReportStep.split(
+        '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
+      ).length - 1,
+    ).toBe(2);
+    expect(
+      pushAndReportStep.split(`if [[ "\${GROWTH_BASE_NEW}" == 'true' ]]; then`)
+        .length - 1,
+    ).toBe(2);
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_NEW: '${{ steps.prepare.outputs.growth_base_new }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_SRC: '${{ steps.prepare.outputs.growth_base_src }}'",
+    );
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_TEST: '${{ steps.prepare.outputs.growth_base_test }}'",
+    );
+    // The marker is written under the key the baseline was READ under
+    // (LIVE_REARM_KEY), not the matrix WINDOW: a supersede-exempt conflict
+    // round can report under a stale WINDOW after a re-arm, and a marker
+    // under that dead key would hide the round's pushed growth from every
+    // later read in the live window.
+    expect(pushAndReportStep).toContain(
+      "GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'",
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_new=${GROWTH_BASE_NEW}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_src=${BASE_SRC}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_test=${BASE_TEST}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'growth_base_win=${LIVE_REARM_KEY}',
+    );
+
+    // The deferred preamble names the actual cause — a maintainer reading
+    // "after five rounds" on a round-2 PR that tripped the growth budget
+    // would reasonably conclude the brake misfired.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Critical-only mode is active: ${CAUSE_EN}',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '已进入仅处理 Critical 的模式：${CAUSE_ZH}',
+    );
+    // The cause construction is REPLAYED across the three engagement shapes,
+    // in both languages: a growth-only trip must never announce the round
+    // threshold, signs render naturally (no '+-120'), and EN/ZH always name
+    // the same cause.
+    const causeBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_CLAUSE_EN="the PR's diff grew[\s\S]*?CAUSE_ZH="\$\{ROUNDS_CLAUSE_ZH\}"\n\s+fi)/,
+    )?.[1];
+    expect(causeBlock).toBeTruthy();
+    const causeFor = (rounds, growth, growthSrc, growthTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_GROWTH=${growth}\nGROWTH_SRC=${growthSrc}\nGROWTH_TEST=${growthTest}\nGROWTH_BUDGET_SRC_LINES=400\nGROWTH_BUDGET_TEST_LINES=400\nCRITICAL_ONLY_AFTER_ROUND=5\n${causeBlock}\nprintf '%s\\n%s' "$CAUSE_EN" "$CAUSE_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const growthOnly = causeFor('false', 'true', -120, 500);
+    expect(growthOnly[0]).toContain('src -120 / test 500');
+    expect(growthOnly[0]).not.toContain('rounds are complete');
+    expect(growthOnly[0]).not.toContain('+-');
+    expect(growthOnly[1]).toContain('源码 -120 / 测试 500');
+    expect(growthOnly[1]).not.toContain('轮次');
+    const roundsOnly = causeFor('true', 'false', 0, 0);
+    expect(roundsOnly[0]).toBe('5 change-producing rounds are complete');
+    expect(roundsOnly[0]).not.toContain('diff grew');
+    expect(roundsOnly[1]).toContain('已完成 5 个产生改动的轮次');
+    const both = causeFor('true', 'true', 900, 20);
+    expect(both[0]).toContain('rounds are complete and');
+    expect(both[0]).toContain('src 900 / test 20');
+    expect(both[1]).toContain('轮次，且');
+
+    // The batch-budget sentence must describe the policy actually in force:
+    // the OVER_BUDGET census only builds spans in round-brake territory, so
+    // a growth-only engagement has no enforceable budget and must say so.
+    const budgetBlock = prepareBranchAndFeedbackStep.match(
+      /(if \[\[ "\$\{CRITICAL_ONLY_ROUNDS\}" == 'true' \]\]; then\n\s+BUDGET_EN=[\s\S]*?BUDGET_ZH="纯增长[\s\S]*?fi)/,
+    )?.[1];
+    expect(budgetBlock).toBeTruthy();
+    const budgetFor = (rounds) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CRITICAL_ONLY_ROUNDS=${rounds}\nCRITICAL_ONLY_HUMAN_BATCHES=2\nCRITICAL_ONLY_AFTER_ROUND=5\n${budgetBlock}\nprintf '%s\\n%s' "$BUDGET_EN" "$BUDGET_ZH"`,
+        ],
+        { encoding: 'utf8' },
+      ).split('\n');
+    const roundsBudget = budgetFor('true');
+    expect(roundsBudget[0]).toContain('used 2 regular feedback batches');
+    expect(roundsBudget[1]).toContain('2 批常规反馈预算');
+    const growthBudget = budgetFor('false');
+    expect(growthBudget[0]).toContain('continues to flow unaffected');
+    expect(growthBudget[0]).not.toContain('named below');
+    expect(growthBudget[1]).toContain('照常流动');
+
+    // Baseline wiring: the BASH_REMATCH split, fresh-anchor fallback, and
+    // growth subtractions — the producer (measurement/jq) and consumer
+    // (mode block) are replayed elsewhere; this replays the middle.
+    const wiringBlock = prepareBranchAndFeedbackStep.match(
+      /(GROWTH_BASE_NEW='false'[\s\S]*?GROWTH_TEST=\$\(\( NET_TEST - BASE_TEST \)\))/,
+    )?.[1];
+    expect(wiringBlock).toBeTruthy();
+    const wire = (baseline, netSrc, netTest) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `GROWTH_BASELINE='${baseline}'\nNET_MEASURED=true\nNET_SRC=${netSrc}\nNET_TEST=${netTest}\n${wiringBlock}\nprintf '%s %s %s %s %s' "$GROWTH_BASE_NEW" "$BASE_SRC" "$BASE_TEST" "$GROWTH_SRC" "$GROWTH_TEST"`,
+        ],
+        { encoding: 'utf8' },
+      );
+    // Parseable baseline: growth = net − base, marker not re-written.
+    expect(wire('50 -60', 120, 40)).toBe('false 50 -60 70 100');
+    // Empty baseline: THIS round anchors — marker written, growth zero.
+    expect(wire('', 120, 40)).toBe('true 120 40 0 0');
+    // Malformed baseline falls to the fresh anchor too.
+    expect(wire('garbage', 120, 40)).toBe('true 120 40 0 0');
+
+    // Writer↔scanner round-trip: render the report step's ACTUAL marker
+    // template (negative src, explicit window key) and require the prepare
+    // step's scan() to parse it back — the two sides are otherwise pinned
+    // only separately, so format drift would ship green while the baseline
+    // never parses in production.
+    const markerTemplate = pushAndReportStep.match(
+      /echo "(<!-- autofix-growth-base src=[^"]+-->)"/,
+    )?.[1];
+    expect(markerTemplate).toBeTruthy();
+    const rendered = execFileSync(
+      'bash',
+      [
+        '-c',
+        `GROWTH_BASE_SRC=-5\nGROWTH_BASE_TEST=0\nGROWTH_BASE_WIN=WINX\necho "${markerTemplate}"`,
+      ],
+      { encoding: 'utf8' },
+    ).trim();
+    const roundTrip = execFileSync(
+      'jq',
+      [
+        '-r',
+        '--arg',
+        'ab',
+        'qwen-code-dev-bot',
+        '--arg',
+        'key',
+        'WINX',
+        '--arg',
+        'baseupd',
+        '',
+        baselineJq,
+      ],
+      {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T00:00:00Z',
+            body: `report\n\n${rendered}`,
+          },
+        ]),
+      },
+    ).trimEnd();
+    expect(roundTrip).toBe('-5 0');
+    // The marker's window field is `key=`, never `win=`: three censuses
+    // attribute comments to windows by the whole-body substring
+    // `win=<key> -->`, and this marker can carry a different window than
+    // its comment's autofix-eval marker.
+    expect(rendered).not.toContain('win=');
+
+    // The report-post retry loop carries the round's entire persisted
+    // state: replay it with a stubbed gh — a success posts exactly once;
+    // a full outage attempts exactly three times, ends with "giving up"
+    // (not a fourth "retrying"), and fails the step.
+    const retryBlock = pushAndReportStep.match(
+      /(REPORT_POSTED='false'[\s\S]*?\[\[ "\$\{REPORT_POSTED\}" == 'true' \]\] \|\| exit 1)/,
+    )?.[1];
+    expect(retryBlock).toBeTruthy();
+    const retry = (ghExit) => {
+      const calls = mkdtempSync(join(tmpdir(), 'autofix-retry-'));
+      const res = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            'PR=1 REPO=o/r WORKDIR=.',
+            'sleep() { :; }',
+            `gh() { echo x >> "$1/calls"; return ${ghExit}; }`.replace(
+              '$1',
+              calls,
+            ),
+            retryBlock,
+            'echo POSTED_OK',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+      const count = existsSync(join(calls, 'calls'))
+        ? readFileSync(join(calls, 'calls'), 'utf8').split('\n').filter(Boolean)
+            .length
+        : 0;
+      rmSync(calls, { recursive: true, force: true });
+      return { out: `${res.stdout}\n${res.stderr}`, status: res.status, count };
+    };
+    const posted = retry(0);
+    expect(posted.count).toBe(1);
+    expect(posted.out).toContain('POSTED_OK');
+    const outage = retry(1);
+    expect(outage.count).toBe(3);
+    expect(outage.status).toBe(1);
+    expect(outage.out).toContain('giving up');
+    expect(outage.out.split('retrying').length - 1).toBe(2);
+  });
+
   it('requires the address path to run verification and record it as evidence', () => {
     // Observed: #7408 committed a fix with a TS error the gate then rejected,
     // while its summary claimed "verified all 3 commits". A soft "run the
@@ -5325,7 +7092,19 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
-    expect(workflow).not.toContain("runner.environment == 'self-hosted'");
+    // What this line guarded is the STEP the dedicated-runner design added —
+    // a `command -v node` check gated on `runner.environment == 'self-hosted'`
+    // that duplicated setup-node and was removed in #6261. That step is
+    // pinned out by name on the next line, so guarding the bare expression as
+    // a substring only forbids the `runner` context by accident: this same
+    // test requires `RUNNER_ENVIRONMENT: '${{ runner.environment }}'` below,
+    // and the npm-cache choice reads the same fact. Guard the shape that was
+    // actually reverted — an `if:` that tests that fact — in every spelling:
+    // single-line or block scalar, wrapped `${{ }}`, extra conjuncts, either
+    // operand order, arbitrary spacing.
+    expect(workflow).not.toMatch(
+      /if:\s*(?:\|-\s*)?\$\{\{[^}]*(?:runner\.environment\s*==\s*'self-hosted'|'self-hosted'\s*==\s*runner\.environment)/,
+    );
     expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
     expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
     expect(workflow).toContain(
@@ -5454,15 +7233,22 @@ describe('qwen-autofix workflow', () => {
     // Node bump applied to two of the three jobs) must not ship green.
     expect(nodeSetupSteps).toHaveLength(3);
     for (const step of nodeSetupSteps) {
-      // Unconditional: re-adding the hosted-only `if` skips setup-node on
-      // every ECS-routed run and leaves the job on whatever Node the pool
-      // image happens to ship, while every recipe assertion stays green.
-      expect(step).not.toContain("runner.environment == 'github-hosted'");
+      // Unconditional: any `if:` skips setup-node on one of the pools and
+      // leaves that job on whatever Node its image happens to ship, while
+      // every recipe assertion stays green.
+      expect(step).not.toMatch(/^\s*if:/m);
       expect(step).toContain(
         'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
       );
       expect(step).toContain("node-version: '22.x'");
-      expect(step).toContain("cache: 'npm'");
+      // The cache is the one input that is NOT the same on both pools — see
+      // 'does not restore the remote npm cache on the persistent pool'. The
+      // inputs are still identical across the three steps, which is what
+      // this test is for.
+      expect(step).toContain(
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      );
+      expect(step).toContain('package-manager-cache: false');
       expect(step).toContain("cache-dependency-path: 'package-lock.json'");
     }
   });
@@ -5712,7 +7498,10 @@ describe('qwen-autofix workflow', () => {
     const unsetExt = sanitizeStep.indexOf(
       '--unset-all extensions.worktreeConfig',
     );
-    const sweep = sanitizeStep.indexOf('--name-only --list');
+    // Explicitly the LOCAL sweep: the global scrub (asserted in its own
+    // test below) now sits at the top of the step and would otherwise be
+    // the first '--name-only --list' occurrence.
+    const sweep = sanitizeStep.indexOf('git config --local --name-only --list');
     const hooks = sanitizeStep.indexOf('--git-path hooks');
     expect(rmWorktreeCfg).toBeGreaterThan(-1);
     expect(unsetExt).toBeGreaterThan(rmWorktreeCfg);
@@ -5733,6 +7522,579 @@ describe('qwen-autofix workflow', () => {
     // Provenance link: the inlined step and qwen-triage's hardened step must
     // be edited together.
     expect(sanitizeStep).toContain('qwen-triage');
+  });
+
+  it('scrubs exec-vector keys from the runner-user GLOBAL git config', () => {
+    // Run 31516789251: a stray `diff.external=global-driver` in the pool
+    // runner's ~/.gitconfig — planted by human-authored code an earlier job
+    // ran as this user — failed four per-hunk probe tests in every later
+    // verification gate on that host. The local sweep above never touches
+    // the global file, so the pollution outlived every job. Ordered BEFORE
+    // the `.git` early-exit — host hygiene owes nothing to the workspace
+    // existing (first run on a host, wiped workspace) — and before the
+    // hooks resolution, so a planted global core.hooksPath is removed, not
+    // merely bypassed while resolving.
+    const globalScrub = sanitizeStep.indexOf(
+      'git config --global --name-only --list',
+    );
+    const earlyExit = sanitizeStep.indexOf('[ ! -e .git ]');
+    const localSweep = sanitizeStep.indexOf(
+      'git config --local --name-only --list',
+    );
+    const hooks = sanitizeStep.indexOf('--git-path hooks');
+    expect(globalScrub).toBeGreaterThan(-1);
+    expect(earlyExit).toBeGreaterThan(globalScrub);
+    expect(localSweep).toBeGreaterThan(earlyExit);
+    expect(hooks).toBeGreaterThan(localSweep);
+    // The PAT-side re-run (resanitize-git-config.sh) duplicates both lists
+    // because the inlined copies cannot call a repo script pre-checkout —
+    // pin them equal so the copies cannot drift apart (a key added to one
+    // denylist but not the other re-opens the class on the stale side).
+    const resanitize = readFileSync(
+      '.github/scripts/resanitize-git-config.sh',
+      'utf8',
+    );
+    const denylistOf = (text) => text.match(/grep -iE '([^']+)'/)?.[1];
+    const allowlistOf = (text) => text.match(/grep -ivE '([^']+)'/)?.[1];
+    expect(denylistOf(sanitizeStep)).toBeTruthy();
+    expect(denylistOf(resanitize)).toBe(denylistOf(sanitizeStep));
+    expect(allowlistOf(resanitize)).toBe(allowlistOf(sanitizeStep));
+    // Belt over the byte-identity pin: the list comparison holds against
+    // EVERY inlined copy, not only the canonical first.
+    for (const step of sanitizeSteps) {
+      expect(denylistOf(step)).toBe(denylistOf(sanitizeStep));
+    }
+    // Functional: the extracted pipeline drops every command-execution key
+    // and keeps the routing/credential keys the pool image may own — the
+    // global file is infra territory, so this must stay a denylist. The
+    // fixture covers every denylist alternation (deleting one lets its
+    // family survive and fails the kept-set assertion) and plants dotted
+    // SUBSECTION names: git subsection names may contain dots, so a
+    // `[^.]+` slot would let `[diff "a.b"] command` slip through — the
+    // incident-class regression the `.+` slots exist to prevent.
+    // The scrub is a for-loop over BOTH files of the global scope —
+    // ~/.gitconfig and the XDG file — because `git config --global`
+    // lists/unsets only the former once both exist (probed: the listing
+    // omits the XDG keys and --unset-all exits 5 with them live).
+    const scrub = sanitizeStep.match(
+      /for global_file in[\s\S]*?\|\| true; done\n\s+done/,
+    )?.[0];
+    expect(scrub).toBeTruthy();
+    const runScrub = (home) => {
+      const env = {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, '.config'),
+      };
+      delete env['GIT_CONFIG_GLOBAL'];
+      return spawnSync('bash', ['-e', '-o', 'pipefail', '-c', scrub], {
+        env,
+        encoding: 'utf8',
+      });
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-global-scrub-'));
+    const cfg = join(dir, '.gitconfig');
+    mkdirSync(join(dir, '.config', 'git'), { recursive: true });
+    const xdgCfg = join(dir, '.config', 'git', 'config');
+    writeFileSync(
+      xdgCfg,
+      '[diff]\n\texternal = xdg-evil\n[user]\n\temail = keep@x\n',
+    );
+    writeFileSync(
+      cfg,
+      [
+        '[safe]',
+        '\tdirectory = /work',
+        '[http]',
+        '\tproxy = http://proxy:3128',
+        '[credential]',
+        '\thelper = store',
+        '[user]',
+        '\tname = runner',
+        '[remote "origin"]',
+        '\turl = https://github.com/o/r',
+        '\tuploadpack = evil',
+        '\treceivepack = evil',
+        '[diff]',
+        '\texternal = global-driver',
+        '[diff "a.b"]',
+        '\tcommand = evil',
+        '\ttextconv = evil',
+        '[core]',
+        '\tfsmonitor = evil',
+        '\thooksPath = /tmp/evil',
+        '\tpager = evil',
+        '\teditor = evil',
+        '\tsshCommand = evil',
+        '\taskpass = evil',
+        '\talternateRefsCommand = evil',
+        '\tgitProxy = evil',
+        '\tautocrlf = false',
+        '[merge "x.y"]',
+        '\tdriver = evil',
+        '[filter "x"]',
+        '\tsmudge = evil',
+        '[alias]',
+        '\tpwn = !evil',
+        '[pager]',
+        '\tdiff = evil',
+        '[difftool "t"]',
+        '\tcmd = evil',
+        '[mergetool "t"]',
+        '\tcmd = evil',
+        '[interactive]',
+        '\tdiffFilter = evil',
+        '[sequence]',
+        '\teditor = evil',
+        '[gpg]',
+        '\tprogram = evil',
+        '[gpg "ssh"]',
+        '\tprogram = evil',
+        '[init]',
+        '\ttemplateDir = /tmp/evil',
+        '[include]',
+        '\tpath = /tmp/no-such-include',
+        '[includeIf "gitdir:/tmp/"]',
+        '\tpath = /tmp/evil.inc',
+        '[protocol]',
+        '\tallow = always',
+        '[protocol "ext"]',
+        '\tallow = always',
+        '[submodule "s.t"]',
+        '\tupdate = !evil',
+        '[url "https://mirror.example/"]',
+        '\tinsteadOf = https://github.com/',
+        '\tpushInsteadOf = https://github.com/',
+        '[http "https://github.com"]',
+        '\tsslVerify = false',
+        '\tsslCAInfo = /tmp/evil-ca',
+        '',
+      ].join('\n'),
+    );
+    expect(runScrub(dir).status).toBe(0);
+    const keysOf = (file) =>
+      execFileSync('git', ['config', '--file', file, '--name-only', '--list'], {
+        encoding: 'utf8',
+      })
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .sort();
+    expect(keysOf(cfg)).toEqual([
+      'core.autocrlf',
+      'credential.helper',
+      'http.proxy',
+      'remote.origin.url',
+      'safe.directory',
+      'user.name',
+    ]);
+    // The XDG leg of the loop scrubbed its exec key and kept its benign one.
+    expect(keysOf(xdgCfg)).toEqual(['user.email']);
+    // The two `|| true` guards are load-bearing under the step's default
+    // `bash -e` + pipefail: a config with NO exec keys (the steady state on
+    // a clean runner) makes grep exit 1, and a corrupt or missing global
+    // file makes git exit non-zero — none may kill the sanitize step.
+    writeFileSync(cfg, '[user]\n\tname = clean\n');
+    rmSync(join(dir, '.config'), { recursive: true, force: true });
+    expect(runScrub(dir).status).toBe(0);
+    writeFileSync(cfg, '[[[ not a git config\n');
+    expect(runScrub(dir).status).toBe(0);
+    rmSync(cfg);
+    expect(runScrub(dir).status).toBe(0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('re-sanitizes git config and resets the helper list at every PAT-bearing git step', () => {
+    // The job-start sanitize is pre-checkout hygiene; the gates then run
+    // branch test code on the host and the sandboxed agent has the
+    // workspace mounted — either can plant exec keys in the repo-LOCAL
+    // .git/config (highest precedence, read by the push) or rewrite the
+    // real ~/.gitconfig behind the gates' env redirect (a direct file
+    // write bypasses inherited env — probe-verified in the #8961 review).
+    // So both PAT-bearing git steps re-run the sweeps from a TRUSTED-BASE
+    // staged copy — never the working tree, which holds the branch under
+    // test at call time — before touching credentials.
+    const resanitizeCall = 'bash "${RUNNER_TEMP}/resanitize-git-config.sh"';
+    for (const step of [publishPrStep, pushAndReportStep]) {
+      expect(step).toContain(resanitizeCall);
+      expect(step.indexOf(resanitizeCall)).toBeLessThan(
+        step.indexOf('credential."https://github.com".helper'),
+      );
+      // The staged copy's provenance holds at cp time only — RUNNER_TEMP
+      // is writable by that same branch code — so the invocation must
+      // verify the digest the staging step parked in GITHUB_OUTPUT
+      // (expression context, unreachable from a disk write), and it must
+      // do so BEFORE executing the script.
+      // Pin the WHOLE verify line, not just its presence: `|| true` or a
+      // swapped digest target would turn the tamper gate into a decorative
+      // no-op while presence/order assertions stayed green (both mutants
+      // executed in the round-3 review).
+      const verifyLine =
+        'echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null';
+      expect(step).toContain(verifyLine);
+      expect(step.indexOf(verifyLine)).toBeLessThan(
+        step.indexOf(resanitizeCall),
+      );
+      expect(step).not.toMatch(/sha256sum -c[^\n]*\|\| true/);
+      expect(step).toContain(
+        "RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'",
+      );
+      // Full env-channel closure, not just GIT_CONFIG_COUNT: GITHUB_ENV can
+      // inject any git env knob, and several outrank file config — the step
+      // strips them and redirects the file scopes to a throwaway (as the
+      // gates do), so a concurrent job's ~/.gitconfig rewrite and an
+      // env-planted GIT_SSL_NO_VERIFY/GIT_EXEC_PATH/GIT_DIR all miss.
+      expect(step).toContain('export GIT_CONFIG_COUNT=0');
+      expect(step).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      // Unpredictable throwaway (mktemp), not a fixed literal a same-user
+      // watcher could re-plant into after the seed.
+      expect(step).toContain(
+        'export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-pat-gitconfig.XXXXXX")"',
+      );
+      // PATH is pinned to the staged trusted value and the preload channels
+      // dropped BEFORE anything runs — else a swapped git/sha256sum/bash
+      // defeats the digest gate itself; the full env-channel closure covers
+      // the file-scope redirects (GLOBAL/SYSTEM), the exec/transport knobs,
+      // and every repo-redirect twin (DIR/WORK_TREE/COMMON_DIR/object dirs).
+      expect(step).toContain('export PATH="${TRUSTED_PATH}"');
+      expect(step).toMatch(/unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH/);
+      for (const v of [
+        'GIT_SSL_NO_VERIFY',
+        'GIT_SSL_CAINFO',
+        'GIT_EXEC_PATH',
+        'GIT_DIR',
+        'GIT_WORK_TREE',
+        'GIT_COMMON_DIR',
+        'GIT_OBJECT_DIRECTORY',
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+        'GIT_SHALLOW_FILE',
+        'GIT_ALLOW_PROTOCOL',
+        'GIT_CONFIG_PARAMETERS',
+        'GIT_PROXY_COMMAND',
+        'GIT_SSH_COMMAND',
+        'GIT_ASKPASS',
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+      ]) {
+        expect(step).toMatch(new RegExp(`unset[\\s\\S]*?\\b${v}\\b`));
+      }
+    }
+    // The three PAT hermetic preambles (both pushes AND Prepare) are
+    // identical (only their comment twin-names differ, stripped here): a
+    // hardening applied to one PAT git site but not the others re-opens the
+    // class on the stale side. Anchored from `export PATH` so the whole
+    // preamble — PATH pin, LD/env strip, mktemp redirect — is compared.
+    const patBlockOf = (step) =>
+      step
+        .match(
+          /export PATH="\$\{TRUSTED_PATH\}"\n\s*unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \\[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(patBlockOf(publishPrStep)).toBeTruthy();
+    expect(patBlockOf(pushAndReportStep)).toBe(patBlockOf(publishPrStep));
+    expect(patBlockOf(prepareStep)).toBe(patBlockOf(publishPrStep));
+    // Each PAT step carries the trusted-PATH env wiring.
+    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+      expect(step).toContain(
+        "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+      );
+    }
+    // The staging steps record the trusted PATH before any branch code runs.
+    expect(workflow.match(/trusted_path=\$\{PATH\}/g) ?? []).toHaveLength(2);
+    // gh's own env channels are pinned/stripped BEFORE the first gh call in
+    // each PAT step, so a $GITHUB_ENV-planted GH_HOST cannot reroute the
+    // identity check and a planted GH_TOKEN cannot outrank the inline one.
+    for (const [step, firstGh] of [
+      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
+      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
+      [prepareStep, 'PR_LIVE="$(gh pr view'],
+    ]) {
+      const ghPin = step.indexOf('export GH_HOST=github.com');
+      expect(ghPin).toBeGreaterThan(-1);
+      expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
+      // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
+      // back to the attacker-writable ~/.config/gh with http_unix_socket).
+      expect(step).toContain(
+        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+      );
+      expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
+      expect(ghPin).toBeLessThan(step.indexOf(firstGh));
+    }
+    // The fork fetch and salvage fetch cannot recurse into a planted
+    // submodule and execute an ext:: URL with the PAT (env-level
+    // GIT_ALLOW_PROTOCOL is stripped; these pin the config level).
+    expect(pushAndReportStep).toContain(
+      '-c fetch.recurseSubmodules=false -c protocol.ext.allow=never',
+    );
+    // The push refuses a HEAD that is not the gate's verified head — closes a
+    // repo redirect (planted .git/commondir / GIT_DIR) that would push an
+    // attacker tree.
+    expect(pushAndReportStep).toMatch(
+      /HEAD_NOW="\$\(git rev-parse HEAD\)"[\s\S]{0,400}!= "\$\{VERIFIED_HEAD\}"[\s\S]{0,200}refusing to push/,
+    );
+    // And it pushes the exact verified OBJECT, not symbolic HEAD (which the
+    // push would re-resolve, re-opening the check-then-use race): PUSH_SHA
+    // is pinned to VERIFIED_HEAD under the guard and re-pinned to the merge
+    // result after each salvage merge.
+    expect(pushAndReportStep).toContain('PUSH_SHA="${VERIFIED_HEAD}"');
+    expect(pushAndReportStep).toContain(
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
+    );
+    expect(pushAndReportStep).not.toMatch(
+      /git_auth push[^\n]*HEAD:"\$\{BRANCH\}"/,
+    );
+    expect(pushAndReportStep).toMatch(
+      /PUSH_SHA="\$\(git rev-parse HEAD\)"[\s\S]{0,120}PRE_MERGE_HEAD/,
+    );
+    // The gate runner is digest-verified before BOTH gate passes (the branch
+    // runs its own build/test between them), with PATH pinned first.
+    expect(
+      workflow.match(
+        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c - > \/dev\/null/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(
+      workflow.match(/verify_runner_sha256=\$\(sha256sum /g) ?? [],
+    ).toHaveLength(1);
+    // resanitize defuses the repo-redirect FILES (.git/commondir/shallow).
+    const resanitizeScript = readFileSync(
+      '.github/scripts/resanitize-git-config.sh',
+      'utf8',
+    );
+    expect(resanitizeScript).toContain(
+      'rm -f "${GIT_DIR_PATH}/commondir" "${GIT_DIR_PATH}/shallow"',
+    );
+    // Both staging steps stage the script and record its digest.
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/resanitize-git-config\.sh "\$\{RUNNER_TEMP\}\/resanitize-git-config\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(
+      workflow.match(/resanitize_sha256=\$\(sha256sum /g) ?? [],
+    ).toHaveLength(2);
+    // Every one-shot credential helper leads with an empty-helper reset:
+    // helpers run in config order and the FIRST to answer wins, so without
+    // the reset a helper planted at any earlier scope sees the request
+    // (and the env) before ours answers — probe-verified. http.sslVerify
+    // rides the same chain: a kept http.proxy plus a planted
+    // sslVerify=false would otherwise read the credential off the wire.
+    // Count equality pins a future push site to ship with both or fail.
+    const helperSites =
+      workflow.match(/-c credential\."https:\/\/github\.com"\.helper=/g) ?? [];
+    // Tolerant of the intermediate `-c` transport/protocol flags git_auth
+    // also carries between the sslVerify pin and the helper reset.
+    const resetSites =
+      workflow.match(
+        /-c http\.sslVerify=true (?:-c [^\n]*?)?-c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
+      ) ?? [];
+    expect(helperSites).toHaveLength(3);
+    expect(resetSites).toHaveLength(helperSites.length);
+    // The fork fetch is PAT-bearing too (its step env carries the PAT) and
+    // is anonymous — a public repo's fork heads are public — so it leads
+    // with the helper-list reset + transport pin and never adds the PAT
+    // helper: a planted global extraheader must not 401 into a planted
+    // helper handing over the PAT. The bare fetch was the one network site
+    // the round-2 rollout skipped.
+    expect(prepareStep).toMatch(
+      /git -c http\.sslVerify=true -c credential\.helper= fetch "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+    );
+    expect(prepareStep).not.toMatch(
+      /\n\s*if ! git fetch "https:\/\/github\.com\/\$\{HEAD_REPO\}\.git"/,
+    );
+    // The push-race salvage merge is signing-proof: a global
+    // commit.gpgsign=true with no key on the runner would exit 128 and be
+    // misread as a content conflict, discarding a verified round.
+    expect(pushAndReportStep).toMatch(
+      /git -c commit\.gpgsign=false[\s\S]*?merge --no-edit FETCH_HEAD/,
+    );
+    // Functional: run the staged script against a fixture repo with exec
+    // keys planted in LOCAL and WORKTREE config (what branch code can do
+    // between the job-start sanitize and the push) plus a polluted global
+    // file — the planted keys go, the allowlisted plumbing stays.
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-resanitize-'));
+    const home = join(dir, 'home');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(home, '.gitconfig'),
+      '[diff]\n\texternal = global-driver\n',
+    );
+    // A LIVE XDG global file too: git reads it for keys ~/.gitconfig does
+    // not define, and it is the file the incident host actually carries.
+    // Without it the script's second loop iteration runs against a
+    // nonexistent path and the XDG leg has no behavioural coverage
+    // (mutation: dropping the XDG file from the loop then stays green).
+    mkdirSync(join(home, '.config', 'git'), { recursive: true });
+    writeFileSync(
+      join(home, '.config', 'git', 'config'),
+      '[core]\n\thooksPath = /tmp/xdg-evil\n',
+    );
+    const repo = join(dir, 'repo');
+    mkdirSync(repo);
+    execFileSync('git', ['init', '-q', repo]);
+    const env = {
+      ...process.env,
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, '.config'),
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+    delete env['GIT_CONFIG_GLOBAL'];
+    const lgit = (...args) =>
+      execFileSync('git', ['-C', repo, ...args], { env, encoding: 'utf8' });
+    lgit('config', '--local', 'credential.helper', '!evil');
+    lgit('config', '--local', 'core.fsmonitor', 'evil');
+    lgit('config', '--local', 'remote.origin.url', 'https://github.com/o/r');
+    // The worktree-config branch: extensions.worktreeConfig activates a
+    // second local file that `git config --local` neither lists nor unsets
+    // — the script must delete it, not merely sweep the local scope
+    // (mutation-tested: without this arm, deleting the `rm -f` line kept
+    // the whole suite green).
+    lgit('config', '--local', 'extensions.worktreeConfig', 'true');
+    lgit('config', '--worktree', 'core.fsmonitor', 'evil-wt');
+    const run = spawnSync(
+      'bash',
+      [resolve('.github/scripts/resanitize-git-config.sh')],
+      { cwd: repo, env, encoding: 'utf8' },
+    );
+    expect(run.status).toBe(0);
+    expect(existsSync(join(repo, '.git', 'config.worktree'))).toBe(false);
+    const localKeys = lgit('config', '--local', '--name-only', '--list')
+      .trim()
+      .split('\n');
+    expect(localKeys).not.toContain('credential.helper');
+    expect(localKeys).not.toContain('core.fsmonitor');
+    expect(localKeys).not.toContain('extensions.worktreeconfig');
+    expect(localKeys).toContain('remote.origin.url');
+    // Full-scope resolution: nothing plants back through any surviving file.
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'core.fsmonitor'], {
+        env,
+        encoding: 'utf8',
+      }).status,
+    ).not.toBe(0);
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'diff.external'], {
+        env,
+        encoding: 'utf8',
+      }).status,
+    ).not.toBe(0);
+    // The XDG-planted exec key is gone too — pins the script's two-file loop.
+    expect(
+      spawnSync('git', ['-C', repo, 'config', '--get', 'core.hooksPath'], {
+        env,
+        encoding: 'utf8',
+      }).stdout,
+    ).not.toContain('xdg-evil');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('runs both verification gates under a throwaway global git config', () => {
+    // Same incident, the gate-side guard: the gates re-run branch tests on
+    // the HOST, so runner ~/.gitconfig pollution failed tests the branch
+    // never caused, the rejection charged the round (package tests are
+    // A/B-exempt), and an 18-minute repair burned on a failure no repair
+    // can reach. Both gates redirect global config to a throwaway file so
+    // every child — vitest fixture repos included — is hermetic to the
+    // host, and a branch-authored `git config --global` dies with the run
+    // instead of poisoning the next one.
+    for (const gate of verificationGateBodies) {
+      const globalRedirect = gate.indexOf(
+        'export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"',
+      );
+      expect(gate).toContain('export GIT_CONFIG_SYSTEM=/dev/null');
+      expect(globalRedirect).toBeGreaterThan(-1);
+      // Truncated per run: the repair leg must not inherit writes the first
+      // gate run's branch tests made into the throwaway file.
+      expect(gate).toContain(': > "${GIT_CONFIG_GLOBAL}"');
+      // Seeded with the workspace safe.directory the redirect just hid
+      // (actions/checkout wrote it into the real global config).
+      expect(gate.indexOf('safe.directory "$(pwd)"')).toBeGreaterThan(
+        globalRedirect,
+      );
+      // Before the deterministic checks, so they all see the redirect.
+      expect(globalRedirect).toBeLessThan(gate.indexOf('npm run build'));
+      // GITHUB_ENV-injected git env knobs outrank BOTH redirects — each
+      // gate zeroes GIT_CONFIG_COUNT and strips the transport/exec channels.
+      expect(gate).toContain('export GIT_CONFIG_COUNT=0');
+      for (const v of ['GIT_SSL_NO_VERIFY', 'GIT_EXEC_PATH', 'GIT_DIR']) {
+        expect(gate).toMatch(new RegExp(`unset[\\s\\S]*\\b${v}\\b`));
+      }
+    }
+    // The two gate env+redirect blocks are one hardening surface — pin them
+    // equal (whitespace-normalized; the shell copy and the YAML copy differ
+    // only in indentation) so a channel added to one but not the other
+    // cannot ship green, exactly as the three job-start scrub copies are
+    // pinned byte-identical.
+    const gateBlockOf = (body) =>
+      body
+        .match(
+          /unset GIT_CONFIG_PARAMETERS[\s\S]*?git config --file "\$\{GIT_CONFIG_GLOBAL\}" safe\.directory "\$\(pwd\)"/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(gateBlockOf(reviewVerificationRunner)).toBeTruthy();
+    expect(gateBlockOf(verificationGateSteps[0] ?? '')).toBe(
+      gateBlockOf(reviewVerificationRunner),
+    );
+    // Before the FIRST git command in each gate, not merely before the
+    // checks: the committed-ref probe and dirty-tree asserts must live in
+    // the same config universe as everything after them.
+    expect(
+      reviewVerificationRunner.indexOf('export GIT_CONFIG_SYSTEM=/dev/null'),
+    ).toBeLessThan(
+      reviewVerificationRunner.indexOf('git diff --quiet "origin/${BRANCH}'),
+    );
+    const issueGate = verificationGateSteps[0] ?? '';
+    expect(
+      issueGate.indexOf('export GIT_CONFIG_SYSTEM=/dev/null'),
+    ).toBeLessThan(issueGate.indexOf('git status --porcelain'));
+    // Functional, not just positional: execute the extracted redirect
+    // block under a hostile HOME (a polluted ~/.gitconfig) AND a hostile
+    // env channel (GIT_CONFIG_COUNT-planted key). After the block, a child
+    // git must see neither, and a `git config --global` write must land in
+    // the throwaway file — the block can no longer be reverted or hollowed
+    // out while a string-presence test stays green.
+    const redirectBlock = reviewVerificationRunner.match(
+      /unset GIT_CONFIG_PARAMETERS[\s\S]*?safe\.directory "\$\(pwd\)"/,
+    )?.[0];
+    expect(redirectBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-gate-redirect-'));
+    const home = join(dir, 'home');
+    const temp = join(dir, 'temp');
+    mkdirSync(home, { recursive: true });
+    mkdirSync(temp, { recursive: true });
+    writeFileSync(
+      join(home, '.gitconfig'),
+      '[diff]\n\texternal = global-driver\n',
+    );
+    const env = {
+      ...process.env,
+      HOME: home,
+      RUNNER_TEMP: temp,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.fsmonitor',
+      GIT_CONFIG_VALUE_0: 'evil',
+    };
+    delete env['GIT_CONFIG_GLOBAL'];
+    const probe = spawnSync(
+      'bash',
+      [
+        '-c',
+        `${redirectBlock}\n` +
+          'git config --get diff.external && exit 7\n' +
+          'git config --get core.fsmonitor && exit 8\n' +
+          'git config --global qwen.probe ok\n' +
+          'git config --global --get qwen.probe',
+      ],
+      { cwd: dir, env, encoding: 'utf8' },
+    );
+    expect(probe.status).toBe(0);
+    expect(probe.stdout.trim().endsWith('ok')).toBe(true);
+    // The write above landed in the throwaway file, not the hostile HOME.
+    expect(readFileSync(join(home, '.gitconfig'), 'utf8')).not.toContain(
+      'qwen',
+    );
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('never invokes a local action before checkout', () => {
@@ -6216,6 +8578,40 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
+  it('does not restore the remote npm cache on the persistent pool', () => {
+    // Measured on one review-address leg: `Set up Node.js` took 339s, of
+    // which Node itself was free (already in the runner tool cache) and
+    // 2,654,052,865 bytes at ~10 MB/s were the npm cache restore — guarding
+    // an `npm ci` that took 29s in the very next step. Every leg pays it,
+    // up to ten per scan, plus build-cli and issue-autofix.
+    // All three consumers, so a fourth job with a hardcoded cache fails
+    // here rather than quietly paying 2.65 GB per run — counted by step
+    // name, so no choice of inputs can dodge the capture.
+    expect(nodeSetupSteps).toHaveLength(3);
+    for (const step of nodeSetupSteps) {
+      expect(step).toContain(
+        `cache: "\${{ runner.environment != 'self-hosted' && 'npm' || '' }}"`,
+      );
+    }
+    // Text pins cannot tell a ternary that works from one that GHA's
+    // operand-value &&/|| semantics defeat — this PR's first attempt read
+    // correctly and still restored the cache on BOTH pools. Evaluate the
+    // pinned expression the way Actions does: '' on the persistent pool,
+    // 'npm' on the ephemeral hosted fallback.
+    const cacheExpression =
+      nodeSetupSteps[0].match(/cache: "\$\{\{ ([^}]+) \}\}"/)?.[1] ?? '';
+    for (const [environment, expected] of [
+      ['self-hosted', ''],
+      ['github-hosted', 'npm'],
+    ]) {
+      expect(
+        evalGhaExpression(cacheExpression, {
+          'runner.environment': environment,
+        }),
+      ).toBe(expected);
+    }
+  });
+
   it('passes model credentials directly to qwen subprocesses', () => {
     const qwenSteps = [
       assessCandidatesStep,
@@ -6547,7 +8943,7 @@ describe('qwen-autofix workflow', () => {
     // git push twice more and the salvage legs execute against a branch
     // that was already pushed.
     expect(pushAndReportStep).toMatch(
-      /if git_auth push --no-verify "\$\{PUSH_URL\}" HEAD:"\$\{BRANCH\}"; then\n\s+break/,
+      /if git_auth push --no-verify "\$\{PUSH_URL\}" "\$\{PUSH_SHA\}:refs\/heads\/\$\{BRANCH\}"; then\n\s+break/,
     );
     // BOTH push-URL constructions stay pinned — the fork one is pinned by
     // the fork-plumbing test, and the same-repo one lost its old
@@ -6573,10 +8969,10 @@ describe('qwen-autofix workflow', () => {
     // date") and must NOT tell the reviewer to re-check commits that
     // never existed.
     expect(pushAndReportStep).toMatch(
-      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n\s+if ! git -c user\.name=/,
+      /PRE_MERGE_HEAD="\$\(git rev-parse HEAD\)"\n[\s\S]{0,600}if ! git -c commit\.gpgsign=false \\\n\s+-c user\.name=/,
     );
     expect(pushAndReportStep).toMatch(
-      /if \[\[ "\$\(git rev-parse HEAD\)" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
+      /PUSH_SHA="\$\(git rev-parse HEAD\)"\n\s+if \[\[ "\$\{PUSH_SHA\}" != "\$\{PRE_MERGE_HEAD\}" \]\]; then\n\s+PUSH_RACE_MERGED='true'/,
     );
     // Merge, never rebase: the agent's own conflict-resolution rounds create
     // merge commits, and a rebase would flatten them and can silently
@@ -6608,6 +9004,11 @@ describe('qwen-autofix workflow', () => {
       /PUSH_RACE_MERGED='false'\n\s+for push_attempt in 1 2 3; do/,
     );
     expect(pushAndReportStep).toContain('verification predates that merge');
+    // The STALE_BASE_RETRY handoff embeds a rejection written BEFORE the
+    // auto-update; the note un-poisons its framing for the retry agent.
+    expect(reviewAddressReportStep).toContain(
+      'the base has since been auto-updated',
+    );
     // Bounded: the loop gives up after the last attempt instead of spinning.
     // The structural pin connects the guard value to the error exit — a
     // mutation of == 3 to == 4 survives presence-only checks: the loop
@@ -6634,7 +9035,7 @@ describe('qwen-autofix workflow', () => {
     // Same anchor as the dry-run: the publish push must carry the
     // host-scoped `git -c credential…` prefix, not a bare `git push`.
     expect(publishPrStep).toMatch(
-      /git -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
+      /git -c http\.sslVerify=true -c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=[^\n]*\n\s+push --no-verify "https:\/\/github\.com\/\$\{REPO\}\.git"/,
     );
     // Neither PAT push may expose the token — not persisted to .git/config
     // (a `git remote set-url`) and not in the process argv (a token-bearing
@@ -6657,7 +9058,7 @@ describe('qwen-autofix workflow', () => {
       'git config --local credential.helper',
     );
     expect(pushAndReportStep).toContain(
-      'git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"',
+      'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // Five sites now: both PAT pushes, the PAT-bearing prepare checkout,
     // AND both no-secret verification checkouts (convention: every host
@@ -6680,10 +9081,10 @@ describe('qwen-autofix workflow', () => {
     // hence the wider windows — the assertions are about order, and one
     // hooksPath site genuinely covers both arms of the if.
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,900}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,1400}git checkout -B "\$\{BRANCH\}" FETCH_HEAD/,
     );
     expect(workflow).toMatch(
-      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,2200}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
+      /git config core\.hooksPath \/dev\/null\n[\s\S]{0,3000}git checkout -B "\$\{BRANCH\}" "origin\/\$\{BRANCH\}"/,
     );
     // The agent step re-points hooks to .husky BEFORE invoking the runner.
     // Assert the ordering directly (not a fixed-width window) so adding a
@@ -7023,10 +9424,10 @@ describe('qwen-autofix workflow', () => {
       reviewVerificationRunner.match(/retryable=true/g) ?? [],
     ).toHaveLength(1);
     expect(reviewVerificationRunner).toContain(
-      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
     );
     expect(reviewVerificationRunner).toContain(
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'cross-package contract verification failed'",
     );
     expect(pushAndReportStep).toContain(
       "steps.final_verify.outputs.outcome == 'fixed'",
@@ -7047,10 +9448,10 @@ describe('qwen-autofix workflow', () => {
       'VERIFICATION_HEAD="$(git rev-parse HEAD)"',
     );
     const schemaCheck = reviewVerificationRunner.indexOf(
-      "run_check 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
     );
     const contractCheck = reviewVerificationRunner.indexOf(
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'cross-package contract verification failed'",
     );
     const coreRebuild = reviewVerificationRunner.indexOf(
       "run_check 'core rebuild failed on the agent-committed fix'",
@@ -7625,6 +10026,28 @@ describe('qwen-autofix workflow', () => {
     expect(staleConflict.split('|')[0]).toBe(NEWEST);
     expect(staleConflict).toContain('Could not produce a passing fix');
 
+    // Pre-existing verdicts pick their remedy from the compare the step
+    // already ran — swapping the two clause bodies must fail here, not ship
+    // a headline prescribing a merge that changes nothing.
+    const preAhead = run(
+      { OUTCOME: 'failed', PREEXISTING: 'true' },
+      { gateRejection: true },
+    );
+    expect(preAhead).toContain('PRE-EXISTING failure');
+    expect(preAhead).toContain('own pre-round code needs attention');
+    expect(preAhead).not.toContain('base update (merge main)');
+    const preBehindConflict = run(
+      {
+        OUTCOME: 'failed',
+        PREEXISTING: 'true',
+        CMP_STATUS_STUB: 'behind',
+        UPDATE_OK_STUB: '0',
+      },
+      { gateRejection: true },
+    );
+    expect(preBehindConflict).toContain('PRE-EXISTING failure');
+    expect(preBehindConflict).toContain('base update (merge main)');
+
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
     expect(crashed.split('|')[0]).toBe(SENTINEL);
@@ -7659,6 +10082,19 @@ describe('qwen-autofix workflow', () => {
     expect(timedOutCapped).toContain(
       'split the PR or raise the agent time budget',
     );
+    // An IDLE timeout at the cap gets the sandbox remedy, not budget
+    // advice: more minutes cannot cure a sandbox that produced nothing.
+    const idleCapped = run({
+      OUTCOME: 'failed',
+      AGENT_TIMEOUT:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      ROUND: '4',
+    });
+    expect(idleCapped).toContain('this was the last automatic attempt');
+    expect(idleCapped).toContain(
+      'raising the time budget cannot cure a silent sandbox',
+    );
+    expect(idleCapped).not.toContain('split the PR or raise');
 
     // At the cap the gate crash names the operator fix rather than promising a
     // retry the scan's round gate would refuse.
@@ -8011,6 +10447,50 @@ describe('qwen-autofix workflow', () => {
     expect(interleaved.terminal).toBe(true);
     expect(interleaved.headline).toContain('time-budget exhaustions');
     expect(interleaved.headline).toContain('/retry');
+    // Idle (silent-sandbox) timeouts share the census — each burns a full
+    // budget — and when the window contains any, the breaker's advice says
+    // a budget increase cannot cure them.
+    const IDLE_HEAD =
+      '🤖 AutoFix ran out of time before finishing (idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)) (attempt 2/100) — it will retry on the next scan.';
+    const idleMixed = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleMixed.terminal).toBe(true);
+    expect(idleMixed.headline).toContain('time-budget exhaustions');
+    expect(idleMixed.headline).toContain(
+      'silent-sandbox (idle) timeouts that no budget increase can cure',
+    );
+    // An ALL-idle window swaps the closing remedy for the sandbox
+    // investigation — mirroring the round-level split — instead of
+    // prescribing the budget increase the clause above declared useless.
+    expect(idleMixed.headline).toContain(
+      'A human should investigate the sandbox image and runner docker daemon',
+    );
+    expect(idleMixed.headline).not.toContain('raise the agent time budget');
+    // A MIXED window (any real budget timeout) keeps the budget remedy.
+    const idleSome = run([TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleSome.terminal).toBe(true);
+    expect(idleSome.headline).toContain('2 of those were silent-sandbox');
+    expect(idleSome.headline).toContain('raise the agent time budget');
+    // The CURRENT round's idle timeout is counted by the increment, not
+    // the grep: cap-1 budget priors plus an idle current round render
+    // "1 of those were silent-sandbox". Deleting the IDLE_N increment
+    // suppresses the clause entirely (the grep sees no idle prior) and
+    // must fail here.
+    const idleCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
+      agentTimeout:
+        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    });
+    expect(idleCurrentOnly.terminal).toBe(true);
+    expect(idleCurrentOnly.headline).toContain(
+      '1 of those were silent-sandbox (idle) timeouts',
+    );
+    // A window WITHOUT idle rounds keeps today's advice untouched.
+    expect(interleaved.headline).not.toContain('silent-sandbox');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
       terminal: false,
@@ -8072,6 +10552,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(reviewAddressReportStep).toContain(
       'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'IDLE_N="$(grep -c \'idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
     );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
@@ -8154,12 +10637,12 @@ describe('qwen-autofix workflow', () => {
     // is captured for the retry.
     for (const check of [
       "run_check 'core rebuild failed on the agent-committed fix'",
-      "run_check 'settings schema is stale on the agent-committed fix'",
-      "run_check 'cross-package contract verification failed'",
+      "run_check_no_ab 'settings schema is stale on the agent-committed fix'",
+      "run_check_no_ab 'cross-package contract verification failed'",
       "run_check 'build failed on the agent-committed fix' npm run build",
-      "run_check 'typecheck failed on the agent-committed fix' npm run typecheck",
-      "run_check 'lint failed on the agent-committed fix' npm run lint",
-      'run_check "tests failed in ${p}"',
+      "run_check_no_ab 'typecheck failed on the agent-committed fix' npm run typecheck",
+      "run_check_no_ab 'lint failed on the agent-committed fix' npm run lint",
+      'run_check_no_ab "tests failed in ${p}"',
     ]) {
       expect(gate).toContain(check);
     }
@@ -9512,7 +11995,12 @@ describe('qwen-autofix workflow', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('turn_tool_call_cap: too many tool calls\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'turn_tool_call_cap: too many tool calls',
+            isError: true,
+          }),
+        )});`,
         'process.exit(1);',
       ]);
 
@@ -9540,11 +12028,17 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('detects loop guard output before it falls out of the log tail', () => {
+  it('detects the terminal loop result despite later log output', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
+        // Trailing output must not replace the already parsed terminal result.
         "process.stdout.write('x'.repeat(21_000));",
         'process.exit(1);',
       ]);
@@ -9628,6 +12122,210 @@ describe('qwen-autofix workflow', () => {
     });
   });
 
+  it('flags a recoverable stream-json API error even when qwen exits zero', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        '[API Error: 429 quota exceeded]',
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'recoverable API error without an agent verdict',
+      );
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+      expect(
+        readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+      ).toBe('transient');
+    });
+  });
+
+  it('classifies split and unterminated stream-json result lines', () => {
+    for (const [name, writes] of [
+      [
+        'split',
+        [
+          "const line = qwenResultLine({ result: '[API Error: 429 quota exceeded]' });",
+          'process.stdout.write(line.slice(0, 20));',
+          'process.stdout.write(line.slice(20));',
+        ],
+      ],
+      [
+        'unterminated',
+        [
+          "process.stdout.write(qwenResultLine({ result: '[API Error: 429 quota exceeded]' }).trimEnd());",
+        ],
+      ],
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeWorkdirStub(dir, [
+          "const qwenResultLine = (value) => `${JSON.stringify({ type: 'result', subtype: 'success', is_error: false, ...value })}\\n`;",
+          ...writes,
+          'process.exit(0);',
+        ]);
+
+        const result = runAddressReview(dir, stub);
+
+        expect(result.status, name).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error')), name).toBe(true);
+      });
+    }
+  });
+
+  it('ignores API-error markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: '[API Error: 429 quota exceeded]',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'finished without required output file(s)',
+      );
+    });
+  });
+
+  it('drops oversized stdout lines from API-error diagnostics', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const oversizedToolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content:
+                'x'.repeat(1_045_000) +
+                '[API Error: 429 quota exceeded]' +
+                'x'.repeat(55_000),
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(oversizedToolResult)}, () => process.exit(1));`,
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'status 1',
+      );
+      expect(result.stdout).toContain(
+        'dropped oversized stream-json line; full bytes in agent.log',
+      );
+    });
+  });
+
+  it('resumes parsing after a terminated oversized stdout line', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const loopResult = qwenResultLine({
+        errorMessage: 'Loop detection halted the run',
+        isError: true,
+      });
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write('x'.repeat(1_100_000) + '\\n' + ${JSON.stringify(
+          loopResult,
+        )});`,
+        'process.exitCode = 1;',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
+        'human should take over',
+      );
+      expect(
+        result.stdout.match(/dropped oversized stream-json line/g),
+      ).toHaveLength(1);
+    });
+  });
+
+  it('ignores loop-guard markers from streamed tool results', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const toolResult = `${JSON.stringify({
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'tool_result',
+              content: 'turn_tool_call_cap Loop detection halted the run',
+            },
+          ],
+        },
+      })}\n`;
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(toolResult)});`,
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: '[API Error: 429 quota exceeded]',
+            isError: true,
+          }),
+        )});`,
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'handoff.md'))).toBe(false);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '429 quota exceeded',
+      );
+    });
+  });
+
+  it('keeps a recovered exit-zero run with a verdict out of the API-error retry path', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({ result: '[API Error: 429 quota exceeded]' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(existsSync(join(dir, 'failure.md'))).toBe(false);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
   it('does not flag a non-API subprocess failure for retry', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
@@ -9663,7 +12361,12 @@ describe('qwen-autofix workflow', () => {
     withRunnerDir((dir) => {
       writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
       const stub = writeQwenStub(dir, [
-        "process.stderr.write('Loop detection halted the run\\n');",
+        `process.stdout.write(${JSON.stringify(
+          qwenResultLine({
+            errorMessage: 'Loop detection halted the run',
+            isError: true,
+          }),
+        )});`,
         "process.stdout.write('[API Error: 503 upstream overloaded]\\n');",
         'process.exit(1);',
       ]);
@@ -10114,5 +12817,893 @@ describe('qwen-autofix workflow', () => {
     const skill = readAutofixSkill();
     expect(skill).not.toContain('label/comment trigger');
     expect(skill).toContain('label event');
+  });
+});
+
+describe('review verification gate: baseline A/B on deterministic rejection', () => {
+  // The A/B re-runs a failed check at the pre-round ref and reports
+  // pre-existing ONLY when the baseline fails with a MATCHING failure
+  // signature (tsc diagnostics normalized to file + code): a bare nonzero
+  // baseline can be a different defect or an infrastructure hiccup, and
+  // gitignored dist survives the detach — which is why only the builds
+  // (root `npm run build` and the pre-commit core rebuild, which remake
+  // dist from checked-out sources) are A/B-eligible; typecheck, lint, and
+  // package tests consume
+  // round-built dist and are exempt. These tests execute the REAL script in
+  // a real git repo, config-isolated (a global core.hooksPath or
+  // pre-commit hook must not reach the fixture), with a stubbed npm whose
+  // failures and diagnostics are keyed by commit SHA.
+  const GIT_ISOLATION = {
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  const runGate = ({
+    failAt = [],
+    agentCommit = true,
+    schemaFail = false,
+    typecheckFail = false,
+    addWorkspace = false,
+    noisySuccess = false,
+    touchCore = false,
+    baselineCode = '',
+    baselineMsg = '',
+    headMsg = '',
+    extraRoundDiag = false,
+    extraBaselineDiag = false,
+    restoreClash = false,
+    hugeFail = false,
+    noIdentity = false,
+    baselineNoIdentity = false,
+    trackedDirt = false,
+    commFail = false,
+  }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
+    try {
+      const sh = (cmd, cwd) =>
+        execFileSync('bash', ['-c', cmd], {
+          cwd,
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        });
+      const origin = join(dir, 'origin.git');
+      const work = join(dir, 'work');
+      sh(`git init -q --bare '${origin}'`, dir);
+      sh(`git clone -q '${origin}' '${work}'`, dir);
+      const g = (cmd) => sh(cmd, work);
+      g('git config user.email t@t && git config user.name t');
+      g('echo base > f.txt && git add . && git commit -qm base');
+      g('git branch -M main && git push -q origin main');
+      g('git checkout -qb feature');
+      if (touchCore) {
+        // Reaches the core-rebuild run_check BEFORE the commit gate, so a
+        // failure there exercises the no-round-commit guard.
+        g('mkdir -p packages/core/src && echo x > packages/core/src/x.ts');
+        g('git add . && git commit -qm core');
+      } else {
+        g('echo branch > f.txt && git commit -qam branch');
+      }
+      g('git push -q origin feature');
+      if (agentCommit) {
+        if (addWorkspace) {
+          // The round ADDS a workspace — it does not exist at the baseline.
+          g('mkdir -p packages/newpkg');
+          g(
+            `printf '{"name":"newpkg","scripts":{"test":"vitest run"}}' > packages/newpkg/package.json`,
+          );
+          g('git add . && git commit -qm agent');
+        } else if (restoreClash) {
+          // A file the branch TRACKS but the baseline lacks: the baseline
+          // leg recreates it untracked, and the restore checkout refuses.
+          g('echo tracked > clash.txt && git add . && git commit -qm agent');
+        } else {
+          g('echo agent > f.txt && git commit -qam agent');
+        }
+      }
+      const shaOf = (ref) => g(`git rev-parse ${ref}`).trim();
+      const failShas = failAt.map(shaOf).join(' ');
+      const baselineSha = shaOf('origin/feature');
+
+      // Stub npm. A failing `run build` prints a marker AND a tsc-style
+      // diagnostic — the identity the A/B compares. BASELINE_CODE switches
+      // the diagnostic code on the baseline SHA so a different-cause
+      // baseline can be staged. `run test --workspace` mirrors measured npm:
+      // exit 1 "No workspaces found" for a missing workspace. NOISY_SUCCESS
+      // makes a PASSING build print >3 KB — the evidence-window flood shape.
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'npm'),
+        [
+          '#!/bin/bash',
+          'if [[ "$1" == "run" && "$2" == "build" ]]; then',
+          '  head="$(git rev-parse HEAD)"',
+          '  for s in ${FAIL_BUILD_SHAS}; do',
+          '    if [[ "$s" == "$head" ]]; then',
+          '      code=9999',
+          '      pos="(1,1)"; msg="stub failure"',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" ]]; then',
+          // The baseline leg emits a SHIFTED position — the strip is what
+          // makes the two legs comparable, so the fixture must exercise it.
+          '        pos="(7,3)"',
+          '        if [[ -n "${BASELINE_CODE:-}" ]]; then code="${BASELINE_CODE}"; fi',
+          '        if [[ -n "${BASELINE_MSG:-}" ]]; then msg="${BASELINE_MSG}"; fi',
+          '        if [[ "${RESTORE_CLASH:-}" == "1" ]]; then echo untracked > clash.txt; fi',
+          '      fi',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" ]]; then',
+          '        if [[ -n "${HEAD_MSG:-}" ]]; then msg="${HEAD_MSG}"; fi',
+          '      fi',
+          '      echo "stub build FAILED at $head"',
+          '      if [[ "${NO_IDENTITY:-}" == "1" ]]; then',
+          // vite/esbuild shape: a red build with no tsc diagnostic at all.
+          '        echo "error during build: something exploded"; exit 1',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${BASELINE_NO_IDENTITY:-}" == "1" ]]; then',
+          // Same shape restricted to the baseline leg — the head keeps its
+          // tsc identity while the baseline loses its.
+          '        echo "error during build: something exploded"; exit 1',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${TRACKED_DIRT:-}" == "1" ]]; then',
+          // The build rewrites a TRACKED file (the settings-schema shape):
+          // f.txt differs across refs, so an undiscarded rewrite makes the
+          // restore checkout refuse.
+          '        echo dirt > f.txt',
+          '      fi',
+          '      echo "src/f.ts${pos}: error TS${code}: ${msg}"',
+          '      if [[ "${HUGE_FAIL:-}" == "1" ]]; then',
+          '        for i in $(seq 1 200); do echo "verbose failure context line $i ****************************************"; done',
+          '        echo "root cause marker line"',
+          '      fi',
+          '      if [[ "$head" != "${BASELINE_SHA:-}" && "${EXTRA_ROUND_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(2,2): error TS7777: round-introduced defect"',
+          '      fi',
+          '      if [[ "$head" == "${BASELINE_SHA:-}" && "${EXTRA_BASELINE_DIAG:-}" == "1" ]]; then',
+          '        echo "src/g.ts(7,3): error TS8888: baseline-only defect"',
+          '      fi',
+          '      exit 1',
+          '    fi',
+          '  done',
+          '  if [[ "${NOISY_SUCCESS:-}" == "1" ]]; then',
+          '    for i in $(seq 1 200); do echo "baseline build banner line $i — all green, nothing to see"; done',
+          '  fi',
+          'fi',
+          'if [[ "$1" == "run" && "$2" == "typecheck" && "${TYPECHECK_FAIL:-}" == "1" ]]; then',
+          '  echo "stub typecheck FAILED"; exit 1',
+          'fi',
+          'if [[ "$1" == "run" && "$2" == "test" && "$3" == "--workspace" ]]; then',
+          '  if [[ ! -d "$4" ]]; then echo "npm error No workspaces found: --workspace=$4"; exit 1; fi',
+          '  if [[ "${WORKSPACE_TEST_FAIL:-}" == "1" ]]; then echo "stub workspace tests FAILED in $4"; exit 1; fi',
+          'fi',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'npm'), 0o755);
+      if (commFail) {
+        // Shadows the system comm via PATH precedence: the signature
+        // comparison itself fails (the SIGPIPE-under-pipefail class), so
+        // the gate takes its fail-closed retryable exit.
+        writeFileSync(join(bin, 'comm'), '#!/bin/bash\nexit 1\n');
+        chmodSync(join(bin, 'comm'), 0o755);
+      }
+      const rt = join(dir, 'rt');
+      mkdirSync(rt);
+      writeFileSync(
+        join(rt, 'check-settings-schema.sh'),
+        'if [[ "${SCHEMA_FAIL:-}" == "1" ]]; then echo "schema stale"; exit 1; fi\nexit 0\n',
+      );
+      writeFileSync(
+        join(rt, 'check-autofix-contracts.sh'),
+        'cat > /dev/null\nexit 0\n',
+      );
+      writeFileSync(
+        join(rt, 'resolve-owning-packages.sh'),
+        'cat > /dev/null\nprintf "%s" "${RESOLVED_PKGS:-}"\n',
+      );
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'address-summary.md'), 'summary\n');
+      const outFile = join(dir, 'gh-output');
+      writeFileSync(outFile, '');
+
+      const res = spawnSync(
+        'bash',
+        [resolve('.github/scripts/run-autofix-review-verification.sh')],
+        {
+          cwd: work,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            ...GIT_ISOLATION,
+            PATH: `${bin}:${process.env.PATH}`,
+            BRANCH: 'feature',
+            WORKDIR: workdir,
+            RUNNER_TEMP: rt,
+            GITHUB_OUTPUT: outFile,
+            FAIL_BUILD_SHAS: failShas,
+            BASELINE_SHA: baselineSha,
+            BASELINE_CODE: baselineCode,
+            BASELINE_MSG: baselineMsg,
+            HEAD_MSG: headMsg,
+            EXTRA_ROUND_DIAG: extraRoundDiag ? '1' : '',
+            EXTRA_BASELINE_DIAG: extraBaselineDiag ? '1' : '',
+            RESTORE_CLASH: restoreClash ? '1' : '',
+            NO_IDENTITY: noIdentity ? '1' : '',
+            BASELINE_NO_IDENTITY: baselineNoIdentity ? '1' : '',
+            TRACKED_DIRT: trackedDirt ? '1' : '',
+            SCHEMA_FAIL: schemaFail ? '1' : '',
+            TYPECHECK_FAIL: typecheckFail ? '1' : '',
+            NOISY_SUCCESS: noisySuccess ? '1' : '',
+            HUGE_FAIL: hugeFail ? '1' : '',
+            WORKSPACE_TEST_FAIL: addWorkspace ? '1' : '',
+            RESOLVED_PKGS: addWorkspace ? 'packages/newpkg' : '',
+          },
+        },
+      );
+      return {
+        status: res.status,
+        stdout: `${res.stdout}\n${res.stderr}`,
+        outputs: readFileSync(outFile, 'utf8'),
+        rejection: existsSync(join(workdir, 'gate-rejection.md'))
+          ? readFileSync(join(workdir, 'gate-rejection.md'), 'utf8')
+          : '',
+        headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
+        baselineSha,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('charges a failure to the round when the baseline is green', () => {
+    const r = runGate({ failAt: ['feature'] });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('retryable=true');
+    // The repair agent's only warning that dist/ now holds baseline-built
+    // artifacts — dropped, it burns its budget on phantom dist-consuming
+    // failures.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+    expect(r.outputs).not.toContain('preexisting=true');
+    // The A/B genuinely ran — the verdict is measured, not assumed.
+    expect(r.stdout).toContain('Baseline A/B');
+    expect(r.rejection).not.toContain('pre-existing');
+    // The tree is back on the branch for anything that reads it afterwards.
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('reports pre-existing only on a matching failure signature, with the baseline transcript as evidence', () => {
+    const r = runGate({ failAt: ['feature', 'origin/feature'] });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    expect(r.outputs).toContain('preexisting=true');
+    // retryable stays unset: the repair step keys on it and must not run.
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain('pre-existing');
+    expect(r.rejection).toContain('base update (merge main)');
+    // The baseline leg's own transcript is the ONLY proof behind the
+    // verdict — it must reach the rejection document.
+    expect(r.rejection).toContain(`stub build FAILED at ${r.baselineSha}`);
+    // No repair runs for a pre-existing failure — the dist/ steering note
+    // is for the repair agent and stays out of this document.
+    expect(r.rejection).not.toContain(
+      'run npm run build before typecheck/tests',
+    );
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('charges the round when the codes match but the messages differ', () => {
+    // Identity is file + code + MESSAGE: common codes (TS2339) collide
+    // across unrelated defects in one file, and a code-only signature would
+    // skip a repair that could have produced a green fix.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineMsg: 'an entirely different defect',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+  });
+
+  it('crashes verdict-less when the baseline leg breaks the restore (retry, not handoff)', () => {
+    // The baseline run recreates (untracked) a file the branch tracks
+    // (`git restore -- .` touches tracked files only), so the checkout back
+    // refuses — the tree can no longer be trusted, and the repair must not
+    // run in it (its commit would orphan on the detached baseline). But a
+    // transient git-state failure is NOT a verdict either: a plain
+    // outcome=failed is an EVALUATED rejection — the watermark advances and
+    // the item is handed off for good. The gate therefore leaves outcome
+    // UNSET (the report's gate-crashed path retries next scan) while still
+    // writing the detail document so the crash comment explains itself.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      restoreClash: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).not.toContain('outcome=');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('could not restore the verification tree');
+    expect(r.rejection).toContain('could not restore the verification tree');
+  });
+
+  it('short-circuits before the detach when the head has no failure identity', () => {
+    // vite/esbuild/crash failures carry no tsc diagnostic: an empty head
+    // signature fails closed REGARDLESS of the baseline, so the gate must
+    // decide before paying the detach + full baseline re-run + restore.
+    const r = runGate({ failAt: ['feature'], noIdentity: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('no failure identity in the head transcript');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('discards tracked build dirt so a real verdict survives the restore', () => {
+    // The baseline build REWRITES a tracked file (the settings-schema
+    // shape): without the pre-checkout `git restore -- .` the restore
+    // refuses and a clean pre-existing verdict degrades into the
+    // verdict-less crash.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      trackedDirt: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.stdout).not.toContain('could not restore the verification tree');
+  });
+
+  it('caps the LONG-preamble (pre-existing) rejection under the render window', () => {
+    // The short-preamble flood is pinned above; the pre-existing path adds
+    // ~490 bytes of preamble, and the ${#preamble} subtraction is what
+    // keeps THIS document under the cap — a constant would pass the short
+    // case and truncate this one's closing fence.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      hugeFail: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.rejection.endsWith('````\n')).toBe(true);
+  });
+
+  it('keeps the full message past the first n (the bracket class ate it)', () => {
+    // In an ERE bracket expression `\` is literal, so the earlier
+    // `[^\n]*` meant "neither backslash nor the letter n" and truncated
+    // every message at its first 'n' — collapsing "Cannot find module
+    // './foo'" and "'./bar'" into one signature and skipping the only
+    // repair that could fix the round-caused one. `.*` keeps the message.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      headMsg: "Cannot find module './foo'",
+      baselineMsg: "Cannot find module './bar'",
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('charges the round when it ADDS a diagnostic to a failing baseline', () => {
+    // Pre-existing means the round's failing set is a SUBSET of the
+    // baseline's: sharing one signature with the baseline while adding
+    // another is a round-caused failure the repair can still fix — an
+    // intersection test labeled it pre-existing and skipped the repair.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraRoundDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+  });
+
+  it('reports pre-existing when the baseline fails with a SUPERSET of the round signatures', () => {
+    // The other arm of the subset semantics: every failing signature of
+    // the round also fails at the baseline, which ADDITIONALLY carries a
+    // baseline-only diagnostic. Still pre-existing — the repair may only
+    // amend the round's fix, so the extra baseline diagnostic is equally
+    // beyond its reach. A set-equality comparator instead of the subset
+    // check would flip this round to retryable.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      extraBaselineDiag: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('preexisting=true');
+    expect(r.outputs).not.toContain('retryable=true');
+    expect(r.rejection).toContain('pre-existing');
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('charges the round when the baseline fails for a DIFFERENT reason', () => {
+    // A nonzero baseline is not identity: reason A there, reason B here —
+    // reducing both to rc=1 would skip the only repair allowed to fix B.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineCode: '8888',
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+    // The same repair handoff as the green path — the dist/ warning must
+    // seed this rejection too.
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+  });
+
+  it('charges the round when the baseline fails without a failure identity', () => {
+    // Mirror of the head-side noIdentity shape on the other leg: the
+    // baseline crashes vite/esbuild-style with no tsc diagnostic, so its
+    // signature is empty and identity cannot be established — fail
+    // closed and charge the round, with the same repair handoff (and
+    // dist/ note) as the sibling retryable exits.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      baselineNoIdentity: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).toContain('DIFFERENT reason');
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+  });
+
+  it('seeds the dist-rebuild warning when the signature comparison itself fails', () => {
+    // comm failing (SIGPIPE under pipefail, an infrastructure hiccup)
+    // takes the same retryable handoff as the green/different-signature
+    // exits — without the note the repair agent trusts baseline-built
+    // dist/ and chases phantom dist-consuming failures.
+    const r = runGate({
+      failAt: ['feature', 'origin/feature'],
+      commFail: true,
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain('run npm run build before typecheck/tests');
+    // Like its sibling exits, this one names its verdict — an oncall must
+    // distinguish "the comparison itself failed" from "baseline is green"
+    // without re-running the A/B.
+    expect(r.rejection).toContain('signature comparison failed');
+    expect(r.headAfter).toBe('feature');
+  });
+
+  it('keeps the green path intact', () => {
+    const r = runGate({ failAt: [] });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=fixed');
+    expect(r.outputs).not.toContain('preexisting');
+  });
+
+  it('keeps the failure text in the evidence window past a chatty green baseline', () => {
+    const r = runGate({ failAt: ['feature'], noisySuccess: true });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.rejection).toContain('stub build FAILED');
+  });
+
+  it('keeps the closing fence when the failure saturates the evidence window', () => {
+    // The report renders head -c 3900 of the FINISHED document; reject_fix
+    // sizes its own tail against the preamble so the closing fence survives
+    // even when the captured failure dwarfs the window. A future preamble
+    // or constant change that breaks the invariant fails here, not in a
+    // posted comment.
+    const r = runGate({ failAt: ['feature'], hugeFail: true });
+    expect(r.status).toBe(1);
+    expect(r.rejection.length).toBeLessThanOrEqual(3900);
+    expect(r.rejection.endsWith('````\n')).toBe(true);
+    expect(r.rejection).toContain('root cause marker line');
+  });
+
+  it('never A/Bs a check with no round commit to remove', () => {
+    const r = runGate({
+      agentCommit: false,
+      touchCore: true,
+      failAt: ['feature'],
+    });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+
+  it('never A/Bs the dist-coupled and stdin-fed checks', () => {
+    // schema (round-built core dist), contracts (drained stdin), and now
+    // typecheck (sdk-typescript resolves core d.ts from dist) are exempt.
+    for (const opts of [{ schemaFail: true }, { typecheckFail: true }]) {
+      const r = runGate(opts);
+      expect(r.status).toBe(1);
+      expect(r.outputs).toContain('retryable=true');
+      expect(r.outputs).not.toContain('preexisting=true');
+      expect(r.stdout).not.toContain('Baseline A/B');
+    }
+  });
+
+  it('never A/Bs package tests (dist-resolving dependencies)', () => {
+    const r = runGate({ addWorkspace: true });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('tests failed in packages/newpkg');
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.stdout).not.toContain('Baseline A/B');
+  });
+});
+
+describe('review verification gate: preexisting output is consumed', () => {
+  it('Finalize verification selects the flag from the same attempt as the outcome', () => {
+    expect(workflow).toContain(
+      "FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'",
+    );
+    expect(workflow).toContain(
+      "REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'",
+    );
+    expect(workflow).toMatch(
+      /PREEXISTING="\$\{FIRST_PREEXISTING\}"\n\s*if \[\[ "\$\{REPAIR_ATTEMPTED\}" == 'true' \]\]; then\n\s*PREEXISTING="\$\{REPAIR_PREEXISTING\}"/,
+    );
+  });
+
+  it('the failure report reads it and picks the clause by the compare', () => {
+    expect(workflow).toContain(
+      "PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'",
+    );
+    // behind/diverged → base update; a MEASURED not-behind → the branch's
+    // own pre-round code (an up-to-date branch cannot be cured by merging
+    // main); an EMPTY CMP_R means the compare never ran (a transient API
+    // failure) and must not assert either — it says the base state could
+    // not be compared.
+    expect(workflow).toContain('needs a base update (merge main)');
+    expect(workflow).toContain('the base state could not be compared');
+    // The YAML embeds the apostrophe via shell quoting, so match around it.
+    expect(workflow).toContain('own pre-round code needs attention');
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then/,
+    );
+    expect(workflow).toMatch(/elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then/);
+    // Correspondence, not just existence: swapping the clause bodies must
+    // fail. Each {0,600} bound keeps the match inside this if/elif/else —
+    // a swapped clause puts its anchor on the wrong side of the arm it
+    // belongs to, more than 600 chars away.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{CMP_R:-\}" == 'behind' \|\| "\$\{CMP_R:-\}" == 'diverged' \]\]; then[\s\S]{0,600}?needs a base update \(merge main\)[\s\S]{0,600}?elif \[\[ -z "\$\{CMP_R:-\}" \]\]; then[\s\S]{0,600}?could not be compared[\s\S]{0,600}?else[\s\S]{0,600}?own pre-round code needs attention/,
+    );
+  });
+
+  it('the evidence window flexes so the document clears the render cap', () => {
+    // The report renders head -c 3900 of the finished document; the script
+    // sizes the tail against its preamble so the closing fence survives.
+    expect(workflow).toContain('head -c 3900 "${WORKDIR}/gate-rejection.md"');
+    expect(reviewVerificationRunner).toContain(
+      'tail_budget=$(( 3300 - ${#preamble} ))',
+    );
+    expect(reviewVerificationRunner).toContain(
+      'tail -c "${tail_budget}" "${GATE_LOG}"',
+    );
+  });
+});
+
+describe('run-agent idle watchdog', () => {
+  // Four observed sandbox hangs (#8663 x2, #8761 r3, #8763 r4) printed their
+  // last byte at docker container entry and then sat SILENT for the whole
+  // 2-hour absolute budget — four different runners, two image versions, so
+  // the watchdog lives in the runner script, not the environment. A wedged
+  // sandbox produces nothing; stream-json makes active headless work emit
+  // progress before its final result. These tests execute the REAL script
+  // with a stub agent whose only difference is whether it keeps talking.
+  const runAgent = ({ stub, idleMs, timeoutMs = 60_000 }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-idle-'));
+    try {
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'feedback.md'), 'feedback\n');
+      const bin = join(dir, 'qwen');
+      writeFileSync(bin, stub);
+      chmodSync(bin, 0o755);
+      const res = spawnSync(
+        process.execPath,
+        [
+          resolve('.qwen/skills/autofix/scripts/run-agent.mjs'),
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--qwen-bin',
+          bin,
+          '--workdir',
+          workdir,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            AGENT_WORKDIR: workdir,
+            QWEN_IDLE_TIMEOUT_MS: String(idleMs),
+            QWEN_TIMEOUT_MS: String(timeoutMs),
+          },
+        },
+      );
+      return {
+        status: res.status,
+        stdout: res.stdout,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        agentLog: existsSync(join(workdir, 'agent.log'))
+          ? readFileSync(join(workdir, 'agent.log'), 'utf8')
+          : '',
+        timeoutSentinel: existsSync(join(workdir, 'agent-timeout'))
+          ? readFileSync(join(workdir, 'agent-timeout'), 'utf8')
+          : null,
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('kills a silent agent at the idle window, naming the idle limit', () => {
+    // The hang shape: one line at startup, then nothing, ever.
+    const r = runAgent({
+      stub: '#!/bin/bash\necho "entering sandbox"\nsleep 600\n',
+      idleMs: 1200,
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // NOT the absolute-budget wording: the comment must say which limit
+    // fired, or the operator tunes the wrong knob.
+    expect(r.failure).not.toContain('timeout (60000ms)');
+    // The sentinel routes the round to RETRY; deleting `timedOut = true`
+    // from the idle branch must fail here (the absolute-timeout test pins
+    // the same sentinel for its own path).
+    expect(r.timeoutSentinel).toContain('idle-timeout (no output for 1200ms');
+  });
+
+  it('never fires while the agent emits protocol events, however slowly', () => {
+    // Output every 400ms with a 1500ms idle window: an absolute-timer
+    // regression disguised as an idle watchdog would kill this run.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 8); do echo "{\\"type\\":\\"progress\\",\\"step\\":$i}"; sleep 0.4; done',
+        // The mode's output contract: a real run ends by writing its
+        // summary, and the script fails a run that produced neither output.
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('never fires while the agent talks on stderr only', () => {
+    // The sandbox launcher emits ContainerName on stderr, and a cold
+    // runner's image pull or docker progress is a realistic stderr-only
+    // span with quiet stdout — the liveness contract covers both streams.
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 8); do echo "tick $i" >&2; sleep 0.4; done',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'echo done',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('does not treat an unterminated stdout byte stream as progress', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'for i in $(seq 1 20); do printf x; sleep 0.2; done',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 700,
+      timeoutMs: 2400,
+    });
+
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 700ms');
+    expect(r.failure).not.toContain('timeout (2400ms)');
+  });
+
+  it('requests streamed partial progress so active headless work refreshes the watchdog', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        'if [[ " $* " == *" --output-format stream-json "* && " $* " == *" --include-partial-messages "* ]]; then',
+        '    for i in $(seq 1 8); do echo "{\\"type\\":\\"stream_event\\",\\"event\\":{\\"type\\":\\"input_json_delta\\",\\"partial_json\\":\\"x\\"}}"; sleep 0.4; done',
+        'else',
+        '    sleep 4',
+        'fi',
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+    expect(r.status).toBe(0);
+    expect(r.failure).toBe('');
+  });
+
+  it('keeps partial events in the artifact without flooding step output', () => {
+    const payload = 'x'.repeat(10_000);
+    const streamEvent = JSON.stringify({
+      type: 'stream_event',
+      event: { type: 'input_json_delta', partial_json: payload },
+    });
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        `printf '%s\\n' '${streamEvent}'`,
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain(payload);
+    expect(r.agentLog).toContain(payload);
+  });
+
+  it('bounds an unterminated stdout line while retaining the artifact', () => {
+    const r = runAgent({
+      stub: [
+        '#!/bin/bash',
+        "head -c 2097152 /dev/zero | tr '\\0' x",
+        'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
+        'exit 0',
+      ].join('\n'),
+      idleMs: 1500,
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout.length).toBeLessThan(10_000);
+    expect(r.agentLog.length).toBe(2_097_152);
+  });
+
+  it('keeps idle timeout validation finite and positive', () => {
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(`
+const QWEN_IDLE_TIMEOUT_MS =
+  Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
+    ? parsedIdleTimeoutMs
+    : 20 * 60 * 1000;
+`);
+  });
+});
+
+describe('stale sandbox container cleanup', () => {
+  // Two layers. The kill path: run-agent.mjs captures the container name
+  // its child's launcher printed and force-removes exactly that container
+  // when a budget/idle kill fires — ownership is unambiguous there, which
+  // is why the startup reap below may not touch running containers. The
+  // startup reap: a JOB timeout still reaps only the host-side docker
+  // client, so both sandboxed jobs reap before the sandbox picks a name
+  // (observed: a later leg's name counter found qwen-code-0.21.8-0
+  // occupied) — but the docker daemon is per HOST and this pool runs
+  // several registrations on one OS, so a RUNNING container can belong to
+  // a concurrent job on another registration: the reap is restricted to
+  // provably-dead states.
+  it('both agent jobs remove stale qwen-code containers at start', () => {
+    const step = "- name: 'Remove stale sandbox containers'";
+    expect(workflow.split(step).length - 1).toBe(2);
+    for (const jobId of ['issue-autofix', 'review-address']) {
+      const j = getWorkflowJob(workflow, jobId);
+      expect(j, jobId).toContain(step);
+      expect(j, jobId).toContain(
+        "timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead'",
+      );
+      // Best-effort hygiene under bash -eo pipefail: a daemon blip, a
+      // racing reap on another registration, or a container that refuses
+      // removal must not kill the round at setup — and an alive-but-wedged
+      // daemon must not block the step until the job timeout, so every
+      // docker call runs under `timeout`.
+      expect(j, jobId).toContain(
+        "STALE=\"$(timeout 30 docker ps -aq --filter 'name=qwen-code-' --filter 'status=exited' --filter 'status=dead' 2>/dev/null)\" || STALE=''",
+      );
+      expect(j, jobId).toContain(
+        'xargs -r -I{} timeout 30 docker rm -f {} > /dev/null 2>&1 || true',
+      );
+      // Before the sandbox can pick a colliding name.
+      expect(j.indexOf(step)).toBeLessThan(
+        j.indexOf("- name: 'Reset autofix workspace'"),
+      );
+    }
+  });
+
+  // The kill path is shared by the idle watchdog and the absolute budget
+  // timer (both fire escalateKill). Pin BOTH branches: a future edit that
+  // keeps the container removal on only one of them leaks the other's
+  // sandbox while a single-branch test still passes.
+  const runKillPath = (idleTimeoutMs, timeoutMs) => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-orphan-'));
+    try {
+      const workdir = join(dir, 'wd');
+      mkdirSync(workdir);
+      writeFileSync(join(workdir, 'feedback.md'), 'feedback\n');
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'docker'),
+        '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
+      );
+      chmodSync(join(bin, 'docker'), 0o755);
+      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // prints it, then the wedge shape: one line, then silence.
+      const stub = join(dir, 'qwen');
+      writeFileSync(
+        stub,
+        '#!/bin/bash\necho "ContainerName (regular): qwen-code-9.9.9-9" >&2\nsleep 600\n',
+      );
+      chmodSync(stub, 0o755);
+      const res = spawnSync(
+        process.execPath,
+        [
+          resolve(autofixRunnerScriptPath),
+          '--mode',
+          'address-review',
+          '--pr',
+          '1',
+          '--issue',
+          '1',
+          '--qwen-bin',
+          stub,
+          '--workdir',
+          workdir,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            AGENT_WORKDIR: workdir,
+            PATH: `${bin}:${process.env.PATH}`,
+            QWEN_IDLE_TIMEOUT_MS: idleTimeoutMs,
+            QWEN_TIMEOUT_MS: timeoutMs,
+          },
+        },
+      );
+      return {
+        status: res.status,
+        failure: existsSync(join(workdir, 'failure.md'))
+          ? readFileSync(join(workdir, 'failure.md'), 'utf8')
+          : '',
+        calls: existsSync(join(workdir, 'docker-calls.txt'))
+          ? readFileSync(join(workdir, 'docker-calls.txt'), 'utf8').trim()
+          : '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('an idle kill removes only the running sandbox its own agent launched', () => {
+    // The startup reaper stays restricted to exited/dead containers (a
+    // running one can belong to a concurrent job on another registration),
+    // so the running orphan a kill creates is removed by the kill path
+    // itself: run-agent.mjs captures the container name its child's
+    // launcher printed and force-removes exactly that one.
+    const r = runKillPath('1200', '60000');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('idle-timeout (no output for 1200ms');
+    // The ONLY docker call is the owned container's removal.
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+
+  it('a budget kill removes only the running sandbox its own agent launched', () => {
+    // The idle window sits far above the absolute budget, so the budget
+    // timer is the branch that fires here (the idle variant above pins the
+    // shared kill path from the other side).
+    const r = runKillPath('600000', '1200');
+    expect(r.status).not.toBe(0);
+    expect(r.failure).toContain('timeout (1200ms)');
+    expect(r.failure).not.toContain('idle-timeout');
+    expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
   });
 });

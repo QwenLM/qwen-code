@@ -40,6 +40,8 @@ function setup(
   const handlers = {
     onDelete: vi.fn(),
     onEdit: vi.fn(),
+    onRestoreUnknown: vi.fn(),
+    onDiscardUnknown: vi.fn(),
   };
   const prompts: QueuedPrompt[] = overrides.prompts
     ? [...overrides.prompts]
@@ -87,6 +89,31 @@ describe('QueuedPromptDisplay', () => {
     expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => !button.disabled)).toBe(true);
     expect(container.textContent).not.toContain('插入');
+  });
+
+  it('allows deleting but not editing a summary-only server row', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '[image]',
+          serverPromptId: 'server-1',
+          serverState: 'queued',
+          payloadCompleteness: 'summary-only',
+        },
+      ],
+    });
+
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      `[aria-label="${t('queue.delete')}"]`,
+    );
+    const editButton = container.querySelector<HTMLButtonElement>(
+      `[aria-label="${t('queue.edit')}"]`,
+    );
+    expect(deleteButton?.disabled).toBe(false);
+    expect(editButton?.disabled).toBe(true);
+    expect(editButton?.title).toBe(t('queue.summaryEditDisabled'));
+    expect(container.textContent).not.toContain(t('queue.footer'));
   });
 
   it('keeps a mid-turn prompt queued until injection', () => {
@@ -150,6 +177,61 @@ describe('QueuedPromptDisplay', () => {
     expect(
       container.querySelector('[class*="queuedPromptSpinner"]'),
     ).toBeTruthy();
+  });
+
+  it('requires confirmation before restoring an unknown local payload', () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const { container, handlers } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: '',
+          images: [{ data: 'cG5n', media_type: 'image/png' }],
+          admissionOutcome: 'unknown',
+          payloadCompleteness: 'complete',
+          payloadAvailable: true,
+        },
+      ],
+    });
+    const restore = container.querySelector<HTMLButtonElement>(
+      `[aria-label="${t('queue.restoreUnknown')}"]`,
+    );
+    const discard = container.querySelector<HTMLButtonElement>(
+      `[aria-label="${t('queue.discardUnknown')}"]`,
+    );
+
+    act(() => restore?.click());
+    expect(handlers.onRestoreUnknown).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    act(() => restore?.click());
+    expect(handlers.onRestoreUnknown).toHaveBeenCalledWith(1);
+    act(() => discard?.click());
+    expect(handlers.onDiscardUnknown).toHaveBeenCalledWith(1);
+    expect(container.textContent).not.toContain(t('queue.footer'));
+    confirm.mockRestore();
+  });
+
+  it('warns when an unknown local copy may match a server summary', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: 'uncertain',
+          admissionOutcome: 'unknown',
+          payloadCompleteness: 'complete',
+          payloadAvailable: true,
+        },
+        {
+          id: 2,
+          text: '[image]',
+          serverPromptId: 'server-1',
+          serverState: 'queued',
+          payloadCompleteness: 'summary-only',
+        },
+      ],
+    });
+
+    expect(container.textContent).toContain(t('queue.mayCorrespond'));
   });
 
   it('renders queued reference annotations as tags', () => {

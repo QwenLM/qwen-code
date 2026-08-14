@@ -106,8 +106,12 @@ const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
 const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
+const mockRefreshMemoryInstruction = vi.hoisted(() => vi.fn());
 const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
 const mockLogConversationFinishedEvent = vi.hoisted(() => vi.fn());
+const mockEndInteractionSpan = vi.hoisted(() => vi.fn());
+const mockGetActiveInteractionSpan = vi.hoisted(() => vi.fn());
+const mockInteractionSpan = vi.hoisted(() => ({}));
 const mockUseDualOutput = vi.hoisted(() => vi.fn());
 const mockDualOutput = vi.hoisted(() => ({
   startAssistantMessage: vi.fn(),
@@ -152,8 +156,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
+    refreshMemoryInstruction: mockRefreshMemoryInstruction,
     logConversationFinishedEvent: mockLogConversationFinishedEvent,
     finalizeToolResponses: mockFinalizeToolResponses,
+    endInteractionSpan: mockEndInteractionSpan,
+    getActiveInteractionSpan: mockGetActiveInteractionSpan,
   };
 });
 
@@ -230,7 +237,9 @@ describe('useGeminiStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
+    mockGetActiveInteractionSpan.mockReturnValue(mockInteractionSpan);
     mockRefreshMemoryAfterManagedWrite.mockResolvedValue(false);
+    mockRefreshMemoryInstruction.mockResolvedValue(undefined);
     mockGetActiveGoal.mockReturnValue(undefined);
     mockActiveGoalEquals.mockReturnValue(false);
     vi.mocked(findLastSafeSplitPoint).mockImplementation(
@@ -2506,6 +2515,11 @@ describe('useGeminiStream', () => {
     });
     expect(finishTurn).toHaveBeenCalledWith(permit);
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
+      promptId: 'prompt-goal-missing',
+      errorMessage: 'missing Goal tool context',
+      errorType: 'continuation_goal_context_missing',
+    });
   });
 
   it('fails close when a ToolResult batch has a stale Goal context', async () => {
@@ -2640,6 +2654,11 @@ describe('useGeminiStream', () => {
     });
     expect(finishTurn).toHaveBeenCalledWith(permit);
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
+      promptId: 'prompt-goal-stale',
+      errorMessage: 'stale Goal tool context',
+      errorType: 'continuation_goal_context_stale',
+    });
   });
 
   it('finishes a Goal turn without another model call after update_goal', async () => {
@@ -2681,7 +2700,22 @@ describe('useGeminiStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
     const client = new MockedGeminiClientClass(mockConfig);
-    renderHook(() =>
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'update-goal-1',
+            name: 'update_goal',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-goal-complete',
+            goalContext: permit,
+          },
+        };
+      })(),
+    );
+    const { result } = renderHook(() =>
       useGeminiStream(
         client,
         [],
@@ -2704,6 +2738,14 @@ describe('useGeminiStream', () => {
         24,
       ),
     );
+    await act(async () => {
+      await result.current.submitQuery(
+        'finish the Goal',
+        SendMessageType.UserQuery,
+        'prompt-goal-complete',
+      );
+    });
+    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
     const responseParts: Part[] = [
       {
         functionResponse: {
@@ -2756,7 +2798,100 @@ describe('useGeminiStream', () => {
       },
       expect.any(Number),
     );
-    expect(mockSendMessageStream).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledOnce();
+    expect(mockEndInteractionSpan).toHaveBeenCalledWith('ok', {
+      promptId: 'prompt-goal-complete',
+    });
+  });
+
+  it('does not let an old tool batch end a replacement interaction', async () => {
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+    const originalOwner = {};
+    const replacementOwner = {};
+    mockGetActiveInteractionSpan.mockReturnValue(originalOwner);
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'replacement-tool',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-replaced',
+          },
+        };
+      })(),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'run the tool',
+        SendMessageType.UserQuery,
+        'prompt-replaced',
+      );
+    });
+    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
+    mockGetActiveInteractionSpan.mockReturnValue(replacementOwner);
+
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'replacement-tool',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-replaced',
+          },
+          status: 'cancelled',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'replacement-tool',
+            responseParts: [{ text: 'cancelled' }],
+            errorType: undefined,
+          },
+          tool: { displayName: 'TestTool' },
+          invocation: {
+            getDescription: () => 'replacement test',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCancelledToolCall,
+      ]);
+    });
+
+    expect(mockEndInteractionSpan).not.toHaveBeenCalledWith('cancelled', {
+      promptId: 'prompt-replaced',
+    });
   });
 
   it('records tool results with goalContext during a Goal turn', async () => {
@@ -2921,7 +3056,21 @@ describe('useGeminiStream', () => {
     });
 
     const client = new MockedGeminiClientClass(mockConfig);
-    renderHook(() =>
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: 'agent-call',
+            name: 'agent',
+            args: { run_in_background: true },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-agent',
+          },
+        };
+      })(),
+    );
+    const { result } = renderHook(() =>
       useGeminiStream(
         client,
         [],
@@ -2946,6 +3095,14 @@ describe('useGeminiStream', () => {
     );
 
     await waitFor(() => expect(notificationCallback).toBeDefined());
+    await act(async () => {
+      await result.current.submitQuery(
+        'launch the agent',
+        SendMessageType.UserQuery,
+        'prompt-id-agent',
+      );
+    });
+    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
     await act(async () => {
       await capturedOnComplete?.([
         {
@@ -2983,7 +3140,12 @@ describe('useGeminiStream', () => {
       role: 'user',
       parts: responseParts,
     });
-    expect(mockSendMessageStream).not.toHaveBeenCalled();
+    expect(mockSendMessageStream).toHaveBeenCalledOnce();
+    expect(mockEndInteractionSpan).toHaveBeenCalledWith('error', {
+      promptId: 'prompt-id-agent',
+      errorMessage: 'tool continuation capacity exhausted',
+      errorType: 'continuation_capacity_exhausted',
+    });
 
     act(() => {
       notificationCallback?.(
@@ -2992,8 +3154,8 @@ describe('useGeminiStream', () => {
       );
     });
 
-    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
-    expect(mockSendMessageStream).toHaveBeenCalledWith(
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(2));
+    expect(mockSendMessageStream).toHaveBeenLastCalledWith(
       '<task-notification>done</task-notification>',
       expect.any(AbortSignal),
       expect.any(String),
@@ -5099,6 +5261,20 @@ describe('useGeminiStream', () => {
       } as TrackedCancelledToolCall,
     ];
     const client = new MockedGeminiClientClass(mockConfig);
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.ToolCallRequest,
+          value: {
+            callId: '1',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-3',
+          },
+        };
+      })(),
+    );
 
     // Capture the onComplete callback
     let capturedOnComplete:
@@ -5110,7 +5286,7 @@ describe('useGeminiStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
 
-    renderHook(() =>
+    const { result } = renderHook(() =>
       useGeminiStream(
         client,
         [],
@@ -5134,6 +5310,15 @@ describe('useGeminiStream', () => {
       ),
     );
 
+    await act(async () => {
+      await result.current.submitQuery(
+        'run the tool',
+        SendMessageType.UserQuery,
+        'prompt-id-3',
+      );
+    });
+    await waitFor(() => expect(mockScheduleToolCalls).toHaveBeenCalledOnce());
+
     // Trigger the onComplete callback with cancelled tools
     await act(async () => {
       if (capturedOnComplete) {
@@ -5147,8 +5332,11 @@ describe('useGeminiStream', () => {
         role: 'user',
         parts: [{ text: 'cancelled' }],
       });
-      // Ensure we do NOT call back to the API
-      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockEndInteractionSpan).toHaveBeenCalledWith('cancelled', {
+        promptId: 'prompt-id-3',
+      });
+      // Ensure we do NOT call back to the API after the initial tool request.
+      expect(mockSendMessageStream).toHaveBeenCalledOnce();
     });
   });
 
@@ -8889,6 +9077,9 @@ describe('useGeminiStream', () => {
 
       // Verify state is reset
       expect(result.current.streamingState).toBe(StreamingState.Idle);
+      expect(mockEndInteractionSpan).toHaveBeenCalledWith('cancelled', {
+        promptId: 'test-session-id########5',
+      });
     });
 
     it('should call onCancelSubmit handler when cancelOngoingRequest is called', async () => {
@@ -10409,6 +10600,248 @@ describe('useGeminiStream', () => {
       );
     });
 
+    function createCompletedFileWrite(options: {
+      callId?: string;
+      toolName?: string;
+      filePath: string;
+      status?: TrackedCompletedToolCall['status'];
+    }): TrackedCompletedToolCall {
+      const toolName = options.toolName ?? 'write_file';
+      const callId = options.callId ?? 'write-context-call-1';
+      return {
+        request: {
+          callId,
+          name: toolName,
+          args: { file_path: options.filePath },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-bare-remember',
+        },
+        status: options.status ?? 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [{ text: `Ran ${toolName}` }],
+          resultDisplay: `Ran ${toolName}`,
+          error: undefined,
+          errorType: undefined,
+        },
+        tool: {
+          name: toolName,
+          displayName: toolName,
+          description: 'Writes files',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      };
+    }
+
+    async function markContextRefreshIntent() {
+      mockHandleSlashCommand.mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: 'remember this',
+        refreshContextFilesOnWrite: true,
+      });
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('/remember fact');
+      });
+      return result;
+    }
+
+    async function completeToolWrite(
+      completedToolCall: TrackedCompletedToolCall,
+    ) {
+      const onComplete = mockUseReactToolScheduler.mock.calls.at(-1)?.[0] as
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | undefined;
+      expect(
+        onComplete,
+        'useReactToolScheduler onComplete was never registered',
+      ).toBeDefined();
+      await act(async () => {
+        await onComplete?.([completedToolCall]);
+      });
+    }
+
+    async function submitSlashCommandAndCompleteTool(
+      completedToolCall: TrackedCompletedToolCall,
+      refreshContextFilesOnWrite?: boolean,
+    ) {
+      if (refreshContextFilesOnWrite) {
+        await markContextRefreshIntent();
+      } else {
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'write docs',
+        });
+        const { result } = renderTestHook();
+        await act(async () => {
+          await result.current.submitQuery('/write-docs');
+        });
+      }
+      await completeToolWrite(completedToolCall);
+    }
+
+    async function submitContinuationAndCompleteTool(
+      result: ReturnType<typeof renderTestHook>['result'],
+      text: string,
+      submitType: SendMessageType,
+      promptId?: string,
+      extra?: { goal?: QueuedGoalTurn },
+    ) {
+      await act(async () => {
+        await result.current.submitQuery(text, submitType, promptId, extra);
+      });
+      // Pin that the continuation turn was admitted and reached the model;
+      // submitQuery can silently reject via its lease/streaming-state guards.
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await completeToolWrite(
+        createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
+      );
+
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'interactive context-file memory tool batch',
+      });
+    }
+
+    it('refreshes context-file instructions after bare remember writes QWEN.md', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
+        true,
+      );
+
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'interactive context-file memory tool batch',
+      });
+    });
+
+    it('keeps refreshing context-file instructions for later writes in a marked turn', async () => {
+      await markContextRefreshIntent();
+
+      await completeToolWrite(
+        createCompletedFileWrite({
+          callId: 'write-context-call-1',
+          filePath: '/test/dir/QWEN.md',
+        }),
+      );
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      await completeToolWrite(
+        createCompletedFileWrite({
+          callId: 'write-context-call-2',
+          filePath: '/test/dir/QWEN.md',
+        }),
+      );
+
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledTimes(2);
+    });
+
+    it('refreshes context-file instructions after bare remember edits QWEN.md', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({
+          toolName: 'edit',
+          filePath: '/test/dir/QWEN.md',
+        }),
+        true,
+      );
+
+      expect(mockRefreshMemoryInstruction).toHaveBeenCalledWith(mockConfig, {
+        logContext: 'interactive context-file memory tool batch',
+      });
+    });
+
+    it('does not refresh context-file instructions for failed QWEN.md writes', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({
+          filePath: '/test/dir/QWEN.md',
+          status: 'error',
+        }),
+        true,
+      );
+
+      expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh context-file instructions for other file writes', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({ filePath: '/test/dir/notes.md' }),
+        true,
+      );
+
+      expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh context-file instructions for ordinary QWEN.md writes', async () => {
+      await submitSlashCommandAndCompleteTool(
+        createCompletedFileWrite({ filePath: '/test/dir/QWEN.md' }),
+        false,
+      );
+
+      expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
+    });
+
+    it('clears unmatched context-file refresh intent on the next ordinary turn', async () => {
+      const result = await markContextRefreshIntent();
+      await completeToolWrite(
+        createCompletedFileWrite({ filePath: '/test/dir/notes.md' }),
+      );
+
+      mockHandleSlashCommand.mockResolvedValue(false);
+      await act(async () => {
+        await result.current.submitQuery('ordinary turn');
+      });
+      await completeToolWrite(
+        createCompletedFileWrite({
+          callId: 'ordinary-write-context-call',
+          filePath: '/test/dir/QWEN.md',
+        }),
+      );
+
+      expect(mockRefreshMemoryInstruction).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['Retry', SendMessageType.Retry],
+      ['Notification', SendMessageType.Notification],
+    ])(
+      'preserves context-file refresh intent across a %s turn',
+      async (_label, submitType) => {
+        const result = await markContextRefreshIntent();
+        await submitContinuationAndCompleteTool(
+          result,
+          'retry remember write',
+          submitType,
+        );
+      },
+    );
+
+    it('preserves context-file refresh intent across a Goal turn', async () => {
+      const result = await markContextRefreshIntent();
+      const goal: QueuedGoalTurn = {
+        kind: 'goal',
+        permit: {
+          goalId: 'goal-memory-refresh',
+          revision: 1,
+          turnId: 'turn-memory-refresh',
+        },
+        turnKey: 'goal-runtime:turn-memory-refresh',
+        continuationContext: 'continue remembered fact write',
+      };
+      await submitContinuationAndCompleteTool(
+        result,
+        goal.continuationContext,
+        SendMessageType.Goal,
+        'prompt-id-goal-memory-refresh',
+        { goal },
+      );
+    });
+
     it('does not run the legacy save_memory refresh when managed-memory writes refresh the batch', async () => {
       mockRefreshMemoryAfterManagedWrite.mockResolvedValueOnce(true);
       const mockPerformMemoryRefresh = vi.fn();
@@ -10522,6 +10955,12 @@ describe('useGeminiStream', () => {
         ],
         { logContext: 'interactive memory tool batch' },
       );
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      const continuationCall = mockSendMessageStream.mock.calls.at(-1);
+      expect(continuationCall?.[2]).toBe('prompt-id-memory-write');
+      expect(continuationCall?.[3]).toMatchObject({
+        type: SendMessageType.ToolResult,
+      });
       expect(mockPerformMemoryRefresh).not.toHaveBeenCalled();
     });
   });

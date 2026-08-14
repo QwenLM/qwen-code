@@ -34,6 +34,7 @@ import {
   DaemonHttpError,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import { AcpWsTransport } from '@qwen-code/sdk/daemon/transports';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   Storage,
@@ -303,6 +304,7 @@ describe('qwen serve — capabilities envelope', () => {
       'daemon_status',
       'capabilities',
       'session_create',
+      'session_id_override',
       'session_scope_override',
       'session_load',
       'session_resume',
@@ -313,6 +315,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_side_task',
       'session_prompt',
       'session_mid_turn_message_mutation',
+      'session_mid_turn_message_query',
       'session_cancel',
       'session_events',
       'session_artifacts',
@@ -361,9 +364,11 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_bytes',
       'workspace_file_read_cursor',
       'workspace_file_write',
+      'workspace_file_upload',
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_skill_toggle',
+      'workspace_skill_batch_toggle',
       'workspace_skill_manage',
       'workspace_settings',
       'workspace_permissions',
@@ -549,6 +554,93 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
       body: JSON.stringify({ cwd: 'relative/path' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('honors and reserves a normalized caller-supplied session ID', async () => {
+    const requestedId = '550E8400-E29B-41D4-A716-446655440000';
+    const normalizedId = requestedId.toLowerCase();
+    const created = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        cwd: REPO_ROOT,
+        sessionId: requestedId,
+        sessionScope: 'single',
+      }),
+    });
+    expect(created.status).toBe(200);
+    await expect(created.json()).resolves.toMatchObject({
+      sessionId: normalizedId,
+      attached: false,
+    });
+
+    try {
+      let conflict: unknown;
+      try {
+        await client.createOrAttachSession({
+          workspaceCwd: REPO_ROOT,
+          sessionId: normalizedId,
+        });
+      } catch (error) {
+        conflict = error;
+      }
+      expect(conflict).toBeInstanceOf(DaemonHttpError);
+      expect((conflict as DaemonHttpError).status).toBe(409);
+      expect((conflict as DaemonHttpError).body).toMatchObject({
+        code: 'session_id_conflict',
+        sessionId: normalizedId,
+      });
+
+      await client.closeSession(normalizedId);
+
+      const sdkRest = await client.createOrAttachSession({
+        workspaceCwd: REPO_ROOT,
+        sessionId: requestedId,
+      });
+      expect(sdkRest).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+      await client.closeSession(normalizedId);
+
+      const acpTransport = new AcpWsTransport(
+        `ws://127.0.0.1:${port}/acp`,
+        TOKEN,
+      );
+      const acpClient = new DaemonClient({
+        baseUrl: base,
+        token: TOKEN,
+        transport: acpTransport,
+      });
+      try {
+        const sdkAcp = await acpClient.createOrAttachSession({
+          workspaceCwd: REPO_ROOT,
+          sessionId: requestedId,
+        });
+        expect(sdkAcp).toMatchObject({ sessionId: normalizedId });
+        await client.closeSession(normalizedId);
+      } finally {
+        acpClient.dispose();
+      }
+
+      const invalid = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: REPO_ROOT, sessionId: '../escape' }),
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toMatchObject({
+        code: 'invalid_session_id',
+      });
+    } finally {
+      await client.closeSession(normalizedId).catch(() => undefined);
+    }
   });
 
   it('two parallel POSTs same workspace coalesce to one session', async () => {

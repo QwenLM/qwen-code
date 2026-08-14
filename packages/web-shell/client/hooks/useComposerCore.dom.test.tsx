@@ -32,6 +32,8 @@ function Harness({
   sessionId,
   atWorkspaceCwd,
   commands,
+  onImageIngestionNotice,
+  workspaceUploadBusy,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
@@ -46,6 +48,8 @@ function Harness({
   sessionId?: string;
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
+  onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -59,10 +63,16 @@ function Harness({
     atWorkspaceCwd,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
+    onImageIngestionNotice,
+    workspaceUploadBusy,
   });
   latest = composer;
 
-  return <div ref={composer.containerRef} />;
+  return (
+    <div data-web-shell-composer-surface {...composer.imageTransferHandlers}>
+      <div ref={composer.containerRef} />
+    </div>
+  );
 }
 
 async function mount({
@@ -75,6 +85,8 @@ async function mount({
   sessionId,
   atWorkspaceCwd,
   commands,
+  onImageIngestionNotice,
+  workspaceUploadBusy,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -89,6 +101,8 @@ async function mount({
   sessionId?: string;
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
+  onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -111,6 +125,8 @@ async function mount({
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
             commands={commands}
+            onImageIngestionNotice={onImageIngestionNotice}
+            workspaceUploadBusy={workspaceUploadBusy}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -140,6 +156,15 @@ async function mount({
   };
 }
 
+async function waitForImageIngestion() {
+  await vi.waitFor(async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
+}
+
 afterEach(() => {
   act(() => root?.unmount());
   vi.useRealTimers();
@@ -159,6 +184,7 @@ afterEach(() => {
   root = null;
   container = null;
   latest = null;
+  vi.unstubAllGlobals();
 });
 
 function pressHistoryKey(key: 'ArrowUp' | 'ArrowDown') {
@@ -255,6 +281,42 @@ describe('useComposerCore history and drafts', () => {
     mounted.rerender();
 
     expect(getItem).toHaveBeenCalledTimes(readsAfterMount);
+  });
+
+  it('blocks submission while an external ingestion lane is busy', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit, workspaceUploadBusy: true });
+
+    act(() => {
+      latest!.setText('review the upload');
+      latest!.submitText();
+    });
+
+    expect(latest!.canSubmit).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('blocks history retry and search-match submit while an upload is busy', async () => {
+    const workspaceCwd = '/workspace/upload-busy';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['previous prompt']),
+    );
+    const onSubmit = vi.fn();
+    await mount({
+      onSubmit,
+      sessionId: 'session-upload-busy',
+      atWorkspaceCwd: workspaceCwd,
+      workspaceUploadBusy: true,
+    });
+
+    act(() => latest!.retryLast());
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMatches).toEqual(['previous prompt']);
+    act(() => latest!.searchState.submitSearchMatch('previous prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('falls back to legacy prompt history until the workspace has its own history', async () => {
@@ -749,7 +811,9 @@ describe('useComposerCore paste', () => {
     const event = new Event('paste', { bubbles: true, cancelable: true });
     Object.defineProperty(event, 'clipboardData', {
       value: {
-        items: [{ type: 'text/plain', getAsFile: () => null }],
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
         getData: () => 'line\n'.repeat(200),
       },
     });
@@ -761,9 +825,321 @@ describe('useComposerCore paste', () => {
     expect(latest!.getText()).toBe('line\n'.repeat(200));
     expect(latest!.getText()).not.toContain('Pasted Content');
   });
+
+  it('claims image drops, blocks submit while reading, and submits image-only', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit });
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: [file], items: [], types: ['Files'], dropEffect: 'none' },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+      latest!.submitText();
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.pendingImageBatchCount).toBe(1);
+
+    await waitForImageIngestion();
+    expect(latest!.pendingImageBatchCount).toBe(0);
+    expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      '',
+      [expect.objectContaining({ media_type: 'image/png' })],
+      expect.any(Function),
+      undefined,
+    );
+  });
+
+  it('keeps drag feedback across composer children and clears it globally', async () => {
+    await mount();
+    const surface = container!.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const editor = container!.querySelector('.cm-content')!;
+    const dataTransfer = {
+      files: [],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => null }],
+      types: ['Files'],
+      dropEffect: 'none',
+    };
+    const dispatchDrag = (
+      target: Element,
+      type: 'dragenter' | 'dragleave' | 'dragover',
+      relatedTarget: EventTarget | null = null,
+    ) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        dataTransfer: { value: dataTransfer },
+        relatedTarget: { value: relatedTarget },
+      });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    act(() => {
+      dispatchDrag(editor, 'dragenter');
+    });
+    expect(latest!.imageDragActive).toBe(true);
+
+    act(() => {
+      dispatchDrag(editor, 'dragleave', surface);
+      dispatchDrag(editor, 'dragover');
+    });
+    expect(latest!.imageDragActive).toBe(true);
+    expect(dataTransfer.dropEffect).toBe('copy');
+
+    act(() => {
+      window.dispatchEvent(new Event('dragend'));
+    });
+    expect(latest!.imageDragActive).toBe(false);
+  });
+
+  it('keeps batch order, normalizes BMP, and aggregates rejected drops', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ onImageIngestionNotice });
+    const first = new File(['first'], 'first.bmp', { type: 'image/x-bmp' });
+    const unsupported = new File(['text'], 'notes.txt', {
+      type: 'text/plain',
+    });
+    const second = new File(['second'], 'second.png', { type: 'image/png' });
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([first, unsupported]);
+      drop([second]);
+    });
+    await waitForImageIngestion();
+
+    expect(latest!.pastedImages.map((image) => image.media_type)).toEqual([
+      'image/bmp',
+      'image/png',
+    ]);
+    expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('1'),
+    );
+  });
+
+  it('continues later image batches when the notice consumer throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onImageIngestionNotice = vi.fn(() => {
+      throw new Error('host notice failed');
+    });
+    await mount({ onImageIngestionNotice });
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([new File(['text'], 'notes.txt', { type: 'text/plain' })]);
+      drop([new File(['png'], 'photo.png', { type: 'image/png' })]);
+    });
+    await waitForImageIngestion();
+
+    expect(onImageIngestionNotice).toHaveBeenCalledOnce();
+    expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
+
+  it('aborts and isolates readers when the composer owner changes', async () => {
+    class DeferredFileReader {
+      static instances: DeferredFileReader[] = [];
+      result: string | ArrayBuffer | null = null;
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      abort = vi.fn(() => this.onabort?.({} as ProgressEvent<FileReader>));
+
+      constructor() {
+        DeferredFileReader.instances.push(this);
+      }
+
+      readAsDataURL() {}
+    }
+    vi.stubGlobal('FileReader', DeferredFileReader);
+    const onImageIngestionNotice = vi.fn();
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+      onImageIngestionNotice,
+    });
+    const file = new File(['png'], 'photo.png', { type: 'image/png' });
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: [file], items: [], types: ['Files'], dropEffect: 'none' },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    });
+    await act(async () => Promise.resolve());
+    expect(latest!.pendingImageBatchCount).toBe(1);
+    expect(DeferredFileReader.instances).toHaveLength(1);
+
+    mounted.switchSession('session-b', '/workspace/b');
+    expect(DeferredFileReader.instances[0]!.abort).toHaveBeenCalledOnce();
+    expect(latest!.pendingImageBatchCount).toBe(0);
+    expect(latest!.pastedImages).toEqual([]);
+    expect(onImageIngestionNotice).not.toHaveBeenCalled();
+  });
 });
 
 describe('useComposerCore tags', () => {
+  it('resubmits restored input annotations with the draft', async () => {
+    const { onSubmit } = await mount();
+    const inputAnnotations = [
+      {
+        type: 'reference' as const,
+        start: 0,
+        end: 8,
+        text: '@file.ts',
+        reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+      },
+    ];
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.(inputAnnotations);
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@file.ts\n\nfix it',
+      undefined,
+      expect.any(Function),
+      { inputAnnotations },
+    );
+  });
+
+  it('keeps earlier annotations when another restored prompt is prepended', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@a old');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 2,
+          text: '@a',
+          reference: { id: 'file:a' },
+        },
+      ]);
+      latest!.handle.setText('@b new\n@a old');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 2,
+          text: '@b',
+          reference: { id: 'file:b' },
+        },
+      ]);
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@b new\n@a old',
+      undefined,
+      expect.any(Function),
+      {
+        inputAnnotations: [
+          expect.objectContaining({ start: 0, end: 2, text: '@b' }),
+          expect.objectContaining({ start: 7, end: 9, text: '@a' }),
+        ],
+      },
+    );
+  });
+
+  it('maps restored annotations through edits before their range', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 8,
+          text: '@file.ts',
+          reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+        },
+      ]);
+      latest!.viewRef.current!.dispatch({
+        changes: { from: 0, insert: 'please ' },
+      });
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      'please @file.ts\n\nfix it',
+      undefined,
+      expect.any(Function),
+      {
+        inputAnnotations: [
+          expect.objectContaining({
+            start: 7,
+            end: 15,
+            text: '@file.ts',
+          }),
+        ],
+      },
+    );
+  });
+
+  it('drops a restored annotation when its range is edited', async () => {
+    const { onSubmit } = await mount();
+
+    act(() => {
+      latest!.handle.setText('@file.ts\n\nfix it');
+      latest!.handle.restoreInputAnnotations?.([
+        {
+          type: 'reference',
+          start: 0,
+          end: 8,
+          text: '@file.ts',
+          reference: { id: 'file:file.ts', kind: 'file', value: 'file.ts' },
+        },
+      ]);
+      latest!.viewRef.current!.dispatch({
+        changes: { from: 1, to: 2, insert: 'X' },
+      });
+      latest!.submitText();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      '@Xile.ts\n\nfix it',
+      undefined,
+      expect.any(Function),
+      undefined,
+    );
+  });
+
   it('keeps the composer API stable across tag updates', async () => {
     await mount();
     const api = latest!.handle;
@@ -960,6 +1336,88 @@ describe('useComposerCore tags', () => {
     });
     expect(latest!.handle.hasAttachments()).toBe(false);
     expect(latest!.hasAttachments).toBe(false);
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('');
+    expect(document.body.querySelector('.cm-placeholder')).not.toBeNull();
+  });
+
+  it('preserves surrounding text when an inline tag chip is removed', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('please review ');
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+      latest!.insertText(' now');
+    });
+    expect(latest!.hasAttachments).toBe(true);
+
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+
+    const text = latest!.viewRef.current!.state.doc.toString();
+    expect(text).toContain('please review');
+    expect(text).toContain('now');
+    // The chip's serialized text must be removed from the doc, not just its
+    // decoration — uncovered text would be submitted as plain prompt text.
+    expect(text).not.toContain('@orders');
+    expect(latest!.hasAttachments).toBe(false);
+  });
+
+  it('appends end-placed inline tags without stealing focus', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('draft text');
+    });
+    const view = latest!.viewRef.current!;
+    // Caret sits mid-text; an end-placement insert must still append.
+    act(() => {
+      view.dispatch({ selection: { anchor: 5 } });
+    });
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline', position: 'end' },
+      );
+    });
+
+    const doc = view.state.doc.toString();
+    // A boundary separates the appended reference from the preceding text,
+    // and the caret stays where the user left it (no teleport to doc end).
+    expect(doc).toBe('draft text @orders ');
+    expect(view.state.selection.main.from).toBe(5);
+    expect(document.activeElement).toBe(outside);
+
+    // The end-placed tag must become a real chip decoration: a wrong
+    // effect-range offset would leave the doc text correct but decorate the
+    // wrong span, breaking the remove button and atomic-range behavior.
+    expect(latest!.hasAttachments).toBe(true);
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+    // The remove button deletes the chip's serialized text (separator
+    // spacing aside), restoring the pre-upload content.
+    const removed = view.state.doc.toString();
+    expect(removed).not.toContain('@orders');
+    expect(removed.trim()).toBe('draft text');
+    expect(latest!.hasAttachments).toBe(false);
+    outside.remove();
   });
 
   it('updates inline tag state when a document change removes the last tag', async () => {

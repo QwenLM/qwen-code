@@ -159,30 +159,56 @@ describe('ChatRecordingService', () => {
       expect(record.provenance).toBe('real_user');
     });
 
-    it('stores hook display provenance in systemPayload only when provided', async () => {
-      const taggedParts: Part[] = [
-        { text: 'my prompt' },
+    it('preserves model-bound parts and records clean display text', async () => {
+      const modelParts: Part[] = [
+        { text: 'expanded model prompt' },
         {
-          text: '<qwen:user-prompt-submit-context>\nextra\n</qwen:user-prompt-submit-context>',
+          text: [
+            '<qwen:user-prompt-submit-context>',
+            'hook-only context',
+            '</qwen:user-prompt-submit-context>',
+          ].join('\n'),
         },
       ];
-      chatRecordingService.recordUserMessage(taggedParts, undefined, {
-        displayText: 'my prompt',
+
+      chatRecordingService.recordUserMessage(modelParts, undefined, {
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
       });
-      chatRecordingService.recordUserMessage([{ text: 'plain prompt' }]);
       await chatRecordingService.flush();
 
-      const calls = vi.mocked(jsonl.writeLine).mock.calls;
-      const augmented = calls[0][1] as ChatRecord;
-      const plain = calls[1][1] as ChatRecord;
-
-      // The model-bound parts are stored verbatim; the user-authored
-      // projection travels separately in the payload.
-      expect(augmented.message).toEqual({ role: 'user', parts: taggedParts });
-      expect(augmented.systemPayload).toEqual({
-        displayText: 'my prompt',
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.message).toEqual({ role: 'user', parts: modelParts });
+      expect(record.systemPayload).toEqual({
+        displayText: 'raw @file prompt',
+        hookContext: 'hook-only context',
       });
-      expect(plain.systemPayload).toBeUndefined();
+    });
+
+    it('records empty display text without dropping prompt provenance', async () => {
+      chatRecordingService.recordUserMessage(
+        [
+          {
+            text: [
+              '<qwen:user-prompt-submit-context>',
+              'hook-only context',
+              '</qwen:user-prompt-submit-context>',
+            ].join('\n'),
+          },
+        ],
+        undefined,
+        {
+          displayText: '',
+          hookContext: 'hook-only context',
+        },
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: 'hook-only context',
+      });
     });
 
     it('blocks later turns after a generic durable write failure', async () => {
@@ -621,6 +647,70 @@ describe('ChatRecordingService', () => {
   });
 
   describe('rewindRecording', () => {
+    it('drops display projections from rewound user turns', async () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'hidden A' }],
+        undefined,
+        {
+          displayText: 'A',
+          hookContext: '',
+        },
+      );
+      chatRecordingService.recordUserMessage(
+        [{ text: 'hidden B' }],
+        undefined,
+        {
+          displayText: 'B',
+          hookContext: '',
+        },
+      );
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      chatRecordingService.recordUserMessage(
+        [{ text: 'hidden C' }],
+        undefined,
+        {
+          displayText: 'C',
+          hookContext: '',
+        },
+      );
+
+      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+        'A',
+        'C',
+      ]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+    });
+
+    it('compensates the rewind splice for the display-text cap window', async () => {
+      // 25 turns, but the projection buffer retains only the last 20, so the
+      // rewind splice must offset by the 5 turns that fell out of the window.
+      for (let index = 0; index < 25; index += 1) {
+        chatRecordingService.recordUserMessage(
+          [{ text: `hidden ${index}` }],
+          undefined,
+          {
+            displayText: `visible ${index}`,
+            hookContext: '',
+          },
+        );
+      }
+      expect(chatRecordingService.getUserDisplayTextsForTitle()).toHaveLength(
+        20,
+      );
+
+      // Rewind to turn 22 keeps turns 0..21; the retained window covers turns
+      // 5..24, so projections for turns 5..21 (entries 0..16) must survive.
+      chatRecordingService.rewindRecording(22, { truncatedCount: 3 });
+
+      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(
+        Array.from({ length: 17 }, (_, index) => `visible ${index + 5}`),
+      );
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+    });
+
     it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         lastCompletedUuid: 'assistant-1',
@@ -1666,6 +1756,48 @@ describe('ChatRecordingService', () => {
   });
 
   describe('legacy recorder', () => {
+    it('restores reduced recorder state without the full conversation', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, 'projected-parent'],
+        customTitle: 'Projected title',
+        titleSource: 'manual',
+        parentSessionId: 'parent-session',
+        sourceType: 'channel',
+        sourceId: 'channel-main',
+      });
+
+      service.recordUserMessage([{ text: 'next' }]);
+      await service.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.parentUuid).toBe('projected-leaf');
+      expect(service.getCurrentCustomTitle()).toBe('Projected title');
+      expect(service.getCurrentTitleSource()).toBe('manual');
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(service.recordParentSession('parent-session')).resolves.toBe(
+        true,
+      );
+      await expect(
+        service.recordSessionSource('channel', 'channel-main'),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('activates a leased recorder from reduced state', async () => {
+      const service = new ChatRecordingService(mockConfig);
+      service.activate(mockLease, undefined, undefined, {
+        lastCompletedUuid: 'leased-projected-leaf',
+        turnParentUuids: [null],
+      });
+
+      service.recordUserMessage([{ text: 'next' }]);
+      await service.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.parentUuid).toBe('leased-projected-leaf');
+    });
+
     it('uses the effective session writer lease gate by default', async () => {
       mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
       mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);

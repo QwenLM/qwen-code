@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -19,6 +27,104 @@ const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
 describe('no-AK integration CI wiring', () => {
+  it.runIf(process.platform === 'linux')(
+    'keeps Linux Unix socket paths short and identity-stable',
+    () => {
+      const workflow = readFileSync(
+        path.join(ROOT, '.github/workflows/ci.yml'),
+        'utf8',
+      );
+      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
+        (jobName) => {
+          const testStep = getWorkflowStep(
+            getWorkflowJob(workflow, jobName),
+            'Run tests and generate reports',
+          );
+          const start = testStep.indexOf('export TMPDIR=');
+          expect(
+            start,
+            `${jobName}: TMPDIR routing block`,
+          ).toBeGreaterThanOrEqual(0);
+          const end = testStep.indexOf('\n          ( while true', start);
+          expect(end, `${jobName}: sampler sentinel`).toBeGreaterThan(start);
+          return testStep.slice(start, end);
+        },
+      );
+      expect(new Set(routingBlocks)).toHaveLength(1);
+      const [routeTemp] = routingBlocks;
+      const root = mkdtempSync(path.join(tmpdir(), 'ci-temp-routing-'));
+      const longRunnerTemp = path.join(root, 'x'.repeat(180));
+
+      try {
+        mkdirSync(longRunnerTemp);
+        const [routedTemp, resolvedTemp] = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${routeTemp}\nprintf '%s\\n%s\\n' "$TMPDIR" "$(cd "$TMPDIR" && pwd -P)"`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              RUNNER_OS: 'Linux',
+              RUNNER_TEMP: longRunnerTemp,
+            },
+          },
+        )
+          .trim()
+          .split('\n');
+
+        expect(resolvedTemp).toBe(routedTemp);
+        expect(routedTemp).toMatch(/^\/var\/tmp\/qwen-ci-/);
+        expect(existsSync(routedTemp)).toBe(false);
+        expect(
+          Buffer.byteLength(
+            path.join(routedTemp, 'qwen-agent-view-XXXXXX', 'supervisor.sock'),
+          ),
+        ).toBeLessThan(108);
+        expect(
+          workflow.match(/mktemp -d \/var\/tmp\/qwen-ci-XXXXXX/g),
+        ).toHaveLength(3);
+        expect(workflow).toContain('QWEN_CI_TMPDIR="$(mktemp -d');
+        expect(workflow).toContain('if [ -n "$QWEN_CI_TMPDIR" ]; then');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('preserves test failures in every wrapped OS job', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+
+    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+      const testStep = getWorkflowStep(
+        getWorkflowJob(workflow, jobName),
+        'Run tests and generate reports',
+      );
+      expect(testStep).toContain(
+        'trap \'rm -rf "$TMPDIR" 2>/dev/null || true\' EXIT',
+      );
+      let previous = -1;
+      for (const command of [
+        'set +e',
+        'npm run test:ci',
+        'RC=$?',
+        'set -e',
+        'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
+        'kill "$SAMPLER_PID" 2>/dev/null || true',
+        'exit "$RC"',
+      ]) {
+        const index = testStep.indexOf(command);
+        expect(index, `${jobName}: ${command}`).toBeGreaterThan(previous);
+        previous = index;
+      }
+    }
+  });
+
   it('defines a focused no-AK integration script', () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
@@ -26,8 +132,9 @@ describe('no-AK integration CI wiring', () => {
 
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
-        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --maxWorkers 2',
+        'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
         './fake-openai-server.test.ts',
+        './test-helper.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',

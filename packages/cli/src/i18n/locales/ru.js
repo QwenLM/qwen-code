@@ -1480,7 +1480,16 @@ export default {
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
   Running: 'Выполняется',
+  Pausing: 'Приостанавливается',
   Paused: 'Приостановлено',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    'Приостановка кооперативная; выполняемая работа может завершиться до того, как рабочий процесс будет приостановлен. Вызов агента, ожидающий одобрения инструмента, удерживает запуск в этом состоянии и продолжает учитываться в лимите активного времени, пока одобрение не будет обработано.',
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    'Приостановлено: новые агенты не будут запускаться; код скрипта между вызовами агентов продолжает выполняться. Нажмите p, чтобы возобновить. /clear, /branch и переключение сессий отменяют приостановленные запуски.',
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    'Приостановка/возобновление отклонены; состояние рабочего процесса изменилось. Повторите попытку.',
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Подсказка: используйте `/workflows p <runId>` или «Фоновые задачи» + p для кооперативной приостановки/возобновления; используйте `/workflows <runId>` для подробностей.',
   Completed: 'Завершено',
   Failed: 'Ошибка',
   Stopped: 'Остановлено',
@@ -2282,4 +2291,5 @@ export default {
     'Изменения куратора автоматических навыков отключены в безопасном режиме.',
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
+  'Kept model as {{model}}': 'Оставлена модель {{model}}',
 };

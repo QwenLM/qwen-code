@@ -6,15 +6,18 @@
 
 import {
   parseGoalSnapshotV2,
+  parseGoalStateCause,
   type ChatRecord,
   type Config,
   type GoalSnapshotV2,
+  type GoalStateCause,
   type HistoryGap,
   type SessionTranscriptCursorState,
   type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
+import { Buffer } from 'node:buffer';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
 import { HistoryReplayer } from './history-replayer.js';
 import type { PendingReplayToolCall } from './history-replayer.js';
@@ -22,6 +25,25 @@ import type { CumulativeUsage, SessionEmitterContext } from './types.js';
 
 interface ReplayLogger {
   warn(message: string, ...args: unknown[]): void;
+}
+
+export class HistoryReplayLimitError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly reason: 'bytes' | 'updates',
+    readonly observed: number,
+    readonly limit: number,
+  ) {
+    super(
+      `Transcript replay for session ${sessionId} exceeds the ${reason} limit (${observed}, max ${limit})`,
+    );
+    this.name = 'HistoryReplayLimitError';
+  }
+}
+
+export interface HistoryReplayLimits {
+  maxBytes: number;
+  maxUpdates: number;
 }
 
 export function createReplayCumulativeUsage(): CumulativeUsage {
@@ -94,6 +116,7 @@ function parseTranscriptReplayState(
   pendingToolCalls: PendingReplayToolCall[];
   cumulativeUsage: CumulativeUsage;
   goalState?: GoalSnapshotV2;
+  goalCause?: GoalStateCause;
 } {
   if (!isObjectRecord(replay)) {
     return {
@@ -142,10 +165,17 @@ function parseTranscriptReplayState(
   if (logger && rawGoalState !== undefined && !goalState) {
     logger.warn('[transcript] replay state dropped a malformed Goal state');
   }
+  const rawGoalCause = replay['goalCause'];
+  const goalCause =
+    rawGoalCause === undefined ? undefined : parseGoalStateCause(rawGoalCause);
+  if (logger && rawGoalCause !== undefined && !goalCause) {
+    logger.warn('[transcript] replay state dropped a malformed Goal cause');
+  }
   return {
     pendingToolCalls,
     cumulativeUsage,
     ...(goalState ? { goalState } : {}),
+    ...(goalCause ? { goalCause } : {}),
   };
 }
 
@@ -154,22 +184,46 @@ function replayContext(
   updates: SessionUpdate[],
   cumulativeUsage: CumulativeUsage,
   config?: Config,
+  limits?: HistoryReplayLimits,
 ): SessionEmitterContext {
   let activeRecordId: string | null = null;
+  let serializedUpdateBytes = 2;
   return {
     sessionId,
     sendUpdate: async (update) => {
       const projectedUpdate = projectAcpToolResultUpdate(update);
-      if (activeRecordId === null) {
-        updates.push(projectedUpdate);
-        return;
+      const updateWithRecordId = (() => {
+        if (activeRecordId === null) return projectedUpdate;
+        const record = projectedUpdate as unknown as Record<string, unknown>;
+        const meta = isObjectRecord(record['_meta']) ? record['_meta'] : {};
+        return {
+          ...record,
+          _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
+        } as unknown as SessionUpdate;
+      })();
+      if (limits) {
+        const updateCount = updates.length + 1;
+        if (updateCount > limits.maxUpdates) {
+          throw new HistoryReplayLimitError(
+            sessionId,
+            'updates',
+            updateCount,
+            limits.maxUpdates,
+          );
+        }
+        serializedUpdateBytes +=
+          (updates.length === 0 ? 0 : 1) +
+          Buffer.byteLength(JSON.stringify(updateWithRecordId), 'utf8');
+        if (serializedUpdateBytes > limits.maxBytes) {
+          throw new HistoryReplayLimitError(
+            sessionId,
+            'bytes',
+            serializedUpdateBytes,
+            limits.maxBytes,
+          );
+        }
       }
-      const record = projectedUpdate as unknown as Record<string, unknown>;
-      const meta = isObjectRecord(record['_meta']) ? record['_meta'] : {};
-      updates.push({
-        ...record,
-        _meta: { ...meta, 'qwen.session.recordId': activeRecordId },
-      } as unknown as SessionUpdate);
+      updates.push(updateWithRecordId);
     },
     setActiveRecordId: (recordId: string | null) => {
       activeRecordId = recordId;
@@ -186,7 +240,9 @@ export async function collectHistoryReplayUpdates({
   gaps,
   cumulativeUsage,
   logger,
-  supersedeUnrestorableGoal,
+  replayState,
+  goalBootstrap,
+  limits,
 }: {
   sessionId: string;
   config?: Config;
@@ -194,20 +250,22 @@ export async function collectHistoryReplayUpdates({
   gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
   logger?: ReplayLogger;
-  /**
-   * Forwarded to `HistoryReplayer`. Only the resume path, where
-   * `#restoreGoalOnResume` follows, sets this. Reading another session's
-   * history must render it as it was, not editorialize a goal it won't restore.
-   */
-  supersedeUnrestorableGoal?: boolean;
+  replayState?: unknown;
+  goalBootstrap?: import('./history-replayer.js').HistoryReplayGoalBootstrap;
+  limits?: HistoryReplayLimits;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   try {
+    const initial = parseTranscriptReplayState(replayState, logger);
     await new HistoryReplayer(
-      replayContext(sessionId, updates, cumulativeUsage, config),
-      { supersedeUnrestorableGoal },
-    ).replay(records, gaps);
+      replayContext(sessionId, updates, cumulativeUsage, config, limits),
+    ).replay(records, gaps, {
+      ...(initial.goalState ? { initialGoalState: initial.goalState } : {}),
+      ...(initial.goalCause ? { initialGoalCause: initial.goalCause } : {}),
+      ...(goalBootstrap ? { goalBootstrap } : {}),
+    });
   } catch (error) {
+    if (error instanceof HistoryReplayLimitError) throw error;
     const replayError = error instanceof Error ? error.message : String(error);
     logger?.warn(
       '[historyReplay] History replay failed for session %s (partial updates: %d):',
@@ -273,6 +331,7 @@ export async function replayTranscriptRecordPage({
         finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
       ...(state.goalState ? { goalState: state.goalState } : {}),
+      ...(state.goalCause ? { goalCause: state.goalCause } : {}),
     });
     replayState = replayPageState.replay;
   } catch (error) {

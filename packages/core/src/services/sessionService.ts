@@ -16,41 +16,60 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import type {
-  ChatCompressionRecordPayload,
   ChatRecord,
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
 import {
   deserializeSnapshots,
   FILE_HISTORY_DIR,
-  MAX_SNAPSHOTS,
   serializeSnapshot,
 } from './fileHistoryService.js';
+import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
-  readLastJsonStringFieldsSync,
+  readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
-import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
 import {
   isSessionArtifactRecord,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
+  selectActiveSideArtifactRecordUuids,
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import {
+  SessionTranscriptReader,
+  SessionTranscriptTooLargeError,
+  type SelectiveSessionRestoreOptions,
+  type SessionLiveRestoreProjection,
+  type SessionRestoreProjection,
+} from './session-transcript-reader.js';
 import {
   SessionWriterLease,
   SessionWriterUnavailableError,
   type SessionWriterProcessKind,
 } from './session-writer-lease.js';
+export {
+  buildApiHistoryFromConversation,
+  type BuildApiHistoryOptions,
+} from './session-api-history.js';
+import {
+  getResumeTokenCounts,
+  type ResumeTokenCounts,
+} from './session-resume-token-counts.js';
+export {
+  getResumePromptTokenCount,
+  getResumeTokenCounts,
+  type ResumeTokenCounts,
+} from './session-resume-token-counts.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -127,6 +146,8 @@ export interface ListSessionsOptions {
    * @default 'active'
    */
   archiveState?: SessionArchiveState;
+  /** Aborts an in-progress catalog scan. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -240,6 +261,7 @@ export interface ResumedSessionData {
  * This is a safety limit to prevent performance issues with very large chat directories.
  */
 const MAX_FILES_TO_PROCESS = 10000;
+const SESSION_LIST_CANCEL_YIELD_INTERVAL = 128;
 
 /**
  * Maximum character length for a session custom title.
@@ -328,12 +350,18 @@ export class SessionService {
   private readonly projectHash: string;
   private readonly projectRoot: string;
   private readonly onWarning: ((message: string) => void) | undefined;
+  private readonly transcriptReader: SessionTranscriptReader;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd, options.runtimeBaseDir);
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
     this.onWarning = options.onWarning;
+    this.transcriptReader = new SessionTranscriptReader(
+      cwd,
+      undefined,
+      options.runtimeBaseDir,
+    );
   }
 
   /** The workspace root this service is bound to (the cwd it was constructed
@@ -402,7 +430,9 @@ export class SessionService {
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    signal?.throwIfAborted();
     if (getProjectHash(recordCwd) === this.projectHash) {
       return true;
     }
@@ -425,9 +455,11 @@ export class SessionService {
       }
     }
 
-    const status = await readRuntimeStatus(
-      this.storage.getRuntimeStatusPath(sessionId),
-    );
+    const runtimeStatusPath = this.storage.getRuntimeStatusPath(sessionId);
+    const status = signal
+      ? await readRuntimeStatus(runtimeStatusPath, { signal })
+      : await readRuntimeStatus(runtimeStatusPath);
+    signal?.throwIfAborted();
     return (
       status?.sessionId === sessionId &&
       getProjectHash(status.workDir) === this.projectHash
@@ -538,6 +570,33 @@ export class SessionService {
     if (active && archived) return 'conflict';
     if (active) return 'active';
     if (archived) return 'archived';
+    return undefined;
+  }
+
+  /**
+   * Finds a persisted session whose UUID filename differs only by case.
+   * Legacy CLI sessions may have been written with `uuidgen`'s uppercase
+   * spelling, while daemon-facing caller IDs are canonicalized to lowercase.
+   */
+  async findSessionIdIgnoringCase(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
+    for (const state of ['active', 'archived'] as const) {
+      let fileNames: string[];
+      try {
+        fileNames = fs.readdirSync(this.getChatsDirForState(state));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      for (const fileName of fileNames) {
+        if (fileName.toLowerCase() !== expectedFileName) continue;
+        const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
+        const location = await this.getSessionLocation(candidateSessionId);
+        if (location !== undefined) return candidateSessionId;
+      }
+    }
     return undefined;
   }
 
@@ -661,19 +720,7 @@ export class SessionService {
     title?: string;
     source?: TitleSource;
   } {
-    const hit = readLastJsonStringFieldsSync(
-      filePath,
-      'customTitle',
-      ['titleSource'],
-      '"subtype":"custom_title"',
-      tailBuffer,
-    );
-    const title = hit['customTitle'];
-    if (!title) return {};
-    const rawSource = hit['titleSource'];
-    const source =
-      rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;
-    return { title, source };
+    return readSessionTitleInfoFromFileSync(filePath, tailBuffer);
   }
 
   /**
@@ -829,8 +876,7 @@ export class SessionService {
       if ('text' in part) {
         const textPart = part as { text: string };
         const text = textPart.text;
-        // Truncate long prompts for display
-        return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+        return this.truncatePromptForDisplay(text);
       }
     }
     return '';
@@ -842,11 +888,34 @@ export class SessionService {
    */
   private extractFirstPromptFromRecords(records: ChatRecord[]): string {
     for (const record of records) {
-      if (record.type !== 'user') continue;
+      if (record.type !== 'user' || record.subtype !== undefined) continue;
+      const payload = record.systemPayload as
+        | UserPromptRecordPayload
+        | undefined;
+      if (payload?.displayText !== undefined) {
+        const displayText = payload.displayText;
+        if (displayText) {
+          return this.truncatePromptForDisplay(displayText);
+        }
+        continue;
+      }
       const prompt = this.extractPromptText(record.message);
-      if (prompt) return prompt;
+      if (prompt) {
+        return prompt;
+      }
     }
     return '';
+  }
+
+  private truncatePromptForDisplay(text: string): string {
+    const codePoints: string[] = [];
+    for (const codePoint of text) {
+      if (codePoints.length === 200) {
+        return `${codePoints.join('')}...`;
+      }
+      codePoints.push(codePoint);
+    }
+    return text;
   }
 
   /**
@@ -943,35 +1012,44 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20, archiveState = 'active' } = options;
+    const { cursor, size = 20, archiveState = 'active', signal } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
+    signal?.throwIfAborted();
 
     // Get all valid session files (matching UUID pattern) with their stats
     let files: Array<{ name: string; mtime: number }> = [];
     try {
       const fileNames = fs.readdirSync(chatsDir);
-      for (const name of fileNames) {
-        // Only process files matching session file pattern
-        if (!SESSION_FILE_PATTERN.test(name)) continue;
-        const filePath = path.join(chatsDir, name);
-        try {
-          const stats = fs.statSync(filePath);
-          files.push({ name, mtime: stats.mtimeMs });
-        } catch {
-          // Skip files we can't stat
-          continue;
+      signal?.throwIfAborted();
+      for (const [index, name] of fileNames.entries()) {
+        if (SESSION_FILE_PATTERN.test(name)) {
+          const filePath = path.join(chatsDir, name);
+          try {
+            const stats = fs.statSync(filePath);
+            files.push({ name, mtime: stats.mtimeMs });
+          } catch {
+            // Skip files we can't stat
+          }
+        }
+        if (signal && (index + 1) % SESSION_LIST_CANCEL_YIELD_INTERVAL === 0) {
+          signal.throwIfAborted();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          signal.throwIfAborted();
         }
       }
     } catch (error) {
+      signal?.throwIfAborted();
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { items: [], hasMore: false };
       }
       throw error;
     }
+    signal?.throwIfAborted();
 
     // Sort by mtime descending (most recent first)
     files.sort((a, b) => b.mtime - a.mtime);
+    signal?.throwIfAborted();
 
     // Apply cursor filter (items with mtime < cursor)
     if (cursor !== undefined) {
@@ -994,6 +1072,7 @@ export class SessionService {
     const tailBuffer = Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const file of files) {
+      signal?.throwIfAborted();
       // Safety limit to prevent performance issues
       if (filesProcessed >= MAX_FILES_TO_PROCESS) {
         hasMoreFiles = true;
@@ -1010,10 +1089,12 @@ export class SessionService {
       lastProcessedMtime = file.mtime;
 
       const filePath = path.join(chatsDir, file.name);
-      const records = await jsonl.readLines<ChatRecord>(
-        filePath,
-        MAX_PROMPT_SCAN_LINES,
-      );
+      const records = signal
+        ? await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES, {
+            signal,
+          })
+        : await jsonl.readLines<ChatRecord>(filePath, MAX_PROMPT_SCAN_LINES);
+      signal?.throwIfAborted();
 
       if (records.length === 0) continue;
       const firstRecord = records[0];
@@ -1022,6 +1103,7 @@ export class SessionService {
         !(await this.sessionBelongsToCurrentProject(
           firstRecord.sessionId,
           firstRecord.cwd,
+          signal,
         ))
       ) {
         continue;
@@ -1029,7 +1111,9 @@ export class SessionService {
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
+      signal?.throwIfAborted();
       const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      signal?.throwIfAborted();
       const source = this.extractCreationMetadataFromRecords(records);
       items.push({
         sessionId: firstRecord.sessionId,
@@ -1051,6 +1135,7 @@ export class SessionService {
         isArchived,
       });
     }
+    signal?.throwIfAborted();
 
     // Determine next cursor (mtime of last processed file)
     // Only set if there are more files to process
@@ -1200,6 +1285,26 @@ export class SessionService {
     return this.loadSessionFromState(sessionId, 'active');
   }
 
+  async readRestoreProjection(
+    sessionId: string,
+    options: SelectiveSessionRestoreOptions,
+  ): Promise<SessionRestoreProjection | undefined> {
+    return this.transcriptReader.readRestoreProjection(sessionId, options, {
+      validateFirstRecord: (record) =>
+        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+    });
+  }
+
+  async readLiveRestoreProjection(
+    sessionId: string,
+    options: SelectiveSessionRestoreOptions,
+  ): Promise<SessionLiveRestoreProjection | undefined> {
+    return this.transcriptReader.readLiveRestoreProjection(sessionId, options, {
+      validateFirstRecord: (record) =>
+        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+    });
+  }
+
   /**
    * Reads an archived session without changing its archive state.
    * Daemon load/resume paths must continue to use {@link loadSession}.
@@ -1289,40 +1394,17 @@ export class SessionService {
     };
 
     // Extract file history snapshots for /rewind across resume
-    const fileHistorySnapshots: FileHistorySnapshot[] = [];
-    const seenPromptIds = new Map<string, number>();
+    const fileHistoryAccumulator = new SessionFileHistoryAccumulator();
     for (const msg of messages) {
-      if (
-        msg.type === 'system' &&
-        msg.subtype === 'file_history_snapshot' &&
-        msg.systemPayload
-      ) {
-        const payload = msg.systemPayload as FileHistorySnapshotRecordPayload;
-        if (!Array.isArray(payload?.snapshots)) continue;
-        let deserialized: FileHistorySnapshot[];
-        try {
-          deserialized = deserializeSnapshots(payload.snapshots);
-        } catch (e) {
-          debugLogger.warn(
-            `loadSession: skipping malformed file_history_snapshot: ${e}`,
-          );
-          continue;
-        }
-        for (const s of deserialized) {
-          const existingIdx = seenPromptIds.get(s.promptId);
-          if (existingIdx !== undefined) {
-            fileHistorySnapshots[existingIdx] = s;
-          } else {
-            seenPromptIds.set(s.promptId, fileHistorySnapshots.length);
-            fileHistorySnapshots.push(s);
-          }
-        }
+      try {
+        fileHistoryAccumulator.add(msg);
+      } catch (e) {
+        debugLogger.warn(
+          `loadSession: skipping malformed file_history_snapshot: ${e}`,
+        );
       }
     }
-    const cappedSnapshots =
-      fileHistorySnapshots.length > MAX_SNAPSHOTS
-        ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
-        : fileHistorySnapshots;
+    const fileHistorySnapshots = fileHistoryAccumulator.finish();
     const activeBranchRecords = includeActiveSideArtifactRecords(
       records,
       messages,
@@ -1336,8 +1418,7 @@ export class SessionService {
       conversation,
       filePath,
       lastCompletedUuid: lastMessage.uuid,
-      fileHistorySnapshots:
-        cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
+      fileHistorySnapshots,
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       historyGaps: gaps.length > 0 ? gaps : undefined,
     };
@@ -2077,7 +2158,11 @@ export class SessionService {
    * @remarks Only checks active sessions. Use `getSessionLocation()` or
    * `sessionExistsInAnyState()` for archive-aware lookups.
    */
-  async sessionExists(sessionId: string): Promise<boolean> {
+  async sessionExists(
+    sessionId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    options.signal?.throwIfAborted();
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
@@ -2085,12 +2170,22 @@ export class SessionService {
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     try {
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      const records = options.signal
+        ? await jsonl.readLines<ChatRecord>(filePath, 1, options)
+        : await jsonl.readLines<ChatRecord>(filePath, 1);
+      options.signal?.throwIfAborted();
       if (records.length === 0) {
         return false;
       }
-      return this.sessionBelongsToCurrentProject(sessionId, records[0].cwd);
+      const belongsToCurrentProject = await this.sessionBelongsToCurrentProject(
+        sessionId,
+        records[0].cwd,
+        options.signal,
+      );
+      options.signal?.throwIfAborted();
+      return belongsToCurrentProject;
     } catch {
+      options.signal?.throwIfAborted();
       return false;
     }
   }
@@ -2103,151 +2198,6 @@ export class SessionService {
       return true;
     }
   }
-}
-
-/**
- * Options for building API history from conversation.
- */
-export interface BuildApiHistoryOptions {
-  /**
-   * Whether to strip thought parts from the history.
-   * Thought parts are content parts that have `thought: true`.
-   * Keeping thoughts ensures `reasoning_content` from reasoning models
-   * (e.g. DeepSeek) is properly passed back in subsequent API calls.
-   * @default false
-   */
-  stripThoughtsFromHistory?: boolean;
-}
-
-/**
- * Strips thought parts from a Content object.
- * Thought parts are identified by having `thought: true`.
- * Returns null if the content only contained thought parts.
- */
-function stripThoughtsFromContent(content: Content): Content | null {
-  if (!content.parts) return content;
-
-  const filteredParts = content.parts.filter((part) => !(part as Part).thought);
-
-  // If all parts were thoughts, remove the entire content
-  if (filteredParts.length === 0) {
-    return null;
-  }
-
-  return {
-    ...content,
-    parts: filteredParts,
-  };
-}
-
-function copyContentForApiHistory(content: Content): Content {
-  return {
-    ...content,
-    parts: content.parts?.map((part) => {
-      if ('functionCall' in part && part.functionCall) {
-        return {
-          ...part,
-          functionCall: {
-            ...part.functionCall,
-            args: part.functionCall.args
-              ? { ...part.functionCall.args }
-              : part.functionCall.args,
-          },
-        };
-      }
-      if ('functionResponse' in part && part.functionResponse) {
-        return {
-          ...part,
-          functionResponse: {
-            ...part.functionResponse,
-          },
-        };
-      }
-      return { ...part };
-    }),
-  };
-}
-
-function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
-  if (!record.message || record.subtype === 'realtime_message') return;
-
-  const message = copyContentForApiHistory(record.message as Content);
-  if (record.subtype === 'mid_turn_user_message') {
-    const previous = history.at(-1);
-    if (previous?.role === 'user') {
-      previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
-      return;
-    }
-  }
-
-  history.push(message);
-}
-
-/**
- * Builds the model-facing chat history (Content[]) from a reconstructed
- * conversation. This keeps UI history intact while applying chat compression
- * checkpoints for the API history used on resume.
- *
- * Strategy:
- * - Find the latest system/chat_compression record (if any).
- * - Use its compressedHistory snapshot as the base history.
- * - Append all messages after that checkpoint (skipping system records).
- * - If no checkpoint exists, return the linear message list (message field only).
- */
-export function buildApiHistoryFromConversation(
-  conversation: ConversationRecord,
-  options: BuildApiHistoryOptions = {},
-): Content[] {
-  const { stripThoughtsFromHistory = false } = options;
-  const { messages } = conversation;
-
-  let lastCompressionIndex = -1;
-  let compressedHistory: Content[] | undefined;
-
-  messages.forEach((record, index) => {
-    if (record.type === 'system' && record.subtype === 'chat_compression') {
-      const payload = record.systemPayload as
-        | ChatCompressionRecordPayload
-        | undefined;
-      if (payload?.compressedHistory) {
-        lastCompressionIndex = index;
-        compressedHistory = payload.compressedHistory;
-      }
-    }
-  });
-
-  if (compressedHistory && lastCompressionIndex >= 0) {
-    const baseHistory: Content[] = compressedHistory.map(
-      copyContentForApiHistory,
-    );
-
-    // Append everything after the compression record (newer turns)
-    for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
-      const record = messages[i];
-      if (record.type === 'system') continue;
-      appendApiHistoryRecord(baseHistory, record);
-    }
-
-    if (stripThoughtsFromHistory) {
-      return baseHistory
-        .map(stripThoughtsFromContent)
-        .filter((content): content is Content => content !== null);
-    }
-    return baseHistory;
-  }
-
-  // Fallback: return linear messages as Content[]
-  const result: Content[] = [];
-  for (const record of messages) {
-    appendApiHistoryRecord(result, record);
-  }
-
-  if (stripThoughtsFromHistory) {
-    return result
-      .map(stripThoughtsFromContent)
-      .filter((content): content is Content => content !== null);
-  }
-  return result;
 }
 
 function remapSnapshotPromptId(
@@ -2321,81 +2271,23 @@ function includeActiveSideArtifactRecords(
   const activeByUuid = new Map(
     activeRecords.map((record) => [record.uuid, record]),
   );
-  const activeUuids = new Set(activeByUuid.keys());
-  const firstActiveUuid = activeRecords[0]?.uuid;
-  const firstActiveIndex =
-    firstActiveUuid === undefined
-      ? -1
-      : records.findIndex((record) => record.uuid === firstActiveUuid);
-  const nextActiveUuidByIndex = new Map<number, string>();
-  const nextBlockingUuidByIndex = new Map<number, string>();
-  let nextActiveUuid: string | undefined;
-  let nextBlockingUuid: string | undefined;
-  for (let index = records.length - 1; index >= 0; index--) {
-    if (nextActiveUuid !== undefined) {
-      nextActiveUuidByIndex.set(index, nextActiveUuid);
-    }
-    if (nextBlockingUuid !== undefined) {
-      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
-    }
-    if (activeUuids.has(records[index]!.uuid)) {
-      nextActiveUuid = records[index]!.uuid;
-      nextBlockingUuid = undefined;
-    } else if (
-      !isSessionArtifactRecord(records[index]!) &&
-      !isTailNeutralSideRecord(records[index]!)
-    ) {
-      nextBlockingUuid = records[index]!.uuid;
-    }
-  }
+  const artifactUuids = new Set(
+    selectActiveSideArtifactRecordUuids(
+      records,
+      activeRecords.map((record) => record.uuid),
+    ),
+  );
   const selected: ChatRecord[] = [];
-  const includedSideArtifactUuids = new Set<string>();
-  let previousActiveUuid: string | undefined;
-  for (let index = 0; index < records.length; index++) {
-    const record = records[index]!;
+  for (const record of records) {
     const activeRecord = activeByUuid.get(record.uuid);
     if (activeRecord) {
       selected.push(activeRecord);
       activeByUuid.delete(record.uuid);
-      previousActiveUuid = record.uuid;
       continue;
     }
-    if (!isSessionArtifactRecord(record)) {
-      continue;
-    }
-    const nextUuid = nextActiveUuidByIndex.get(index);
-    const hasBlockingRecordBeforeNextActive =
-      nextBlockingUuidByIndex.has(index);
-    const isInActiveSegment =
-      !hasBlockingRecordBeforeNextActive &&
-      (nextUuid !== undefined
-        ? activeUuids.has(nextUuid)
-        : previousActiveUuid !== undefined &&
-          activeUuids.has(previousActiveUuid));
-    if (
-      record.parentUuid !== null &&
-      (activeUuids.has(record.parentUuid) ||
-        includedSideArtifactUuids.has(record.parentUuid)) &&
-      isInActiveSegment &&
-      (record.parentUuid === previousActiveUuid ||
-        includedSideArtifactUuids.has(record.parentUuid))
-    ) {
-      selected.push(record);
-      includedSideArtifactUuids.add(record.uuid);
-    } else if (
-      record.parentUuid === null &&
-      index < firstActiveIndex &&
-      isInActiveSegment
-    ) {
-      selected.push(record);
-      includedSideArtifactUuids.add(record.uuid);
-    }
+    if (artifactUuids.has(record.uuid)) selected.push(record);
   }
   return selected;
-}
-
-function isTailNeutralSideRecord(record: ChatRecord): boolean {
-  return record.type === 'system' && record.subtype === 'custom_title';
 }
 
 function collectFileHistorySnapshotPromptIds(
@@ -2457,62 +2349,6 @@ export function replayUiTelemetryFromConversation(
     );
   }
   return resumeTokenCounts;
-}
-
-export interface ResumeTokenCounts {
-  promptTokenCount: number;
-  outputTokenCount: number;
-}
-
-/**
- * Returns the best available prompt token count for resuming telemetry.
- * Walks backward through messages and returns the first valid value:
- * - The latest assistant's non-zero usage (promptTokenCount ?? totalTokenCount).
- * - The most recent chat compression checkpoint's newTokenCount.
- */
-export function getResumePromptTokenCount(
-  conversation: ConversationRecord,
-): number | undefined {
-  return getResumeTokenCounts(conversation)?.promptTokenCount;
-}
-
-/**
- * Returns the prompt and previous-response output token counts used to seed a
- * resumed chat. The prompt count restores the context anchor; the output
- * count preserves the output tokens appended after that prompt count was
- * reported, matching steady-state prompt estimation on the next send.
- */
-export function getResumeTokenCounts(
-  conversation: ConversationRecord,
-): ResumeTokenCounts | undefined {
-  for (let i = conversation.messages.length - 1; i >= 0; i--) {
-    const record = conversation.messages[i];
-
-    if (record.type === 'assistant') {
-      const usage = record.usageMetadata;
-      const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
-      if (candidate) {
-        return {
-          promptTokenCount: candidate,
-          outputTokenCount: getUsageOutputTokenCountForPromptEstimate(usage),
-        };
-      }
-    }
-
-    if (record.type === 'system' && record.subtype === 'chat_compression') {
-      const payload = record.systemPayload as
-        | ChatCompressionRecordPayload
-        | undefined;
-      if (payload?.info) {
-        return {
-          promptTokenCount: payload.info.newTokenCount,
-          outputTokenCount: 0,
-        };
-      }
-    }
-  }
-
-  return undefined;
 }
 
 const MAX_BRANCH_COLLISION_SCAN = 99;

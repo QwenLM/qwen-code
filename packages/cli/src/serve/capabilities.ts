@@ -34,6 +34,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
+  session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
   session_load: { since: 'v1' },
   session_resume: { since: 'v1' },
@@ -52,6 +53,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_side_task: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_mid_turn_message_mutation: { since: 'v1' },
+  // Daemon-owned reconciliation surface for mid-turn messages:
+  // `GET /session/:id/mid-turn-messages` returns the messages still waiting
+  // in the queue plus bounded settled/promoted id rings. Clients pre-flight
+  // this tag before calling the route; an
+  // older daemon without it leaves them on the legacy client-fallback
+  // behavior. Client-generated message ids make retries idempotent.
+  session_mid_turn_message_query: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
@@ -154,6 +162,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. Clients should still pre-flight `require_auth` separately for
   // deployment posture; this tag only means the route contract exists.
   workspace_file_write: { since: 'v1' },
+  // Daemon hosts binary file upload (`POST /file/upload`) behind the strict
+  // mutation gate. Uploads never overwrite; occupied names auto-number. New
+  // route contract = new tag (same split as `workspace_file_bytes` from
+  // `workspace_file_read`). The advertised upload byte cap is surfaced via
+  // `limits.maxWorkspaceFileUploadBytes`.
+  workspace_file_upload: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —
@@ -170,6 +184,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_skill_toggle: { since: 'v1' },
+  workspace_skill_batch_toggle: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
@@ -336,8 +351,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
-  // workspace agent CRUD, and persisted session organization surfaces.
+  // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
+  // memory, workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
   // persistence. ACP/WebSocket and auth stay outside this core tag;

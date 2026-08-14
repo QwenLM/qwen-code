@@ -75,8 +75,8 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
-  getActiveGoal,
-  unregisterGoalHook,
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
   ToolNames,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
@@ -90,8 +90,14 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
+  applyReasoningEffort,
+  REASONING_EFFORT_TIERS,
+  addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
+  emptyGoalSnapshot,
+  GoalPersistenceUnavailableError,
+  type GoalSnapshotV2,
   type AgentParams,
   ApprovalMode,
   type Config,
@@ -107,8 +113,12 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
+  type ReasoningEffort,
   type ResumedSessionData,
+  type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
+  type SessionLiveRestoreProjection,
+  type SessionRestoreProjection,
   type SessionArtifactEventRecordPayload,
   type SessionArtifactSnapshotRecordPayload,
   type WorkspaceRememberContextMode,
@@ -148,8 +158,8 @@ import type {
   ResumeSessionResponse,
   SessionConfigOption,
   SessionInfo,
-  SessionModeState,
   SessionUpdate,
+  SessionModeState,
   SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse,
   SetSessionModelRequest,
@@ -179,6 +189,10 @@ import {
   SettingScope,
 } from '../config/settings.js';
 import { loadSettingsCached } from '../config/settings-cache.js';
+import {
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../config/session-id.js';
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
@@ -196,7 +210,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import { isCompatibleLiveSessionSource } from '../serve/live/session-source.js';
+import { isCompatibleLiveSessionSource } from '../serve/conversations/session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -219,11 +233,19 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { HistoryReplayer } from './session/history-replayer.js';
+import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
+import { ActiveWorkReporter } from './active-work-reporter.js';
+import {
+  getModelConfiguration,
+  type ModelReasoningConfiguration,
+} from './model-configuration.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
+  HistoryReplayLimitError,
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
@@ -239,7 +261,9 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -308,12 +332,21 @@ import {
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import {
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
+  ACTIVE_WORK_HEARTBEAT_META_KEY,
+  ACTIVE_WORK_HEARTBEAT_VERSION,
+  ACTIVE_WORK_HOLD_CATEGORIES,
+  clampActiveWorkIntervalMs,
+  type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   DAEMON_MODEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  LOAD_REPLAY_MAX_BYTES,
+  LOAD_REPLAY_MAX_UPDATES,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
@@ -343,7 +376,7 @@ import type { HistoryItemContextUsage } from '../ui/types.js';
 import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
 import {
   collectGoalStatusItemsFromRecords,
-  restoreGoalFromHistory,
+  findGoalToRestore,
 } from '../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -361,24 +394,41 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
+const ACP_REASONING_EFFORT_DEFAULT = 'default';
+const ACP_REASONING_EFFORT_NONE = 'none';
+const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
 
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
-type AcpSessionStartStage =
+type AcpSessionProfileStage =
   | 'settings_load'
+  | 'live_restore'
+  | 'existence_check'
   | 'config_setup'
   | 'auth'
   | 'file_system_setup'
   | 'session_register'
-  | 'response_build';
+  | 'runtime_initialize'
+  | 'response_build'
+  | 'history_replay'
+  | 'post_replay_services';
 
-interface AcpSessionStartSpan {
+interface AcpSessionProfileSpan {
   setAttribute(name: string, value: string | number | boolean): unknown;
 }
 
-function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
-  let failedStage: AcpSessionStartStage | undefined;
+function createAcpSessionProfiler(
+  span: AcpSessionProfileSpan | undefined,
+  attributePrefix: 'session_start' | 'session_restore',
+) {
+  let failedStage: AcpSessionProfileStage | undefined;
   const setAttribute = (
     name: string,
     value: string | number | boolean,
@@ -386,24 +436,30 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     try {
       span?.setAttribute(name, value);
     } catch {
-      // Telemetry must not affect session creation.
+      // Telemetry must not affect session creation or restore.
     }
   };
-  const recordStage = (stage: AcpSessionStartStage, start: number): void => {
+  const recordStage = (stage: AcpSessionProfileStage, start: number): void => {
     const durationMs = Math.round((performance.now() - start) * 100) / 100;
     if (Number.isFinite(durationMs) && durationMs >= 0) {
-      setAttribute(`qwen-code.daemon.session_start.${stage}_ms`, durationMs);
+      setAttribute(
+        `qwen-code.daemon.${attributePrefix}.${stage}_ms`,
+        durationMs,
+      );
     }
   };
-  const recordFailure = (stage: AcpSessionStartStage): void => {
+  const recordFailure = (stage: AcpSessionProfileStage): void => {
     if (failedStage !== undefined) return;
     failedStage = stage;
-    setAttribute('qwen-code.daemon.session_start.failed_stage', stage);
+    setAttribute(`qwen-code.daemon.${attributePrefix}.failed_stage`, stage);
   };
 
   return {
+    fail(stage: AcpSessionProfileStage): void {
+      recordFailure(stage);
+    },
     async time<T>(
-      stage: AcpSessionStartStage,
+      stage: AcpSessionProfileStage,
       fn: () => T | Promise<T>,
     ): Promise<T> {
       if (!span) return await fn();
@@ -417,7 +473,7 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
         recordStage(stage, start);
       }
     },
-    timeSync<T>(stage: AcpSessionStartStage, fn: () => T): T {
+    timeSync<T>(stage: AcpSessionProfileStage, fn: () => T): T {
       if (!span) return fn();
       const start = performance.now();
       try {
@@ -434,6 +490,22 @@ function createAcpSessionStartProfiler(span: AcpSessionStartSpan | undefined) {
     },
   };
 }
+
+function createAcpSessionStartProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_start');
+}
+
+function createAcpSessionRestoreProfiler(
+  span: AcpSessionProfileSpan | undefined,
+) {
+  return createAcpSessionProfiler(span, 'session_restore');
+}
+
+type AcpSessionRestoreProfiler = ReturnType<
+  typeof createAcpSessionRestoreProfiler
+>;
 
 function workspaceMemoryErrorData(
   code: string,
@@ -650,6 +722,196 @@ function shouldHideInheritedHistory(params: LoadSessionRequest): boolean {
   return meta?.[LOAD_REPLAY_HIDE_INHERITED_META_KEY] === true;
 }
 
+function loadRestoreOptions(
+  params: LoadSessionRequest,
+): SelectiveSessionRestoreOptions {
+  const hideInheritedHistory = shouldHideInheritedHistory(params);
+  if (!isBulkLoadReplayRequest(params)) {
+    return { replay: { kind: 'all', hideInheritedHistory } };
+  }
+  const limit = getLoadReplayPageSize(params);
+  return limit === undefined
+    ? { replay: { kind: 'all', hideInheritedHistory } }
+    : { replay: { kind: 'recent', limit, hideInheritedHistory } };
+}
+
+const RESUME_RESTORE_OPTIONS: SelectiveSessionRestoreOptions = {
+  replay: { kind: 'none' },
+};
+
+function mapSessionRestoreRequestError(
+  error: unknown,
+  sessionId: string,
+): unknown {
+  const mappedWriterError = mapSessionWriterRequestError(error);
+  if (mappedWriterError !== error) return mappedWriterError;
+  if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+    return new RequestError(-32010, error.message, {
+      errorKind: 'transcript_snapshot_unavailable',
+      sessionId,
+    });
+  }
+  if (error instanceof SessionTranscriptTooLargeError) {
+    return new RequestError(-32011, error.message, {
+      errorKind: 'transcript_too_large',
+      sessionId,
+      snapshotSize: error.snapshotSize,
+      maxBytes: error.maxBytes,
+    });
+  }
+  if (error instanceof SessionTranscriptPageTooLargeError) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.envelope_limit_reason',
+      'bytes',
+    );
+    return new RequestError(-32012, error.message, {
+      errorKind: 'transcript_page_too_large',
+      sessionId,
+      pageBytes: error.pageBytes,
+      maxBytes: error.maxBytes,
+    });
+  }
+  if (error instanceof HistoryReplayLimitError) {
+    addDaemonRequestAttribute(
+      'qwen-code.daemon.session_restore.envelope_limit_reason',
+      error.reason,
+    );
+    return new RequestError(-32012, error.message, {
+      errorKind: 'transcript_page_too_large',
+      sessionId,
+      reason: error.reason,
+      observed: error.observed,
+      limit: error.limit,
+    });
+  }
+  return error;
+}
+
+function validateLoadReplayEnvelope(
+  sessionId: string,
+  envelope: BridgeLoadReplayEnvelope,
+  enforceLimits: boolean,
+): void {
+  if (!enforceLimits) return;
+  if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
+    throw new HistoryReplayLimitError(
+      sessionId,
+      'updates',
+      envelope.updates.length,
+      LOAD_REPLAY_MAX_UPDATES,
+    );
+  }
+  const pageBytes = Buffer.byteLength(JSON.stringify(envelope), 'utf8');
+  if (pageBytes > LOAD_REPLAY_MAX_BYTES) {
+    throw new HistoryReplayLimitError(
+      sessionId,
+      'bytes',
+      pageBytes,
+      LOAD_REPLAY_MAX_BYTES,
+    );
+  }
+}
+
+function replayGoalBootstrap(
+  projection:
+    | SessionRestoreProjection
+    | SessionLiveRestoreProjection
+    | undefined,
+): ReturnType<typeof HistoryReplayer.v2GoalBootstrap> {
+  if (projection && !('runtime' in projection)) {
+    const sourceUuid = projection.goalRecoverySourceUuid;
+    if (!sourceUuid) return undefined;
+    if (
+      projection.replay?.records.some((record) => record.uuid === sourceUuid)
+    ) {
+      return undefined;
+    }
+    const replay = projection.replay?.replay;
+    if (isObjectRecord(replay)) {
+      const bootstrap = HistoryReplayer.v2GoalBootstrap(
+        replay['goalState'],
+        replay['goalCause'],
+      );
+      if (bootstrap) return bootstrap;
+    }
+    const sourceRecord = projection.goalRecords?.find(
+      (record) => record.uuid === sourceUuid,
+    );
+    if (sourceRecord?.subtype === 'goal_state') {
+      const payload = isObjectRecord(sourceRecord.systemPayload)
+        ? sourceRecord.systemPayload
+        : undefined;
+      return HistoryReplayer.v2GoalBootstrap(
+        payload?.['snapshot'],
+        payload?.['cause'],
+      );
+    }
+    const active = findGoalToRestore(
+      collectGoalStatusItemsFromRecords(projection.goalRecords ?? []),
+    );
+    return active
+      ? {
+          goalStatus: {
+            kind: active.iterations > 0 ? 'checking' : 'set',
+            condition: active.condition,
+            iterations: active.iterations,
+            ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+          },
+        }
+      : undefined;
+  }
+  const sourceUuid = projection?.replay?.goalRecoverySourceUuid;
+  if (!projection?.replay || !sourceUuid) return undefined;
+  if (projection.replay.records.some((record) => record.uuid === sourceUuid)) {
+    return undefined;
+  }
+  const goalBootstrapRecords = projection.replay.goalBootstrapRecords ?? [];
+  const sourceRecord = goalBootstrapRecords.find(
+    (record) => record.uuid === sourceUuid,
+  );
+  if (sourceRecord?.subtype === 'goal_state') {
+    const payload = isObjectRecord(sourceRecord.systemPayload)
+      ? sourceRecord.systemPayload
+      : undefined;
+    return HistoryReplayer.v2GoalBootstrap(
+      payload?.['snapshot'],
+      payload?.['cause'],
+    );
+  }
+  const active = findGoalToRestore(
+    collectGoalStatusItemsFromRecords(goalBootstrapRecords),
+  );
+  if (!active) return undefined;
+  return {
+    goalStatus: {
+      kind: active.iterations > 0 ? 'checking' : 'set',
+      condition: active.condition,
+      iterations: active.iterations,
+      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+    },
+  };
+}
+
+function replayInitialGoalState(
+  projection: SessionRestoreProjection | undefined,
+): {
+  initialGoalState?: NonNullable<
+    Parameters<HistoryReplayer['replay']>[2]
+  >['initialGoalState'];
+  initialGoalCause?: NonNullable<
+    Parameters<HistoryReplayer['replay']>[2]
+  >['initialGoalCause'];
+} {
+  const replay = projection?.replay?.replay;
+  if (!isObjectRecord(replay)) return {};
+  const initialGoalState = parseGoalSnapshotV2(replay['goalState']);
+  const initialGoalCause = parseGoalStateCause(replay['goalCause']);
+  return {
+    ...(initialGoalState ? { initialGoalState } : {}),
+    ...(initialGoalCause ? { initialGoalCause } : {}),
+  };
+}
+
 export function selectVisibleHistoryRecords(
   records: ChatRecord[],
   hideInheritedHistory: boolean,
@@ -714,30 +976,6 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
     );
   }
   return value as number;
-}
-
-function isHistoryTurnStart(record: ChatRecord): boolean {
-  return record.type === 'user' && record.subtype !== 'mid_turn_user_message';
-}
-
-function selectRecentHistoryRecords(
-  records: ChatRecord[],
-  pageSize: number | undefined,
-): { records: ChatRecord[]; hasMore: boolean } {
-  if (pageSize === undefined || records.length <= pageSize) {
-    return { records, hasMore: false };
-  }
-  let start = records.length - pageSize;
-  for (let i = start; i < records.length; i++) {
-    if (isHistoryTurnStart(records[i]!)) {
-      start = i;
-      break;
-    }
-  }
-  while (start > 0 && !isHistoryTurnStart(records[start]!)) {
-    start--;
-  }
-  return { records: records.slice(start), hasMore: start > 0 };
 }
 
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
@@ -3504,6 +3742,7 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly startingSessionIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -3533,6 +3772,8 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
+  /** Set once the daemon negotiates active-work reporting; one per channel. */
+  private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
     | 'uninitialized'
     | 'trusted'
@@ -4074,11 +4315,6 @@ class QwenAgent implements Agent {
       }
     }
     try {
-      unregisterGoalHook(session.getConfig(), sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-    try {
       this.mcpPool?.releaseSession(sessionId);
     } catch (error) {
       cleanupErrors.push(error);
@@ -4089,6 +4325,9 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    // A Session missing from the next snapshot is how the daemon learns the
+    // child released it — including when it never saw our close response.
+    this.activeWorkReporter?.notifyChanged();
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -4103,7 +4342,11 @@ class QwenAgent implements Agent {
   private async withLiveSessionRestore<T>(
     sessionId: string,
     session: Session,
-    operation: (config: Config, data: ResumedSessionData) => Promise<T>,
+    options: SelectiveSessionRestoreOptions,
+    operation: (
+      config: Config,
+      projection: SessionLiveRestoreProjection | undefined,
+    ) => Promise<T>,
   ): Promise<T> {
     await session.assertCanStartTurn();
     const config = session.getConfig();
@@ -4115,15 +4358,17 @@ class QwenAgent implements Agent {
         'restore',
       );
       const recorder = config.getChatRecordingService();
-      const loadAuthoritative = () =>
-        config.getSessionService().loadSession(sessionId);
-      const data = recorder
-        ? await recorder.runWithWriteBarrier(loadAuthoritative)
-        : await loadAuthoritative();
-      if (!data) throw new SessionWriterUnavailableError();
-      return await operation(config, data);
+      const readProjection = () =>
+        config
+          .getSessionService()
+          .readLiveRestoreProjection(sessionId, options);
+      const projection = recorder
+        ? await recorder.runWithWriteBarrier(readProjection)
+        : await readProjection();
+      if (!projection) throw new SessionWriterUnavailableError();
+      return await operation(config, projection);
     } catch (error) {
-      throw mapSessionWriterRequestError(error);
+      throw mapSessionRestoreRequestError(error, sessionId);
     } finally {
       releaseGate();
     }
@@ -4155,6 +4400,7 @@ class QwenAgent implements Agent {
   private async cleanupAfterRequestFailure(
     error: unknown,
     cleanup: () => Promise<void>,
+    sessionId?: string,
   ): Promise<never> {
     try {
       await cleanup();
@@ -4163,7 +4409,9 @@ class QwenAgent implements Agent {
         `Session cleanup failed while preserving the original request error: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
       );
     }
-    throw mapSessionWriterRequestError(error);
+    throw sessionId
+      ? mapSessionRestoreRequestError(error, sessionId)
+      : mapSessionWriterRequestError(error);
   }
 
   private pendingConfigCleanupKey(
@@ -4208,12 +4456,19 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      /**
+       * Close only if the Session holds no active work — the daemon's
+       * automatic-cleanup path. Explicit close, kill, and shutdown leave this
+       * unset and keep their force semantics.
+       */
+      onlyIfUnheld?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
-      return;
+      // Already gone is the outcome the caller wanted, not a refusal.
+      return { closed: true, holds: [] };
     }
 
     const recorder = session.getConfig().getChatRecordingService();
@@ -4226,6 +4481,19 @@ class QwenAgent implements Agent {
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : session.beginClose();
+    // Checked under the close gate and before anything destructive runs. The
+    // gate is what makes this atomic: with it held the Session admits no new
+    // prompt and starts no new automatic turn, so a hold cannot appear between
+    // this read and the teardown below. Without it, a caller that asked
+    // "anything running?" and then closed would race exactly the work it was
+    // trying to protect.
+    if (opts?.onlyIfUnheld) {
+      const holds = session.collectActiveWorkHolds();
+      if (holds.length > 0) {
+        cancelClose();
+        return { closed: false, holds };
+      }
+    }
     for (const [requestId, generation] of this.generationControllers) {
       if (generation.sessionId !== sessionId) continue;
       generation.controller.abort();
@@ -4281,6 +4549,7 @@ class QwenAgent implements Agent {
     } finally {
       if (!removedFromStore) cancelClose();
     }
+    return { closed: true, holds: [] };
   }
 
   private async discardStoredSessionIfCurrent(
@@ -4300,6 +4569,8 @@ class QwenAgent implements Agent {
   }
 
   async disposeSessions(): Promise<void> {
+    this.activeWorkReporter?.dispose();
+    this.activeWorkReporter = undefined;
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -4519,6 +4790,30 @@ class QwenAgent implements Agent {
       !Array.isArray(requestedProfile) &&
       (requestedProfile as Record<string, unknown>)['v'] ===
         CHANNEL_STARTUP_PROFILE_VERSION;
+    const requestedActiveWork = args._meta?.[ACTIVE_WORK_HEARTBEAT_META_KEY];
+    const activeWorkRequested =
+      requestedActiveWork !== null &&
+      typeof requestedActiveWork === 'object' &&
+      !Array.isArray(requestedActiveWork) &&
+      (requestedActiveWork as Record<string, unknown>)['v'] ===
+        ACTIVE_WORK_HEARTBEAT_VERSION;
+    // The daemon proposes a cadence; we answer with the one we will actually
+    // use, clamped into the range both sides agree on. The daemon clamps the
+    // echo again — neither side trusts the other to pick a sane number, and a
+    // flood or a multi-hour interval would each break freshness in its own way.
+    const activeWorkIntervalMs = activeWorkRequested
+      ? clampActiveWorkIntervalMs(
+          (requestedActiveWork as Record<string, unknown>)['intervalMs'],
+        )
+      : undefined;
+    if (activeWorkIntervalMs !== undefined) {
+      this.activeWorkReporter?.dispose();
+      this.activeWorkReporter = new ActiveWorkReporter(
+        (method, params) => this.connection.extNotification(method, params),
+        () => this.sessions.values(),
+        activeWorkIntervalMs,
+      );
+    }
 
     const responseMeta: Record<string, unknown> = {
       ...(this.managedToolInvocationGuard
@@ -4529,6 +4824,15 @@ class QwenAgent implements Agent {
         : {}),
       ...(profileRequested && startupProfile
         ? { [CHANNEL_STARTUP_PROFILE_META_KEY]: startupProfile }
+        : {}),
+      ...(activeWorkIntervalMs !== undefined
+        ? {
+            [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+              v: ACTIVE_WORK_HEARTBEAT_VERSION,
+              intervalMs: activeWorkIntervalMs,
+              categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+            },
+          }
         : {}),
     };
     return Object.keys(responseMeta).length > 0
@@ -4566,361 +4870,651 @@ class QwenAgent implements Agent {
     }
   }
 
+  private reserveStartingSessionId(sessionId: string): () => void {
+    if (
+      this.sessions.has(sessionId) ||
+      this.startingSessionIds.has(sessionId)
+    ) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active or starting.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+    this.startingSessionIds.add(sessionId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.startingSessionIds.delete(sessionId);
+    };
+  }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    const parsedSessionId = parseCallerSuppliedSessionId(
+      params._meta?.[REQUESTED_SESSION_ID_META_KEY],
+    );
+    if (parsedSessionId.kind === 'invalid') {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `\`_meta["${REQUESTED_SESSION_ID_META_KEY}"]\` must be an RFC UUID v1-v5`,
+        { errorKind: 'invalid_session_id', httpStatus: 400 },
+      );
+    }
     const requestedSessionId =
-      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
-        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
-        : undefined;
-    const sessionSource = getSessionSource(params);
+      parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
+    const releaseStartingSessionId = requestedSessionId
+      ? this.reserveStartingSessionId(requestedSessionId)
+      : undefined;
+    try {
+      const sessionSource = getSessionSource(params);
+      const parentContext = extractDaemonTraceContext(params);
+      return await withDaemonSpan(
+        'qwen-code.daemon.session_start',
+        { 'qwen-code.daemon.operation': 'acp_session_new' },
+        async (span) => {
+          const profiler = createAcpSessionStartProfiler(span);
+          // Per-request settings: session handlers run concurrently, and
+          // `this.settings` is only a "latest loaded" cache for agent-level
+          // readers. Threading the instance explicitly keeps a slow session
+          // creation from picking up whichever workspace loaded last — Session
+          // persists model changes through this instance, so a mix-up writes to
+          // another workspace's settings.json.
+          const settings = profiler.timeSync('settings_load', () =>
+            loadSettingsCached(cwd),
+          );
+          this.settings = settings;
+          const config = await profiler.time('config_setup', () =>
+            this.newSessionConfig(
+              cwd,
+              mcpServers,
+              settings,
+              sessionSource,
+              requestedSessionId,
+              undefined,
+              shouldDeferMcpDiscovery(params)
+                ? { skipMcpDiscovery: true }
+                : undefined,
+            ),
+          );
+          let session: Session;
+          try {
+            await profiler.time('auth', () => this.ensureAuthenticated(config));
+            profiler.timeSync('file_system_setup', () =>
+              this.setupFileSystem(config),
+            );
+            session = await profiler.time('session_register', () =>
+              this.createAndStoreSession(config, settings),
+            );
+          } catch (error) {
+            return this.cleanupAfterRequestFailure(error, async () => {
+              if (
+                this.sessions.get(config.getSessionId())?.getConfig() !== config
+              ) {
+                await this.cleanupUnstoredConfig(config);
+              }
+            });
+          }
+          profiler.setSessionId(session.getId());
+          return profiler.timeSync('response_build', () => ({
+            sessionId: session.getId(),
+            models: this.buildAvailableModels(config),
+            modes: this.buildModesData(config),
+            configOptions: this.buildConfigOptions(config),
+          }));
+        },
+        parentContext ? { parentContext } : {},
+      );
+    } finally {
+      releaseStartingSessionId?.();
+    }
+  }
+
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
-      'qwen-code.daemon.session_start',
-      { 'qwen-code.daemon.operation': 'acp_session_new' },
-      async (span) => {
-        const profiler = createAcpSessionStartProfiler(span);
-        // Per-request settings: session handlers run concurrently, and
-        // `this.settings` is only a "latest loaded" cache for agent-level
-        // readers. Threading the instance explicitly keeps a slow session
-        // creation from picking up whichever workspace loaded last — Session
-        // persists model changes through this instance, so a mix-up writes to
-        // another workspace's settings.json.
-        const settings = profiler.timeSync('settings_load', () =>
-          loadSettingsCached(cwd),
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_load',
+        'qwen-code.daemon.session_restore.action': 'load',
+        'session.id': sessionId,
+      },
+      async (span) =>
+        this.loadSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
+      parentContext ? { parentContext } : {},
+    );
+  }
+
+  private async loadSessionWithProfiler(
+    params: LoadSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<LoadSessionResponse> {
+    let sessionId = initialSessionId;
+    const sessionSource = getSessionSource(params);
+    const restoreOptions = loadRestoreOptions(params);
+    const liveSession = this.sessions.get(sessionId);
+    if (liveSession) {
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const liveConfig = liveSession.getConfig();
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          restoreOptions,
+          async (config, projection) => {
+            const response = profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(projection?.artifactSnapshot
+                    ? { artifactSnapshot: projection.artifactSnapshot }
+                    : {}),
+                }) as LoadSessionResponse,
+            );
+            const replayPage = projection?.replay;
+            if (!replayPage || replayPage.records.length === 0) return response;
+
+            const bulkReplay = isBulkLoadReplayRequest(params);
+            const replay = await profiler.time('history_replay', () =>
+              collectHistoryReplayUpdates({
+                sessionId,
+                config,
+                records: replayPage.records,
+                gaps: replayPage.gaps,
+                cumulativeUsage: createReplayCumulativeUsage(),
+                replayState: replayPage.replay,
+                goalBootstrap: replayGoalBootstrap(projection),
+                ...(restoreOptions.replay.kind === 'recent'
+                  ? {
+                      limits: {
+                        maxBytes: LOAD_REPLAY_MAX_BYTES,
+                        maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                      },
+                    }
+                  : {}),
+                logger: debugLogger,
+              }),
+            );
+            addDaemonRequestAttribute(
+              'qwen-code.daemon.session_restore.partial_replay',
+              replay.replayError !== undefined,
+            );
+            if (!bulkReplay) {
+              try {
+                for (const update of replay.updates) {
+                  await liveSession.sendUpdate(update);
+                }
+              } finally {
+                // Replayed plan updates re-stamp the revision via sendUpdate;
+                // drop it so a replayed snapshot cannot bind a later approval
+                // (same rule Session.replayHistory applies to cold loads),
+                // even if delivery fails part-way. The bulk path keeps a live
+                // binding on purpose: it hands the updates to the client
+                // instead of replaying them through this session.
+                liveSession.clearActiveTodoPlanRevision();
+              }
+              if (replay.replayError !== undefined) {
+                throw RequestError.internalError(undefined, replay.replayError);
+              }
+              return response;
+            }
+
+            const envelope: BridgeLoadReplayEnvelope = {
+              v: LOAD_REPLAY_VERSION,
+              updates: replay.updates,
+              ...(replayPage.anchorRecordId
+                ? { anchorRecordId: replayPage.anchorRecordId }
+                : {}),
+              ...(replay.replayError !== undefined
+                ? {
+                    partial: true,
+                    replayError: replay.replayError,
+                  }
+                : {}),
+              ...(replayPage.hasMore ? { hasMore: true } : {}),
+            };
+            validateLoadReplayEnvelope(
+              sessionId,
+              envelope,
+              restoreOptions.replay.kind === 'recent',
+            );
+            return {
+              ...response,
+              _meta: {
+                [LOAD_REPLAY_META_KEY]: envelope,
+              },
+            };
+          },
         );
-        this.settings = settings;
-        const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(
-            cwd,
-            mcpServers,
-            settings,
-            sessionSource,
-            requestedSessionId,
-            undefined,
-            shouldDeferMcpDiscovery(params)
-              ? { skipMcpDiscovery: true }
-              : undefined,
-          ),
+      });
+    }
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
+    try {
+      // Load per-request settings only after reserving a non-live id. The check
+      // must resolve `advanced.runtimeOutputDir` from this request's cwd.
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
+          const sessionService = new SessionService(params.cwd);
+          if (await sessionService.sessionExists(sessionId)) {
+            return sessionId;
+          }
+          return sessionService.findSessionIdIgnoringCase?.(sessionId);
+        }),
+      );
+      if (!persistedSessionId) {
+        profiler.fail('existence_check');
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
+      }
+      sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
+      // Adopt into the "latest loaded" cache only once the session is
+      // confirmed — a failed probe for a stale id must not repoint
+      // agent-level readers at this request's workspace.
+      this.settings = settings;
+
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          // `LoadSessionRequest.mcpServers` is required in today's ACP
+          // schema, but mirror `unstable_resumeSession` and tolerate a
+          // future loosening — `newSessionConfig` iterates the list, so
+          // a `null`/`undefined` would otherwise throw `TypeError`.
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+          {},
+          undefined,
+          restoreOptions,
+        ),
+      );
+      const projection = config.consumeSessionRestoreProjection?.();
+      const suppressRecoveredGoalPresentation =
+        projection?.runtime.goalRecoverySourceUuid !== undefined &&
+        projection.runtime.goalRecoverySourceUuid !==
+          projection.replay?.goalRecoverySourceUuid;
+      const bulkReplay = isBulkLoadReplayRequest(params);
+      let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
+      const replayUsage = createReplayCumulativeUsage();
+      let recoveredGoalPublicationKey: string | undefined;
+      let suppressedRecoveredGoalId: string | undefined;
+      let streamGoalUpdates: SessionUpdate[] = [];
+      let response: LoadSessionResponse | undefined;
+      const buildResponse = () =>
+        profiler.timeSync('response_build', () => ({
+          modes: this.buildModesData(config),
+          models: this.buildAvailableModels(config),
+          configOptions: this.buildConfigOptions(config),
+          ...(projection?.runtime.artifactSnapshot
+            ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+            : {}),
+          ...(replayEnvelope
+            ? {
+                _meta: {
+                  [LOAD_REPLAY_META_KEY]: replayEnvelope,
+                },
+              }
+            : {}),
+        })) as LoadSessionResponse;
+      try {
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
         );
-        let session: Session;
-        try {
-          await profiler.time('auth', () => this.ensureAuthenticated(config));
-          profiler.timeSync('file_system_setup', () =>
-            this.setupFileSystem(config),
-          );
-          session = await profiler.time('session_register', () =>
-            this.createAndStoreSession(config, settings),
-          );
-        } catch (error) {
-          return this.cleanupAfterRequestFailure(error, async () => {
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings, undefined, {
+            enableLiveScreenContext: isCompatibleLiveSessionSource(
+              sessionSource ?? {},
+            ),
+            replayHistory: false,
+            prepareBeforeSessionCreate: async () => {
+              if (bulkReplay && projection?.replay) {
+                const replay = await profiler.time('history_replay', () =>
+                  collectHistoryReplayUpdates({
+                    sessionId,
+                    config,
+                    records: projection.replay!.records,
+                    gaps: projection.replay!.gaps,
+                    cumulativeUsage: replayUsage,
+                    replayState: projection.replay!.replay,
+                    goalBootstrap: replayGoalBootstrap(projection),
+                    ...(restoreOptions.replay.kind === 'recent'
+                      ? {
+                          limits: {
+                            maxBytes: LOAD_REPLAY_MAX_BYTES,
+                            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                          },
+                        }
+                      : {}),
+                    logger: debugLogger,
+                  }),
+                );
+                addDaemonRequestAttribute(
+                  'qwen-code.daemon.session_restore.partial_replay',
+                  replay.replayError !== undefined,
+                );
+                replayEnvelope = {
+                  v: LOAD_REPLAY_VERSION,
+                  updates: replay.updates,
+                  ...(projection.replay.anchorRecordId
+                    ? { anchorRecordId: projection.replay.anchorRecordId }
+                    : {}),
+                  ...(replay.replayError !== undefined
+                    ? {
+                        partial: true,
+                        replayError: replay.replayError,
+                      }
+                    : {}),
+                  ...(projection.replay.hasMore ? { hasMore: true } : {}),
+                };
+                validateLoadReplayEnvelope(
+                  sessionId,
+                  replayEnvelope,
+                  restoreOptions.replay.kind === 'recent',
+                );
+              }
+              const goalBootstrap = replayGoalBootstrap(projection);
+              const rendered = await renderPreparedGoalUpdate(
+                () => config.getGoalRuntimePrepared(),
+                {
+                  ...(projection?.replay?.records
+                    ? { replayedRecords: projection.replay.records }
+                    : {}),
+                  ...(suppressRecoveredGoalPresentation
+                    ? { hideRuntimeGoal: true }
+                    : {}),
+                  ...(goalBootstrap ? { bootstrap: goalBootstrap } : {}),
+                },
+              ).catch((error) => {
+                if (suppressRecoveredGoalPresentation) throw error;
+                debugLogger.debug(
+                  `Failed to render recovered Goal state: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+                return {
+                  publicationKey: undefined,
+                  suppressedGoalId: undefined,
+                  updates: [],
+                };
+              });
+              recoveredGoalPublicationKey = rendered.publicationKey;
+              suppressedRecoveredGoalId = rendered.suppressedGoalId;
+              if (!bulkReplay) {
+                streamGoalUpdates = rendered.updates;
+                return;
+              }
+              const goalUpdates = rendered.updates;
+              if (goalUpdates.length > 0) {
+                replayEnvelope ??= {
+                  v: LOAD_REPLAY_VERSION,
+                  updates: [],
+                };
+                replayEnvelope.updates.push(...goalUpdates);
+                validateLoadReplayEnvelope(
+                  sessionId,
+                  replayEnvelope,
+                  restoreOptions.replay.kind === 'recent',
+                );
+              }
+            },
+            beforeSessionCreate: () => {
+              response = buildResponse();
+            },
+            primeSession: (createdSession) => {
+              profiler.timeSync('runtime_initialize', () => {
+                if (!projection) return;
+                createdSession.primeTurnState(
+                  projection.runtime.initialTurn,
+                  projection.runtime.backgroundNotificationTaskIds,
+                );
+                copyCumulativeUsage(
+                  createdSession.cumulativeUsage,
+                  replayUsage,
+                );
+                createdSession.primeRecoveredGoalPublication(
+                  recoveredGoalPublicationKey,
+                  suppressedRecoveredGoalId,
+                );
+              });
+            },
+            beforeStartPostReplayServices: async (createdSession) => {
+              if (!bulkReplay && projection?.replay) {
+                await profiler.time('history_replay', async () => {
+                  const goalBootstrap = replayGoalBootstrap(projection);
+                  const initialGoalState = replayInitialGoalState(projection);
+                  const hasGoalReplayState =
+                    goalBootstrap !== undefined ||
+                    initialGoalState.initialGoalState !== undefined ||
+                    initialGoalState.initialGoalCause !== undefined;
+                  if (hasGoalReplayState) {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                      {
+                        ...(goalBootstrap ? { goalBootstrap } : {}),
+                        ...initialGoalState,
+                      },
+                    );
+                  } else {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                    );
+                  }
+                });
+                try {
+                  for (const update of streamGoalUpdates) {
+                    await createdSession.sendUpdate(update);
+                  }
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to publish recovered Goal state: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
+              }
+              await profiler.time('post_replay_services', async () => {
+                await this.#restoreWorktreeOnResume(config, createdSession);
+                await this.#restoreBackgroundAgentsOnResume(
+                  config,
+                  createdSession,
+                );
+              });
+            },
+          }),
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(
+          error,
+          async () => {
             if (
               this.sessions.get(config.getSessionId())?.getConfig() !== config
             ) {
               await this.cleanupUnstoredConfig(config);
             }
-          });
-        }
-        profiler.setSessionId(session.getId());
-        return profiler.timeSync('response_build', () => ({
-          sessionId: session.getId(),
-          models: this.buildAvailableModels(config),
-          modes: this.buildModesData(config),
-          configOptions: this.buildConfigOptions(config),
-        }));
-      },
-      parentContext ? { parentContext } : {},
-    );
-  }
-
-  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
-    const sessionSource = getSessionSource(params);
-    // Load per-request settings BEFORE the existence check: the check must
-    // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
-    // whichever settings a concurrent handler loaded last.
-    const settings = loadSettingsCached(params.cwd);
-    const liveSession = this.sessions.get(params.sessionId);
-    if (liveSession) {
-      const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        params.sessionId,
-        liveSession,
-        async (config, sessionData) => {
-          const response: LoadSessionResponse = {
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          } as LoadSessionResponse;
-          const records = sessionData.conversation.messages;
-          const visibleRecords = selectVisibleHistoryRecords(
-            records,
-            shouldHideInheritedHistory(params),
-          );
-          if (visibleRecords.length === 0) return response;
-
-          const bulkReplay = isBulkLoadReplayRequest(params);
-          const replayPage = bulkReplay
-            ? selectRecentHistoryRecords(
-                visibleRecords,
-                getLoadReplayPageSize(params),
-              )
-            : { records: visibleRecords, hasMore: false };
-          const replay = await collectHistoryReplayUpdates({
-            sessionId: params.sessionId,
-            config,
-            records: replayPage.records,
-            gaps: sessionData.historyGaps,
-            cumulativeUsage: createReplayCumulativeUsage(),
-            logger: debugLogger,
-          });
-          if (!bulkReplay) {
-            try {
-              for (const update of replay.updates) {
-                await liveSession.sendUpdate(update);
-              }
-            } finally {
-              // Replayed plan updates re-stamp the revision via sendUpdate;
-              // drop it so a replayed snapshot cannot bind a later approval
-              // (same rule Session.replayHistory applies to cold loads),
-              // even if delivery fails part-way. The bulk path keeps a live
-              // binding on purpose: it hands the updates to the client
-              // instead of replaying them through this session.
-              liveSession.clearActiveTodoPlanRevision();
-            }
-            if (replay.replayError !== undefined) {
-              throw RequestError.internalError(undefined, replay.replayError);
-            }
-            return response;
-          }
-
-          return {
-            ...response,
-            _meta: {
-              [LOAD_REPLAY_META_KEY]: {
-                v: LOAD_REPLAY_VERSION,
-                updates: replay.updates,
-                ...(replay.replayError !== undefined
-                  ? { partial: true as const, replayError: replay.replayError }
-                  : {}),
-                ...(replayPage.hasMore ? { hasMore: true as const } : {}),
-              },
-            },
-          };
-        },
-      );
+          },
+          sessionId,
+        );
+      }
+      return response!;
+    } finally {
+      releaseStartingSessionId();
     }
-    const exists = await this.runWithPinnedRuntimeBaseDir(
-      settings,
-      params.cwd,
-      async () => {
-        const sessionService = new SessionService(params.cwd);
-        return sessionService.sessionExists(params.sessionId);
-      },
-    );
-    if (!exists) {
-      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
-    }
-    // Adopt into the "latest loaded" cache only once the session is
-    // confirmed — a failed probe for a stale id must not repoint
-    // agent-level readers at this request's workspace.
-    this.settings = settings;
-
-    const config = await this.newSessionConfig(
-      params.cwd,
-      // `LoadSessionRequest.mcpServers` is required in today's ACP
-      // schema, but mirror `unstable_resumeSession` and tolerate a
-      // future loosening — `newSessionConfig` iterates the list, so
-      // a `null`/`undefined` would otherwise throw `TypeError`.
-      params.mcpServers ?? [],
-      settings,
-      sessionSource,
-      params.sessionId,
-      true,
-    );
-    const sessionData = config.getResumedSessionData();
-    const bulkReplay = isBulkLoadReplayRequest(params);
-    const replayPageSize = bulkReplay
-      ? getLoadReplayPageSize(params)
-      : undefined;
-    let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
-    try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      await this.createAndStoreSession(config, settings, sessionData, {
-        enableLiveScreenContext: isCompatibleLiveSessionSource(
-          sessionSource ?? {},
-        ),
-        ...(bulkReplay ? { replayHistory: false } : {}),
-        beforeStartPostReplayServices: async (createdSession) => {
-          if (bulkReplay) {
-            const records = sessionData?.conversation.messages;
-            let replayUpdates: SessionUpdate[] = [];
-            if (records) {
-              createdSession.primeTurnFromHistory(records);
-              const visibleRecords = selectVisibleHistoryRecords(
-                records,
-                shouldHideInheritedHistory(params),
-              );
-              const replayPage = selectRecentHistoryRecords(
-                visibleRecords,
-                replayPageSize,
-              );
-              const replayUsage = createReplayCumulativeUsage();
-              const replay = await collectHistoryReplayUpdates({
-                sessionId: params.sessionId,
-                config,
-                records: replayPage.records,
-                gaps: sessionData?.historyGaps,
-                cumulativeUsage: replayUsage,
-                supersedeUnrestorableGoal: true,
-                logger: debugLogger,
-              });
-              replayUpdates = replay.updates;
-              copyCumulativeUsage(createdSession.cumulativeUsage, replayUsage);
-              if (replay.replayError !== undefined) {
-                replayEnvelope = {
-                  v: LOAD_REPLAY_VERSION,
-                  updates: replayUpdates,
-                  partial: true,
-                  replayError: replay.replayError,
-                  ...(replayPage.hasMore ? { hasMore: true } : {}),
-                };
-              }
-              replayEnvelope ??= {
-                v: LOAD_REPLAY_VERSION,
-                updates: replayUpdates,
-                ...(replayPage.hasMore ? { hasMore: true } : {}),
-              };
-            }
-            replayEnvelope ??= {
-              v: LOAD_REPLAY_VERSION,
-              updates: replayUpdates,
-            };
-          }
-
-          await this.#restoreWorktreeOnResume(config, createdSession);
-          await this.#restoreBackgroundAgentsOnResume(config, createdSession);
-          this.#restoreGoalOnResume(config, createdSession);
-        },
-      });
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
-      });
-    }
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    const response: LoadSessionResponse = {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as LoadSessionResponse;
-    if (!replayEnvelope) {
-      return response;
-    }
-    return {
-      ...response,
-      _meta: {
-        [LOAD_REPLAY_META_KEY]: replayEnvelope,
-      },
-    };
   }
 
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
-    const sessionSource = getSessionSource(params);
-    // Same per-request settings discipline as `loadSession`.
-    const settings = loadSettingsCached(params.cwd);
-    const liveSession = this.sessions.get(params.sessionId);
-    if (liveSession) {
-      const liveConfig = liveSession.getConfig();
-      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
-      return this.withLiveSessionRestore(
-        params.sessionId,
-        liveSession,
-        async (config, sessionData) =>
-          ({
-            modes: this.buildModesData(config),
-            models: this.buildAvailableModels(config),
-            configOptions: this.buildConfigOptions(config),
-            ...(sessionData.artifactSnapshot
-              ? { artifactSnapshot: sessionData.artifactSnapshot }
-              : {}),
-          }) as ResumeSessionResponse,
-      );
-    }
-    const exists = await this.runWithPinnedRuntimeBaseDir(
-      settings,
-      params.cwd,
-      async () => {
-        const sessionService = new SessionService(params.cwd);
-        return sessionService.sessionExists(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const parentContext = extractDaemonTraceContext(params);
+    return await withDaemonSpan(
+      'qwen-code.daemon.session_restore',
+      {
+        'qwen-code.daemon.operation': 'acp_session_resume',
+        'qwen-code.daemon.session_restore.action': 'resume',
+        'session.id': sessionId,
       },
+      async (span) =>
+        this.resumeSessionWithProfiler(
+          params,
+          sessionId,
+          createAcpSessionRestoreProfiler(span),
+        ),
+      parentContext ? { parentContext } : {},
     );
-    if (!exists) {
-      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
-    }
-    this.settings = settings;
+  }
 
-    const config = await this.newSessionConfig(
-      params.cwd,
-      params.mcpServers ?? [],
-      settings,
-      sessionSource,
-      params.sessionId,
-      true,
-    );
-    try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      await this.createAndStoreSession(
-        config,
-        settings,
-        config.getResumedSessionData(),
-        {
-          enableLiveScreenContext: isCompatibleLiveSessionSource(
-            sessionSource ?? {},
-          ),
-          replayHistory: false,
-          beforeStartPostReplayServices: async (createdSession) => {
-            await this.#restoreWorktreeOnResume(config, createdSession);
-            await this.#restoreBackgroundAgentsOnResume(config, createdSession);
-            this.#restoreGoalOnResume(config, createdSession);
-          },
-        },
+  private async resumeSessionWithProfiler(
+    params: ResumeSessionRequest,
+    initialSessionId: string,
+    profiler: AcpSessionRestoreProfiler,
+  ): Promise<ResumeSessionResponse> {
+    let sessionId = initialSessionId;
+    const sessionSource = getSessionSource(params);
+    const liveSession = this.sessions.get(sessionId);
+    if (liveSession) {
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
       );
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
+      const liveConfig = liveSession.getConfig();
+      return profiler.time('live_restore', async () => {
+        await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+        return this.withLiveSessionRestore(
+          sessionId,
+          liveSession,
+          RESUME_RESTORE_OPTIONS,
+          async (config, projection) =>
+            profiler.timeSync(
+              'response_build',
+              () =>
+                ({
+                  modes: this.buildModesData(config),
+                  models: this.buildAvailableModels(config),
+                  configOptions: this.buildConfigOptions(config),
+                  ...(projection?.artifactSnapshot
+                    ? { artifactSnapshot: projection.artifactSnapshot }
+                    : {}),
+                }) as ResumeSessionResponse,
+            ),
+        );
       });
     }
+    const releaseStartingSessionId = this.reserveStartingSessionId(sessionId);
+    try {
+      // Same per-request settings discipline as `loadSession`.
+      const settings = profiler.timeSync('settings_load', () =>
+        loadSettingsCached(params.cwd),
+      );
+      const persistedSessionId = await profiler.time('existence_check', () =>
+        this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
+          const sessionService = new SessionService(params.cwd);
+          if (await sessionService.sessionExists(sessionId)) {
+            return sessionId;
+          }
+          return sessionService.findSessionIdIgnoringCase?.(sessionId);
+        }),
+      );
+      if (!persistedSessionId) {
+        profiler.fail('existence_check');
+        throw RequestError.resourceNotFound(`session:${sessionId}`);
+      }
+      sessionId = persistedSessionId;
+      profiler.setSessionId(sessionId);
+      this.settings = settings;
 
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
+      const config = await profiler.time('config_setup', () =>
+        this.newSessionConfig(
+          params.cwd,
+          params.mcpServers ?? [],
+          settings,
+          sessionSource,
+          sessionId,
+          true,
+          {},
+          undefined,
+          RESUME_RESTORE_OPTIONS,
+        ),
+      );
+      const projection = config.consumeSessionRestoreProjection?.();
+      let response: ResumeSessionResponse | undefined;
+      try {
+        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        profiler.timeSync('file_system_setup', () =>
+          this.setupFileSystem(config),
+        );
+        await profiler.time('session_register', () =>
+          this.createAndStoreSession(config, settings, undefined, {
+            enableLiveScreenContext: isCompatibleLiveSessionSource(
+              sessionSource ?? {},
+            ),
+            replayHistory: false,
+            beforeSessionCreate: () => {
+              response = profiler.timeSync('response_build', () => ({
+                modes: this.buildModesData(config),
+                models: this.buildAvailableModels(config),
+                configOptions: this.buildConfigOptions(config),
+                ...(projection?.runtime.artifactSnapshot
+                  ? { artifactSnapshot: projection.runtime.artifactSnapshot }
+                  : {}),
+              })) as ResumeSessionResponse;
+            },
+            primeSession: (createdSession) => {
+              profiler.timeSync('runtime_initialize', () => {
+                if (!projection) return;
+                createdSession.primeTurnState(
+                  projection.runtime.initialTurn,
+                  projection.runtime.backgroundNotificationTaskIds,
+                );
+              });
+            },
+            beforeStartPostReplayServices: async (createdSession) => {
+              await profiler.time('post_replay_services', async () => {
+                await this.#restoreWorktreeOnResume(config, createdSession);
+                await this.#restoreBackgroundAgentsOnResume(
+                  config,
+                  createdSession,
+                );
+              });
+            },
+          }),
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(
+          error,
+          async () => {
+            if (
+              this.sessions.get(config.getSessionId())?.getConfig() !== config
+            ) {
+              await this.cleanupUnstoredConfig(config);
+            }
+          },
+          sessionId,
+        );
+      }
 
-    const sessionData = config.getResumedSessionData();
-    return {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as ResumeSessionResponse;
+      return response!;
+    } finally {
+      releaseStartingSessionId();
+    }
   }
 
   /**
@@ -4953,63 +5547,6 @@ class QwenAgent implements Agent {
     await config.loadPausedBackgroundAgents(config.getSessionId());
     session.pendingRecoveredAgentsNotice =
       config.consumePendingRecoveredAgentsNotice();
-  }
-
-  /**
-   * Re-registers the `/goal` Stop hook when a resumed transcript ends on an
-   * unsatisfied goal — the daemon counterpart of the TUI's resume restore.
-   * Without this the goal loop silently dies whenever a session is reloaded or
-   * `qwen serve` restarts, even though the transcript still shows it as active.
-   *
-   * The `addItem` bridge that `restoreGoalFromHistory` takes in the TUI is not
-   * used here — the daemon's terminal card goes out over the wire, not into an
-   * Ink history. But restore reaches `unregisterGoalHook` on every path,
-   * including the one where there was nothing to restore, and that clears the
-   * observer the `Session` constructor installed. So it is put back afterwards,
-   * unconditionally: without it a restored goal that later achieves or fails
-   * emits no terminal update and persists no terminal card, and the next reload
-   * revives a goal that already finished.
-   *
-   * Best-effort: a failed restore must not block session load.
-   */
-  #restoreGoalOnResume(config: Config, session: Session): void {
-    try {
-      const records = config.getResumedSessionData()?.conversation.messages;
-      if (!records?.length) return;
-      const restored = restoreGoalFromHistory(
-        collectGoalStatusItemsFromRecords(records),
-        config,
-      );
-      if (restored.restored) {
-        debugLogger.info(
-          `ACP goal restored sessionId=${config.getSessionId()} condition=${restored.condition}`,
-        );
-      } else if (
-        restored.blockedBy &&
-        restored.blockedBy !== 'condition-invalid'
-      ) {
-        // The transcript still holds an active goal card. `HistoryReplayer`
-        // supersedes it with a `cleared` card so the client does not show a
-        // goal that nothing is driving; say why on stderr.
-        //
-        // `condition-invalid` is excluded: `restoreGoalFromHistory` already
-        // wrote a line for it (it is the only caller that knows the condition
-        // is malformed). Logging here too would double-report the one case,
-        // while the env gates below report once.
-        writeStderrLineSafe(
-          `qwen: not restoring the active goal for session ${config.getSessionId()} (${restored.blockedBy}).`,
-        );
-      }
-    } catch (error) {
-      // Not debugLogger: it no-ops unless a debug session is active, and a
-      // failed restore is invisible from the outside — the transcript still
-      // shows the goal as active while no hook drives it.
-      writeStderrLineSafe(
-        `qwen: goal restore failed for session ${config.getSessionId()}: ${error}`,
-      );
-    } finally {
-      session.installGoalTerminalObserver();
-    }
   }
 
   async unstable_listSessions(
@@ -5056,33 +5593,36 @@ class QwenAgent implements Agent {
   async setSessionMode(
     params: SetSessionModeRequest,
   ): Promise<SetSessionModeResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode(params);
+    return session.setMode({ ...params, sessionId });
   }
 
   async unstable_setSessionModel(
     params: SetSessionModelRequest,
   ): Promise<SetSessionModelResponse | void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
       throw RequestError.invalidParams(
         undefined,
-        `Session not found for id: ${params.sessionId}`,
+        `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel(params);
+    return await session.setModel({ ...params, sessionId });
   }
 
   async setSessionConfigOption(
     params: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
-    const { sessionId, configId, value } = params;
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const { configId, value } = params;
 
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -5110,6 +5650,51 @@ class QwenAgent implements Agent {
         );
         break;
       }
+      case 'reasoning_effort': {
+        const modelReasoning = this.getModelReasoningConfiguration(
+          session.getConfig(),
+        );
+        if (modelReasoning) {
+          const selected =
+            value === ACP_REASONING_EFFORT_NONE
+              ? ACP_REASONING_EFFORT_NONE
+              : modelReasoning.efforts.find((effort) => effort === value);
+          if (!selected) {
+            throw RequestError.invalidParams(
+              undefined,
+              `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_NONE}, ${modelReasoning.efforts.join(', ')}`,
+            );
+          }
+          const generation = session.getConfig().getContentGeneratorConfig();
+          if (selected === ACP_REASONING_EFFORT_NONE) {
+            generation.reasoning = false;
+          } else {
+            const current = generation.reasoning;
+            generation.reasoning = {
+              ...(current || {}),
+              effort: selected,
+            };
+          }
+          break;
+        }
+        const effort =
+          value === ACP_REASONING_EFFORT_DEFAULT
+            ? undefined
+            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
+        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+          );
+        }
+        if (!applyReasoningEffort(session.getConfig(), effort)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Reasoning effort cannot be applied while thinking is disabled',
+          );
+        }
+        break;
+      }
       default:
         throw RequestError.invalidParams(
           undefined,
@@ -5123,20 +5708,32 @@ class QwenAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
-    const sanitizedParams = { ...params };
+    const sanitizedParams = { ...params, sessionId };
     const meta =
       params._meta && typeof params._meta === 'object'
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
+    const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
+    delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+    // The user-facing display projection is caller-controlled metadata; honor
+    // it only for trusted parents (the daemon bridge re-injects the trusted
+    // channel-worker value here). A plain delete would drop that re-injection.
+    if (
+      this.privateParentState === 'trusted' &&
+      typeof suppliedPromptDisplayText === 'string'
+    ) {
+      meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] = suppliedPromptDisplayText;
+    }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
     } else {
@@ -5180,10 +5777,10 @@ class QwenAgent implements Agent {
         settleCall = resolve;
       }),
     };
-    let calls = this.activePromptCalls.get(params.sessionId);
+    let calls = this.activePromptCalls.get(sessionId);
     if (!calls) {
       calls = new Set();
-      this.activePromptCalls.set(params.sessionId, calls);
+      this.activePromptCalls.set(sessionId, calls);
     }
     calls.add(call);
     try {
@@ -5196,16 +5793,23 @@ class QwenAgent implements Agent {
     } finally {
       calls.delete(call);
       if (calls.size === 0) {
-        this.activePromptCalls.delete(params.sessionId);
+        this.activePromptCalls.delete(sessionId);
       }
       settleCall();
+      // Order a fresh snapshot ahead of this response on the same stream. The
+      // daemon drops its own pending-prompt count the instant the response
+      // lands, so any hold this prompt left behind — a background agent it
+      // started, its terminal notification — has to already be on the wire or
+      // the daemon sees an idle Session for as long as the next report takes.
+      await this.activeWorkReporter?.flush();
     }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
-    const session = this.sessions.get(params.sessionId);
+    const sessionId = normalizeSessionIdForLookup(params.sessionId);
+    const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw new Error(`Session not found: ${sessionId}`);
     }
     try {
       await session.cancelPendingPrompt();
@@ -7484,6 +8088,14 @@ class QwenAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     try {
+      const rawSessionId = params['sessionId'];
+      const normalizedParams =
+        typeof rawSessionId === 'string'
+          ? {
+              ...params,
+              sessionId: normalizeSessionIdForLookup(rawSessionId),
+            }
+          : params;
       if (
         method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
         this.privateParentState !== 'trusted'
@@ -7493,7 +8105,7 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
-      return await this.extMethodInternal(method, params);
+      return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);
       if (writerError) {
@@ -9323,13 +9935,18 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        await this.closeStoredSession(sessionId, {
+        const outcome = await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          onlyIfUnheld: params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
           ...(typeof rawDrainTimeoutMs === 'number'
             ? { drainTimeoutMs: rawDrainTimeoutMs }
             : {}),
         });
-        return { sessionId, closed: true };
+        // `holds` rides along only on a refusal, so the response every existing
+        // caller already parses keeps its exact shape.
+        return outcome.closed
+          ? { sessionId, closed: true }
+          : { sessionId, closed: false, holds: outcome.holds };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -10144,21 +10761,40 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const cleared = unregisterGoalHook(config, sessionId);
-        if (cleared) {
-          session.emitGoalStatus({
-            kind: 'cleared',
-            condition: cleared.condition,
-            iterations: cleared.iterations,
-            durationMs: Date.now() - cleared.setAt,
-          });
+        let runtime;
+        try {
+          runtime = await config.getGoalRuntimeReady();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // No persistence means no goal to clear. Answering honestly beats
+          // failing the request: `general.chatRecording: false` is a config
+          // choice, and a sticky `recoveryError` from a malformed transcript
+          // record would otherwise break clear for this session forever.
+          debugLogger.info(
+            `sessionGoalClear sessionId=${sessionId} cleared=false (goal persistence unavailable)`,
+          );
+          return {
+            cleared: false,
+            condition: undefined,
+            snapshot: emptyGoalSnapshot(),
+          };
         }
+        const before = runtime.getSnapshot();
+        const goal = before.goal;
+        const response = goal
+          ? await runtime.dispatch({
+              action: 'clear',
+              expectedGoalId: goal.goalId,
+              expectedRevision: goal.revision,
+            })
+          : { snapshot: before };
         debugLogger.info(
-          `sessionGoalClear sessionId=${sessionId} cleared=${!!cleared} condition=${cleared?.condition ?? '(none)'}`,
+          `sessionGoalClear sessionId=${sessionId} cleared=${!!goal} objective=${goal?.objective ?? '(none)'}`,
         );
         return {
-          cleared: !!cleared,
-          condition: cleared?.condition,
+          cleared: !!goal,
+          condition: goal?.objective,
+          snapshot: response.snapshot,
         };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionGoalGet: {
@@ -10169,21 +10805,31 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        // Throws when the session is not live. That is the honest answer: the
-        // goal store is in-memory, so a goal only exists — and only advances —
-        // while its session is resident.
-        this.sessionOrThrow(sessionId);
-        const active = getActiveGoal(sessionId);
+        const session = this.sessionOrThrow(sessionId);
+        let snapshot: GoalSnapshotV2;
+        try {
+          snapshot = (
+            await session.getConfig().getGoalRuntimeReady()
+          ).getSnapshot();
+        } catch (error) {
+          if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+          // A session that cannot persist goals has no goal, which is a
+          // perfectly describable state. Rejecting instead would make
+          // `GET /goals` drop this session on every poll and report it as
+          // unreachable, which reads as a wedged child rather than a config.
+          snapshot = emptyGoalSnapshot();
+        }
+        const activeGoal =
+          snapshot.goal?.status === 'active' ? snapshot.goal : null;
         return {
-          // Projected field by field: `ActiveGoal` also carries `hookId` and
-          // `tokensAtStart`, which are this process's business.
-          active: active
+          snapshot,
+          active: activeGoal
             ? {
-                condition: active.condition,
-                iterations: active.iterations,
-                setAt: active.setAt,
-                ...(active.lastReason !== undefined
-                  ? { lastReason: active.lastReason }
+                condition: activeGoal.objective,
+                iterations: activeGoal.turnCount,
+                setAt: activeGoal.createdAt,
+                ...(activeGoal.lastReason !== undefined
+                  ? { lastReason: activeGoal.lastReason }
                   : {}),
               }
             : null,
@@ -11397,6 +12043,7 @@ class QwenAgent implements Agent {
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
+    restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
     try {
       this.assertManagedSessionAdmission();
@@ -11414,11 +12061,15 @@ class QwenAgent implements Agent {
           resume,
           initializeOptions,
           chatRecording,
+          restoreOptions,
         );
       });
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
-        throw RequestError.invalidParams(undefined, error.message);
+        throw new RequestError(ACP_ERROR_CODES.INVALID_PARAMS, error.message, {
+          errorKind: 'session_id_conflict',
+          sessionId: error.sessionId,
+        });
       }
       const writerError = getSessionWriterError(error);
       if (writerError) {
@@ -11426,7 +12077,9 @@ class QwenAgent implements Agent {
           errorKind: writerError.errorKind,
         });
       }
-      throw error;
+      throw sessionId && restoreOptions
+        ? mapSessionRestoreRequestError(error, sessionId)
+        : error;
     }
   }
 
@@ -11439,6 +12092,7 @@ class QwenAgent implements Agent {
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
+    restoreOptions?: SelectiveSessionRestoreOptions,
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -11551,8 +12205,25 @@ class QwenAgent implements Agent {
       // not process.exit(1) the shared ACP child and every session on its
       // channel. newSessionConfig maps the throw to a RequestError.
       true,
-      this.managedToolInvocationGuard
-        ? { toolInvocationGuard: this.managedToolInvocationGuard }
+      this.managedToolInvocationGuard || restoreOptions
+        ? {
+            ...(this.managedToolInvocationGuard
+              ? { toolInvocationGuard: this.managedToolInvocationGuard }
+              : {}),
+            ...(restoreOptions && sessionId
+              ? {
+                  sessionRestore: {
+                    projectionSource: (restoreSessionId) =>
+                      new SessionService(cwd, {
+                        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+                      }).readRestoreProjection(
+                        restoreSessionId,
+                        restoreOptions,
+                      ),
+                  },
+                }
+              : {}),
+          }
         : undefined,
     );
     if (sessionSource) {
@@ -11663,6 +12334,7 @@ class QwenAgent implements Agent {
         this.cleanupUnstoredConfig(config),
       );
     }
+    startNonInteractiveOpenAILogHousekeeping(config, settings);
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
@@ -11736,11 +12408,14 @@ class QwenAgent implements Agent {
     options: {
       replayHistory?: boolean;
       enableLiveScreenContext?: boolean;
+      prepareBeforeSessionCreate?: () => Promise<void>;
+      beforeSessionCreate?: () => void;
+      primeSession?: (session: Session) => void;
       beforeStartPostReplayServices?: (session: Session) => Promise<void>;
     } = {},
   ): Promise<Session> {
     this.assertManagedSessionAdmission();
-    const sessionId = config.getSessionId();
+    const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const geminiClient = config.getGeminiClient();
     const needsInitialize = !geminiClient.isInitialized();
 
@@ -11750,13 +12425,41 @@ class QwenAgent implements Agent {
     this.assertManagedSessionAdmission();
 
     if (this.sessions.has(sessionId)) {
-      throw new Error(`Session ${sessionId} is already active.`);
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
     }
 
-    const session = new Session(sessionId, config, this.connection, settings);
-    this.sessions.set(sessionId, session);
-    this.initializingConfigs.delete(config);
+    await options.prepareBeforeSessionCreate?.();
+    this.assertManagedSessionAdmission();
+    if (this.sessions.has(sessionId)) {
+      throw new RequestError(
+        ACP_ERROR_CODES.INVALID_PARAMS,
+        `Session ${sessionId} is already active.`,
+        { errorKind: 'session_id_conflict', sessionId },
+      );
+    }
+    options.beforeSessionCreate?.();
+
+    const session = new Session(
+      sessionId,
+      config,
+      this.connection,
+      settings,
+      () => this.activeWorkReporter?.notifyChanged(),
+    );
+    let published = false;
     try {
+      options.primeSession?.(session);
+      config.hydrateSessionRestoreFileHistory?.();
+      this.sessions.set(sessionId, session);
+      published = true;
+      // The Session set itself is part of the snapshot: publish so the daemon
+      // learns about this Session from a report rather than inferring it.
+      this.activeWorkReporter?.notifyChanged();
+      this.initializingConfigs.delete(config);
       if (options.enableLiveScreenContext) {
         await session.enableLiveScreenContext();
       }
@@ -11781,12 +12484,31 @@ class QwenAgent implements Agent {
           sessionData.conversation.messages,
           sessionData.historyGaps,
         );
+        // Strictly after replay: Goal recovery ran in the Config constructor,
+        // before this Session existed to subscribe, and replay streams the
+        // pre-migration records. Without this the client's newest goal card
+        // is the legacy `set` one and it shows a phantom running goal until
+        // the next reload. Never fatal — a session that cannot publish its
+        // goal state must still open.
+        try {
+          await session.publishRecoveredGoalState(
+            sessionData.conversation.messages,
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `Failed to publish recovered Goal state: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
 
       await options.beforeStartPostReplayServices?.(session);
 
       // Install rewriter AFTER history replay to avoid rewriting historical messages
       session.installRewriter();
+
+      config.finalizeSessionRestore?.();
 
       // After replay and resume-state restoration so a durable cron fire can't
       // interleave with either.
@@ -11797,6 +12519,16 @@ class QwenAgent implements Agent {
       }, 0);
       return session;
     } catch (error) {
+      if (!published) {
+        try {
+          session.dispose();
+        } catch (disposeError) {
+          debugLogger.warn(
+            `Failed to dispose unpublished session ${sessionId}: ${disposeError instanceof Error ? disposeError.message : String(disposeError)}`,
+          );
+        }
+        throw error;
+      }
       try {
         await this.discardStoredSessionIfCurrent(sessionId, session, {
           shutdownConfig: false,
@@ -11910,7 +12642,80 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
-    return [modeConfigOption, modelConfigOption];
+    const modelReasoning = this.getModelReasoningConfiguration(config);
+    const currentModelEffort = config.getReasoningEffort?.();
+    const reasoningEffortConfigOption: SessionConfigOption = modelReasoning
+      ? {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          description: `Thinking and reasoning effort for ${rawCurrentModelId}`,
+          category: 'thought_level',
+          type: 'select' as const,
+          currentValue:
+            config.getContentGeneratorConfig().reasoning === false
+              ? ACP_REASONING_EFFORT_NONE
+              : (modelReasoning.efforts.find(
+                  (effort) => effort === currentModelEffort,
+                ) ?? modelReasoning.defaultEffort),
+          options: [
+            {
+              value: ACP_REASONING_EFFORT_NONE,
+              name: 'Thinking off',
+              description: 'Disable thinking for this session',
+            },
+            ...modelReasoning.efforts.map((effort) => ({
+              value: effort,
+              name: ACP_REASONING_EFFORT_NAMES[effort],
+              description: 'Apply this effort to the next request',
+            })),
+          ],
+          _meta: {
+            'qwenCode/reasoning': {
+              defaultEffort: modelReasoning.defaultEffort,
+            },
+          },
+        }
+      : {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          description: 'How hard reasoning-capable models should think',
+          category: 'thought_level',
+          type: 'select' as const,
+          currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
+          options: [
+            {
+              value: ACP_REASONING_EFFORT_DEFAULT,
+              name: 'Default',
+              description: 'Use the model or provider default',
+            },
+            ...REASONING_EFFORT_TIERS.map((effort) => ({
+              value: effort,
+              name: ACP_REASONING_EFFORT_NAMES[effort],
+              description:
+                'Providers map or clamp the requested tier for the active model',
+            })),
+          ],
+        };
+
+    return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
+  }
+
+  private getModelReasoningConfiguration(
+    config: Config,
+  ): ModelReasoningConfiguration | undefined {
+    if (
+      config.getActiveRuntimeModelSnapshot?.() ||
+      config.getReasoningEffortOverride?.() ||
+      config.getContentGeneratorConfig().thinkingMandatory === true
+    ) {
+      return undefined;
+    }
+    const reasoning = getModelConfiguration(config.getModel())?.reasoning;
+    const currentEffort = config.getReasoningEffort?.();
+    return reasoning?.thinking &&
+      (!currentEffort || reasoning.efforts.includes(currentEffort))
+      ? reasoning
+      : undefined;
   }
 
   private buildSelectableModelOptions(config: Config) {

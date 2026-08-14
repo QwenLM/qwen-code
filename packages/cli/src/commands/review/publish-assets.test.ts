@@ -24,14 +24,18 @@ const ghWithInputMock = vi.hoisted(() =>
 const ghWithInputPlainMock = vi.hoisted(() =>
   vi.fn((_input: string, ..._rest: string[]) => ''),
 );
-vi.mock('./lib/gh.js', () => ({
-  gh: ghMock,
-  // Two DISTINCT mocks: aliasing them hid which function a write actually
-  // used, and the retry-vs-not split is the point of having two.
-  ghWithInput: ghWithInputPlainMock,
-  ghWithInputRetried: ghWithInputMock,
-  setGhHost: setGhHostMock,
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghMock,
+    // Two DISTINCT mocks: aliasing them hid which function a write actually
+    // used, and the retry-vs-not split is the point of having two.
+    ghWithInput: ghWithInputPlainMock,
+    ghWithInputRetried: ghWithInputMock,
+    setGhHost: setGhHostMock,
+  };
+});
 
 const setGhHostMock = vi.hoisted(() => vi.fn((_h: string) => {}));
 
@@ -42,7 +46,44 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: stderrSpy,
 }));
 
-const { runPublishAssets } = await import('./publish-assets.js');
+// The handler resolves `review.comment` through `operatorReviewSettings` —
+// pin the view it reads so the wiring leg below does not depend on the
+// running developer's settings.json. The direct refusal assertions call
+// runPublishAssets and never touch this mock; the handler-path tests below
+// do.
+const reviewSettingsMock = vi.hoisted(() =>
+  vi.fn((): Record<string, unknown> => ({})),
+);
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    // The production call carries `{ skipWorkspaceSettings: true }` — the
+    // authorisation default resolves from operator scopes only. A caller that
+    // forgets the flag reads the workspace-polluted view instead; the guards
+    // that redden are submit.test.ts's handler-level refusal test,
+    // review-settings.test.ts's direct assertion, and this file's
+    // handler-level refusal test. The direct runPublishAssets refusals
+    // bypass the handler.
+    loadSettings: vi.fn((...callArgs: unknown[]) => {
+      const opts = callArgs[1] as
+        | { skipWorkspaceSettings?: boolean }
+        | undefined;
+      return {
+        merged: {
+          review: opts?.skipWorkspaceSettings
+            ? reviewSettingsMock()
+            : { attribution: false, comment: true, effort: 'low' },
+        },
+      };
+    }),
+  };
+});
+
+const { runPublishAssets, publishAssetsCommand } = await import(
+  './publish-assets.js'
+);
 
 // A 1x1 PNG, enough bytes to be a plausible file and stable to hash.
 const PNG = Buffer.from(
@@ -73,6 +114,7 @@ describe('publish-assets', () => {
     // dogfooding session's exported value must not leak into URL assertions.
     savedGhHostMain = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     // mockReset, not mockClear: a sibling block's persistent
@@ -124,6 +166,25 @@ describe('publish-assets', () => {
     } as never);
   }
 
+  // The handler-path counterpart of run(): every handler-level leg calls
+  // this, so the yargs-facing argument shape lives in exactly one place and
+  // a one-leg-only edit (a renamed key silenced by the `as never` cast) is
+  // structurally impossible.
+  async function runHandler(
+    overrides: Record<string, unknown> = {},
+  ): Promise<void> {
+    await publishAssetsCommand.handler?.({
+      _: [],
+      $0: 'qwen',
+      pr: 8346,
+      files: [pngFile('a.png')],
+      out: join(dir, 'manifest.json'),
+      'user-authorized': false,
+      'skill-args': argsFile,
+      ...overrides,
+    } as never);
+  }
+
   it('refuses without a designated repo — exit 3, nothing written', () => {
     delete process.env['QWEN_REVIEW_ASSETS_REPO'];
     run({ files: [pngFile('a.png')] });
@@ -156,6 +217,46 @@ describe('publish-assets', () => {
     run({ files: [pngFile('a.png')], userAuthorized: true });
     expect(process.exitCode).toBeUndefined();
     expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('the standing review.comment setting authorises publishing without --comment', () => {
+    // The two callers of the shared gate must agree on what authorises a
+    // run: submit accepts the setting, so publish-assets must too — or a
+    // run that posts the review still refuses to publish its evidence.
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    happyGh();
+    run({ files: [pngFile('a.png')], defaultComment: true });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('wires the standing review.comment setting through the handler', async () => {
+    // Wiring leg: dropping `defaultComment` from the handler call leaves the
+    // direct runPublishAssets test green while production refuses. The
+    // workspace-polluted mock stands guard on the scope flag at the same
+    // time — it answers a flag-less call with comment:true.
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    reviewSettingsMock.mockReturnValue({ comment: true });
+    happyGh();
+    await runHandler({ files: [pngFile('wired.png')] });
+    expect(process.exitCode).toBeUndefined();
+    expect(ghWithInputMock).toHaveBeenCalled();
+  });
+
+  it('the handler refuses when neither flag nor setting authorises — the polluted view must not decide', async () => {
+    // The refusal counterpart of the wiring leg above: setting off, no
+    // `--comment` in the recorded arguments. If the handler's loadSettings
+    // call drops `skipWorkspaceSettings`, the workspace-polluted mock view
+    // answers comment:true and this refusal becomes a publish — the exact
+    // regression review-settings.ts documents (a repository-controlled
+    // .qwen/settings.json deciding to publish for every reviewer).
+    writeFileSync(argsFile, '8346\n'); // no --comment
+    reviewSettingsMock.mockReturnValue({}); // setting off
+    happyGh();
+    await runHandler({ files: [pngFile('refused.png')] });
+    expect(process.exitCode).toBe(3);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(ghMock).not.toHaveBeenCalled();
   });
 
   it('publishes, writes a manifest with commit-pinned URLs', () => {
@@ -457,6 +558,7 @@ describe('publish-assets — round-2 review pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockClear();
@@ -590,6 +692,7 @@ describe('publish-assets — round-3 self-review pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockClear();
@@ -708,6 +811,7 @@ describe('publish-assets — round-4 pins', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();
@@ -856,6 +960,7 @@ describe('publish-assets — empty is two different things', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();
@@ -922,6 +1027,7 @@ describe('publish-assets — host binds even without --reviewed-repo', () => {
     delete process.env['QWEN_CODE_SESSION_ID'];
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    reviewSettingsMock.mockReturnValue({});
     ghMock.mockReset();
     ghWithInputMock.mockReset();
     setGhHostMock.mockReset();

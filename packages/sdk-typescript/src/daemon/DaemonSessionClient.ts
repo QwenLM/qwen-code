@@ -11,6 +11,7 @@ import {
   matchTurnEvent,
   normalizePendingPromptLimit,
   type CreateSessionRequest,
+  type DaemonSseConnectReason,
   type NonBlockingPromptAccepted,
   type PromptRequest,
   type RestoreSessionRequest,
@@ -24,11 +25,13 @@ import type {
   DaemonSessionBtwResult,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
+  DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionConfigOptionResult,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
@@ -80,6 +83,12 @@ export interface DaemonSessionClientOptions {
   eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
+  /** True when the load response explicitly carried both replay arrays. */
+  replaySnapshotComplete?: boolean;
+  /** True when persisted replay was only partially reconstructed. */
+  replayPartial?: boolean;
+  /** Diagnostic for a partial persisted replay. */
+  replayError?: string;
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
   /**
@@ -107,7 +116,11 @@ export interface DaemonSessionClientOptions {
   maxPendingPromptsPerSession?: number | null;
 }
 
-export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
+export interface DaemonSessionSubscribeOptions
+  extends Omit<
+    SubscribeOptions,
+    'clientId' | 'previousSseStreamId' | 'onSseStreamAccepted'
+  > {
   /**
    * Reuse this client's last seen SSE event id when `lastEventId` is not
    * supplied. Defaults to true so reconnecting client adapters get replay
@@ -132,6 +145,9 @@ export class DaemonSessionClient {
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
   readonly replaySnapshot: DaemonReplaySnapshot;
+  readonly replaySnapshotComplete: boolean;
+  readonly replayPartial: boolean;
+  readonly replayError: string | undefined;
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
   /**
@@ -155,6 +171,8 @@ export class DaemonSessionClient {
    * subscription's `X-Qwen-Event-Epoch` response header.
    */
   private lastSeenEpoch: string | undefined;
+  private hasAcceptedRestStream = false;
+  private lastAcceptedRestStreamId: string | undefined;
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
@@ -180,6 +198,9 @@ export class DaemonSessionClient {
       compactedReplay: [],
       liveJournal: [],
     };
+    this.replaySnapshotComplete = opts.replaySnapshotComplete ?? false;
+    this.replayPartial = opts.replayPartial ?? false;
+    this.replayError = opts.replayError;
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
     this.lastSeenEpoch = opts.eventEpoch;
     this.promptLimit =
@@ -251,6 +272,10 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
+    const restored = await client.loadSession(sessionId, req, clientId);
+    const replaySnapshotComplete =
+      Array.isArray(restored.compactedReplay) &&
+      Array.isArray(restored.liveJournal);
     const {
       state,
       hasActivePrompt,
@@ -259,10 +284,12 @@ export class DaemonSessionClient {
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
+      partial,
+      replayError,
       lastEventId: serverLastEventId,
       eventEpoch,
       ...session
-    } = await client.loadSession(sessionId, req, clientId);
+    } = restored;
     return new DaemonSessionClient({
       client,
       session,
@@ -274,6 +301,9 @@ export class DaemonSessionClient {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
       },
+      replaySnapshotComplete,
+      replayPartial: partial === true,
+      replayError,
       historyHasMore,
       historyAnchorRecordId,
       replayDegraded,
@@ -335,6 +365,10 @@ export class DaemonSessionClient {
 
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
+  }
+
+  get eventEpoch(): string | undefined {
+    return this.lastSeenEpoch;
   }
 
   setLastEventId(lastEventId: number | undefined): void {
@@ -535,6 +569,18 @@ export class DaemonSessionClient {
     );
   }
 
+  async setConfigOption(
+    configId: 'reasoning_effort',
+    value: string,
+  ): Promise<DaemonSessionConfigOptionResult> {
+    return await this.client.setSessionConfigOption(
+      this.sessionId,
+      configId,
+      value,
+      this.clientId,
+    );
+  }
+
   async getRewindSnapshots(): Promise<{
     snapshots: DaemonRewindSnapshotInfo[];
   }> {
@@ -601,15 +647,16 @@ export class DaemonSessionClient {
   /**
    * Queue a user message typed while this session's turn is still running so
    * the ACP child can drain it mid-turn. Forwards the client id bound at
-   * create/attach. Resolves `{ accepted: false }` when the session is idle —
-   * the caller should then send the message as a normal next-turn prompt.
+   * create/attach. Accepted requests become daemon-owned even when the active
+   * turn settles while the request is in flight.
    */
   async enqueueMidTurnMessage(
     message: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; messageId?: string },
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -618,6 +665,22 @@ export class DaemonSessionClient {
     messageId: string,
   ): Promise<DaemonRemoveMidTurnMessageResult> {
     return await this.client.removeMidTurnMessage(this.sessionId, messageId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /**
+   * Fetch the mid-turn reconciliation snapshot (queue + delivery-state rings) for
+   * this session. Forwards the bound client id. See
+   * `DaemonClient.getMidTurnMessages` — requires the daemon to advertise
+   * `session_mid_turn_message_query`; older daemons reject with 404 and
+   * callers preserve their current state.
+   */
+  async getMidTurnMessages(opts?: {
+    signal?: AbortSignal;
+  }): Promise<DaemonMidTurnMessagesResult> {
+    return await this.client.getMidTurnMessages(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -817,7 +880,17 @@ export class DaemonSessionClient {
     release: () => void,
   ): AsyncGenerator<DaemonEvent, void, unknown> {
     try {
-      const { resume = true, ...subscribeOpts } = opts;
+      const {
+        resume = true,
+        sseConnectReason: requestedConnectReason,
+        ...sessionSubscribeOpts
+      } = opts;
+      // `Omit` protects TypeScript callers; sanitize the runtime object too so
+      // untyped JavaScript cannot override session-owned REST stream identity.
+      const subscribeOpts: SubscribeOptions = { ...sessionSubscribeOpts };
+      delete subscribeOpts.clientId;
+      delete subscribeOpts.previousSseStreamId;
+      delete subscribeOpts.onSseStreamAccepted;
       const lastEventId =
         subscribeOpts.lastEventId ??
         (resume ? this.lastSeenEventId : undefined);
@@ -826,10 +899,29 @@ export class DaemonSessionClient {
       const epoch =
         subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
       const callerOnEpoch = subscribeOpts.onEpoch;
+      const restSubscription = this.client.transport.type === 'rest';
+      if (!restSubscription) {
+        this.hasAcceptedRestStream = false;
+        this.lastAcceptedRestStreamId = undefined;
+      }
+      const sseConnectReason: DaemonSseConnectReason =
+        requestedConnectReason ??
+        (this.hasAcceptedRestStream ? 'resume' : 'initial');
 
       for await (const event of this.client.subscribeEvents(this.sessionId, {
         ...subscribeOpts,
         lastEventId,
+        ...(this.clientId ? { clientId: this.clientId } : {}),
+        sseConnectReason,
+        ...(this.lastAcceptedRestStreamId
+          ? {
+              previousSseStreamId: this.lastAcceptedRestStreamId,
+            }
+          : {}),
+        onSseStreamAccepted: (streamId: string | undefined) => {
+          this.hasAcceptedRestStream = true;
+          this.lastAcceptedRestStreamId = streamId;
+        },
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
           this.lastSeenEpoch = learned;
