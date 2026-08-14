@@ -3864,6 +3864,77 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it('answers session replies on the connection stream when the pre-attach queue overflows', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const reader = frameReader(connStream);
+    try {
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 899,
+        method: 'session/new',
+        params: {},
+      });
+      await expect(reader.next()).resolves.toMatchObject({ id: 899 });
+
+      const promptIds = Array.from({ length: 257 }, (_, index) => 900 + index);
+      for (const [index, id] of promptIds.entries()) {
+        const response = await post(connId, {
+          jsonrpc: '2.0',
+          id,
+          method: 'session/prompt',
+          params: {
+            sessionId: 'sess-1',
+            prompt: [{ type: 'text', text: 'fill detached reply queue' }],
+          },
+        });
+        expect(response.status).toBe(202);
+        if (index < 256) {
+          await waitUntil(
+            () => acpHandle?.getSnapshot().bufferedSessionFrames === index + 1,
+          );
+        }
+      }
+
+      const replies: Array<{
+        id: number;
+        error: { code: number; message: string };
+      }> = [];
+      for (let index = 0; index < promptIds.length; index += 1) {
+        replies.push(
+          (await reader.next(5000)) as {
+            id: number;
+            error: { code: number; message: string };
+          },
+        );
+      }
+
+      expect(
+        replies
+          .map(({ id, error }) => ({ id, error }))
+          .sort((a, b) => a.id - b.id),
+      ).toEqual(
+        promptIds.map((id) => ({
+          id,
+          error: {
+            code: -32603,
+            message: 'Response delivery failed',
+          },
+        })),
+      );
+      const conn = acpHandle?.registry.get(connId);
+      expect(conn?.destroyed).toBe(false);
+      expect(conn?.sessions.has('sess-1')).toBe(false);
+      expect(acpHandle?.getSnapshot().preAttach).toMatchObject({
+        usedFrames: 0,
+        usedBytes: 0,
+        pendingDeliveryFrames: 0,
+      });
+    } finally {
+      reader.close();
+    }
+  });
+
   it('session/load reports partial replay status under qwen _meta', async () => {
     bridge.loadState = {
       replayed: true,

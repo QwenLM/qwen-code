@@ -5406,7 +5406,20 @@ export class AcpDispatcher {
             logSafe(err instanceof Error ? err.message : String(err)),
         );
       }
-      conn.sendSessionReply(sessionId, frame, anchorId);
+      const delivery = conn.sendSessionReply(sessionId, frame, anchorId);
+      void delivery.then(
+        (outcome) => {
+          if (
+            (outcome === 'failed' || outcome === 'closed') &&
+            !conn.destroyed
+          ) {
+            void conn.sendConn(
+              error(id, RPC.INTERNAL_ERROR, 'Response delivery failed'),
+            );
+          }
+        },
+        () => undefined,
+      );
     } else {
       // Fallback fired — log it so an operator can correlate "reply arrived on
       // the connection stream, not the session stream" with a mid-flight
