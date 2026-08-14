@@ -5561,6 +5561,21 @@ exit 1
         labels: [{ name: 'autofix/skip' }],
       }).calls.match(/api -X DELETE/gm) ?? [],
     ).toHaveLength(0);
+    // R4-16: fork-refused and skip-blocked acks — management never resumed,
+    // zero DELETEs (with total-count assertions, not just toContain).
+    expect(runAck({ ack: 'fork-refused' }).calls).not.toContain(nhDelete);
+    expect(
+      runAck({ ack: 'fork-refused' }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(0);
+    expect(
+      runAck({ ack: 'skip-blocked', labels: [{ name: 'autofix/skip' }] }).calls,
+    ).not.toContain(nhDelete);
+    expect(
+      runAck({
+        ack: 'skip-blocked',
+        labels: [{ name: 'autofix/skip' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
+    ).toHaveLength(0);
   });
 
   it('narrows the agent prompt after a timeout since the last successful round', () => {
