@@ -1170,6 +1170,30 @@ function isDegradedPlaceholderPrefix(text: string): boolean {
   );
 }
 
+/**
+ * Copy of `chunk` whose candidate content parts are fresh objects. History
+ * consolidation merges adjacent text parts in place (`lastPart.text +=
+ * part.text`), rewriting part objects shared with chunks still owed to the
+ * consumer; chunks flushed after consolidation must carry detached parts or
+ * the consumer sees rewritten, duplicated text.
+ */
+function detachChunkParts(
+  chunk: GenerateContentResponse,
+): GenerateContentResponse {
+  return {
+    ...chunk,
+    candidates: chunk.candidates?.map((candidate) => ({
+      ...candidate,
+      content: candidate.content
+        ? {
+            ...candidate.content,
+            parts: candidate.content.parts?.map((part) => ({ ...part })),
+          }
+        : candidate.content,
+    })),
+  } as GenerateContentResponse;
+}
+
 function isDegradedPlaceholderTurn(content: Content): boolean {
   const parts = content.parts ?? [];
   if (parts.length === 0) return false;
@@ -1804,17 +1828,6 @@ export class GeminiChat {
   private pendingPartialAssistantRecord:
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
-
-  /**
-   * Text of degraded-placeholder-prefix chunks the pipeline held back and then
-   * dropped on a stream error. They were never yielded, so the send loop's
-   * delivery accounting misses them; the loop folds this into the attempt's
-   * catch so the continuation gate resumes from the held prefix instead of
-   * replaying fresh — a fresh replay would let a placeholder split across the
-   * cut (e.g. '(request ' + 'timeout)') slip through as the harmless-looking
-   * fragment. Reset at the start of every `processStreamResponse`.
-   */
-  private pendingHeldPlaceholderText = '';
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
@@ -2869,17 +2882,6 @@ export class GeminiChat {
             // than per chunk keeps the overlap scan anchored at the attempt
             // boundary, which is the only place a replay can occur.
             foldTransportAttemptText();
-            // The pipeline holds back degraded-placeholder-prefix chunks and
-            // never yields them; on a stream error it discards them. The model
-            // still delivered that text, so fold the staged handoff into the
-            // same buffer — otherwise the continuation gate sees nothing
-            // delivered and replays fresh, letting a placeholder split across
-            // the cut slip through as a harmless-looking fragment.
-            if (self.pendingHeldPlaceholderText) {
-              transportAttemptText += self.pendingHeldPlaceholderText;
-              self.pendingHeldPlaceholderText = '';
-              foldTransportAttemptText();
-            }
 
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
@@ -4545,10 +4547,11 @@ export class GeminiChat {
     // pairing intact across the failure.
     let streamError: unknown = null;
     let yieldedAnyChunk = false;
-    let deferredFirstChunk: GenerateContentResponse | null = null;
-    let pendingDegradedPlaceholderChunks: GenerateContentResponse[] = [];
-    // Fresh attempt: clear any handoff a previous attempt's error path staged.
-    this.pendingHeldPlaceholderText = '';
+    // Chunks withheld before the first inline yield, in ARRIVAL order: the
+    // finishReason-bearing chunk deferred so post-stream validation can
+    // reject it before consumers commit a Finished state, and
+    // placeholder-prefix chunks held for the same reason.
+    let pendingPreValidationChunks: GenerateContentResponse[] = [];
     try {
       for await (const chunk of streamResponse) {
         const preparations = getToolCallPreparations(chunk);
@@ -4724,20 +4727,22 @@ export class GeminiChat {
           }
         }
 
+        let deferredNow = false;
         if (isToolResultContinuation) {
           // Do not let consumers commit Finished before post-stream validation
           // can reject a semantically empty continuation.
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
-              if (!yieldedAnyChunk) {
-                deferredFirstChunk ??= chunk;
+              if (!yieldedAnyChunk && !deferredNow) {
+                deferredNow = true;
+                pendingPreValidationChunks.push(chunk);
               }
               deferredFinishReason ??= candidate.finishReason;
               delete candidate.finishReason;
             }
           }
         } else if (!yieldedAnyChunk) {
-          // Defer the first chunk that carries a finishReason so post-stream
+          // Defer the chunk that carries a finishReason so post-stream
           // validation (placeholder check, empty-text check, etc.) can reject
           // it before the content reaches consumers. Without this deferral a
           // single-chunk fail-fast placeholder (text + finishReason: 'STOP')
@@ -4745,7 +4750,8 @@ export class GeminiChat {
           // and neither consumer rolls back the committed output.
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
-              deferredFirstChunk ??= chunk;
+              deferredNow = true;
+              pendingPreValidationChunks.push(chunk);
               break;
             }
           }
@@ -4759,7 +4765,7 @@ export class GeminiChat {
         const shouldHoldDegradedPlaceholder =
           !hasToolCall && isDegradedPlaceholderPrefix(pendingPlaceholderText);
 
-        if (chunk !== deferredFirstChunk) {
+        if (!deferredNow) {
           if (
             !chunk.candidates?.length ||
             preparations.length > 0 ||
@@ -4767,13 +4773,14 @@ export class GeminiChat {
             !protocolTagDetector.blockingOutput
           ) {
             if (shouldHoldDegradedPlaceholder) {
-              pendingDegradedPlaceholderChunks.push(chunk);
+              pendingPreValidationChunks.push(chunk);
             } else {
               yieldedAnyChunk = true;
-              for (const pendingChunk of pendingDegradedPlaceholderChunks) {
+              // Arrival order: everything pending predates this chunk.
+              for (const pendingChunk of pendingPreValidationChunks) {
                 yield pendingChunk;
               }
-              pendingDegradedPlaceholderChunks = [];
+              pendingPreValidationChunks = [];
               yield chunk;
             }
           }
@@ -4782,49 +4789,35 @@ export class GeminiChat {
     } catch (e) {
       streamError = e;
     }
+    // Snapshot the pending chunks BEFORE history consolidation merges adjacent
+    // text parts in place (the pending chunks share those part objects via
+    // allModelParts); a flush after consolidation would otherwise deliver the
+    // rewritten, duplicated text instead of what actually arrived.
+    pendingPreValidationChunks =
+      pendingPreValidationChunks.map(detachChunkParts);
     if (streamError !== null) {
-      // Judge the deferred chunk against the ACCUMULATED attempt text — the
-      // same expression the in-loop hold uses — rather than in isolation: a
-      // placeholder split into a held prefix and a finishReason-bearing tail
-      // ('(request ' + 'timeout)') fails a per-chunk prefix check on the tail
-      // alone, which would leak the fragment to consumers and scramble the
-      // continuation handoff below. While the accumulation is still a
-      // placeholder prefix no chunk can have been yielded inline (divergence
-      // is irreversible), so the accumulated text is exactly held + deferred,
-      // in delivery order.
+      // A COMPLETED placeholder is gateway garbage with nothing honest to
+      // resume from: drop it silently and let the recovery replay fresh.
+      // Any other partial delivery — held placeholder-prefix chunks and/or
+      // the deferred chunk — is yielded in arrival order instead: the send
+      // loop mirrors every yielded chunk into the continuation buffer, so
+      // what the consumer saw and what a continuation resumes from stay
+      // aligned. (Staging the never-delivered text into the buffer instead
+      // let a diverged continuation persist an invisible prefix into
+      // history/JSONL, and a stale stage could leak into a later turn.)
       const accumulatedText = allModelParts
         .filter((part) => !part.thought && part.text)
         .map((part) => part.text)
         .join('')
         .trim();
-      const deferredIsPlaceholderBound =
-        deferredFirstChunk !== null &&
-        !hasToolCall &&
-        isDegradedPlaceholderPrefix(accumulatedText);
-      if (deferredFirstChunk && !deferredIsPlaceholderBound) {
-        yield deferredFirstChunk;
+      const completedPlaceholder =
+        !hasToolCall && accumulatedText === UPSTREAM_DEGRADED_PLACEHOLDER;
+      if (!completedPlaceholder) {
+        for (const pendingChunk of pendingPreValidationChunks) {
+          yield pendingChunk;
+        }
       }
-      deferredFirstChunk = null;
-      // Hand the held placeholder-prefix text to the send loop before
-      // discarding the chunks: the model did deliver it, but it was never
-      // yielded, so the loop's delivery accounting would otherwise see nothing
-      // and replay fresh — letting a placeholder split across the cut slip
-      // through as a fragment. Folded into the continuation buffer, the next
-      // attempt resumes from it and the reassembled text can still be
-      // rejected as a completed placeholder. A COMPLETED placeholder is the
-      // exception: there is nothing honest to resume from, so the honest
-      // recovery stays a fresh replay (no handoff).
-      const heldText = pendingDegradedPlaceholderChunks
-        .map((chunk) =>
-          getPlainTextFromParts(chunk.candidates?.[0]?.content?.parts),
-        )
-        .join('');
-      const handoffText = deferredIsPlaceholderBound
-        ? accumulatedText
-        : heldText;
-      this.pendingHeldPlaceholderText =
-        handoffText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER ? '' : handoffText;
-      pendingDegradedPlaceholderChunks = [];
+      pendingPreValidationChunks = [];
     }
 
     if (
@@ -5101,11 +5094,11 @@ export class GeminiChat {
         'UPSTREAM_DEGRADED_RESPONSE',
       );
     }
-    for (const pendingChunk of pendingDegradedPlaceholderChunks) {
+    // Arrival order: everything pending predates any yielded chunk. Yield
+    // detached copies — the consolidation above merged adjacent text parts
+    // IN PLACE and rewrote the shared part objects these chunks carry.
+    for (const pendingChunk of pendingPreValidationChunks) {
       yield pendingChunk;
-    }
-    if (deferredFirstChunk) {
-      yield deferredFirstChunk;
     }
     if (
       willPersistToHistory &&

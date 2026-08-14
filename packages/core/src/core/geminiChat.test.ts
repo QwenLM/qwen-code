@@ -6653,6 +6653,103 @@ describe('GeminiChat', async () => {
       });
     });
 
+    it('delivers a deferred finishReason chunk before later held chunks in arrival order', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: '(req' }]), {
+          candidates: [{ content: { parts: [{ text: 'uest' }] } }],
+        } as unknown as GenerateContentResponse),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-deferred-arrival-order',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      const delivered = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .map((event) => event.value.candidates?.[0]?.content?.parts?.[0]?.text);
+      expect(delivered).toEqual(['(req', 'uest']);
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'test' }] },
+        { role: 'model', parts: [{ text: '(request' }] },
+      ]);
+    });
+
+    it('delivers a diverged placeholder prefix and its continuation in order without retrying', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(
+          {
+            candidates: [{ content: { parts: [{ text: '(request ' }] } }],
+          } as unknown as GenerateContentResponse,
+          stopResponse([{ text: ' real content' }]),
+        ),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-placeholder-prefix-divergence',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockLogContentRetry).not.toHaveBeenCalled();
+      const delivered = events
+        .filter((event) => event.type === StreamEventType.CHUNK)
+        .map((event) => event.value.candidates?.[0]?.content?.parts?.[0]?.text);
+      expect(delivered).toEqual(['(request ', ' real content']);
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'test' }] },
+        { role: 'model', parts: [{ text: '(request  real content' }] },
+      ]);
+    });
+
+    it('delivers and persists a lone placeholder-prefix chunk without rejecting it', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: '(request' }])),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-lone-placeholder-prefix',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(mockLogContentRetry).not.toHaveBeenCalled();
+      expect(
+        events.some(
+          (event) =>
+            event.type === StreamEventType.CHUNK &&
+            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+              '(request',
+        ),
+      ).toBe(true);
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'test' }] },
+        { role: 'model', parts: [{ text: '(request' }] },
+      ]);
+    });
+
     it('should not yield a split placeholder tail when the stream errors before any yield', async () => {
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         (async function* () {
@@ -8836,6 +8933,53 @@ describe('GeminiChat', async () => {
           expect(chatWithRecording.getHistory().at(-1)).toEqual({
             role: 'model',
             parts: [{ text: 'first half second half' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps delivery and persistence aligned when a held prefix continuation diverges', async () => {
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Sorry — the answer is 42.', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-held-prefix-divergence',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(2);
+          // The held prefix must have reached the consumer: what the UI saw
+          // and what a diverged continuation persists stay aligned, instead
+          // of an invisible prefix riding into history/JSONL.
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  '(request ',
+            ),
+          ).toBe(true);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe(
+            '(request Sorry — the answer is 42.',
+          );
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: '(request Sorry — the answer is 42.' }],
           });
         } finally {
           vi.useRealTimers();
