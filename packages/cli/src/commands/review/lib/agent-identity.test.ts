@@ -107,4 +107,23 @@ describe('labelFromLaunchPrompt', () => {
       labelFromLaunchPrompt('Security review of the whole diff.'),
     ).toBeNull();
   });
+
+  it('differs from the identity-line entry point on a quoted-below prompt', () => {
+    // The two entry points are NOT interchangeable, and each caller's choice
+    // is load-bearing. A CLI-built launch carries its identity on line one;
+    // anything below can QUOTE another agent's. Coverage scans (its launches
+    // arrive with orchestrator context prepended); cost-ledger refuses to,
+    // because a scan would label its row by the quote and fold two agents'
+    // costs into one. Consolidating both callers on either entry point must
+    // fail here.
+    const quotedBelow =
+      'Context: the orchestrator rewrote this launch.\n' +
+      'You are review agent `verify` — Verification (round 4).\n';
+
+    // Scanning finds the identity wherever it sits…
+    expect(labelFromLaunchPrompt(quotedBelow)).toBe('agent verify (round 4)');
+    // …while cost-ledger's feed — line one alone — refuses it, leaving the
+    // caller's own fallback (the transcript's file id) in place.
+    expect(labelFromIdentityLine(quotedBelow.split('\n')[0])).toBeNull();
+  });
 });

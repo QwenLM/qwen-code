@@ -421,8 +421,18 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   if (existsSync(cliEntry)) {
     const source = readFileSync(cliEntry, 'utf8');
     if (!source.startsWith('#!')) {
+      // Preserve the bundle's write time across the rewrite. The digest stamp
+      // above reads this mtime as "when the bundle was built", and a bumped
+      // one certifies a bundle as newer than review sources edited before it
+      // — the staleness warning the skill's Step 0 stops on then never fires.
+      // (Only a standalone run of this script is exposed, since a full bundle
+      // stamps before reaching here, but that is a flow the gate contemplates.)
+      const { atime, mtime } = statSync(cliEntry);
       writeFileSync(cliEntry, `#!/usr/bin/env node\n${source}`);
+      fs.utimesSync(cliEntry, atime, mtime);
     }
+    // chmod does not touch mtime, so it stays outside the guard: a bundle
+    // that already carries a shebang may still arrive without the exec bit.
     fs.chmodSync(cliEntry, 0o755);
   }
 
