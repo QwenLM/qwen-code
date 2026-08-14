@@ -8,10 +8,9 @@ import type { Part } from '@google/genai';
 
 /**
  * Markers embedded in tool `functionResponse` error text that distinguish
- * synthesized terminal notices (cancellation, policy denial) from genuine
- * tool failures. Producers (`coreToolScheduler`) and consumers
- * (`experience-signals`, the UI completion loops) must share these constants:
- * a reworded notice would otherwise silently desynchronize classification.
+ * synthesized non-failures from genuine tool failures. Producers and
+ * consumers must share these constants: a reworded notice would otherwise
+ * silently desynchronize classification.
  */
 
 /** Prefix of the synthesized error text reported for a cancelled tool call. */
@@ -38,6 +37,12 @@ export const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
 export const PERMISSION_DECLINED_MESSAGE_PREFIX =
   'Qwen Code requires permission to use';
 
+export const DUPLICATE_PROVIDER_TOOL_CALL_PREFIX =
+  'Duplicate provider tool call id "';
+
+export const SUPPRESSED_SIBLING_SKIP_PREFIX =
+  "Skipped: this turn's structured_output contract took precedence as the terminal output.";
+
 /**
  * Whether a settled tool call counts as completed work for the skill-review
  * window. A call does NOT count when it never ran (`not_started` — policy
@@ -58,11 +63,11 @@ export function didToolCallProduceWork(outcome: {
   if (outcome.status !== 'cancelled') {
     return true;
   }
-  for (const part of outcome.responseParts ?? []) {
+  return (outcome.responseParts ?? []).some((part) => {
     const error = part.functionResponse?.response?.['error'];
-    if (typeof error === 'string') {
-      return error.includes(TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE);
-    }
-  }
-  return false;
+    return (
+      typeof error === 'string' &&
+      error.includes(TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE)
+    );
+  });
 }

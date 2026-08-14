@@ -257,25 +257,56 @@ describe('MemoryManager', () => {
       });
     });
 
-    it('skips below threshold', () => {
-      const mgr = new MemoryManager();
-      const result = mgr.scheduleSkillReview({
-        projectRoot: '/project',
-        sessionId: 'sess',
-        history: [],
-        toolCallCount: 1,
-        threshold: 2,
-        skillsModified: false,
-        experienceSignals: SUBSTANTIVE_WINDOW,
-        config: makeMockConfig(),
-      });
+    it.each([
+      [
+        'rejects a retry arc below the experience floor',
+        AUTO_SKILL_EXPERIENCE_FLOOR - 1,
+        { retryArc: true, userSteer: false, hasSubstantiveWork: false },
+        ['skipped', 'below_threshold'],
+      ],
+      [
+        'accepts a retry arc at the experience floor',
+        AUTO_SKILL_EXPERIENCE_FLOOR,
+        { retryArc: true, userSteer: false, hasSubstantiveWork: false },
+        ['scheduled', undefined],
+      ],
+      [
+        'accepts a user steer at the experience floor',
+        AUTO_SKILL_EXPERIENCE_FLOOR,
+        { retryArc: false, userSteer: true, hasSubstantiveWork: false },
+        ['scheduled', undefined],
+      ],
+      [
+        'rejects a read-only window at the backstop threshold',
+        10,
+        { retryArc: false, userSteer: false, hasSubstantiveWork: false },
+        ['skipped', 'below_threshold'],
+      ],
+      [
+        'accepts substantive work at the backstop threshold',
+        10,
+        SUBSTANTIVE_WINDOW,
+        ['scheduled', undefined],
+      ],
+    ] as const)(
+      '%s',
+      async (_name, toolCallCount, experienceSignals, expected) => {
+        const mgr = new MemoryManager();
+        const result = mgr.scheduleSkillReview({
+          projectRoot: '/project',
+          sessionId: 'sess',
+          history: [],
+          toolCallCount,
+          threshold: 10,
+          skillsModified: false,
+          experienceSignals,
+          config: makeMockConfig(),
+        });
 
-      expect(result).toEqual({
-        status: 'skipped',
-        skippedReason: 'below_threshold',
-      });
-      expect(runSkillReviewByAgent).not.toHaveBeenCalled();
-    });
+        expect([result.status, result.skippedReason]).toEqual(expected);
+        await result.promise;
+      },
+    );
 
     it('skips when skills were modified in session', () => {
       const mgr = new MemoryManager();
@@ -343,10 +374,9 @@ describe('MemoryManager', () => {
     });
 
     it('reports below_threshold (not already_running) for a gate-failing window during an in-flight review', async () => {
-      // Pins the gate-before-in-flight ordering: the client's unconditional
-      // window reset on `already_running` is only correct because the
-      // trigger gate runs first — a below-floor window must NOT be
-      // classified as already_running (the client would wipe its signals).
+      // Pins the gate-before-in-flight ordering: `already_running` means the
+      // window would have triggered. A below-floor window must instead be
+      // classified as `below_threshold` so the skip reason stays accurate.
       let resolveReview!: (v: { touchedSkillFiles: string[] }) => void;
       vi.mocked(runSkillReviewByAgent).mockReturnValueOnce(
         new Promise<{ touchedSkillFiles: string[] }>((resolve) => {

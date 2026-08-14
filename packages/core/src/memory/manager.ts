@@ -87,10 +87,7 @@ import {
   rejectPendingSkill,
   type PendingSkill,
 } from './pending-skills.js';
-import {
-  hasExperienceSignal,
-  type ExperienceSignals,
-} from './experience-signals.js';
+import type { ExperienceSignals } from './experience-signals.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MANAGER');
@@ -168,7 +165,6 @@ export interface SkillReviewScheduleResult {
   taskId?: string;
   skippedReason?:
     | 'below_threshold'
-    | 'no_experience_signal'
     | 'skills_modified_in_session'
     | 'disabled'
     | 'already_running'
@@ -852,26 +848,18 @@ export class MemoryManager {
 
     // Two trigger paths (see docs/design/2026-08-13-auto-skill-experience-trigger.md):
     // a fast path for windows showing trial-and-error signals, and a count
-    // backstop that only fires when the window contained substantive
-    // (non-read-only) work, so a pile of bare file reads never triggers.
+    // backstop that only fires after known write/execute work, so a pile of
+    // bare file reads never triggers.
     const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
     const fastPath =
-      hasExperienceSignal(params.experienceSignals) &&
+      (params.experienceSignals.retryArc ||
+        params.experienceSignals.userSteer) &&
       params.toolCallCount >= AUTO_SKILL_EXPERIENCE_FLOOR;
     const backstop =
       params.experienceSignals.hasSubstantiveWork &&
       params.toolCallCount >= threshold;
     if (!fastPath && !backstop) {
-      return {
-        status: 'skipped',
-        skippedReason:
-          params.toolCallCount < AUTO_SKILL_EXPERIENCE_FLOOR ||
-          params.experienceSignals.hasSubstantiveWork
-            ? // Substantive work was present; only the count fell short of
-              // the backstop threshold.
-              'below_threshold'
-            : 'no_experience_signal',
-      };
+      return { status: 'skipped', skippedReason: 'below_threshold' };
     }
 
     if (!params.config) {

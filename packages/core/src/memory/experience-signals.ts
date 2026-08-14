@@ -9,8 +9,10 @@ import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/geminiChat.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from '../core/plan-mode-entry-policy.js';
 import {
+  DUPLICATE_PROVIDER_TOOL_CALL_PREFIX,
   OPERATION_CANCELLED_PREFIX,
   PERMISSION_DECLINED_MESSAGE_PREFIX,
+  SUPPRESSED_SIBLING_SKIP_PREFIX,
 } from '../core/tool-result-markers.js';
 
 /**
@@ -37,44 +39,15 @@ export interface ExperienceSignalAccumulator
   failedToolNames: ReadonlySet<string>;
 }
 
-export function hasExperienceSignal(signals: ExperienceSignals): boolean {
-  return signals.retryArc || signals.userSteer;
-}
-
-// Known read-only builtin tools. Anything outside this set — write/execute
-// builtins, MCP tools (`mcp__*`), extension tools, unknown names — counts as
-// substantive work for the count backstop.
-const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
-  ToolNames.READ_FILE,
-  ToolNames.ZOOM_IMAGE,
-  ToolNames.GREP,
-  ToolNames.GLOB,
-  ToolNames.LS,
-  ToolNames.WEB_FETCH,
-  ToolNames.WEB_SEARCH,
-  ToolNames.LSP,
-  ToolNames.TOOL_SEARCH,
-  ToolNames.READ_MCP_RESOURCE,
-  // Read-only get/list/orchestration builtins; polling them in a loop must
-  // not turn a waiting agent's window into substantive work.
-  ToolNames.GET_GOAL,
-  ToolNames.LIST_AGENTS,
-  ToolNames.TASK_LIST,
-  ToolNames.CRON_LIST,
-  ToolNames.DISPLAY_IMAGE,
-  // Non-work control-flow builtins: mode transitions, user interaction,
-  // goal bookkeeping, and structured output never constitute write/execute
-  // work, so they must not latch hasSubstantiveWork.
-  ToolNames.ENTER_PLAN_MODE,
-  ToolNames.EXIT_PLAN_MODE,
-  ToolNames.ASK_USER_QUESTION,
-  ToolNames.UPDATE_GOAL,
-  ToolNames.LOOP_WAKEUP,
-  ToolNames.STRUCTURED_OUTPUT,
+const SUBSTANTIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ToolNames.WRITE_FILE,
+  ToolNames.EDIT,
+  ToolNames.NOTEBOOK_EDIT,
+  ToolNames.SHELL,
 ]);
 
 export function isSubstantiveToolCall(name: string): boolean {
-  return !READ_ONLY_TOOL_NAMES.has(canonicalToolName(name));
+  return SUBSTANTIVE_TOOL_NAMES.has(canonicalToolName(name));
 }
 
 function isFailedResponse(part: {
@@ -86,14 +59,16 @@ function isFailedResponse(part: {
   if (typeof error === 'string' && error.trim()) {
     // Synthesized non-failure markers carry `error` but are not genuine
     // failures: per-tool cancellation, interrupted-turn orphan repair, and
-    // never-executed policy denials (plan-mode sibling skip, permission
-    // declined). Return `null` (unknown), not `false` — a `false` would
-    // close a pending genuine-failure arc for the same tool.
+    // never-executed calls (policy denials, duplicate provider IDs, suppressed
+    // structured-output siblings). Return `null` (unknown), not `false` — a
+    // `false` would close a pending genuine-failure arc for the same tool.
     if (
       error.startsWith(OPERATION_CANCELLED_PREFIX) ||
+      error.startsWith(DUPLICATE_PROVIDER_TOOL_CALL_PREFIX) ||
       error === ORPHAN_TOOL_USE_REPAIR_REASON ||
       error === PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE ||
-      error.startsWith(PERMISSION_DECLINED_MESSAGE_PREFIX)
+      error.startsWith(PERMISSION_DECLINED_MESSAGE_PREFIX) ||
+      error.startsWith(SUPPRESSED_SIBLING_SKIP_PREFIX)
     ) {
       return null;
     }

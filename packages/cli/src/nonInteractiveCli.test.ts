@@ -46,6 +46,7 @@ import {
   operationCancelledErrorMessage,
   TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
   PERMISSION_DECLINED_MESSAGE_PREFIX,
+  SUPPRESSED_SIBLING_SKIP_PREFIX,
   createGoalRuntime,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
@@ -3543,258 +3544,117 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
-  it('should not record a cancelled tool call toward the skill-review window', async () => {
-    // An interrupt mid-tool-execution resolves the call as cancelled; the
-    // headless finalize path must skip it so the cancelled call cannot
-    // inflate toolCallCount / hasSubstantiveWork.
-    setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-cancelled',
-        providerCallId: 'tool-cancelled',
+  it.each([
+    [
+      'cancelled before completion',
+      'cancelled',
+      operationCancelledErrorMessage('user abort'),
+      false,
+    ],
+    [
+      'cancelled after completion',
+      'cancelled',
+      operationCancelledErrorMessage(TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE),
+      true,
+    ],
+    [
+      'never started after permission denial',
+      'not_started',
+      `${PERMISSION_DECLINED_MESSAGE_PREFIX} "testTool", but that permission was declined.`,
+      false,
+    ],
+  ] as const)(
+    'records skill-review work correctly when a tool is %s',
+    async (_name, executionStatus, error, shouldRecord) => {
+      setupMetricsMock();
+      const request: ToolCallRequestInfo = {
+        callId: 'tool-work-classification',
         name: 'testTool',
         args: { arg1: 'value1' },
         isClientInitiated: false,
-        prompt_id: 'prompt-id-cancelled',
-      },
-    };
-    mockCoreExecuteToolCall.mockImplementation(
-      async (
-        _config: unknown,
-        request: ToolCallRequestInfo,
-        _signal: AbortSignal,
-        options: {
-          onAllToolCallsComplete?: (
-            calls: Array<{
-              request: ToolCallRequestInfo;
-              response: ToolCallResponseInfo;
-              status: 'cancelled';
-            }>,
-          ) => Promise<void>;
-        },
-      ) => {
-        const response: ToolCallResponseInfo = {
-          callId: request.callId,
-          responseParts: [
-            {
-              functionResponse: {
-                id: request.callId,
-                name: request.name,
-                response: {
-                  error: operationCancelledErrorMessage('user abort'),
+        prompt_id: 'prompt-id-work-classification',
+      };
+      const toolCallEvent: ServerGeminiStreamEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: { ...request, providerCallId: request.callId },
+      };
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          completedRequest: ToolCallRequestInfo,
+          _signal: AbortSignal,
+          options: {
+            onAllToolCallsComplete?: (
+              calls: Array<{
+                request: ToolCallRequestInfo;
+                response: ToolCallResponseInfo;
+                status: 'cancelled' | 'error';
+              }>,
+            ) => Promise<void>;
+          },
+        ) => {
+          const response: ToolCallResponseInfo = {
+            callId: completedRequest.callId,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: completedRequest.callId,
+                  name: completedRequest.name,
+                  response: { error },
                 },
               },
+            ],
+            resultDisplay: undefined,
+            error: undefined,
+            errorType: undefined,
+            executionStatus,
+          };
+          await options.onAllToolCallsComplete?.([
+            {
+              request: completedRequest,
+              response,
+              status: executionStatus === 'not_started' ? 'error' : 'cancelled',
             },
-          ],
-          resultDisplay: undefined,
-          error: undefined,
-          errorType: undefined,
-          executionStatus: 'cancelled',
-        };
-        await options.onAllToolCallsComplete?.([
-          { request, response, status: 'cancelled' },
-        ]);
-        return response;
-      },
-    );
-
-    mockGeminiClient.sendMessageStream
-      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
-          {
-            type: GeminiEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 10 },
-            },
-          },
-        ]),
+          ]);
+          return response;
+        },
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-cancelled',
-    );
-
-    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(mockGeminiClient.recordCompletedToolCall).not.toHaveBeenCalled();
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
-  });
-
-  it('should record an after-completion cancellation toward the skill-review window', async () => {
-    // Inclusion direction of the headless gate: an after-completion
-    // cancellation reports executionStatus 'cancelled' (the scheduler's
-    // aborted path) and is distinguished from a before-completion cancel
-    // only by the marker in responseParts. Dropping the responseParts input
-    // would silently drop these landed side effects from the window.
-    setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-after-completion',
-        providerCallId: 'tool-after-completion',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-after-completion',
-      },
-    };
-    mockCoreExecuteToolCall.mockImplementation(
-      async (
-        _config: unknown,
-        request: ToolCallRequestInfo,
-        _signal: AbortSignal,
-        options: {
-          onAllToolCallsComplete?: (
-            calls: Array<{
-              request: ToolCallRequestInfo;
-              response: ToolCallResponseInfo;
-              status: 'cancelled';
-            }>,
-          ) => Promise<void>;
-        },
-      ) => {
-        const response: ToolCallResponseInfo = {
-          callId: request.callId,
-          responseParts: [
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: GeminiEventType.Content, value: 'Final answer' },
             {
-              functionResponse: {
-                id: request.callId,
-                name: request.name,
-                response: {
-                  error: operationCancelledErrorMessage(
-                    TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-                  ),
-                },
+              type: GeminiEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 10 },
               },
             },
-          ],
-          resultDisplay: undefined,
-          error: undefined,
-          errorType: undefined,
-          executionStatus: 'cancelled',
-        };
-        await options.onAllToolCallsComplete?.([
-          { request, response, status: 'cancelled' },
-        ]);
-        return response;
-      },
-    );
+          ]),
+        );
 
-    mockGeminiClient.sendMessageStream
-      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
-          {
-            type: GeminiEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 10 },
-            },
-          },
-        ]),
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-id-work-classification',
       );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-after-completion',
-    );
-
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(1);
-    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
-      'testTool',
-      { arg1: 'value1' },
-    );
-  });
-
-  it('should not record a never-executed policy denial toward the skill-review window', async () => {
-    // Exclusion direction of the headless gate: executionStatus
-    // 'not_started' means the tool never ran. Dropping the executionStatus
-    // input would classify the denial as a genuine error and record it.
-    setupMetricsMock();
-    const toolCallEvent: ServerGeminiStreamEvent = {
-      type: GeminiEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-denied',
-        providerCallId: 'tool-denied',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-denied',
-      },
-    };
-    mockCoreExecuteToolCall.mockImplementation(
-      async (
-        _config: unknown,
-        request: ToolCallRequestInfo,
-        _signal: AbortSignal,
-        options: {
-          onAllToolCallsComplete?: (
-            calls: Array<{
-              request: ToolCallRequestInfo;
-              response: ToolCallResponseInfo;
-              status: 'error';
-            }>,
-          ) => Promise<void>;
-        },
-      ) => {
-        const response: ToolCallResponseInfo = {
-          callId: request.callId,
-          responseParts: [
-            {
-              functionResponse: {
-                id: request.callId,
-                name: request.name,
-                response: {
-                  error: `${PERMISSION_DECLINED_MESSAGE_PREFIX} "testTool", but that permission was declined.`,
-                },
-              },
-            },
-          ],
-          resultDisplay: undefined,
-          error: undefined,
-          errorType: undefined,
-          executionStatus: 'not_started',
-        };
-        await options.onAllToolCallsComplete?.([
-          { request, response, status: 'error' },
-        ]);
-        return response;
-      },
-    );
-
-    mockGeminiClient.sendMessageStream
-      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
-      .mockReturnValueOnce(
-        createStreamFromEvents([
-          { type: GeminiEventType.Content, value: 'Final answer' },
-          {
-            type: GeminiEventType.Finished,
-            value: {
-              reason: undefined,
-              usageMetadata: { totalTokenCount: 10 },
-            },
-          },
-        ]),
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledTimes(
+        Number(shouldRecord),
       );
-
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-denied',
-    );
-
-    expect(mockGeminiClient.recordCompletedToolCall).not.toHaveBeenCalled();
-  });
+      if (shouldRecord) {
+        expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+          'testTool',
+          { arg1: 'value1' },
+        );
+      }
+      expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+    },
+  );
 
   it('should handle error during tool execution and should send error back to the model', async () => {
     setupMetricsMock();
@@ -6220,6 +6080,11 @@ describe('runNonInteractive', () => {
     );
     expect(toolResultBlock?.tool_use_id).toBe('tool-error');
     expect(toolResultBlock?.is_error).toBe(true);
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledOnce();
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+      'errorTool',
+      {},
+    );
     expect(writes.join('')).not.toContain('executionStatus');
     expect(writes.join('')).not.toContain('execution_status');
   });
@@ -7055,7 +6920,7 @@ describe('runNonInteractive', () => {
           message?: { content?: Array<{ content?: string }> };
         }
       )?.message?.content?.[0]?.content;
-      expect(leadingContent).toMatch(/Skipped:/);
+      expect(leadingContent).toContain(SUPPRESSED_SIBLING_SKIP_PREFIX);
       expect(leadingContent).not.toMatch(/Re-issue this call/);
     });
 
@@ -7430,11 +7295,14 @@ describe('runNonInteractive', () => {
       // the "Re-issue this call" guidance: the model is about to receive
       // these parts and may legitimately want to retry the suppressed call
       // in the next turn (the structured contract didn't terminate yet).
-      const suppressedOutput = JSON.stringify(
-        suppressed?.functionResponse?.response,
+      const suppressedResponse = suppressed?.functionResponse?.response as
+        | { error?: string; output?: string }
+        | undefined;
+      expect(suppressedResponse?.error).toContain(
+        SUPPRESSED_SIBLING_SKIP_PREFIX,
       );
-      expect(suppressedOutput).toMatch(/Skipped:/);
-      expect(suppressedOutput).toMatch(/Re-issue this call/);
+      expect(suppressedResponse?.error).toMatch(/Re-issue this call/);
+      expect(suppressedResponse?.output).toBeUndefined();
 
       // The failed structured_output's tool_result must carry the actual
       // validation error from `executeToolCall` so the model has signal

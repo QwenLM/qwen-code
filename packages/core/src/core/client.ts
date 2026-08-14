@@ -2083,10 +2083,6 @@ export class GeminiClient {
       return;
     }
 
-    if (messageType === SendMessageType.Steer) {
-      this.userSteeredSinceReview = true;
-    }
-
     // autoSkill counts tool calls and can trigger on both UserQuery and
     // ToolResult turns so the threshold can fire mid-session.
     if (
@@ -2118,9 +2114,9 @@ export class GeminiClient {
           experienceSignals,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
-        // Log the gate's deciding state: the window is destructively reset
-        // below (and on already_running and /clear), so without this the
-        // trigger decision is unrecoverable after the fact.
+        // Log the gate's deciding state: a dispatched window is destructively
+        // reset below (and on /clear), so without this the trigger decision is
+        // unrecoverable after the fact.
         debugLogger.debug(
           `[autoSkill] skill review gate: status=${skillReviewResult.status}` +
             (skillReviewResult.skippedReason
@@ -2264,6 +2260,7 @@ export class GeminiClient {
 
   private resetSkillReviewWindow(): void {
     this.toolCallCount = 0;
+    this.skillsModifiedInSession = false;
     this.userSteeredSinceReview = false;
     this.experienceSignalsSinceReview = {
       retryArc: false,
@@ -2650,8 +2647,9 @@ export class GeminiClient {
     ) => {
       if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
       this.settledSteerInputs.add(steerInput);
+      const accepted = currentPushCount() > pushCountBefore;
       try {
-        if (currentPushCount() > pushCountBefore) {
+        if (accepted) {
           steerInput.accept();
         } else {
           steerInput.restore();
@@ -2659,6 +2657,7 @@ export class GeminiClient {
       } catch (error) {
         debugLogger.warn(`Failed to settle steer input: ${error}`);
       }
+      if (accepted) this.userSteeredSinceReview = true;
     };
 
     const attachedSteerInput = options?.steerInput;
@@ -3971,9 +3970,6 @@ export class GeminiClient {
             }
             const continueRequest: Part[] = [{ text: continueReason }];
             if (pendingSteer) {
-              // The steer rides a Hook-carrier continuation that the Steer/
-              // ToolResult branches of the signal recorder never see.
-              this.userSteeredSinceReview = true;
               continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
             }
             const pushCountBefore = currentPushCount();
@@ -4133,9 +4129,6 @@ export class GeminiClient {
             ? [{ text: continuationReasonAfterSteer }]
             : [];
           if (pendingSteer) {
-            // The steer rides a Hook-carrier continuation that the Steer/
-            // ToolResult branches of the signal recorder never see.
-            this.userSteeredSinceReview = true;
             if (continueRequest.length > 0) {
               continueRequest.push({ text: '\n\n' });
             }

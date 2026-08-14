@@ -4,43 +4,38 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { Content } from '@google/genai';
 import {
   accumulateExperienceSignals,
-  hasExperienceSignal,
   isSubstantiveToolCall,
-  type ExperienceSignals,
 } from './experience-signals.js';
 import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/geminiChat.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from '../core/plan-mode-entry-policy.js';
 import {
+  DUPLICATE_PROVIDER_TOOL_CALL_PREFIX,
   operationCancelledErrorMessage,
   PERMISSION_DECLINED_MESSAGE_PREFIX,
+  SUPPRESSED_SIBLING_SKIP_PREFIX,
 } from '../core/tool-result-markers.js';
 import { ToolNames } from '../tools/tool-names.js';
 
-function modelCall(name: string): Content {
-  return { role: 'model', parts: [{ functionCall: { name, args: {} } }] };
+function toolResult(name: string, response: Record<string, unknown>): Content {
+  return {
+    role: 'user',
+    parts: [{ functionResponse: { id: 'c', name, response } }],
+  };
 }
 
 function toolOk(name: string, output = 'done'): Content {
-  return {
-    role: 'user',
-    parts: [{ functionResponse: { id: 'c', name, response: { output } } }],
-  };
+  return toolResult(name, { output });
 }
 
-function toolError(name: string, message = 'boom'): Content {
-  return {
-    role: 'user',
-    parts: [
-      { functionResponse: { id: 'c', name, response: { error: message } } },
-    ],
-  };
+function toolError(name: string, error = 'boom'): Content {
+  return toolResult(name, { error });
 }
 
-function shellOutputBlock(command: string, exitCode: number): string {
+function shellOutput(command: string, exitCode: number): string {
   return [
     `Command: ${command}`,
     'Directory: (root)',
@@ -51,402 +46,150 @@ function shellOutputBlock(command: string, exitCode: number): string {
   ].join('\n');
 }
 
-// Real shell.ts failure shape: shell.ts sets error.message to the llmContent
-// block itself and createErrorResponse writes `response: { error: ... }` with
-// no sibling `output` key.
-function shellError(command: string, exitCode: number): Content {
-  return {
-    role: 'user',
-    parts: [
-      {
-        functionResponse: {
-          id: 'c',
-          name: 'run_shell_command',
-          response: {
-            error: shellOutputBlock(command, exitCode),
-          },
-        },
-      },
-    ],
-  };
-}
-
-// Whitelisted exit-1 commands (grep/rg/diff/test) carry no `error` key —
-// shell.ts deliberately classifies them as success-shaped.
-function shellOk(command: string, exitCode = 0): Content {
-  return toolOk('run_shell_command', shellOutputBlock(command, exitCode));
-}
-
-function cancelledResult(name: string): Content {
-  return {
-    role: 'user',
-    parts: [
-      {
-        functionResponse: {
-          id: 'c',
-          name,
-          response: {
-            error: operationCancelledErrorMessage('user abort'),
-          },
-        },
-      },
-    ],
-  };
-}
-
-function planSiblingSkipResult(name: string): Content {
-  return {
-    role: 'user',
-    parts: [
-      {
-        functionResponse: {
-          id: 'c',
-          name,
-          response: { error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE },
-        },
-      },
-    ],
-  };
-}
-
-function permissionDeclinedResult(name: string): Content {
-  return {
-    role: 'user',
-    parts: [
-      {
-        functionResponse: {
-          id: 'c',
-          name,
-          response: {
-            error: `${PERMISSION_DECLINED_MESSAGE_PREFIX} "${name}", but that permission was declined.`,
-          },
-        },
-      },
-    ],
-  };
-}
-
-function orphanRepairResult(name: string): Content {
-  return {
-    role: 'user',
-    parts: [
-      {
-        functionResponse: {
-          id: 'c',
-          name,
-          response: { error: ORPHAN_TOOL_USE_REPAIR_REASON },
-        },
-      },
-    ],
-  };
-}
-
-/** Whole-window convenience wrapper over the production entry point. */
 function detect(history: Content[]) {
-  const { failedToolNames: _failedToolNames, ...signals } =
+  const { failedToolNames: _, ...signals } =
     accumulateExperienceSignals(history);
   return signals;
 }
 
+const NEUTRAL_ERRORS = [
+  ['cancelled', operationCancelledErrorMessage('user abort')],
+  ['orphan repair', ORPHAN_TOOL_USE_REPAIR_REASON],
+  ['plan sibling', PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE],
+  [
+    'permission declined',
+    `${PERMISSION_DECLINED_MESSAGE_PREFIX} "write_file", but that permission was declined.`,
+  ],
+  [
+    'duplicate provider call',
+    `${DUPLICATE_PROVIDER_TOOL_CALL_PREFIX}call-1" was already handled.`,
+  ],
+  ['suppressed structured-output sibling', SUPPRESSED_SIBLING_SKIP_PREFIX],
+] as const;
+
 describe('accumulateExperienceSignals', () => {
-  it('returns no signals for empty history', () => {
-    expect(detect([])).toEqual({
+  it('starts empty', () => {
+    expect(accumulateExperienceSignals([])).toEqual({
       retryArc: false,
       hasSubstantiveWork: false,
+      failedToolNames: new Set(),
     });
   });
 
-  it('detects a retry arc from a tool error followed by a success', () => {
-    const signals = detect([
-      modelCall('read_file'),
-      toolError('read_file'),
-      modelCall('read_file'),
-      toolOk('read_file'),
-    ]);
-    expect(signals.retryArc).toBe(true);
+  it('detects only an ordered same-tool failure and recovery', () => {
+    expect(detect([toolError('read_file'), toolOk('read_file')]).retryArc).toBe(
+      true,
+    );
+    expect(detect([toolError('glob'), toolOk('read_file')]).retryArc).toBe(
+      false,
+    );
+    expect(detect([toolOk('read_file'), toolError('read_file')]).retryArc).toBe(
+      false,
+    );
+    expect(detect([toolError('read_file')]).retryArc).toBe(false);
   });
 
-  it('does not close a retry arc with a different tool', () => {
-    const signals = detect([toolError('glob'), toolOk('read_file')]);
-
-    expect(signals.retryArc).toBe(false);
+  it('keeps a pending failure across unrelated work', () => {
+    expect(
+      detect([
+        toolError('write_file'),
+        toolOk('read_file'),
+        toolOk('write_file'),
+      ]).retryArc,
+    ).toBe(true);
   });
 
-  it('detects a retry arc from a failed shell call followed by a success', () => {
-    const signals = detect([
-      modelCall('run_shell_command'),
-      shellError('npm run test', 2),
-      modelCall('run_shell_command'),
-      shellOk('npm run test'),
-    ]);
-    expect(signals.retryArc).toBe(true);
-  });
+  it('uses the shell response error key rather than parsing output text', () => {
+    expect(
+      detect([
+        toolError('run_shell_command', shellOutput('npm test', 2)),
+        toolOk('run_shell_command', shellOutput('npm test', 0)),
+      ]).retryArc,
+    ).toBe(true);
+    expect(
+      detect([
+        toolOk('run_shell_command', shellOutput('grep foo', 1)),
+        toolOk('run_shell_command', shellOutput('grep bar', 0)),
+      ]).retryArc,
+    ).toBe(false);
 
-  it('does not flag failure without a later success', () => {
-    const signals = detect([
-      modelCall('run_shell_command'),
-      shellError('npm run build', 2),
-    ]);
-    expect(signals.retryArc).toBe(false);
-  });
-
-  it('does not flag success-then-failure (order matters)', () => {
-    const signals = detect([
-      modelCall('run_shell_command'),
-      shellOk('npm run build'),
-      modelCall('run_shell_command'),
-      shellError('npm run build', 1),
-    ]);
-    expect(signals.retryArc).toBe(false);
-  });
-
-  it('treats a whitelisted exit-1 without an error key (e.g. grep) as success', () => {
-    // shell.ts deliberately reports grep/rg/diff/test exit-1 without an
-    // `error` key; the classifier must follow that semantics, so a no-match
-    // grep followed by any successful shell call opens no retry arc.
-    const signals = detect([
-      modelCall('run_shell_command'),
-      shellOk('grep -r foo src', 1),
-      modelCall('run_shell_command'),
-      shellOk('grep -r bar src'),
-    ]);
-    expect(signals.retryArc).toBe(false);
-  });
-
-  it('ignores a status-shaped block embedded in successful command output', () => {
-    // A successful command (no `error` key) whose stdout embeds a shell
-    // transcript with `Exit Code: 1` is still a success — and closes a
-    // pending genuine failure arc.
-    const embedded = [
+    const embeddedStatus = [
       'Command: cat transcript.log',
       'Output: Exit Code: 1',
-      'Signal: (none)',
       'Exit Code: 0',
-      'Signal: (none)',
     ].join('\n');
-    const signals = detect([
-      modelCall('run_shell_command'),
-      shellError('npm run test', 2),
-      modelCall('run_shell_command'),
-      toolOk('run_shell_command', embedded),
-    ]);
-    expect(signals.retryArc).toBe(true);
-
-    const noArc = detect([
-      modelCall('run_shell_command'),
-      toolOk('run_shell_command', embedded),
-    ]);
-    expect(noArc.retryArc).toBe(false);
+    expect(
+      detect([
+        toolError('run_shell_command', shellOutput('npm test', 2)),
+        toolOk('run_shell_command', embeddedStatus),
+      ]).retryArc,
+    ).toBe(true);
   });
 
-  // Substantive work is latched by recordCompletedToolCall via
-  // isSubstantiveToolCall in production, not from history scanning, so these
-  // pin the classifier directly.
-  it('marks write/edit/notebook/shell calls as substantive work', () => {
-    for (const name of [
-      'write_file',
-      'edit',
-      'notebook_edit',
-      'run_shell_command',
-    ]) {
-      expect(isSubstantiveToolCall(name)).toBe(true);
-    }
+  it.each(NEUTRAL_ERRORS)(
+    'treats %s as unknown without losing a pending failure',
+    (_label, error) => {
+      expect(
+        accumulateExperienceSignals([toolError('write_file', error)])
+          .failedToolNames,
+      ).toEqual(new Set());
+
+      const pending = accumulateExperienceSignals([
+        toolError('write_file'),
+        toolError('write_file', error),
+      ]);
+      expect(pending.retryArc).toBe(false);
+      expect(pending.failedToolNames).toEqual(new Set(['write_file']));
+
+      expect(
+        accumulateExperienceSignals([toolOk('write_file')], pending).retryArc,
+      ).toBe(true);
+    },
+  );
+
+  it('carries pending failures across separately scanned fragments', () => {
+    const pending = accumulateExperienceSignals([toolError('read_file')]);
+    expect(
+      accumulateExperienceSignals([toolOk('read_file')], pending).retryArc,
+    ).toBe(true);
   });
 
-  it('marks MCP and other dynamically named tools as substantive work', () => {
-    expect(isSubstantiveToolCall('mcp__github__create_issue')).toBe(true);
-    expect(isSubstantiveToolCall('agent')).toBe(true);
+  it('canonicalizes tool names in retry arcs', () => {
+    expect(detect([toolError('replace'), toolOk('edit')]).retryArc).toBe(true);
   });
 
-  it('does not mark read-only sessions as substantive work', () => {
-    const signals = detect([
-      toolOk('read_file'),
-      toolOk('list_directory'),
-      toolOk('grep_search'),
-    ]);
-    expect(signals).toEqual({ retryArc: false, hasSubstantiveWork: false });
-  });
-
-  // Pin every member of the read-only set: dropping one would let a pure
-  // polling/research window satisfy the substantive-work backstop.
-  it.each([
-    ToolNames.READ_FILE,
-    ToolNames.ZOOM_IMAGE,
-    ToolNames.GREP,
-    ToolNames.GLOB,
-    ToolNames.LS,
-    ToolNames.WEB_FETCH,
-    ToolNames.WEB_SEARCH,
-    ToolNames.LSP,
-    ToolNames.TOOL_SEARCH,
-    ToolNames.READ_MCP_RESOURCE,
-    ToolNames.GET_GOAL,
-    ToolNames.LIST_AGENTS,
-    ToolNames.TASK_LIST,
-    ToolNames.CRON_LIST,
-    ToolNames.DISPLAY_IMAGE,
-    ToolNames.ENTER_PLAN_MODE,
-    ToolNames.EXIT_PLAN_MODE,
-    ToolNames.ASK_USER_QUESTION,
-    ToolNames.UPDATE_GOAL,
-    ToolNames.LOOP_WAKEUP,
-    ToolNames.STRUCTURED_OUTPUT,
-  ])('treats %s as read-only (not substantive work)', (name) => {
-    expect(isSubstantiveToolCall(name)).toBe(false);
-  });
-
-  it('resolves legacy aliases via canonicalToolName', () => {
-    // `replace` is the legacy alias of `edit`.
-    expect(isSubstantiveToolCall('replace')).toBe(true);
-    // An arc opened under the alias is closed by a success under the
-    // canonical name.
-    const signals = detect([
-      toolError('replace'),
-      modelCall('edit'),
-      toolOk('edit'),
-    ]);
-    expect(signals.retryArc).toBe(true);
-  });
-
-  it('ignores cancelled-tool responses instead of seeding a failure', () => {
-    const signals = detect([
-      modelCall('run_shell_command'),
-      cancelledResult('run_shell_command'),
-      modelCall('run_shell_command'),
-      shellOk('npm run build'),
-    ]);
-    expect(signals.retryArc).toBe(false);
-  });
-
-  it('ignores interrupted-turn orphan repair responses', () => {
-    const signals = detect([
-      modelCall('write_file'),
-      orphanRepairResult('write_file'),
-      modelCall('write_file'),
-      toolOk('write_file'),
-    ]);
-    expect(signals.retryArc).toBe(false);
-  });
-
-  it.each([
-    ['plan-mode sibling skip', planSiblingSkipResult],
-    ['permission declined', permissionDeclinedResult],
-  ])(
-    'ignores never-executed policy denials (%s) instead of seeding a failure',
-    (_label, marker) => {
-      // The tool was never attempted, so the denial must not open a retry
-      // arc that the model's post-approval retry would close.
-      const signals = detect([
-        modelCall('write_file'),
-        marker('write_file'),
-        modelCall('write_file'),
+  it('never derives substantive work from response history', () => {
+    expect(
+      detect([
+        toolError('write_file'),
         toolOk('write_file'),
-      ]);
-      expect(signals.retryArc).toBe(false);
-    },
-  );
-
-  it.each([
-    ['plan-mode sibling skip', planSiblingSkipResult],
-    ['permission declined', permissionDeclinedResult],
-  ])(
-    'does not let a never-executed policy denial (%s) close a pending genuine failure arc',
-    (_label, marker) => {
-      const signals = detect([
-        modelCall('run_shell_command'),
-        shellError('npm run test', 2),
-        marker('run_shell_command'),
-        modelCall('run_shell_command'),
-        shellOk('npm run test'),
-      ]);
-      expect(signals.retryArc).toBe(true);
-    },
-  );
-
-  it.each([
-    ['plan-mode sibling skip', planSiblingSkipResult],
-    ['permission declined', permissionDeclinedResult],
-  ])(
-    'does not treat a never-executed policy denial (%s) as recovery from a genuine failure',
-    (_label, marker) => {
-      // The denial is unknown, not success: without a later real success
-      // the arc stays open and no retry signal is produced.
-      const signals = detect([
-        modelCall('run_shell_command'),
-        shellError('npm run test', 2),
-        marker('run_shell_command'),
-      ]);
-      expect(signals.retryArc).toBe(false);
-    },
-  );
-
-  it('does not let a synthesized marker close a pending genuine failure arc', () => {
-    // A cancelled/repair response is unknown, not success: the pending arc
-    // stays open until a real success closes it.
-    for (const marker of [cancelledResult, orphanRepairResult]) {
-      const signals = detect([
-        modelCall('run_shell_command'),
-        shellError('npm run test', 2),
-        marker('run_shell_command'),
-        modelCall('run_shell_command'),
-        shellOk('npm run test'),
-      ]);
-      expect(signals.retryArc).toBe(true);
-    }
-  });
-
-  it('does not treat a synthesized marker as recovery from a genuine failure', () => {
-    // Symmetric discriminator: without a later real success the marker must
-    // yield retryArc false — classifying it as success (`false`) instead of
-    // unknown (`null`) would close the arc and flip this to true.
-    for (const marker of [cancelledResult, orphanRepairResult]) {
-      const signals = detect([
-        modelCall('run_shell_command'),
-        shellError('npm run test', 2),
-        marker('run_shell_command'),
-      ]);
-      expect(signals.retryArc).toBe(false);
-    }
-  });
-
-  it('does not treat an unparseable shell response as failure', () => {
-    // Pins the classifier semantics, not just the downstream flag: an
-    // output-only response (no `error` key) classifies as success and must
-    // never seed failedToolNames, even when its text is unparseable.
-    const { failedToolNames } = accumulateExperienceSignals([
-      toolOk('run_shell_command', 'Exit Code: (none)'),
-    ]);
-    expect(failedToolNames.size).toBe(0);
-  });
-
-  it('keeps a pending failure across separately scanned fragments', () => {
-    const failed = accumulateExperienceSignals([toolError('read_file')]);
-    const recovered = accumulateExperienceSignals(
-      [toolOk('read_file')],
-      failed,
-    );
-
-    expect(recovered.retryArc).toBe(true);
+        toolError('edit', NEUTRAL_ERRORS[3][1]),
+        toolError('run_shell_command', NEUTRAL_ERRORS[0][1]),
+      ]).hasSubstantiveWork,
+    ).toBe(false);
   });
 });
 
-describe('hasExperienceSignal', () => {
-  it('is false when neither signal is set', () => {
-    const signals: ExperienceSignals = {
-      retryArc: false,
-      userSteer: false,
-      hasSubstantiveWork: true,
-    };
-    expect(hasExperienceSignal(signals)).toBe(false);
+describe('isSubstantiveToolCall', () => {
+  it.each([
+    ToolNames.WRITE_FILE,
+    ToolNames.EDIT,
+    ToolNames.NOTEBOOK_EDIT,
+    ToolNames.SHELL,
+    'replace',
+  ])('counts %s', (name) => {
+    expect(isSubstantiveToolCall(name)).toBe(true);
   });
 
-  it.each(['retryArc', 'userSteer'] as const)('is true with %s', (key) => {
-    const signals: ExperienceSignals = {
-      retryArc: false,
-      userSteer: false,
-      hasSubstantiveWork: false,
-      [key]: true,
-    };
-    expect(hasExperienceSignal(signals)).toBe(true);
+  it.each([
+    ToolNames.READ_FILE,
+    ToolNames.GREP,
+    ToolNames.TODO_WRITE,
+    'search_file_content',
+    'mcp__github__create_issue',
+    'agent',
+    'unknown_tool',
+  ])('does not count %s', (name) => {
+    expect(isSubstantiveToolCall(name)).toBe(false);
   });
 });

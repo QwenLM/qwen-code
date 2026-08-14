@@ -84,6 +84,7 @@ export {
 /** @internal */
 export {
   didToolCallProduceWork,
+  SUPPRESSED_SIBLING_SKIP_PREFIX,
   operationCancelledErrorMessage,
   OPERATION_CANCELLED_PREFIX,
   PERMISSION_DECLINED_MESSAGE_PREFIX,

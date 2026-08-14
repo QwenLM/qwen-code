@@ -4218,24 +4218,8 @@ export const useGeminiStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
-        // Even though the wire-side submission is dropped, the tool DID
-        // run locally — `toolCallCount` and `skillsModifiedInSession`
-        // must reflect that. Without this, deduped skill-write tools
-        // (e.g. write_file under a project SKILLS path) would silently
-        // skip the `skillsModifiedInSession` flip that gates the
-        // skills-reload prompt at end-of-turn. Mirrors the
-        // `recordCompletedToolCall` loop below over `geminiTools` —
-        // filter to the same shape (non-client-initiated) so client
-        // tools (which the original loop also skipped) stay skipped.
-        //
-        // Tools that never produced work are skipped: `dedupedTools`
-        // includes anything in a terminal state (success | error |
-        // cancelled), but a pre-completion cancellation or a never-executed
-        // policy denial (`not_started`) means the tool never actually ran,
-        // so it must not inflate `toolCallCount` or flip
-        // `skillsModifiedInSession`. An AFTER-completion cancellation still
-        // counts: its side effects already landed (e.g. a skill write that
-        // is on disk must flip `skillsModifiedInSession`).
+        // Dropped wire results still count when local side effects landed;
+        // use the same client-tool and never-ran filters as the main loop.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
           if (
@@ -4654,12 +4638,7 @@ export const useGeminiStream = (
       }
 
       for (const toolCall of geminiTools) {
-        // Skip tools that never produced work, matching the dedup branch
-        // above: a pre-completion cancellation or a never-executed policy
-        // denial must not inflate `toolCallCount` or flip
-        // `hasSubstantiveWork` for the skill-review window. An
-        // after-completion cancellation still counts — its side effects
-        // (e.g. a skill write) already landed.
+        // Keep the skill-review window limited to calls that actually ran.
         if (
           !didToolCallProduceWork({
             status: toolCall.status,
