@@ -502,7 +502,11 @@ describe('qwen-autofix workflow', () => {
         const sel = seg.slice(0, 400);
         return (
           !/startswith\("review-address"\)/.test(sel) &&
-          !/!= "Qwen Autofix"/.test(sel)
+          !/!= "Qwen Autofix"/.test(sel) &&
+          // The review-in-flight gate (#8888) selects BY NAME for the LLM
+          // review check — a liveness probe, not a feedback selector, so it
+          // needs neither the review-address carve-out nor the workflow guard.
+          !/== "review-pr"/.test(sel)
         );
       });
     expect(guardlessSelectors).toEqual([]);
@@ -556,6 +560,9 @@ describe('qwen-autofix workflow', () => {
       '.github/workflows/qwen-code-pr-review.yml',
       'utf8',
     );
+    expect(reviewWorkflow.split('\n')[0]).toBe(
+      "name: '🧐 Qwen Pull Request Review'",
+    );
     for (const name of nonBlocking) {
       expect(reviewWorkflow).toContain(`\n  ${name}:\n`);
     }
@@ -602,6 +609,212 @@ describe('qwen-autofix workflow', () => {
     expect(run([llm, build])).toBe('true');
     // Unchanged: the branch-mutating sibling in the same workflow still blocks.
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
+  });
+
+  it('holds a round while review-pr is in flight on the head (#8888)', () => {
+    // Every head mutation the scan can make (a stale-base update-branch, an
+    // address push) is a synchronize event that cancels the in-flight review
+    // via qwen-code-pr-review.yml's cancel-in-progress, discarding up to ~3h
+    // of review work — the self-reinforcing cancellation loop of PR #8830.
+    // The gate skips the PR entirely while review-pr is live on its head; the
+    // watermark is not advanced on the skip, so the feedback stays visible.
+    // It is deliberately separate from HAS_PENDING_CHECKS (no aging out, no
+    // NON_BLOCKING_CHECKS revert — that would re-block on the conclusion and
+    // reintroduce #7416's wait).
+    expect(reviewScanJob).toContain('REVIEW_PR_LIVE=');
+    expect(reviewScanJob).toContain(
+      'review-pr in flight on this head — holding this round',
+    );
+    expect(reviewScanJob).toContain('fleet_row "${PR}" \'review-in-flight\'');
+    // The gate must sit BEFORE the stale-base update (a merge-main is exactly
+    // the push that killed two reviews on #8830) and the feedback dispatch.
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('Auto-rerun a check that died on INFRASTRUCTURE'),
+    );
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('Auto-update a PR that is red ONLY'),
+    );
+    expect(reviewScanJob.indexOf('REVIEW_PR_LIVE=')).toBeLessThan(
+      reviewScanJob.indexOf('N_FAILED_CHECKS='),
+    );
+    expect(
+      reviewScanJob.lastIndexOf('if [[ "${REVIEW_PR_LIVE}" == "true" ]]'),
+    ).toBeGreaterThan(reviewScanJob.indexOf('if [[ "${ROUND}" -ge'));
+
+    // Replay the REAL extracted liveness filter over rollup fixtures.
+    const filter = reviewScanJob.match(
+      /REVIEW_PR_LIVE="\$\(jq -r[\s\S]*?<<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(filter).toBeTruthy();
+    const run = (checks) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CHECKS_JSON='${JSON.stringify(checks)}'\n${filter}\nprintf '%s' "$REVIEW_PR_LIVE"`,
+        ],
+        { env: { ...process.env }, encoding: 'utf8' },
+      );
+    const started = '2026-08-10T10:05:49Z';
+    // A live review-pr blocks — in every pending-ish status the rollup uses.
+    for (const status of [
+      'QUEUED',
+      'IN_PROGRESS',
+      'PENDING',
+      'WAITING',
+      'REQUESTED',
+    ]) {
+      expect(
+        run([
+          {
+            name: 'review-pr',
+            workflowName: '🧐 Qwen Pull Request Review',
+            status,
+            startedAt: started,
+          },
+        ]),
+      ).toBe('true');
+    }
+    expect(
+      run([
+        {
+          name: 'review-pr',
+          workflowName: 'Other',
+          status: 'IN_PROGRESS',
+        },
+      ]),
+    ).toBe('false');
+    // A concluded review does NOT block (that would reintroduce #7416's wait).
+    expect(
+      run([
+        {
+          name: 'review-pr',
+          workflowName: '🧐 Qwen Pull Request Review',
+          status: 'COMPLETED',
+          conclusion: 'SUCCESS',
+        },
+      ]),
+    ).toBe('false');
+    // Other checks in flight are this gate's business as usual — not live.
+    expect(
+      run([{ name: 'Test (ubuntu-latest, Node 22.x)', status: 'IN_PROGRESS' }]),
+    ).toBe('false');
+
+    // Delay-window fallback: during the review workflow's 10-minute delay the
+    // review-pr check-run does not exist yet, so the rollup alone misses it;
+    // the scan falls back to queued runs of the review workflow by head SHA.
+    expect(reviewScanJob).toContain('REVIEW_WF_ID=');
+    expect(reviewScanJob).toContain(
+      'actions/workflows/${REVIEW_WF_ID}/runs?per_page=100',
+    );
+    expect(reviewScanJob).not.toContain(
+      'REVIEW_RUNS_JSON="$(gh api --paginate',
+    );
+    expect(reviewScanJob).toContain(
+      'IN("queued", "waiting", "pending", "requested", "in_progress")',
+    );
+    expect(reviewScanJob).not.toContain(
+      "grep -qE '^(queued|waiting|pending)$'",
+    );
+    expect(reviewScanJob).toContain('REVIEW_RUN_STARTED_AT=');
+    expect(reviewScanJob).toContain('.run_started_at // .created_at');
+    expect(reviewScanJob).toContain('any(.pull_requests[]?');
+    expect(reviewScanJob).toContain(
+      'select((.event // "") == "pull_request_target")',
+    );
+
+    // Replay the REAL runs-API fallback filter over fixtures (R1-8): the
+    // toContain pins above would still pass if the jq body were dead.
+    const runsFilter = reviewScanJob.match(
+      /REVIEW_RUN_STARTED_AT="\$\(jq -r[\s\S]*?<<< "\$\{REVIEW_RUNS_JSON\}"\)"/,
+    )?.[0];
+    expect(runsFilter).toBeTruthy();
+    const runRuns = (runs) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `REVIEW_WF_ID='77' PR='42' PR_HEAD_OID='abc123'\nREVIEW_RUNS_JSON='${JSON.stringify(runs)}'\n${runsFilter}\nprintf '%s' "$REVIEW_RUN_STARTED_AT"`,
+        ],
+        { env: { ...process.env }, encoding: 'utf8' },
+      );
+    const runs = (...overrides) => ({
+      workflow_runs: overrides.map((o) => ({
+        workflow_id: 77,
+        event: 'pull_request_target',
+        status: 'in_progress',
+        head_sha: 'abc123',
+        head_branch: 'feat/x',
+        run_started_at: '2026-08-13T01:00:00Z',
+        pull_requests: [],
+        ...o,
+      })),
+    });
+    // A live automatic review on the head blocks — every pending-ish status
+    // the runs API uses, including requested/in_progress (R2-2).
+    for (const status of [
+      'queued',
+      'waiting',
+      'pending',
+      'requested',
+      'in_progress',
+    ]) {
+      expect(runRuns(runs({ status }))).toBe('2026-08-13T01:00:00Z');
+    }
+    // An explicit-trigger run is NOT cancelable by synchronize — no hold (R2-1).
+    expect(runRuns(runs({ event: 'issue_comment' }))).toBe('');
+    // A run of another workflow id never blocks (R2-1 binding).
+    expect(runRuns(runs({ workflow_id: 99 }))).toBe('');
+    // A concluded run does not block.
+    expect(runRuns(runs({ status: 'completed' }))).toBe('');
+    // A fork-controlled bare branch name alone is not identity.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'other',
+          head_branch: 'feat/x',
+          pull_requests: [],
+        }),
+      ),
+    ).toBe('');
+    // Immutable head SHA alone is still enough.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'abc123',
+          head_branch: 'other',
+          pull_requests: [],
+        }),
+      ),
+    ).toBe('2026-08-13T01:00:00Z');
+    // Matching also works via pull_requests association, not only head SHA.
+    expect(
+      runRuns(
+        runs({
+          head_sha: 'other',
+          head_branch: 'other',
+          pull_requests: [{ number: 42 }],
+        }),
+      ),
+    ).toBe('2026-08-13T01:00:00Z');
+
+    // Ack-on-defer: a real-time HUMAN review that the gate defers gets one
+    // visible acknowledgment per in-flight review run (marker keyed on the
+    // review-pr check's startedAt); the review bot's own findings never ack.
+    expect(reviewScanJob).toContain('"${REVIEW_SENDER}" != "${REVIEW_BOT}"');
+    expect(reviewScanJob).toContain('autofix-review-deferred');
+    expect(reviewScanJob).toContain('select((.user.login // "") == $ab)');
+    expect(reviewScanJob).toContain(
+      '[[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"',
+    );
+    expect(workflow).toContain(
+      "review_sender: '${{ github.event.review.user.login }}'",
+    );
+    // An empty startedAt must skip the ack, not arm an always-matching marker.
+    expect(reviewScanJob).toContain('select(. != "") ] | first // ""');
+    expect(reviewScanJob).toContain(
+      'has no startedAt yet (queued); a later scan acks once it starts',
+    );
   });
 
   it('auto-updates a PR red only from a stale base, gated on green-on-main', () => {
@@ -1030,6 +1243,7 @@ describe('qwen-autofix workflow', () => {
       rerunOk = true,
       crName = 'E2E',
       wfName = 'CI',
+      reviewLive = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'infra-'));
       const bin = join(dir, 'bin');
@@ -1076,6 +1290,7 @@ describe('qwen-autofix workflow', () => {
             PR: '1',
             PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
             PR_HEAD_OID: 'headSHA',
+            REVIEW_PR_LIVE: reviewLive ? 'true' : 'false',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
@@ -1109,6 +1324,16 @@ describe('qwen-autofix workflow', () => {
       run({
         checks: [FAIL],
         annotations: 'Expected 1 argument but got 2 — src/foo.ts:10',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // A live review-pr must win: rerunning review-address can push and cancel
+    // that review, so the infra recovery waits for the next scan.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          'The self-hosted runner lost communication with the server',
+        reviewLive: true,
       }),
     ).toEqual({ reran: false, continued: false });
     // Already reran once (attempt 2) and still infra-failing → persistent, do
@@ -2692,14 +2917,16 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(9) green.
-    expect(workflow.split('--paginate').length - 1).toBe(14);
+    expect(workflow.split('--paginate').length - 1).toBe(15);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback = nine normalized fetch sites. The
     // blocked-takeover status lookup is deliberately NOT among them: like the
     // sibling STATUS_ID read, it consumes the page stream inline via
     // `--jq ... | .id` into `tail -1` and never lands in a WORKDIR json file,
     // so piping it through `jq -s 'add // []'` would wrap the id stream in an
-    // array and break the tail-1 consumer.
+    // array and break the tail-1 consumer. The #8888 deferred-review ack
+    // dedup is the same class: `--jq '.[].body'` feeds a grep, never a
+    // WORKDIR file, so it bumps the total pin but not the normalizer count.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(9);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -13341,27 +13568,13 @@ describe('run-agent idle watchdog', () => {
     expect(r.agentLog.length).toBe(2_097_152);
   });
 
-  it('ignores a non-positive or non-numeric QWEN_IDLE_TIMEOUT_MS instead of arming it', () => {
-    // Number('-1') is truthy, so a bare `|| default` guard would arm a
-    // negative window: Date.now() - lastOutputAt >= -1 is instantly true
-    // and every agent dies at the first idle tick. `0` (an operator's
-    // "disable") arms a zero-length window that is true at the first tick,
-    // and NaN arms one too — every rejection class named in the parse
-    // guard's comment must fall back to the default.
-    for (const idleMs of [-1, 0, Number.NaN]) {
-      const r = runAgent({
-        stub: [
-          '#!/bin/bash',
-          'for i in $(seq 1 8); do echo "tick $i"; sleep 0.4; done',
-          'echo summary > "${AGENT_WORKDIR}/address-summary.md"',
-          'echo done',
-          'exit 0',
-        ].join('\n'),
-        idleMs,
-      });
-      expect(r.status).toBe(0);
-      expect(r.failure).toBe('');
-    }
+  it('keeps idle timeout validation finite and positive', () => {
+    expect(readFileSync(autofixRunnerScriptPath, 'utf8')).toContain(`
+const QWEN_IDLE_TIMEOUT_MS =
+  Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
+    ? parsedIdleTimeoutMs
+    : 20 * 60 * 1000;
+`);
   });
 });
 

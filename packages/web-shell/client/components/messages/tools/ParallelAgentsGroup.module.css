@@ -53,13 +53,6 @@
   display: block;
 }
 
-.summaryStatus {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  line-height: 1;
-}
-
 .summaryToolIcon {
   width: 14px;
   height: 14px;
