@@ -16,10 +16,10 @@ export type RendererId = 'ink' | 'opentui';
 
 export const RENDERER_ENV_VAR = 'QWEN_TUI_RENDERER';
 
-// Ink remains the default until the OpenTUI TUI reaches feature parity, so the
-// real CLI stays fully usable (same as qwen-code today). OpenTUI is the new
-// renderer, selectable via `QWEN_TUI_RENDERER=opentui`; it becomes the default
-// (and ink is removed) in the release commit after parity + regression.
+// OpenTUI is the default renderer; ink remains available as the fallback via
+// `QWEN_TUI_RENDERER=ink` (and is selected automatically when the OpenTUI
+// runtime probe fails, e.g. no FFI). Ink is removed in the release commit
+// after parity + regression.
 export const DEFAULT_RENDERER: RendererId = 'opentui';
 
 export const EXPERIMENTAL_RENDERER: RendererId = 'opentui';

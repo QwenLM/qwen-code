@@ -51,7 +51,6 @@ import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth } from '../utils/textUtils.js';
 import { readFileSync } from 'node:fs';
 import nodePath from 'node:path';
-import { execSync } from 'node:child_process';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   livePromptEvents,
@@ -73,8 +72,21 @@ import {
   type MountedDialog,
 } from './command-bridge.js';
 import { OpenTuiDialogMount } from './dialog-mount.js';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import type { SlashCommand } from '../commands/types.js';
+import {
+  createExitGuard,
+  exitGuardHint,
+  type ExitGuard,
+} from './exit-guard.js';
+import { exitSession, EXIT_CODE_INTERRUPT } from './exit-lifecycle.js';
+import {
+  setupUpdateNotifications,
+  type UpdateNotificationHandle,
+} from './post-render.js';
+import { injectCapturedInput } from './early-input.js';
+import { useGitBranchName } from '../hooks/useGitBranchName.js';
+import { buildQuitFarewellForConfig } from './quit-farewell.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -563,12 +575,26 @@ function buildBanner(config: Config | undefined, width: number) {
 function App({
   events,
   config,
+  settings: settingsProp,
+  initialCapturedInput,
 }: {
   events?: AsyncIterable<OpenTuiStreamEvent>;
   config?: Config;
+  settings?: LoadedSettings;
+  /** Keystrokes captured during startup, injected into the composer. */
+  initialCapturedInput?: string;
 }) {
   const renderer = useRenderer();
   const { width } = useTerminalDimensions();
+  // The directory this session operates on. `config.getTargetDir()` (not
+  // `process.cwd()`) so worktree/--cd sessions show the right path.
+  const targetDir = useMemo(
+    () => config?.getTargetDir() ?? process.cwd(),
+    [config],
+  );
+  // Cached git branch (useGitBranchName parity): reads .git directly with a
+  // watcher + poll instead of a synchronous `git` subprocess on every render.
+  const gitBranch = useGitBranchName(targetDir);
   const [items, setItems] = useState<LiveHistoryItem[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
@@ -600,6 +626,18 @@ function App({
   const [_toast, setToast] = useState<string | null>(null);
   const [, setThemeTick] = useState(0);
   const [dialog, setDialog] = useState<MountedDialog | null>(null);
+  // Two-press exit confirmation (ink useDoublePress parity). The hint is the
+  // footer warning shown while a confirmation window is armed.
+  const [exitHint, setExitHint] = useState<string | null>(null);
+  const exitGuardRef = useRef<ExitGuard | null>(null);
+  if (!exitGuardRef.current) {
+    exitGuardRef.current = createExitGuard({
+      onWindowExpired: () => setExitHint(null),
+    });
+  }
+  // Update-check notification surfaced in the footer (post-render prefetch
+  // consumption surface; previously went nowhere in the OpenTUI tree).
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode | undefined>(
     () => config?.getApprovalMode(),
@@ -622,11 +660,14 @@ function App({
   const [commandProcessing, setCommandProcessing] = useState(false);
   const commandProcessingRef = useRef(false);
 
-  // The real settings stack (the opentui entry only receives `config`),
-  // feeding the command services and the settings/theme/permissions dialogs.
+  // The real settings stack, feeding the command services and the
+  // settings/theme/permissions dialogs. The entry passes its loaded settings
+  // through so window title / prefetches / dialogs share one instance; fall
+  // back to loading here when the backend is mounted without them (demo).
   const settings = useMemo(
-    () => loadSettings(config?.getWorkingDir() ?? process.cwd()),
-    [config],
+    () =>
+      settingsProp ?? loadSettings(config?.getWorkingDir() ?? process.cwd()),
+    [settingsProp, config],
   );
 
   // Live light/dark theme switching (OSC 10/11 + mode 2031 updates).
@@ -886,6 +927,42 @@ function App({
     return () => clearTimeout(t);
   }, [config]);
 
+  // Early-input injection (startInteractiveUI initialCapturedInput parity):
+  // keystrokes captured during startup are placed into the composer once it
+  // attaches, instead of being dropped on the floor.
+  useEffect(() => {
+    if (!initialCapturedInput) return;
+    return injectCapturedInput(
+      () => composerHandle.current,
+      initialCapturedInput,
+    );
+  }, [initialCapturedInput]);
+
+  // Update-check notification consumption surface (post-render prefetch
+  // parity): surface startup update notices in the footer. Notices arriving
+  // mid-turn are deferred and flushed when the turn settles.
+  const updateIsIdleRef = useRef({ current: true });
+  const updateHandleRef = useRef<UpdateNotificationHandle | null>(null);
+  useEffect(() => {
+    const handle = setupUpdateNotifications((item) => {
+      const text = 'text' in item ? String(item.text) : '';
+      if (text) setUpdateNotice(text);
+    }, updateIsIdleRef.current);
+    updateHandleRef.current = handle;
+    return () => {
+      handle.dispose();
+      updateHandleRef.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const idle = !(streaming || commandProcessing);
+    updateIsIdleRef.current.current = idle;
+    if (idle) updateHandleRef.current?.flush();
+  }, [streaming, commandProcessing]);
+
+  // Dispose the exit-guard timer on unmount.
+  useEffect(() => () => exitGuardRef.current?.dispose(), []);
+
   // Approval-mode switch (Shift+Tab / dialog): cycling includes PLAN (core
   // approval-mode.ts order), and switching into YOLO/AUTO_EDIT auto-confirms
   // still-waiting calls with ProceedOnce (useGeminiStream
@@ -913,7 +990,92 @@ function App({
     }
   };
 
+  // Graceful quit: abort any in-flight turn, signal the client to skip
+  // background memory work, then drain the shared exit-cleanup chain (chat
+  // recording flush, config.shutdown(), usage persist, farewell echo) before
+  // exiting. Replaces the old `renderer.destroy()+process.exit(0)` shortcut
+  // that skipped every cleanup step.
+  const quitOpenTui = useCallback(
+    (code: number) => {
+      liveAbortRef.current?.abort();
+      liveAbortRef.current = null;
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      try {
+        config?.getGeminiClient()?.requestShutdown();
+      } catch {
+        // Best-effort: shutting down the client must not block exit.
+      }
+      void exitSession(code);
+    },
+    [config],
+  );
+
+  // Two-press exit guard (ink handleExit parity). The first press closes an
+  // open dialog, cancels an in-flight turn, or clears input; only a bare idle
+  // prompt arms the confirmation window. A second press inside the window
+  // quits through the cleanup drain. Ctrl+D with content is a no-op (ink).
+  const handleExitGuardKey = (exitKey: 'ctrl-c' | 'ctrl-d') => {
+    const composerText = composerHandle.current?.getText() ?? '';
+    // ink Ctrl+D parity: a non-empty buffer is a hard no-op, checked before
+    // anything else — it never closes a dialog, cancels a stream, or exits,
+    // so unsent input is never destroyed by a stray Ctrl+D.
+    if (exitKey === 'ctrl-d' && composerText.length > 0) {
+      return;
+    }
+    if (questionReq) {
+      qAnswersRef.current = {};
+      setQuestionReq(null);
+      questionReq.resolve(null);
+      return;
+    }
+    if (confirmReq) {
+      confirmReq.resolve(false);
+      setConfirmReq(null);
+      return;
+    }
+    if (dialog) {
+      setDialog(null);
+      return;
+    }
+    if (streamingRef.current || commandProcessingRef.current) {
+      // Cancel the in-flight work first; the next press can then arm exit.
+      if (commandProcessingRef.current) {
+        gateway.cancel();
+      } else {
+        liveAbortRef.current?.abort();
+        liveAbortRef.current = null;
+        setItems((prev) => settleOpenTools(prev, 'interrupted'));
+        setStreaming(false);
+      }
+      return;
+    }
+    if (exitKey === 'ctrl-c' && composerText.length > 0) {
+      // Clear the buffer first (CLEAR_INPUT parity); exit needs a bare prompt.
+      composerHandle.current?.setText('');
+      return;
+    }
+    const guard = exitGuardRef.current;
+    if (!guard) return;
+    if (guard.press(exitKey) === 'exit') {
+      setExitHint(null);
+      quitOpenTui(EXIT_CODE_INTERRUPT);
+      return;
+    }
+    setExitHint(exitGuardHint(exitKey));
+  };
+
   useKeyboard((key) => {
+    if (key.name === 'c' && key.ctrl) {
+      handleExitGuardKey('ctrl-c');
+      return;
+    }
+    if (key.name === 'd' && key.ctrl) {
+      handleExitGuardKey('ctrl-d');
+      return;
+    }
     if (questionReq) {
       const q = questionReq.questions[qNav.q];
       const optCount = (q?.options.length ?? 0) + 1; // + "Other"
@@ -1003,16 +1165,6 @@ function App({
         confirmReq.resolve(false);
         setConfirmReq(null);
       }
-      return;
-    }
-    if (key.name === 'c' && key.ctrl) {
-      renderer.destroy();
-      setTimeout(() => process.exit(0), 100);
-      return;
-    }
-    if (key.name === 'd' && key.ctrl) {
-      renderer.destroy();
-      setTimeout(() => process.exit(0), 100);
       return;
     }
     if (key.name === 'l' && key.ctrl) {
@@ -1312,18 +1464,32 @@ function App({
           });
           return;
         }
-        case 'quit':
+        case 'quit': {
+          // Render the farewell (goodbye + real session wall time + resume
+          // hint) into the transcript, mirroring ink's QuittingDisplay, then
+          // quit through the cleanup drain. The exit cleanup echoes the same
+          // farewell to stdout so it survives the renderer teardown.
+          const farewell = config
+            ? buildQuitFarewellForConfig(
+                config,
+                userPrompts.length > 0,
+                uiTelemetryService.getSessionStartTime(),
+              )
+            : null;
+          if (farewell) {
+            applyEvent({ type: 'text', delta: farewell.join('\n') });
+          }
           applyEvent({ type: 'done' });
-          renderer.destroy();
-          setTimeout(() => process.exit(0), 100);
+          quitOpenTui(0);
           return;
+        }
         case 'unsupported':
           applyEvent({ type: 'text', delta: action.message });
           applyEvent({ type: 'done' });
           return;
       }
     },
-    [applyEvent, config, renderer, startLiveTurn],
+    [applyEvent, config, quitOpenTui, startLiveTurn, userPrompts],
   );
 
   const submitText = useCallback(
@@ -1395,17 +1561,8 @@ function App({
   const banner = buildBanner(config, width);
 
   // footer (mirrors original Footer): project · git · model + approval mode
-  const footerProject = nodePath.basename(process.cwd());
-  let footerBranch = '';
-  try {
-    footerBranch = execSync('git rev-parse --abbrev-ref HEAD', {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .toString()
-      .trim();
-  } catch {
-    footerBranch = '';
-  }
+  const footerProject = nodePath.basename(targetDir);
+  const footerBranch = gitBranch ?? '';
   const fm = (
     config as unknown as { getModel?: () => unknown } | undefined
   )?.getModel?.();
@@ -1672,6 +1829,8 @@ function App({
         </box>
         {/* footer */}
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+          {exitHint && <text fg={C.yellow}>{exitHint}</text>}
+          {updateNotice && <text fg={C.dim}>{updateNotice}</text>}
           <text fg={C.dim}>{footerLine1}</text>
           <box flexDirection="row">
             {(streaming || commandProcessing) && (

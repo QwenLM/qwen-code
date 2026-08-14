@@ -91,7 +91,16 @@ export async function startInteractiveUI(
     const { probeOpenTuiRuntime } = await import('./render/runtime-gate.js');
     if (probeOpenTuiRuntime().supported) {
       const { startOpenTuiUI } = await import('./render/opentui-entry.js');
-      await startOpenTuiUI({ config });
+      await startOpenTuiUI({
+        config,
+        settings,
+        postRender: {
+          connectIde: options.postRenderConnectIde ?? false,
+          initializeTelemetry:
+            options.postRenderInitializeTelemetry ??
+            config.isTelemetryInitializationDeferred(),
+        },
+      });
       return;
     }
     // fall through to ink
