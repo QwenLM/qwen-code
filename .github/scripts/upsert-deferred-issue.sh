@@ -13,7 +13,7 @@ set -uo pipefail
 # creation; every later round appends by POSTING A COMMENT — atomic and
 # append-only, so no read-modify-write can race a maintainer's edits and
 # a lost GET can never be mistaken for an empty history. Deduplication
-# reads the body plus all comments, anchored to the bullet form
+# reads the body plus the bot's own comments, anchored to the bullet form
 # "- rc:<id> " at line start (free-text mentions of an id do not count).
 
 FINDINGS="${WORKDIR}/deferred-findings.json"
@@ -54,8 +54,12 @@ if [[ -n "${ISSUE_NUM}" && "${ISSUE_NUM}" != 'null' ]]; then
     echo "::warning::could not read deferred-findings issue #${ISSUE_NUM}; skipping this round"
     exit 0
   fi
+  # Bot-authored comments only: the tracking issue is public, and an
+  # arbitrary commenter posting a line-start "- rc:<id> " bullet must not
+  # be able to permanently suppress a deferred finding from the corpus.
   if ! COMMENT_TEXT="$(gh api "repos/${REPO}/issues/${ISSUE_NUM}/comments?per_page=100" \
-    --paginate 2> /dev/null | jq -rs 'add // [] | map(.body // "") | join("\n")')"; then
+    --paginate 2> /dev/null | jq -rs --arg bot "${AUTOFIX_BOT}" \
+      'add // [] | map(select((.user.login // "") == $bot) | .body // "") | join("\n")')"; then
     echo "::warning::could not read deferred-findings comments on #${ISSUE_NUM}; skipping this round"
     exit 0
   fi

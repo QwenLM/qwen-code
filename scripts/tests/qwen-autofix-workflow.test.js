@@ -8232,6 +8232,20 @@ exit 1
       );
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
+      // bash startup channels (BASH_ENV sourced by every child bash;
+      // BASH_FUNC_*%% exported functions outrank PATH in children) and
+      // gh-side transport channels (proxy reroute, SSL_CERT_* CA re-root)
+      // are $GITHUB_ENV-plantable too — swept before the first gh call.
+      const bashSweep = step.indexOf(
+        'unset BASH_ENV ENV HTTPS_PROXY HTTP_PROXY ALL_PROXY \\',
+      );
+      expect(bashSweep).toBeGreaterThan(-1);
+      expect(bashSweep).toBeLessThan(step.indexOf(firstGh));
+      expect(step).toContain(
+        'https_proxy http_proxy all_proxy SSL_CERT_FILE SSL_CERT_DIR',
+      );
+      expect(step).toContain('BASH_FUNC_*%%');
+      expect(step).toContain('unset -f');
     }
     // The fork fetch and salvage fetch cannot recurse into a planted
     // submodule and execute an ext:: URL with the PAT (env-level
@@ -10374,7 +10388,49 @@ exit 1
     expect(
       workflow.split('bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"').length -
         1,
-    ).toBe(3);
+    ).toBe(2);
+    // Placement, not just counts: the digest-gated invocation is a step-local
+    // function defined ONCE in 'Push and report' and called immediately after
+    // resolve_and_reply_threads in BOTH arms; the failure/handoff step keeps
+    // its own gated copy.
+    expect(pushAndReportStep.split('run_deferred_upsert() {').length - 1).toBe(
+      1,
+    );
+    expect(
+      pushAndReportStep.match(
+        /resolve_and_reply_threads\n(?:\s*#[^\n]*\n)*\s*run_deferred_upsert\n/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    // The failure-path invocation sits INSIDE the DRY_RUN/STALE/token guard
+    // (deleting the guard or relocating the call would break this slice).
+    expect(reviewAddressReportStep).toMatch(
+      /if \[\[ "\$\{DRY_RUN\}" != "true" && "\$\{STALE:-\}" != "true" && -n "\$\{GITHUB_TOKEN:-\}" \]\]; then(?:(?!\n {10}fi\n)[\s\S])*upsert-deferred-issue\.sh(?:(?!\n {10}fi\n)[\s\S])*\n {10}fi\n/,
+    );
+    // Pre-stage failures leave UPSERT_SHA256 empty: that skips with a plain
+    // notice instead of imitating a tamper alarm.
+    expect(reviewAddressReportStep).toContain(
+      'deferred-findings upsert skipped: stage step never ran',
+    );
+    // The failure path can run without POST_HANDOFF's identity check
+    // (OUTCOME=fixed/noop), so it verifies the PAT identity itself.
+    expect(reviewAddressReportStep).toContain(
+      'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user',
+    );
+    expect(reviewAddressReportStep).toContain(
+      '[[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]',
+    );
+    // The failure step pins PATH to the staged trusted value (guarded for
+    // pre-stage crashes) BEFORE its digest gate runs.
+    expect(reviewAddressReportStep).toContain(
+      "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
+    );
+    const failPathPin = reviewAddressReportStep.indexOf(
+      'export PATH="${TRUSTED_PATH}"',
+    );
+    expect(failPathPin).toBeGreaterThan(-1);
+    expect(failPathPin).toBeLessThan(
+      reviewAddressReportStep.indexOf('sha256sum -c'),
+    );
     expect(workflow).toContain(
       'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
     );
@@ -10386,9 +10442,9 @@ exit 1
     );
     expect(
       workflow.split(
-        'echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+        '"${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
       ).length - 1,
-    ).toBe(3);
+    ).toBe(2);
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
       expect(step).toContain(
         "UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'",
@@ -10487,7 +10543,9 @@ exit 1
         { number: 42, body: `x\n${marker}`, pull_request: null },
       ]),
       body: 'intro\n- rc:8 `x`: dup',
-      comments: JSON.stringify([{ body: '- rc:9 `y`: in-comment' }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- rc:9 `y`: in-comment' },
+      ]),
     });
     expect(appended.calls).toContain(
       'api repos/o/r/issues/42/comments -f body=',
@@ -10606,6 +10664,47 @@ exit 1
     });
     expect(appendFail.out).toContain('could not append');
     expect(appendFail.out).toContain('NOT persisted');
+    // The dedupe corpus is BOT-authored comments only: a third party posting
+    // a line-start bullet on the public tracking issue cannot permanently
+    // suppress a deferred finding.
+    const foreign = runUpsert({
+      findings: '[{"id":9,"reason":"real"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'mallory' }, body: '- rc:9 `y`: squatted' },
+      ]),
+    });
+    expect(foreign.calls).toContain('issues/42/comments -f body=');
+    expect(foreign.calls).toContain('- rc:9 ');
+    // Intra-batch dedupe: duplicate ids collapse to one bullet.
+    const dup = runUpsert({
+      findings: '[{"id":7,"reason":"a"},{"id":7,"reason":"b"}]',
+    });
+    expect(dup.calls.split('- rc:7 ').length - 1).toBe(1);
+    expect(dup.out).toContain('(1 of 1 new)');
+    // Identity anchors: only a MARKER-carrying issue is adopted (an
+    // unrelated bot issue falls through to the create path), and the source
+    // pins the creator= authorship filter the stub cannot observe.
+    const markerless = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([
+        { number: 41, body: 'no marker here', pull_request: null },
+      ]),
+    });
+    expect(markerless.calls).toContain('-f title=');
+    expect(markerless.calls).not.toContain('issues/41/comments');
+    expect(upsertDeferredScript).toContain('creator=${AUTOFIX_BOT}');
+    expect(upsertDeferredScript).toContain('contains($m)');
+    // Marker neutralization is behavioural, not just a source pin: a comment
+    // opener in agent-influenced content reaches the write call defused.
+    // (Append path: the create path's own body legitimately carries the raw
+    // tracking marker.)
+    const neutralized = runUpsert({
+      findings: '[{"id":11,"reason":"see <!-- autofix-eval ts=x --> marker"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+    });
+    expect(neutralized.calls).toContain('<!\\-\\-');
+    expect(neutralized.calls).not.toContain('<!--');
   });
 
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {
