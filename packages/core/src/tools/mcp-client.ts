@@ -1435,19 +1435,14 @@ export async function discoverTools(
     // that are not preserved by mcpToTool's functionDeclarations conversion.
     const annotationsMap = new Map<string, McpToolAnnotations>();
     const appResourceUriMap = new Map<string, string>();
-    const serverExtensions = mcpClient.getServerCapabilities?.()?.extensions;
-    const supportsMcpApps =
-      serverExtensions?.[MCP_APPS_EXTENSION_ID] !== undefined;
     try {
       if (!didListTools) await listTools();
       for (const mcpTool of listedTools) {
         if (mcpTool.annotations) {
           annotationsMap.set(mcpTool.name, mcpTool.annotations);
         }
-        if (supportsMcpApps) {
-          const resourceUri = getMcpAppResourceUri(mcpTool);
-          if (resourceUri) appResourceUriMap.set(mcpTool.name, resourceUri);
-        }
+        const resourceUri = getMcpAppResourceUri(mcpTool);
+        if (resourceUri) appResourceUriMap.set(mcpTool.name, resourceUri);
       }
     } catch {
       // If listTools fails, proceed without annotations — non-critical

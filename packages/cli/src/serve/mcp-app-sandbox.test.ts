@@ -19,6 +19,7 @@ describe('MCP App sandbox', () => {
       JSON.stringify({
         connectDomains: [
           'https://api.example.com',
+          'HTTPS://API2.EXAMPLE.COM',
           'https://bad.test; script-src *',
         ],
         resourceDomains: ['https://*.example.com'],
@@ -28,6 +29,7 @@ describe('MCP App sandbox', () => {
     expect(buildMcpAppCsp(parsed)).toContain(
       "connect-src 'self' https://api.example.com",
     );
+    expect(buildMcpAppCsp(parsed)).toContain('HTTPS://API2.EXAMPLE.COM');
     expect(buildMcpAppCsp(parsed)).toContain(
       "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://*.example.com",
     );
@@ -80,4 +82,25 @@ describe('MCP App sandbox', () => {
     expect(response.text).toContain('inner.srcdoc = params.html');
     expect(response.text).toContain("event.origin === 'null'");
   });
+
+  it.each([
+    'https://K.example.com',
+    'https://ſ.example.com',
+    'httpſ://example.com',
+  ])(
+    'drops Unicode case-folding match %s before writing CSP headers',
+    async (domain) => {
+      const app = express();
+      mountMcpAppSandbox(app);
+
+      const response = await request(app)
+        .get('/mcp-app-sandbox')
+        .query({
+          csp: JSON.stringify({ connectDomains: [domain] }),
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-security-policy']).not.toContain(domain);
+    },
+  );
 });

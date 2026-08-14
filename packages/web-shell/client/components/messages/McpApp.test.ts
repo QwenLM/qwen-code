@@ -74,6 +74,16 @@ describe('MCP App host helpers', () => {
       'csp=',
     );
     expect(applySandboxCspQuery(sandboxUrl, 'x'.repeat(8193))).toBe(sandboxUrl);
+    const encodedOverflow = JSON.stringify({
+      connectDomains: Array(680).fill('https://a'),
+    });
+    expect(encodedOverflow.length).toBeLessThan(8192);
+    const encodedUrl = new URL(sandboxUrl);
+    encodedUrl.searchParams.set('csp', encodedOverflow);
+    expect(
+      encodedUrl.pathname.length + encodedUrl.search.length,
+    ).toBeGreaterThan(16 * 1024);
+    expect(applySandboxCspQuery(sandboxUrl, encodedOverflow)).toBe(sandboxUrl);
   });
 
   it('rejects non-loopback hosts', () => {

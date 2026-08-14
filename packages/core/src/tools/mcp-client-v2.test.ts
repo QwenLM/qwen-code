@@ -63,6 +63,7 @@ describe('configured MCP SDK v2 negotiation', () => {
                 name: 'echo',
                 description: 'Echo input',
                 inputSchema: { type: 'object' },
+                _meta: { ui: { resourceUri: 'ui://demo/dashboard' } },
               },
             ],
             ttlMs: 60_000,
@@ -118,6 +119,14 @@ describe('configured MCP SDK v2 negotiation', () => {
       await expect(client.listTools()).resolves.toMatchObject({
         tools: [{ name: 'echo' }],
       });
+      const [discoveredTool] = await discoverTools(
+        'modern-only',
+        { type: 'sdk' } as MCPServerConfig,
+        client,
+        {} as Config,
+        { applyConfigFilters: false },
+      );
+      expect(discoveredTool?.appResourceUri).toBe('ui://demo/dashboard');
       await expect(
         client.callTool({ name: 'echo', arguments: { text: 'hello' } }),
       ).resolves.toMatchObject({

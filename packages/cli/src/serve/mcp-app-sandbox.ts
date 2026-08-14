@@ -15,7 +15,7 @@ interface McpAppResourceCsp {
 
 const MAX_CSP_QUERY_LENGTH = 8192;
 const CSP_SOURCE_PATTERN =
-  /^(?:https?|wss?):\/\/(?:\*\.)?[a-z0-9.-]+(?::\d+)?$/iu;
+  /^(?:https?|wss?):\/\/(?:\*\.)?[a-z0-9.-]+(?::\d+)?$/i;
 
 function sanitizeCspDomains(domains: unknown): string[] {
   if (!Array.isArray(domains)) return [];

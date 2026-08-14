@@ -43,9 +43,8 @@ export function getMcpAppDisplay(value: unknown): McpAppDisplay | undefined {
   return value as unknown as McpAppDisplay;
 }
 
-// Matches packages/cli/src/serve/mcp-app-sandbox.ts MAX_CSP_QUERY_LENGTH.
 // Must stay under Node's default 16 KiB HTTP request-line limit.
-const MAX_SANDBOX_CSP_QUERY_LENGTH = 8192;
+const MAX_SANDBOX_QUERY_LENGTH = 8192;
 
 function isLoopbackHostname(hostname: string): boolean {
   return (
@@ -89,12 +88,12 @@ export function applySandboxCspQuery(
   sandboxUrl: string,
   cspJson: string,
 ): string {
-  if (!cspJson || cspJson.length > MAX_SANDBOX_CSP_QUERY_LENGTH) {
-    return sandboxUrl;
-  }
+  if (!cspJson) return sandboxUrl;
   const url = new URL(sandboxUrl);
   url.searchParams.set('csp', cspJson);
-  return url.toString();
+  return url.search.length <= MAX_SANDBOX_QUERY_LENGTH
+    ? url.toString()
+    : sandboxUrl;
 }
 
 function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {

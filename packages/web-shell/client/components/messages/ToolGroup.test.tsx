@@ -462,6 +462,34 @@ describe('tool group summary logic', () => {
     expect(container.textContent).toContain('Dashboard ready');
   });
 
+  it('keeps an MCP App open when tools and thinking share a summary', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({ callId: 'read', toolName: 'read_file' }),
+        makeTool({
+          callId: 'app',
+          toolName: 'mcp__demo__show_dashboard',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Dashboard</main>',
+            toolResult: { content: [] },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        }),
+      ],
+      {},
+      [{ content: 'thinking', beforeToolCallId: 'read' }],
+    );
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
   it('does not mount an MCP App while a summary-only row is collapsed', () => {
     const container = renderToolLine(
       makeTool({
