@@ -225,16 +225,21 @@ export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
 /**
- * Work categories a child reports holds for. Deliberately excludes background
- * shells, Monitors, workflows, and cron: those are out of `activeWork`'s
- * declared scope. The category travels on every hold so widening the scope
- * later adds data rather than changing what the `activeWork` boolean means.
+ * Work categories a child reports holds for. Monitors, workflows, and cron
+ * remain outside `activeWork`'s declared scope. The category travels on every
+ * hold so peers can negotiate coverage explicitly when the scope widens.
  */
-export type ActiveWorkHoldCategory = 'agent' | 'notification';
+export type ActiveWorkHoldCategory = 'agent' | 'notification' | 'shell';
+
+/** Categories understood by active-work v1 before category negotiation was
+ * added to the daemon's initialize request. */
+export const ACTIVE_WORK_LEGACY_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] =
+  ['agent', 'notification'];
 
 export const ACTIVE_WORK_HOLD_CATEGORIES: readonly ActiveWorkHoldCategory[] = [
   'agent',
   'notification',
+  'shell',
 ];
 
 export interface ActiveWorkHeartbeatCapabilityV1 {
@@ -1901,9 +1906,9 @@ export interface AcpSessionBridge {
   readonly activePromptCount: number;
 
   /**
-   * Whether an accepted prompt, a running background Agent, or an Agent
-   * terminal notification is unsettled. Background shells, Monitors,
-   * workflows, and cron are deliberately outside this.
+   * Whether an accepted prompt, a running background Agent, an Agent terminal
+   * notification, or Session-managed background shell work is unsettled.
+   * Monitors, workflows, and cron are deliberately outside this.
    */
   readonly activeWork: boolean;
 

@@ -964,6 +964,8 @@ import {
   ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
+  ACTIVE_WORK_NOTIFICATION_METHOD,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
@@ -1945,7 +1947,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     | ((conn: AgentSideConnectionLike) => AgentLike)
     | undefined;
 
-  type AgentSideConnectionLike = { closed: Promise<void> };
+  type AgentSideConnectionLike = {
+    closed: Promise<void>;
+    extNotification?: (
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<void>;
+  };
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
@@ -1973,12 +1981,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         hardSuspendTodoStopGuard: ReturnType<typeof vi.fn>;
+        beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         appendLiveConversationTranscript: ReturnType<typeof vi.fn>;
+        collectActiveWorkHolds: ReturnType<typeof vi.fn>;
+        dispose: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
       }
@@ -2663,6 +2674,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('merges active-work negotiation and enables Session reporting', async () => {
     await setupSessionMocks('active-work-session');
     initializeAcpStartupProfiler();
+    let blockActiveWorkSnapshot = false;
+    let markActiveWorkSnapshotStarted!: () => void;
+    const activeWorkSnapshotStarted = new Promise<void>((resolve) => {
+      markActiveWorkSnapshotStarted = resolve;
+    });
+    let releaseActiveWorkSnapshot!: () => void;
+    const activeWorkSnapshotGate = new Promise<void>((resolve) => {
+      releaseActiveWorkSnapshot = resolve;
+    });
+    const extNotification = vi.fn(
+      async (method: string, _params: Record<string, unknown>) => {
+        if (
+          blockActiveWorkSnapshot &&
+          method === ACTIVE_WORK_NOTIFICATION_METHOD
+        ) {
+          markActiveWorkSnapshotStarted();
+          await activeWorkSnapshotGate;
+        }
+      },
+    );
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
@@ -2673,6 +2704,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       get closed() {
         return mockConnectionState.promise;
       },
+      extNotification,
     }) as AgentLike;
 
     const response = (await agent.initialize({
@@ -2686,6 +2718,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           // Absurd cadence: the child must answer with the clamped value it
           // will actually use, not echo this back.
           intervalMs: 1,
+          categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
         },
       },
     })) as { _meta?: Record<string, unknown> };
@@ -2704,6 +2737,148 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // The Session gets a change callback, not a cadence: one reporter per
     // channel owns the timing.
     expect(typeof vi.mocked(Session).mock.calls.at(-1)?.[4]).toBe('function');
+
+    lastSessionMock?.collectActiveWorkHolds.mockReturnValue([
+      { category: 'shell', id: 'background-shells' },
+    ]);
+    blockActiveWorkSnapshot = true;
+    let promptSettled = false;
+    const prompt = agent
+      .prompt({
+        sessionId: 'active-work-session',
+        prompt: [{ type: 'text', text: 'start a shell' }],
+      })
+      .finally(() => {
+        promptSettled = true;
+      });
+    await activeWorkSnapshotStarted;
+    expect(promptSettled).toBe(false);
+    releaseActiveWorkSnapshot();
+    await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+    const snapshots = extNotification.mock.calls.filter(
+      ([method]) => method === ACTIVE_WORK_NOTIFICATION_METHOD,
+    );
+    expect(snapshots.at(-1)?.[1]).toMatchObject({
+      sessions: [
+        {
+          sessionId: 'active-work-session',
+          holds: [{ category: 'shell', id: 'background-shells' }],
+        },
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses the pre-category v1 baseline when initialize omits categories', async () => {
+    await setupSessionMocks('legacy-active-work-session');
+    const extNotification = vi.fn().mockResolvedValue(undefined);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+      extNotification,
+    }) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+          v: ACTIVE_WORK_HEARTBEAT_VERSION,
+          intervalMs: 15_000,
+        },
+      },
+    })) as { _meta?: Record<string, unknown> };
+
+    expect(response._meta).toMatchObject({
+      [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+        v: ACTIVE_WORK_HEARTBEAT_VERSION,
+        categories: [...ACTIVE_WORK_LEGACY_HOLD_CATEGORIES],
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock?.collectActiveWorkHolds.mockReturnValue([
+      { category: 'shell', id: 'background-shells' },
+    ]);
+
+    await agent.prompt({
+      sessionId: 'legacy-active-work-session',
+      prompt: [{ type: 'text', text: 'start a shell' }],
+    });
+    const snapshots = extNotification.mock.calls.filter(
+      ([method]) => method === ACTIVE_WORK_NOTIFICATION_METHOD,
+    );
+    expect(snapshots.at(-1)?.[1]).toMatchObject({
+      sessions: [{ sessionId: 'legacy-active-work-session', holds: [] }],
+    });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: 'legacy-active-work-session',
+        onlyIfUnheld: true,
+      }),
+    ).resolves.toEqual({
+      sessionId: 'legacy-active-work-session',
+      closed: false,
+      holds: [{ category: 'shell', id: 'background-shells' }],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rechecks local holds after active turns drain during conditional close', async () => {
+    await setupSessionMocks('active-work-close-race');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let closeGateHeld = false;
+    let turnsSettled = false;
+    lastSessionMock?.beginClose.mockImplementation(() => {
+      closeGateHeld = true;
+      return () => {
+        closeGateHeld = false;
+      };
+    });
+    lastSessionMock?.waitForActiveTurnsToSettle.mockImplementation(async () => {
+      turnsSettled = true;
+    });
+    lastSessionMock?.collectActiveWorkHolds.mockImplementation(() =>
+      closeGateHeld && turnsSettled
+        ? [{ category: 'shell', id: 'background-shells' }]
+        : [],
+    );
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: 'active-work-close-race',
+        onlyIfUnheld: true,
+      }),
+    ).resolves.toEqual({
+      sessionId: 'active-work-close-race',
+      closed: false,
+      holds: [{ category: 'shell', id: 'background-shells' }],
+    });
+    expect(lastSessionMock?.waitForActiveTurnsToSettle).toHaveBeenCalledOnce();
+    expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
+    expect(closeGateHeld).toBe(false);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3747,6 +3922,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     vi.mocked(Session).mockImplementation((createdSessionId, createdConfig) => {
       const sessionMock = {
+        sessionId: createdSessionId,
         getId: vi.fn().mockReturnValue(createdSessionId),
         getConfig: vi.fn().mockReturnValue(createdConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -3764,6 +3940,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           .mockResolvedValue({ accepted: true }),
         enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
         appendLiveConversationTranscript: vi.fn().mockResolvedValue(undefined),
+        collectActiveWorkHolds: vi.fn().mockReturnValue([]),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn(),
         emitGoalStatus: vi.fn(),

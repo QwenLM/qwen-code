@@ -30,6 +30,8 @@ import {
   setDebugLogSession,
 } from '../utils/debugLogger.js';
 
+const mockEndAllInteractionSpans = vi.hoisted(() => vi.fn());
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -62,6 +64,9 @@ vi.mock('./session-events.js', () => ({
 }));
 vi.mock('./session-context.js');
 vi.mock('./trace-context.js');
+vi.mock('./session-tracing.js', () => ({
+  endAllInteractionSpans: mockEndAllInteractionSpans,
+}));
 vi.mock('./tracer.js', () => ({
   createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
 }));
@@ -411,7 +416,13 @@ describe('Telemetry SDK', () => {
 
       await shutdownTelemetry();
 
+      expect(mockEndAllInteractionSpans).toHaveBeenCalledWith('cancelled');
       expect(emitSessionEnd).toHaveBeenCalledWith('active-session');
+      expect(
+        mockEndAllInteractionSpans.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(NodeSDK.prototype.shutdown).mock.invocationCallOrder[0],
+      );
       expect(
         vi.mocked(emitSessionEnd).mock.invocationCallOrder[0],
       ).toBeLessThan(
