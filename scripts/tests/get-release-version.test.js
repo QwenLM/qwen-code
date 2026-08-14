@@ -791,6 +791,28 @@ describe('assertVersionUnreleased', () => {
     );
   });
 
+  it('keeps the refusal decisive when a probe fails after a shipped hit', () => {
+    // A partial publish retried during a registry disruption: the scan
+    // hits on a shipped package, then a later probe errors transiently.
+    // The refusal is already decided; throwing there would demote the
+    // exit-3 refusal to a probe-failure exit and lose the version_refusal
+    // marker the workflow keys on to skip the release-failed notification.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command === `npm view ${PUBLISHED_PACKAGES[0]}@1.2.3 version`) {
+        return '1.2.3';
+      }
+      if (command.includes('npm view')) {
+        throw new Error('npm error code ETIMEDOUT');
+      }
+      return notFoundAnywhere(command);
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(runCli({ 'assert-unreleased': '1.2.3' })).toBe(3);
+    expect(errorSpy).toHaveBeenCalledWith(
+      `::error::${refusalMessage(PUBLISHED_PACKAGES[0])}`,
+    );
+  });
+
   it('fails closed when ls-remote errors with anything other than no-match', () => {
     vi.mocked(execSync).mockImplementation((command) => {
       if (command.includes('git ls-remote')) {

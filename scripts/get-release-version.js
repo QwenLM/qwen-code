@@ -214,8 +214,14 @@ function doesVersionExist(version, { strict = false, shippedTo } = {}) {
     } catch (error) {
       // E404 means the version is absent from this package. Strict mode
       // guards the force push, so any other probe failure is "cannot
-      // verify" and must throw instead of passing.
-      if (strict && !error.message?.includes('E404')) {
+      // verify" and must throw instead of passing — but once a package
+      // has shipped the refusal is decided, and a throw would mask its
+      // recovery guidance with a probe-failure exit.
+      if (
+        strict &&
+        shippedPackages.length === 0 &&
+        !error.message?.includes('E404')
+      ) {
         throw new Error(
           `Failed to verify ${pkg}@${version} on npm: ${error.message}`,
         );

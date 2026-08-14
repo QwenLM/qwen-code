@@ -175,28 +175,34 @@ describe('release workflow', () => {
     );
   });
 
-  it('exits 3 from the real entry point when the version already shipped', () => {
-    // The workflow reads the refusal through the entry-point exit-status
-    // glue, not through runCli(); the usage-error test above never
-    // exercises exit 3. A stub npm on PATH that echoes the probed
-    // version makes the strict npm scan report "shipped" without
-    // network, so an entry point that swallowed exit 3 fails here
-    // instead of reading as GUARD_STATUS=0 at push time.
-    const stubDir = mkdtempSync(join(tmpdir(), 'npm-stub-'));
-    writeFileSync(join(stubDir, 'npm'), '#!/bin/sh\necho "${2##*@}"\n', {
-      mode: 0o755,
-    });
-    const result = spawnSync(
-      process.execPath,
-      ['scripts/get-release-version.js', '--assert-unreleased=1.2.3'],
-      {
-        encoding: 'utf8',
-        env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}` },
-      },
-    );
-    expect(result.status).toBe(3);
-    expect(result.stderr).toContain('has already shipped');
-  });
+  it.skipIf(process.platform === 'win32')(
+    'exits 3 from the real entry point when the version already shipped',
+    () => {
+      // The workflow reads the refusal through the entry-point exit-status
+      // glue, not through runCli(); the usage-error test above never
+      // exercises exit 3. A stub npm on PATH that echoes the probed
+      // version makes the strict npm scan report "shipped" without
+      // network, so an entry point that swallowed exit 3 fails here
+      // instead of reading as GUARD_STATUS=0 at push time. The stub is a
+      // '#!/bin/sh' script prepended to PATH with ':' — unresolvable on
+      // Windows, so win32 skips it and Linux CI remains the authoritative
+      // coverage.
+      const stubDir = mkdtempSync(join(tmpdir(), 'npm-stub-'));
+      writeFileSync(join(stubDir, 'npm'), '#!/bin/sh\necho "${2##*@}"\n', {
+        mode: 0o755,
+      });
+      const result = spawnSync(
+        process.execPath,
+        ['scripts/get-release-version.js', '--assert-unreleased=1.2.3'],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}` },
+        },
+      );
+      expect(result.status).toBe(3);
+      expect(result.stderr).toContain('has already shipped');
+    },
+  );
 
   it('keeps a dispatch failure from failing an already-published release', () => {
     // The packages are published before this step runs, so it must not fail
