@@ -162,6 +162,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. Clients should still pre-flight `require_auth` separately for
   // deployment posture; this tag only means the route contract exists.
   workspace_file_write: { since: 'v1' },
+  // Daemon hosts binary file upload (`POST /file/upload`) behind the strict
+  // mutation gate. Uploads never overwrite; occupied names auto-number. New
+  // route contract = new tag (same split as `workspace_file_bytes` from
+  // `workspace_file_read`). The advertised upload byte cap is surfaced via
+  // `limits.maxWorkspaceFileUploadBytes`.
+  workspace_file_upload: { since: 'v1' },
   // Daemon hosts the session-level approval-mode
   // control route `POST /session/:id/approval-mode` (gated by the
   // mutation gate, strict). The route accepts `{mode, persist?}` —
@@ -345,8 +351,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
-  // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
-  // workspace agent CRUD, and persisted session organization surfaces.
+  // Covers core file read/write/upload, status/permissions/trust/lifecycle/MCP/tool,
+  // memory, workspace agent CRUD, and persisted session organization surfaces.
   // Workspace-qualified settings also require the existing
   // `workspace_settings` tag because that surface depends on settings
   // persistence. ACP/WebSocket and auth stay outside this core tag;

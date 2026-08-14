@@ -262,6 +262,181 @@ describe('createDaemonSessionActions', () => {
     expect(createDetachedSession).not.toHaveBeenCalled();
   });
 
+  it('blocks a restore while active-session creation is in flight', async () => {
+    const existingSession = createMockSession('session-a');
+    const nextSession = createMockSession('session-b');
+    const created = createDeferred<typeof nextSession>();
+    existingSession.client.createOrAttachSession.mockReturnValueOnce(
+      created.promise,
+    );
+    let sourceBoundOperationCount = 0;
+    const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+      sourceBoundOperationCount += inFlight ? 1 : -1;
+    });
+    const beginCrossSessionTransition = vi.fn(async () => {
+      if (sourceBoundOperationCount > 0) {
+        throw new DOMException(
+          'Another session operation is already in progress',
+          'InvalidStateError',
+        );
+      }
+    });
+    const { actions } = createActionsHarness({
+      beginCrossSessionTransition,
+      connection: { status: 'connected', sessionId: 'session-a' },
+      isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+      session: existingSession,
+      setSourceBoundOperationInFlight,
+    });
+
+    const create = actions.createSession();
+    await expect(actions.loadSession('session-c')).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    expect(beginCrossSessionTransition).toHaveBeenCalledOnce();
+
+    created.resolve(nextSession);
+    await expect(create).resolves.toBe(nextSession);
+    expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+      [true],
+      [false],
+    ]);
+  });
+
+  it('keeps restore blocked after create times out until the raw request settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const existingSession = createMockSession('session-a');
+      const nextSession = createMockSession('session-b');
+      const created = createDeferred<typeof nextSession>();
+      existingSession.client.createOrAttachSession.mockReturnValueOnce(
+        created.promise,
+      );
+      let sourceBoundOperationCount = 0;
+      const beginCrossSessionTransition = vi.fn(async () => {
+        if (sourceBoundOperationCount > 0) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      });
+      const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+        sourceBoundOperationCount += inFlight ? 1 : -1;
+      });
+      const { actions } = createActionsHarness({
+        beginCrossSessionTransition,
+        connection: { status: 'connected', sessionId: 'session-a' },
+        isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+        session: existingSession,
+        setSourceBoundOperationInFlight,
+      });
+
+      const createOutcome = actions
+        .createSession()
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(createOutcome).resolves.toMatchObject({
+        message: expect.stringContaining('Create session timed out'),
+      });
+      await expect(actions.loadSession('session-c')).rejects.toMatchObject({
+        name: 'InvalidStateError',
+      });
+      expect(beginCrossSessionTransition).toHaveBeenCalledOnce();
+
+      created.resolve(nextSession);
+      await Promise.resolve();
+      expect(existingSession.client.detachSession).toHaveBeenCalledWith(
+        nextSession.sessionId,
+        nextSession.clientId,
+      );
+      await actions.loadSession('session-c');
+      expect(beginCrossSessionTransition).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retires a detached create that succeeds after its public timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const nextSession = createMockSession('session-b');
+      const created = createDeferred<DaemonSessionClient>();
+      const setSourceBoundOperationInFlight = vi.fn();
+      const { actions, getConnection, sessionRef } = createActionsHarness({
+        connection: { status: 'connected' },
+        createDetachedSession: vi.fn(() => created.promise),
+        setSourceBoundOperationInFlight,
+      });
+
+      const createOutcome = actions
+        .createSession()
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(createOutcome).resolves.toMatchObject({
+        message: expect.stringContaining('Create session timed out'),
+      });
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([[true]]);
+
+      created.resolve(nextSession as unknown as DaemonSessionClient);
+      await Promise.resolve();
+      expect(nextSession.detach).toHaveBeenCalledOnce();
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+        [true],
+        [false],
+      ]);
+      expect(sessionRef.current).toBeUndefined();
+      expect(getConnection()).not.toHaveProperty('sessionId');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('consumes a controlled origin when a source-bound operation blocks restore', async () => {
+    let controlled = true;
+    let sourceBound = true;
+    const beginCrossSessionTransition = vi.fn(
+      async (_request: { origin: 'action' | 'controlled' }) => {
+        if (sourceBound) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      },
+    );
+    const source = createMockSession('session-a', 'client-a');
+    const { actions } = createActionsHarness({
+      beginCrossSessionTransition,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workspaceCwd: '/workspace',
+      },
+      getTransitionOrigin: () => {
+        const origin = controlled ? 'controlled' : 'action';
+        controlled = false;
+        return origin;
+      },
+      isSourceBoundOperationInFlight: () => sourceBound,
+      session: source,
+    });
+
+    await expect(actions.loadSession('session-b')).rejects.toMatchObject({
+      name: 'InvalidStateError',
+    });
+    sourceBound = false;
+    await actions.loadSession('session-b');
+
+    expect(beginCrossSessionTransition).toHaveBeenCalledWith(
+      expect.objectContaining({ origin: 'action' }),
+      expect.any(Function),
+    );
+    expect(
+      beginCrossSessionTransition.mock.calls.map(([request]) => request.origin),
+    ).toEqual(['controlled', 'action']);
+  });
+
   it('creates a detached session when no active session exists', async () => {
     const nextSession = createMockSession('session-b');
     const createDetachedSession = vi.fn(async () => nextSession);
@@ -613,7 +788,7 @@ describe('createDaemonSessionActions', () => {
     const beginCrossSessionTransition = vi.fn(async () => undefined);
     const { actions, pendingSessionLoadRef } = createActionsHarness({
       beginCrossSessionTransition,
-      isCrossSessionTransitionPending: () => true,
+      isDifferentLogicalTransitionPending: () => true,
       connection: {
         status: 'connected',
         sessionId: 'session-a',
@@ -625,9 +800,31 @@ describe('createDaemonSessionActions', () => {
     await expect(actions.loadSession('session-a')).rejects.toMatchObject({
       name: 'InvalidStateError',
     });
+    await expect(
+      actions.reloadSession(new AbortController().signal, {
+        replaySource: 'configured',
+      }),
+    ).rejects.toMatchObject({ name: 'InvalidStateError' });
     expect(beginCrossSessionTransition).not.toHaveBeenCalled();
     expect(pendingSessionLoadRef.current).toBeUndefined();
     expect(source.detach).not.toHaveBeenCalled();
+  });
+
+  it('keeps an empty-owner load on the bootstrap path', () => {
+    const beginCrossSessionTransition = vi.fn(async () => undefined);
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      beginCrossSessionTransition,
+      session: undefined,
+    });
+
+    void actions.loadSession('session-a').catch(() => undefined);
+
+    expect(beginCrossSessionTransition).not.toHaveBeenCalled();
+    expect(pendingSessionLoadRef.current).toMatchObject({
+      sessionId: 'session-a',
+      mode: 'load',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
   });
 
   it('consumes the controlled origin when a switch uses the legacy path', () => {
@@ -1205,6 +1402,147 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('keeps refresh blocked after model context times out until it settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const context = createDeferred<ReturnType<typeof contextStatus>>();
+      session.context.mockReturnValueOnce(context.promise);
+      let sourceBoundOperationCount = 0;
+      const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+        sourceBoundOperationCount += inFlight ? 1 : -1;
+      });
+      const beginCrossSessionTransition = vi.fn(async () => {
+        if (sourceBoundOperationCount > 0) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      });
+      const { actions } = createActionsHarness({
+        beginCrossSessionTransition,
+        connection: {
+          status: 'connected',
+          sessionId: session.sessionId,
+          currentModel: 'model-a',
+        },
+        isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+        session,
+        setSourceBoundOperationInFlight,
+      });
+
+      const modelUpdate = actions.setModel('model-b');
+      await vi.waitFor(() => expect(session.context).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(modelUpdate).resolves.toEqual({});
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).rejects.toMatchObject({ name: 'InvalidStateError' });
+
+      context.resolve(contextStatus(session.sessionId));
+      await vi.waitFor(() => expect(sourceBoundOperationCount).toBe(0));
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+        [true],
+        [false],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps refresh blocked after reasoning times out until the request settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const response = createDeferred<{ configOptions: unknown[] }>();
+      session.setConfigOption.mockReturnValueOnce(response.promise);
+      let sourceBoundOperationCount = 0;
+      const setSourceBoundOperationInFlight = vi.fn((inFlight: boolean) => {
+        sourceBoundOperationCount += inFlight ? 1 : -1;
+      });
+      const beginCrossSessionTransition = vi.fn(async () => {
+        if (sourceBoundOperationCount > 0) {
+          throw new DOMException(
+            'Another session operation is already in progress',
+            'InvalidStateError',
+          );
+        }
+      });
+      const { actions } = createActionsHarness({
+        beginCrossSessionTransition,
+        connection: {
+          status: 'connected',
+          sessionId: session.sessionId,
+          currentModel: 'qwen3.8-max',
+        },
+        isSourceBoundOperationInFlight: () => sourceBoundOperationCount > 0,
+        session,
+        setSourceBoundOperationInFlight,
+      });
+
+      const reasoningUpdate = actions
+        .setReasoningEffort('medium')
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(reasoningUpdate).resolves.toMatchObject({
+        message: expect.stringContaining('Set reasoning effort timed out'),
+      });
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).rejects.toMatchObject({ name: 'InvalidStateError' });
+
+      response.resolve({ configOptions: [] });
+      await Promise.resolve();
+      await expect(
+        actions.loadSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(setSourceBoundOperationInFlight.mock.calls).toEqual([
+        [true],
+        [false],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not apply context captured before a reasoning update', async () => {
+    const session = createMockSession('session-a');
+    const staleContext = createDeferred<ReturnType<typeof contextStatus>>();
+    const currentConfigOptions = reasoningConfigOptions('medium');
+    session.context.mockReturnValueOnce(staleContext.promise);
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: currentConfigOptions,
+    });
+    const sessionConfigGeneration = new WeakMap<DaemonSessionClient, number>();
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        currentModel: 'qwen3.8-max',
+        context: reasoningContext(session.sessionId, 'xhigh'),
+        reasoning: { enabled: true, effort: 'xhigh', efforts: [] },
+      },
+      session,
+      sessionConfigGeneration,
+    });
+
+    const staleRead = actions.getContext();
+    await actions.setReasoningEffort('medium');
+    staleContext.resolve(reasoningContext(session.sessionId, 'xhigh'));
+    await expect(staleRead).resolves.toEqual(
+      reasoningContext(session.sessionId, 'xhigh'),
+    );
+
+    expect(getConnection()).toMatchObject({
+      reasoning: { enabled: true, effort: 'medium' },
+      context: { state: { configOptions: currentConfigOptions } },
+    });
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -1330,8 +1668,10 @@ function createActionsHarness(
     setRestoreSessionId?: ReturnType<typeof vi.fn>;
     setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
     setSourceBoundOperationInFlight?: ReturnType<typeof vi.fn>;
+    sessionConfigGeneration?: WeakMap<DaemonSessionClient, number>;
     isSourceBoundOperationInFlight?: () => boolean;
     isCrossSessionTransitionPending?: () => boolean;
+    isDifferentLogicalTransitionPending?: () => boolean;
     setPromptStatus?: ReturnType<typeof vi.fn>;
     hasSessionActivePrompt?: () => boolean;
   } = {},
@@ -1386,9 +1726,12 @@ function createActionsHarness(
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
     beginCrossSessionTransition: opts.beginCrossSessionTransition,
     isCrossSessionTransitionPending: opts.isCrossSessionTransitionPending,
+    isDifferentLogicalTransitionPending:
+      opts.isDifferentLogicalTransitionPending,
     isSourceBoundOperationInFlight: opts.isSourceBoundOperationInFlight,
     getTransitionOrigin: opts.getTransitionOrigin,
     setSourceBoundOperationInFlight: opts.setSourceBoundOperationInFlight,
+    sessionConfigGeneration: opts.sessionConfigGeneration,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
@@ -1436,6 +1779,11 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    setConfigOption: vi.fn(
+      async (): Promise<{ configOptions: unknown[] }> => ({
+        configOptions: [],
+      }),
+    ),
     shellCommand: vi.fn(async () => ({})),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
@@ -1486,4 +1834,21 @@ function contextStatus(sessionId: string) {
     workspaceCwd: '/workspace',
     state: {},
   };
+}
+
+function reasoningContext(sessionId: string, effort: string) {
+  return {
+    ...contextStatus(sessionId),
+    state: { configOptions: reasoningConfigOptions(effort) },
+  };
+}
+
+function reasoningConfigOptions(effort: string) {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue: effort,
+      options: ['none', 'low', 'medium', 'xhigh'].map((value) => ({ value })),
+    },
+  ];
 }

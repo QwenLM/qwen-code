@@ -28,11 +28,11 @@ import {
   MAX_UNTRACKED_TOTAL_BYTES,
 } from './local-diff.js';
 import { parseDiff, buildDiffPlan, chunksCoverDiff } from './diff-plan.js';
+import { isolateHostGitConfig } from './test-utils.js';
 
 let repo: string;
-let home: string;
 let cwd: string;
-let savedEnv: NodeJS.ProcessEnv;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
@@ -61,28 +61,18 @@ beforeEach(() => {
   process.chdir(repo);
 
   // `captureLocalDiff` shells out to git through `process.env`, so the fixture
-  // has to isolate the *process* environment, not just its own git calls. Left
-  // inheriting the developer's setup, a global `core.hooksPath` runs during the
-  // test and a global `commit.gpgsign=true` fails it outright for want of a key
-  // — and a stray `~/.gitconfig` silently redefines what the "clean" baseline
-  // is. Matches the neighbouring diff-plan fixture.
-  savedEnv = { ...process.env };
-  // The config lives OUTSIDE the repo. Written inside it, the fixture's own
-  // isolation file becomes an untracked file — and this suite's whole subject is
-  // what the capture does with untracked files.
-  home = realpathSync(mkdtempSync(join(tmpdir(), 'review-home-')));
-  const emptyConfig = join(home, '.gitconfig');
-  writeFileSync(emptyConfig, '');
-  process.env['GIT_CONFIG_NOSYSTEM'] = '1';
-  process.env['GIT_CONFIG_GLOBAL'] = emptyConfig;
-  process.env['HOME'] = home; // belt and braces where the above is unsupported
+  // has to isolate the *process* environment, not just its own git calls
+  // (shared helper — see isolateHostGitConfig for the incident class). The
+  // throwaway config lives OUTSIDE the repo: written inside it, the
+  // fixture's own isolation file becomes an untracked file — and this
+  // suite's whole subject is what the capture does with untracked files.
+  gitIsolation = isolateHostGitConfig();
 });
 
 afterEach(() => {
   process.chdir(cwd);
-  process.env = savedEnv;
   rmSync(repo, { recursive: true, force: true });
-  rmSync(home, { recursive: true, force: true });
+  gitIsolation.dispose();
 });
 
 /** Init a repo with hooks and signing off, so a fixture cannot run either. */

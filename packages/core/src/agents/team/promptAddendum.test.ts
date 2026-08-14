@@ -24,4 +24,15 @@ describe('buildTeammatePromptAddendum', () => {
     expect(prompt).toContain('call exit_plan_mode');
     expect(prompt).toContain('Do not use send_message for plan approval');
   });
+
+  it('marks read-only tasks complete before the turn-ending report', () => {
+    const prompt = buildTeammatePromptAddendum('reader', 'team', 'leader', {
+      readOnly: true,
+    });
+
+    expect(prompt).toContain('MARK COMPLETE');
+    expect(prompt.indexOf('MARK COMPLETE')).toBeLessThan(
+      prompt.indexOf('REPORT RESULTS'),
+    );
+  });
 });

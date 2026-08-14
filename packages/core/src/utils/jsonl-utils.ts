@@ -35,6 +35,10 @@ type JsonlReadOptions = {
   throwOnNonEnoentError?: boolean;
 };
 
+type JsonlReadLinesOptions = {
+  signal?: AbortSignal;
+};
+
 /**
  * A map of file paths to mutexes for preventing concurrent writes.
  */
@@ -171,11 +175,15 @@ async function closeLineReader(
 export async function readLines<T = unknown>(
   filePath: string,
   count: number,
+  options: JsonlReadLinesOptions = {},
 ): Promise<T[]> {
   let fileStream: fs.ReadStream | undefined;
   let rl: readline.Interface | undefined;
   try {
-    fileStream = fs.createReadStream(filePath);
+    options.signal?.throwIfAborted();
+    fileStream = options.signal
+      ? fs.createReadStream(filePath, { signal: options.signal })
+      : fs.createReadStream(filePath);
     rl = readline.createInterface({
       input: fileStream,
       crlfDelay: Infinity,
@@ -192,8 +200,10 @@ export async function readLines<T = unknown>(
       }
     }
 
+    options.signal?.throwIfAborted();
     return results;
   } catch (error) {
+    options.signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.error(
         `Error reading first ${count} lines from ${filePath}:`,
@@ -203,6 +213,7 @@ export async function readLines<T = unknown>(
     return [];
   } finally {
     await closeLineReader(rl, fileStream);
+    options.signal?.throwIfAborted();
   }
 }
 

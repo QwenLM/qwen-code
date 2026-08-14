@@ -5,6 +5,47 @@ set -eo pipefail
 # environment from the caller. WORKDIR and BRANCH are job-level env;
 # GITHUB_OUTPUT and RUNNER_TEMP are runner-provided. None is defined here.
 
+# Deterministic verification must not read the RUNNER's git config: the
+# persistent pool accumulates state, and a leaked global exec knob fails
+# branch tests the branch never caused. Measured counterexample, run
+# 31516789251: a stray `diff.external=global-driver` in the runner user's
+# ~/.gitconfig killed four per-hunk probe tests in packages/cli on #8613 —
+# charged to the round (package tests are A/B-exempt), which burned the
+# 18-minute repair on a failure no repair can reach and ended the round as
+# a timeout. Every git this script or its checks spawn (vitest fixture
+# repos included) reads a per-run throwaway global config instead — seeded
+# with the workspace safe.directory actions/checkout put in the real one —
+# and no system config — any system-level git setting the checks ever
+# come to depend on (a CA bundle, a proxy) must be replicated via per-job
+# env, not /etc/gitconfig, because the redirect silently drops it. The
+# redirect also keeps a branch-authored `git config --global` from writing
+# durable state onto the host: it lands in the throwaway file and dies
+# with the run. Enforcement is inherited-env only — branch code writing
+# the real file directly bypasses it, which is why the PAT-bearing steps
+# re-run resanitize-git-config.sh afterwards.
+# Environment-carried config outranks BOTH file redirects and defeats
+# every file-level guard: GIT_CONFIG_COUNT/_PARAMETERS carry config at
+# command-line precedence, GIT_SSL_* / GIT_PROXY_COMMAND steer transport,
+# GIT_EXEC_PATH swaps the transport-helper binary, GIT_DIR/GIT_WORK_TREE
+# repoint git, GIT_ASKPASS/GIT_SSH* hijack auth/exec — branch code in an
+# earlier step can inject any of them through $GITHUB_ENV. Strip them, then
+# redirect the file scopes. Keep this env+redirect block equal to the
+# issue-fix gate's copy (the contract test pins them).
+unset GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
+  GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
+  GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
+  GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
+export GIT_CONFIG_COUNT=0
+export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_GLOBAL="${RUNNER_TEMP}/autofix-gate-gitconfig"
+: > "${GIT_CONFIG_GLOBAL}"
+git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
+if [ -s /etc/gitconfig ]; then
+  echo "::notice::/etc/gitconfig exists but is bypassed by the gate's GIT_CONFIG_SYSTEM redirect — replicate any setting the checks need via per-job env."
+fi
+
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
 # agent that commits and then aborts. The failure handoff keys its
@@ -153,13 +194,15 @@ baseline_also_fails() {
     } > "${WORKDIR}/gate-rejection.md" || true
     exit 1
   fi
+  # Every retryable exit below hands the tree to the repair agent with
+  # dist/ REBUILT FROM BASELINE SOURCES (the restore checkout brings back
+  # tracked files only) — the mirror of the dist confound that exempted
+  # typecheck from the A/B. seed_dist_note seeds the repair feedback so
+  # the agent rebuilds before it trusts any dist-consuming check. The
+  # pre-existing exit is the exception: no repair runs for it, so the
+  # note stays out of its document.
   if [[ "${rc}" -ne 1 ]]; then
-    # Both retryable exits below hand the tree to the repair agent with
-    # dist/ REBUILT FROM BASELINE SOURCES (the restore checkout brings back
-    # tracked files only) — the mirror of the dist confound that exempted
-    # typecheck from the A/B. The note seeds the repair feedback so the
-    # agent rebuilds before it trusts any dist-consuming check.
-    echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
+    seed_dist_note
     echo "🔁 baseline is green — the failure belongs to this round" \
       | tee -a "${GATE_LOG}"
     return 1
@@ -185,9 +228,14 @@ baseline_also_fails() {
   # verdict-less gate crash.
   # (sig_head was extracted before the detach.)
   sig_base="$(fail_signature "${ab_log}")" || true
-  new_in_round="$(comm -23 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}"))" ||
+  new_in_round="$(comm -23 <(printf '%s\n' "${sig_head}") <(printf '%s\n' "${sig_base}"))" || {
+    seed_dist_note
+    echo "🔁 signature comparison failed — fail-closed, charged to the round" \
+      | tee -a "${GATE_LOG}"
     return 1
+  }
   if [[ -z "${sig_head}" || -z "${sig_base}" ]] || [[ -n "${new_in_round}" ]]; then
+    seed_dist_note
     echo "🔁 baseline fails for a DIFFERENT reason — charged to the round" \
       | tee -a "${GATE_LOG}"
     return 1
@@ -211,6 +259,12 @@ fail_signature() {
   # to the round) — widening needs their position formats normalized first.
   grep -oE "[^ '\"]+\([0-9]+,[0-9]+\): error TS[0-9]+.*" "${1}" 2> /dev/null \
     | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u
+}
+# The one emit point for the dist-rebuild steering note — every retryable
+# exit of baseline_also_fails after the baseline leg calls this, so the
+# guidance cannot drift across exits.
+seed_dist_note() {
+  echo "⚠️ the baseline leg rebuilt dist/ from baseline sources — run npm run build before typecheck/tests" >> "${GATE_LOG}"
 }
 run_check() {
   # pipefail makes the pipeline carry the command's status, not tee's. The
