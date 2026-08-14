@@ -118,17 +118,17 @@ describe('WorkflowRunner', () => {
 
     const bridgeApprovalEvents = createProductionDispatchMock.mock
       .calls[0]?.[3] as
-      | ((emitter: AgentEventEmitter) => () => void)
+      | ((emitter: AgentEventEmitter, dispatchId?: string) => () => void)
       | undefined;
     expect(bridgeApprovalEvents).toEqual(expect.any(Function));
     const emitter = new AgentEventEmitter();
     const cleanup = vi.fn();
     productionBridge.mockReturnValue(cleanup);
-    expect(bridgeApprovalEvents?.(emitter)).toBe(cleanup);
+    expect(bridgeApprovalEvents?.(emitter, 'dispatch-1')).toBe(cleanup);
     expect(productionBridge).toHaveBeenCalledWith(
       productionHandle.runId,
       emitter,
-      undefined,
+      'dispatch-1',
     );
 
     const injected = configWithRegistry();

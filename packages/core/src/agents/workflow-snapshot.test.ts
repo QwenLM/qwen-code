@@ -292,7 +292,7 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
 
   it('keeps the snapshot and reports failure when journal deletion fails', async () => {
     const config = fakeConfig(projectDir);
-    const runId = 'wf_busy';
+    const runId = 'wf_dead';
     await writeWorkflowSnapshot(config, task({ runId }));
     const journalPath = config.storage.getWorkflowRunJournalPath(runId);
     await fs.mkdir(path.dirname(journalPath), { recursive: true });
@@ -304,6 +304,7 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       );
 
     await expect(deleteWorkflowSnapshot(config, runId)).resolves.toBe(false);
+    expect(rmSpy).toHaveBeenCalledTimes(1);
 
     rmSpy.mockRestore();
     await expect(

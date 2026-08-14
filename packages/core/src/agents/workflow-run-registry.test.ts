@@ -608,6 +608,9 @@ describe('WorkflowRunRegistry', () => {
       expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });
     expect(r.get('wf_sync_failed_channel')?.pendingApprovals).toEqual([]);
+    expect(
+      r.get('wf_sync_failed_channel')?.events.map((event) => event.type),
+    ).toEqual(['approval-requested', 'approval-settled']);
   });
 
   it('fails the run and drains siblings when resolving respond throws', async () => {
@@ -719,6 +722,11 @@ describe('WorkflowRunRegistry', () => {
 
     expect(r.get('wf_tool_result')?.pendingApprovals).toEqual([]);
     expect(respond).not.toHaveBeenCalled();
+    expect(r.get('wf_tool_result')?.events.at(-1)).toMatchObject({
+      type: 'approval-settled',
+      at: 1_700_000_000_200,
+      name: 'Shell',
+    });
   });
 
   it('aborts the host request signal when an attempt cleans up', async () => {

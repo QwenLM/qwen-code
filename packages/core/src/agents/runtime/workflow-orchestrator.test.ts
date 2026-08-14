@@ -602,6 +602,15 @@ describe('WorkflowOrchestrator', () => {
       logAppended: () => {
         throw new Error('log-subscriber-boom');
       },
+      dispatchQueued: () => {
+        throw new Error('queued-subscriber-boom');
+      },
+      dispatchStarted: () => {
+        throw new Error('started-subscriber-boom');
+      },
+      dispatchSettled: () => {
+        throw new Error('settled-subscriber-boom');
+      },
     };
     const outcome = await orchestrator.run({
       script: `
@@ -1971,24 +1980,31 @@ describe('createProductionDispatch', () => {
         signal?.addEventListener('abort', () => resolve(), { once: true });
       });
     };
-    const installed: AgentEventEmitter[] = [];
+    const installed: Array<{
+      emitter: AgentEventEmitter;
+      dispatchId?: string;
+    }> = [];
     const cleaned: AgentEventEmitter[] = [];
     const dispatch = createProductionDispatch(
       fakeConfig(),
       undefined,
       undefined,
-      (emitter) => {
-        installed.push(emitter);
+      (emitter, dispatchId) => {
+        installed.push({ emitter, dispatchId });
         return () => cleaned.push(emitter);
       },
     );
 
-    await expect(dispatch('hello', { label: 'h1', stallMs: 5 })).resolves.toBe(
-      'headless-said:hello',
-    );
+    await expect(
+      dispatch('hello', { label: 'h1', stallMs: 5 }, 'dispatch-1'),
+    ).resolves.toBe('headless-said:hello');
     expect(installed).toHaveLength(2);
-    expect(installed[0]).not.toBe(installed[1]);
-    expect(cleaned).toEqual(installed);
+    expect(installed[0]?.emitter).not.toBe(installed[1]?.emitter);
+    expect(installed.map(({ dispatchId }) => dispatchId)).toEqual([
+      'dispatch-1',
+      'dispatch-1',
+    ]);
+    expect(cleaned).toEqual(installed.map(({ emitter }) => emitter));
   });
 
   it('bubbles a production subagent approval through the run registry and resumes after ProceedOnce', async () => {
