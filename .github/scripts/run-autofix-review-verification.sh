@@ -347,8 +347,9 @@ fi
 # `scripts` sections of workspace manifests are their own class because the
 # gate's every command resolves through them (`npm run build/typecheck/
 # lint/test`) — a scripts edit can hollow out the gate while every check
-# "passes". Only root and first-level `packages/*/package.json` count:
-# fixture manifests deeper in a src tree are ordinary test data.
+# "passes". Only the root manifest and DECLARED workspace manifests count
+# (resolver-backed, nested workspaces included): fixture manifests deeper
+# in a src tree are ordinary test data.
 at_workspace_root() {
   # True when the path sits at the repo root or at a DECLARED workspace's
   # root (resolved through the same trusted resolver the package-test loop
@@ -511,8 +512,8 @@ fi
 # report so a maintainer always sees exactly which tests disappeared,
 # whoever suggested it.
 TEST_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(glob)**/__snapshots__/**' ':(glob)**/__tests__/**' ':(glob)**/test-utils/**' ':(glob)integration-tests/**')
-DELETED_TESTS="$(git diff --name-only --diff-filter=D "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}")"
-NET_TEST_LINES="$(git diff --numstat "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
+DELETED_TESTS="$(git diff --name-only -z --no-renames --diff-filter=D "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" | tr '\0' '\n')"
+NET_TEST_LINES="$(git diff --numstat --no-renames "${ROUND_RANGE}" -- "${TEST_PATHSPEC[@]}" |
   awk '{ if ($1 != "-") a += $1; if ($2 != "-") d += $2 } END { print a - d + 0 }')"
 rm -f "${WORKDIR}/gate-advisories.md"
 if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
@@ -634,21 +635,30 @@ bite_runner_default() {
   shift
   npm run test --workspace "${ws}" --if-present -- "$@"
 }
+# Merge freight (content identical to current main) is not the round's
+# authorship — the same doctrine the class scan applies. Filter it out of
+# every bite input so a base-merging round is judged on its own changes.
+not_merge_freight() {
+  while IFS= read -r -d '' f; do
+    git diff --quiet origin/main "${BRANCH}" -- "${f}" 2> /dev/null || printf '%s\0' "${f}"
+  done
+}
 mapfile -d '' -t BITE_FILES < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
   -- ':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**' \
-  ':(exclude,glob)integration-tests/**' || true)
+  ':(exclude,glob)integration-tests/**' | not_merge_freight || true)
 # Changed snapshots ride the overlay (a fix proven by a regenerated
 # snapshot must not revert to the pre-round snapshot and read as green)
 # but are never passed to the runner as test-file arguments.
 mapfile -d '' -t BITE_SNAPS < <(git diff --name-only -z --no-renames --diff-filter=AM "${ROUND_RANGE}" \
-  -- ':(glob)**/__snapshots__/**' || true)
+  -- ':(glob)**/__snapshots__/**' | not_merge_freight || true)
 # No blanket *.md exclusion: .qwen/skills/**/*.md is EXECUTABLE agent
 # behavior (and scripts/tests pins it), so markdown counts as source; the
 # consequence gating above keeps doc-only rounds from ever being rejected.
-BITE_SRC="$(git diff --name-only "${ROUND_RANGE}" \
+BITE_SRC="$(git diff --name-only -z --no-renames "${ROUND_RANGE}" \
   -- ':(exclude,glob)**/*.test.*' ':(exclude,glob)**/*.spec.*' \
   ':(exclude,glob)**/__snapshots__/**' ':(exclude,glob)**/__tests__/**' \
-  ':(exclude,glob)**/test-utils/**' ':(exclude,glob)integration-tests/**')"
+  ':(exclude,glob)**/test-utils/**' ':(exclude,glob)integration-tests/**' |
+  not_merge_freight | tr '\0' '\n')"
 # Does this round RESOLVE a Critical-tagged or CHANGES_REQUESTED finding in
 # code? resolved-comments.txt is the agent's own machine-readable claim of
 # what it fixed; rc.json/rv.json carry the thread bodies and review states
@@ -688,7 +698,15 @@ if [[ -s "${WORKDIR}/resolved-comments.txt" && -s "${WORKDIR}/rc.json" ]]; then
       | ($ids | split("\n")
           | map(sub("^rc:"; "") | sub("\r$"; "")
             | select(test("^[0-9]+$")) | tonumber)) as $resolved
-      | [ $comments[] | select(.id as $id | $resolved | index($id) != null) | (.path // "") ]
+      | def critical($c):
+          (($c.body // "") | contains("**[Critical]**"))
+          or (($c.in_reply_to_id // null) as $root
+            | $root != null
+            and any($comments[];
+              .id == $root and ((.body // "") | contains("**[Critical]**"))));
+      [ $comments[]
+        | select(.id as $id | $resolved | index($id) != null)
+        | select(critical(.)) | (.path // "") ]
       | (length > 0) and all(.[];
           test("\\.(test|spec)\\.") or test("__tests__/|__snapshots__/|test-utils/|^integration-tests/"))' \
       "${WORKDIR}/rc.json" 2> /dev/null)" || TESTSIDE='false'
@@ -801,13 +819,22 @@ if [[ "${#BITE_FILES[@]}" -gt 0 && -n "${BITE_SRC}" ]]; then
         } >> "${GATE_LOG}"
         reject_fix 'bite check: changed tests pass on the pre-round tree (claimed defect does not reproduce)' 'false' 'false'
       elif [[ "${BITE_RAN}" == 'true' && "${BITE_BIT}" == 'false' ]]; then
-        # Not a defect-claim round: all-green pre-round tests are legitimate
-        # for a refactor or coverage addition — surface, never reject.
-        {
-          echo '🦷 **Gate advisory — this round'"'"'s changed tests all pass on the pre-round tree** (machine-measured, not agent-authored). Expected for a refactor or coverage addition; if this round was meant to FIX a defect, that defect did not reproduce. · 本轮改动的测试在轮前树上全部通过（门自动测量，非 agent 文本）。对重构或补充覆盖属正常；若本轮意在修复缺陷，则该缺陷未能复现。'
-        } >> "${WORKDIR}/gate-advisories.md"
-        echo "🦷 changed tests all pass on the pre-round tree — advisory written (no defect claim in this round)" \
-          | tee -a "${GATE_LOG}"
+        # All-green without rejection: either no defect claim (refactor or
+        # coverage addition — legitimate) or a TEST-SIDE claim, whose fixed
+        # test is EXPECTED to pass pre-round. Say which.
+        if [[ "${BITE_ENFORCE}" == 'advisory' ]]; then
+          {
+            echo '🦷 **Gate advisory — test-side defect claim, changed tests all pass on the pre-round tree** (machine-measured, not agent-authored). Expected when the defect was in the test itself; the resolution rests on the round summary. · 本轮为测试侧缺陷声明，改动的测试在轮前树上全部通过（门自动测量）。若缺陷在测试本身属预期；该解决以轮次摘要为凭。'
+          } >> "${WORKDIR}/gate-advisories.md"
+          echo "🦷 test-side defect claim — advisory written (all-green is the expected shape)" \
+            | tee -a "${GATE_LOG}"
+        else
+          {
+            echo '🦷 **Gate advisory — this round'"'"'s changed tests all pass on the pre-round tree** (machine-measured, not agent-authored). Expected for a refactor or coverage addition; if this round was meant to FIX a defect, that defect did not reproduce. · 本轮改动的测试在轮前树上全部通过（门自动测量，非 agent 文本）。对重构或补充覆盖属正常；若本轮意在修复缺陷，则该缺陷未能复现。'
+          } >> "${WORKDIR}/gate-advisories.md"
+          echo "🦷 changed tests all pass on the pre-round tree — advisory written (no defect claim in this round)" \
+            | tee -a "${GATE_LOG}"
+        fi
       elif [[ "${BITE_BIT}" == 'true' ]]; then
         echo "🦷 bite confirmed: at least one changed test fails on the pre-round tree" \
           | tee -a "${GATE_LOG}"

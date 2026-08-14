@@ -4956,72 +4956,11 @@ jobs:
             exit 1
           fi
 
-          if [[ "${OUTCOME}" == "fixed" ]]; then
-            NEXT_ROUND="$(( ROUND + 1 ))"
-            git config --local --unset-all http.https://github.com/.extraheader || true
-            # This step carries the PAT; the branch carries PR-controlled
-            # .husky hooks (hooksPath was pointed there so the AGENT's
-            # commits get checked). A pre-push hook would execute that code
-            # with the PAT in env — sever hooks entirely before pushing.
-            git config core.hooksPath /dev/null
-            # Authenticate push/fetch with a one-shot, host-scoped credential
-            # helper via a git_auth wrapper (see Publish PR) — nothing lands
-            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference.
-            git_auth() { git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
-            if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
-              # Push back to the FORK branch via allow-edits (PAT has push
-              # rights on the upstream, which GitHub extends to the fork's
-              # PR branch when the author ticked the box).
-              PUSH_URL="https://github.com/${HEAD_REPO}.git"
-            else
-              PUSH_URL="https://github.com/${REPO}.git"
-            fi
-            # Salvage a race-lost push instead of discarding the run. The
-            # per-PR head-write concurrency group serialises THIS repo's
-            # workflows, but it cannot stop the PR author (or anything on the
-            # fork side) pushing during the agent's ~120-minute window. The
-            # stated budget widened it from ~50m, so a race-lost push is that
-            # much likelier and the retry loop below stays bounded at 3 merges.
-            # Observed twice in one day (#7983, #7985): a one-shot push died
-            # `fetch first` and a full verified agent run was thrown away.
-            # On rejection, fetch the moved head and MERGE it into the local
-            # line (merge, not rebase: the agent's own conflict-resolution
-            # rounds create merge commits, and a rebase would flatten them
-            # and can silently re-introduce the conflicts it resolved). The
-            # merge result descends from the remote head, so the retried push
-            # is a fast-forward. A genuine content conflict aborts and falls
-            # through to the existing failure path — same as today.
-            PUSH_RACE_MERGED='false'
-            for push_attempt in 1 2 3; do
-              if git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
-                break
-              fi
-              if [[ "${push_attempt}" == 3 ]]; then
-                echo "::error::push rejected ${push_attempt} times; giving up"
-                exit 1
-              fi
-              echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
-              if ! git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
-                echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
-                exit 1
-              fi
-              # The disclosure flag keys on HEAD actually advancing: a push
-              # can fail transiently (upload timeout, 503) with the branch
-              # unmoved, and the merge then no-ops "Already up to date" —
-              # flagging that would tell the reviewer to re-check mid-run
-              # commits that never existed.
-              PRE_MERGE_HEAD="$(git rev-parse HEAD)"
-              if ! git -c user.name="${AUTOFIX_BOT}" \
-                -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
-                merge --no-edit FETCH_HEAD; then
-                git merge --abort || true
-                echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
-                exit 1
-              fi
-              if [[ "$(git rev-parse HEAD)" != "${PRE_MERGE_HEAD}" ]]; then
-                PUSH_RACE_MERGED='true'
-              fi
-            done
+          # Shared by the pushed and no-op outcomes: a no-op round may
+          # resolve re-verified findings (verified_head is the unchanged,
+          # previously verified origin head) and must post its declines'
+          # replies — silence in still-open threads was a no-op-only gap.
+          resolve_and_reply_threads() {
             CAN_RESOLVE_THREADS='false'
             if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
               LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
@@ -5166,6 +5105,75 @@ jobs:
                 "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
               echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
             fi
+          }
+
+                    if [[ "${OUTCOME}" == "fixed" ]]; then
+            NEXT_ROUND="$(( ROUND + 1 ))"
+            git config --local --unset-all http.https://github.com/.extraheader || true
+            # This step carries the PAT; the branch carries PR-controlled
+            # .husky hooks (hooksPath was pointed there so the AGENT's
+            # commits get checked). A pre-push hook would execute that code
+            # with the PAT in env — sever hooks entirely before pushing.
+            git config core.hooksPath /dev/null
+            # Authenticate push/fetch with a one-shot, host-scoped credential
+            # helper via a git_auth wrapper (see Publish PR) — nothing lands
+            # in .git/config, argv holds only the ${GITHUB_TOKEN} reference.
+            git_auth() { git -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
+            if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
+              # Push back to the FORK branch via allow-edits (PAT has push
+              # rights on the upstream, which GitHub extends to the fork's
+              # PR branch when the author ticked the box).
+              PUSH_URL="https://github.com/${HEAD_REPO}.git"
+            else
+              PUSH_URL="https://github.com/${REPO}.git"
+            fi
+            # Salvage a race-lost push instead of discarding the run. The
+            # per-PR head-write concurrency group serialises THIS repo's
+            # workflows, but it cannot stop the PR author (or anything on the
+            # fork side) pushing during the agent's ~120-minute window. The
+            # stated budget widened it from ~50m, so a race-lost push is that
+            # much likelier and the retry loop below stays bounded at 3 merges.
+            # Observed twice in one day (#7983, #7985): a one-shot push died
+            # `fetch first` and a full verified agent run was thrown away.
+            # On rejection, fetch the moved head and MERGE it into the local
+            # line (merge, not rebase: the agent's own conflict-resolution
+            # rounds create merge commits, and a rebase would flatten them
+            # and can silently re-introduce the conflicts it resolved). The
+            # merge result descends from the remote head, so the retried push
+            # is a fast-forward. A genuine content conflict aborts and falls
+            # through to the existing failure path — same as today.
+            PUSH_RACE_MERGED='false'
+            for push_attempt in 1 2 3; do
+              if git_auth push --no-verify "${PUSH_URL}" HEAD:"${BRANCH}"; then
+                break
+              fi
+              if [[ "${push_attempt}" == 3 ]]; then
+                echo "::error::push rejected ${push_attempt} times; giving up"
+                exit 1
+              fi
+              echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
+              if ! git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
+                echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
+                exit 1
+              fi
+              # The disclosure flag keys on HEAD actually advancing: a push
+              # can fail transiently (upload timeout, 503) with the branch
+              # unmoved, and the merge then no-ops "Already up to date" —
+              # flagging that would tell the reviewer to re-check mid-run
+              # commits that never existed.
+              PRE_MERGE_HEAD="$(git rev-parse HEAD)"
+              if ! git -c user.name="${AUTOFIX_BOT}" \
+                -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
+                merge --no-edit FETCH_HEAD; then
+                git merge --abort || true
+                echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
+                exit 1
+              fi
+              if [[ "$(git rev-parse HEAD)" != "${PRE_MERGE_HEAD}" ]]; then
+                PUSH_RACE_MERGED='true'
+              fi
+            done
+            resolve_and_reply_threads
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -5211,6 +5219,10 @@ jobs:
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
+            # No push happened, so the verified head is the unchanged
+            # origin head; resolution's own live-head guards still apply.
+            PUSH_RACE_MERGED='false'
+            resolve_and_reply_threads
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {

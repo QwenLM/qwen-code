@@ -8598,8 +8598,9 @@ exit 1
           'bash',
           dir,
         ],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', env: isolatedGitEnv },
       );
+      expect(res.error).toBeUndefined();
       rmSync(dir, { recursive: true, force: true });
       return `${res.stdout}\n${res.stderr}`;
     };
@@ -8860,8 +8861,9 @@ exit 1
           dir,
           workdir,
         ],
-        { encoding: 'utf8' },
+        { encoding: 'utf8', env: isolatedGitEnv },
       );
+      expect(res.error).toBeUndefined();
       const advisoryPath = join(workdir, 'gate-advisories.md');
       const advisory = existsSync(advisoryPath)
         ? readFileSync(advisoryPath, 'utf8')
@@ -9068,6 +9070,74 @@ exit 1
           'rc.json': JSON.stringify([
             { id: 101, body: '**[Critical]** stale owner routes writes' },
             { id: 404, body: 'fixed here', in_reply_to_id: 101 },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      }).out,
+    ).toContain('REJECT:bite check');
+    // A Critical anchored ON a test file is a test-side claim: all-green is
+    // its expected shape, so it demotes to the advisory arm...
+    const testSide = run(srcAndTest, {
+      runnerExit: 0,
+      resolverLines: ['packages/cli'],
+      workdir: {
+        'resolved-comments.txt': 'rc:101\n',
+        'rc.json': JSON.stringify([
+          {
+            id: 101,
+            path: 'packages/cli/src/a.test.ts',
+            body: '**[Critical]** this test asserts the wrong behavior',
+          },
+        ]),
+        'rv.json': JSON.stringify([]),
+      },
+    });
+    expect(testSide.out).toContain('SURVIVED');
+    expect(testSide.out).not.toContain('REJECT:');
+    expect(testSide.advisory).toContain('test-side defect claim');
+    // ...but only RESOLVED CRITICAL threads vote: a source-file Suggestion
+    // resolved alongside must not break the demotion.
+    expect(
+      run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n303\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 303,
+              path: 'packages/cli/src/a.ts',
+              body: '**[Suggestion]** rename this helper',
+            },
+          ]),
+          'rv.json': JSON.stringify([]),
+        },
+      }).out,
+    ).not.toContain('REJECT:');
+    // A Critical anchored on SOURCE keeps full enforcement even when a
+    // test-side Critical is resolved in the same round.
+    expect(
+      run(srcAndTest, {
+        runnerExit: 0,
+        resolverLines: ['packages/cli'],
+        workdir: {
+          'resolved-comments.txt': '101\n102\n',
+          'rc.json': JSON.stringify([
+            {
+              id: 101,
+              path: 'packages/cli/src/a.test.ts',
+              body: '**[Critical]** this test asserts the wrong behavior',
+            },
+            {
+              id: 102,
+              path: 'packages/cli/src/a.ts',
+              body: '**[Critical]** stale owner routes writes',
+            },
           ]),
           'rv.json': JSON.stringify([]),
         },
