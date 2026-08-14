@@ -135,6 +135,7 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
+import { ConversationRuntimeOwnershipError } from './conversations/conversation-runtime-errors.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import { ServeAppLifecycleController } from './serve-app-lifecycle.js';
@@ -6550,12 +6551,14 @@ async function runQwenServeImpl(
       let liveDiscoveryPublish: Promise<void> | undefined;
       let liveDiscoveryRetryTimer: NodeJS.Timeout | undefined;
       let liveDiscoveryRetryTask: Promise<void> | undefined;
+      let liveDiscoveryBootRetryApp: Application | undefined;
       let liveDiscoveryEnabled = false;
       let liveDiscoveryShuttingDown = false;
       let liveDiscoveryToggle: Promise<void> = Promise.resolve();
       let attemptPendingLiveDiscovery: (() => Promise<void>) | undefined;
       const pendingLiveDiscoveryBaseDirs = new Set<string>();
       const warnedLiveDiscoveryOwners = new Set<string>();
+      let warnedLiveDiscoveryBootFailure = false;
       const liveDiscoveryRetryDelayMs =
         deps.liveDiscoveryRetryDelayMs !== undefined &&
         Number.isFinite(deps.liveDiscoveryRetryDelayMs) &&
@@ -6568,21 +6571,24 @@ async function runQwenServeImpl(
           !liveDiscoveryEnabled ||
           liveDiscoveryRetryTimer ||
           liveDiscoveryRetryTask ||
-          pendingLiveDiscoveryBaseDirs.size === 0 ||
-          !attemptPendingLiveDiscovery
+          (!liveDiscoveryBootRetryApp &&
+            (pendingLiveDiscoveryBaseDirs.size === 0 ||
+              !attemptPendingLiveDiscovery))
         ) {
           return;
         }
         liveDiscoveryRetryTimer = setTimeout(() => {
           liveDiscoveryRetryTimer = undefined;
-          if (
-            liveDiscoveryShuttingDown ||
-            !liveDiscoveryEnabled ||
-            !attemptPendingLiveDiscovery
-          ) {
+          if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) {
             return;
           }
-          const retry = attemptPendingLiveDiscovery().finally(() => {
+          const retryApp = liveDiscoveryBootRetryApp;
+          liveDiscoveryBootRetryApp = undefined;
+          const retryOperation = retryApp
+            ? publishLiveDiscovery(retryApp)
+            : attemptPendingLiveDiscovery?.();
+          if (!retryOperation) return;
+          const retry = retryOperation.finally(() => {
             if (liveDiscoveryRetryTask === retry) {
               liveDiscoveryRetryTask = undefined;
             }
@@ -6612,6 +6618,7 @@ async function runQwenServeImpl(
         const instanceNonce = coordinator?.daemonInstanceNonce;
         if (typeof instanceNonce !== 'string') return Promise.resolve();
         let publicationFailed = false;
+        let publicationRetryable = false;
         const publication = serveAppLifecycle
           .startBoot()
           .then(() => loadLiveDiscoveryRuntime())
@@ -6623,6 +6630,8 @@ async function runQwenServeImpl(
               writeLiveDiscoveryFile,
             }) => {
               if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) return;
+              liveDiscoveryBootRetryApp = undefined;
+              warnedLiveDiscoveryBootFailure = false;
               const stableBaseDir = liveDiscoveryStableBaseDir;
               const runtimeBaseDir = path.resolve(liveRuntimeBaseDir);
               const targetBaseDirs = new Set<string>();
@@ -6719,11 +6728,16 @@ async function runQwenServeImpl(
           )
           .catch((err) => {
             publicationFailed = true;
-            daemonLog.warn(
-              `failed to publish Live Host discovery: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
+            publicationRetryable =
+              err instanceof ConversationRuntimeOwnershipError && err.retryable;
+            if (!publicationRetryable || !warnedLiveDiscoveryBootFailure) {
+              warnedLiveDiscoveryBootFailure = publicationRetryable;
+              daemonLog.warn(
+                `failed to publish Live Host discovery: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
           });
         const trackedPublication = publication.finally(() => {
           if (
@@ -6731,6 +6745,14 @@ async function runQwenServeImpl(
             liveDiscoveryPublish === trackedPublication
           ) {
             liveDiscoveryPublish = undefined;
+            if (
+              publicationRetryable &&
+              !liveDiscoveryShuttingDown &&
+              liveDiscoveryEnabled
+            ) {
+              liveDiscoveryBootRetryApp = candidateApp;
+              scheduleLiveDiscoveryRetry();
+            }
           }
         });
         liveDiscoveryPublish = trackedPublication;
@@ -6766,6 +6788,8 @@ async function runQwenServeImpl(
       };
       const unpublishLiveDiscovery = async (): Promise<void> => {
         liveDiscoveryEnabled = false;
+        liveDiscoveryBootRetryApp = undefined;
+        warnedLiveDiscoveryBootFailure = false;
         cancelLiveDiscoveryRetry();
         pendingLiveDiscoveryBaseDirs.clear();
         attemptPendingLiveDiscovery = undefined;

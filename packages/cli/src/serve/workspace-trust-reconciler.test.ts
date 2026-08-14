@@ -78,10 +78,13 @@ describe('workspace trust reconciler', () => {
 
       await reconciler.reconcile(nextPolicy);
 
-      expect(registry.getByWorkspaceCwd(scratch.workspaceCwd)).toBe(scratch);
+      expect(registry.getManagedByWorkspaceCwd(scratch.workspaceCwd)).toBe(
+        scratch,
+      );
       expect(scratch.trusted).toBe(true);
       expect(
-        registry.getEntryByWorkspaceCwd(scratch.workspaceCwd)?.appliedRevision,
+        registry.getManagedEntryByWorkspaceCwd(scratch.workspaceCwd)
+          ?.appliedRevision,
       ).toBe('two');
       expect(buildRuntime).not.toHaveBeenCalled();
       expect(drainRuntime).not.toHaveBeenCalled();
