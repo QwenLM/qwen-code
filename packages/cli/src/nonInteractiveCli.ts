@@ -1370,6 +1370,9 @@ export async function runNonInteractive(
             : 'the active model override does not support audio';
           initialParts = replaceAudioPartsWithUnavailable(initialParts, reason);
           emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
+          if (routeResolutionFailed) {
+            inlineModelOverride = undefined;
+          }
         } else {
           initialParts = initialParts.map((part) =>
             hasAudioParts([part]) ? clampInlineMediaPart(part) : part,

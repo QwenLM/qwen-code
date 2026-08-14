@@ -4603,6 +4603,9 @@ export class Session implements SessionContext {
                       onFullTurnModel,
                       () => fullTurnModelOverride,
                       rejectOnLoopDetected,
+                      () => {
+                        fullTurnModelOverride = undefined;
+                      },
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
@@ -4733,6 +4736,9 @@ export class Session implements SessionContext {
           watchQueuedPrompt: true,
           onFullTurnModel,
           getModelOverride: () => modelOverride,
+          onModelOverrideResolutionFailed: () => {
+            modelOverride = undefined;
+          },
         });
         if (drained.parts.length > 0) {
           if (drained.hasQueuedPrompt) {
@@ -4760,6 +4766,9 @@ export class Session implements SessionContext {
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
+              onModelOverrideResolutionFailed: () => {
+                modelOverride = undefined;
+              },
               responseCapture,
               rejectOnLoopDetected,
             },
@@ -4834,6 +4843,9 @@ export class Session implements SessionContext {
             watchQueuedPrompt: true,
             onFullTurnModel,
             getModelOverride: () => modelOverride,
+            onModelOverrideResolutionFailed: () => {
+              modelOverride = undefined;
+            },
           });
           if (drained.parts.length > 0) {
             if (drained.hasQueuedPrompt) {
@@ -4861,6 +4873,9 @@ export class Session implements SessionContext {
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
+                onModelOverrideResolutionFailed: () => {
+                  modelOverride = undefined;
+                },
                 responseCapture,
                 rejectOnLoopDetected,
               },
@@ -4996,6 +5011,9 @@ export class Session implements SessionContext {
             : {}),
           onFullTurnModel,
           getModelOverride: () => modelOverride,
+          onModelOverrideResolutionFailed: () => {
+            modelOverride = undefined;
+          },
           responseCapture,
           rejectOnLoopDetected,
         },
@@ -5022,6 +5040,7 @@ export class Session implements SessionContext {
       onAutomaticContinuationValidated?: () => Promise<void>;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
+      onModelOverrideResolutionFailed?: () => void;
       responseCapture?: AgentResponseCapture;
       rejectOnLoopDetected?: boolean;
     } = {},
@@ -5115,6 +5134,8 @@ export class Session implements SessionContext {
                       watchQueuedPrompt: true,
                       onFullTurnModel: options.onFullTurnModel,
                       getModelOverride: options.getModelOverride,
+                      onModelOverrideResolutionFailed:
+                        options.onModelOverrideResolutionFailed,
                     },
                   );
                   if (drained.parts.length > 0) {
@@ -5612,6 +5633,7 @@ export class Session implements SessionContext {
           options.onFullTurnModel,
           options.getModelOverride,
           options.rejectOnLoopDetected ?? false,
+          options.onModelOverrideResolutionFailed,
         );
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.hadMidTurnUserInput) {
@@ -6055,6 +6077,7 @@ export class Session implements SessionContext {
     onFullTurnModel?: (model: string) => boolean,
     getModelOverride?: () => string | undefined,
     rejectOnLoopDetected = false,
+    onModelOverrideResolutionFailed?: () => void,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -6071,6 +6094,7 @@ export class Session implements SessionContext {
       watchQueuedPrompt: toolLoopState.repeatedToolFailureMode !== 'off',
       onFullTurnModel,
       getModelOverride,
+      onModelOverrideResolutionFailed,
     });
     const hadMidTurnUserInput = drained.parts.length > 0;
     if (hadMidTurnUserInput) {
@@ -6295,6 +6319,7 @@ export class Session implements SessionContext {
       watchQueuedPrompt?: boolean;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
+      onModelOverrideResolutionFailed?: () => void;
     } = {},
   ): Promise<MidTurnDrainResult> {
     // Flush anything recovered from a PRIOR timed-out drain first: the daemon
@@ -6471,10 +6496,14 @@ export class Session implements SessionContext {
     options: {
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
+      onModelOverrideResolutionFailed?: () => void;
       preserveFallbackOnAbort?: boolean;
     } = {},
   ): Promise<Part[]> {
-    const parts: Part[] = [];
+    const resolvedMessages: Array<{
+      parts: Part[];
+      displayText: string;
+    }> = [];
     for (const message of messages) {
       const displayText =
         message.kind === 'text' ? message.message : message.displayText;
@@ -6490,11 +6519,13 @@ export class Session implements SessionContext {
                   this.#resolvePrompt(message.content, signal, {
                     onFullTurnModel: options.onFullTurnModel,
                     getModelOverride: options.getModelOverride,
+                    onModelOverrideResolutionFailed:
+                      options.onModelOverrideResolutionFailed,
                   }),
               );
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
-          return parts;
+          break;
         }
         if (!abortSignal.aborted) {
           const errorMessage = this.#formatError(messageError);
@@ -6511,10 +6542,22 @@ export class Session implements SessionContext {
         }
       }
       const built = prefixMidTurnUserMessageParts(rawParts, displayText);
+      resolvedMessages.push({ parts: built, displayText });
+    }
+    const parts: Part[] = [];
+    for (const resolved of resolvedMessages) {
+      const finalized = options.getModelOverride
+        ? await this.#applyAudioBridgeIfNeeded(
+            resolved.parts,
+            abortSignal,
+            options.getModelOverride(),
+            options.onModelOverrideResolutionFailed,
+          )
+        : resolved.parts;
       this.config
         .getChatRecordingService()
-        ?.recordMidTurnUserMessage(built, displayText);
-      parts.push(...built);
+        ?.recordMidTurnUserMessage(finalized, resolved.displayText);
+      parts.push(...finalized);
     }
     return parts;
   }
@@ -10901,6 +10944,7 @@ export class Session implements SessionContext {
       promptLast?: boolean;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
+      onModelOverrideResolutionFailed?: () => void;
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
@@ -11075,6 +11119,7 @@ export class Session implements SessionContext {
         abortSignal,
         options.onFullTurnModel,
         options.getModelOverride,
+        options.onModelOverrideResolutionFailed,
       );
     }
 
@@ -11084,6 +11129,7 @@ export class Session implements SessionContext {
         abortSignal,
         options.onFullTurnModel,
         options.getModelOverride,
+        options.onModelOverrideResolutionFailed,
       );
     }
 
@@ -11197,6 +11243,7 @@ export class Session implements SessionContext {
       abortSignal,
       options.onFullTurnModel,
       options.getModelOverride,
+      options.onModelOverrideResolutionFailed,
     );
   }
 
@@ -11205,11 +11252,13 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
     getModelOverride?: () => string | undefined,
+    onModelOverrideResolutionFailed?: () => void,
   ): Promise<Part[]> {
     const parts = await this.#applyAudioBridgeIfNeeded(
       originalParts,
       abortSignal,
       getModelOverride?.(),
+      onModelOverrideResolutionFailed,
     );
     if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
       return parts;
@@ -11293,6 +11342,7 @@ export class Session implements SessionContext {
     parts: Part[],
     abortSignal: AbortSignal,
     modelOverride?: string,
+    onModelOverrideResolutionFailed?: () => void,
   ): Promise<Part[]> {
     if (!hasAudioParts(parts)) return parts;
     let targetSupportsAudio: boolean | undefined;
@@ -11307,6 +11357,7 @@ export class Session implements SessionContext {
         targetSupportsAudio =
           runtimeView.contentGeneratorConfig.modalities?.audio === true;
       } catch (error) {
+        onModelOverrideResolutionFailed?.();
         debugLogger.warn(
           `audio route capability check failed for '${routeSelector}': ${
             error instanceof Error ? error.message : String(error)

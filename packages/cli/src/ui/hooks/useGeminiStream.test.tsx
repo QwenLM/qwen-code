@@ -980,6 +980,79 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('rechecks retained audio after clearing an inline override on retry', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'audio-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGeneratorConfig: { modalities: { audio: true } },
+          }),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'retry transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    const { result, mockSendMessageStream: sendMessageStream } =
+      renderTestHook();
+    sendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    expect(mockRunAudioBridge).toHaveBeenCalledOnce();
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(sendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'retry transcript' },
+    ]);
+    expect(JSON.stringify(sendMessageStream.mock.calls[1]?.[0])).not.toContain(
+      'audio/wav',
+    );
+    expect(sendMessageStream.mock.calls[1]?.[3]?.modelOverride).toBeUndefined();
+  });
+
   it('fails closed when inline override capability resolution rejects', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
@@ -1019,6 +1092,9 @@ describe('useGeminiStream', () => {
         ),
       }),
     ]);
+    expect(
+      mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
     expect(mockAddItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: MessageType.ERROR,

@@ -1296,6 +1296,12 @@ export const useGeminiStream = (
                 ? 'the active model override could not be resolved'
                 : 'the active model override does not support audio';
               nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
+              if (routeResolutionFailed) {
+                clearModelOverride(
+                  modelOverrideRef,
+                  inlineModelOverrideActiveRef,
+                );
+              }
               addItem(
                 {
                   type: MessageType.ERROR,
@@ -3463,7 +3469,16 @@ export const useGeminiStream = (
                   }
                 : { queryToSend: null, shouldProceed: false }
               : submitType === SendMessageType.Retry
-                ? { queryToSend: query, shouldProceed: true }
+                ? hasAudioParts(query)
+                  ? await applyBridgeConversionsIfNeeded(
+                      query,
+                      userMessageTimestamp,
+                      abortSignal,
+                    ).then(({ parts, shouldProceed }) => ({
+                      queryToSend: parts,
+                      shouldProceed,
+                    }))
+                  : { queryToSend: query, shouldProceed: true }
                 : await prepareQueryForGemini(
                     query,
                     userMessageTimestamp,
@@ -3927,6 +3942,7 @@ export const useGeminiStream = (
     [
       streamingState,
       setModelSwitchedFromQuotaError,
+      applyBridgeConversionsIfNeeded,
       prepareQueryForGemini,
       processGeminiStreamEvents,
       pendingHistoryItemRef,

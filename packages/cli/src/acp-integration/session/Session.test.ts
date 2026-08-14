@@ -11046,6 +11046,116 @@ describe('Session', () => {
         );
       });
 
+      it('rechecks earlier drained audio after a later message selects the full-turn model', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi
+          .fn()
+          .mockReturnValue({ audio: true });
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGenerator: {},
+            contentGeneratorConfig: {
+              model: 'vision-agent',
+              modalities: { image: true },
+            },
+            model: 'vision-agent',
+          }),
+        });
+        Object.assign(mockSettings.merged as Record<string, unknown>, {
+          voiceModel: 'qwen3-asr-flash',
+          env: { OPENAI_API_KEY: 'test-key' },
+        });
+        transcribeVoiceAudioSpy.mockResolvedValue('batch transcript');
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+              ],
+              displayText: 'please listen first',
+            },
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'aW1hZ2U=',
+                },
+              ],
+              displayText: 'then inspect this image',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-read',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read a file' }],
+        });
+
+        expect(transcribeVoiceAudioSpy).toHaveBeenCalledOnce();
+        expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[0]).toBe(
+          'vision-agent\0https://vision.example.com/v1\0',
+        );
+        expect(
+          textParts(secondCall?.[1].message as Part[]).join('\n'),
+        ).toContain('batch transcript');
+        expect(JSON.stringify(secondCall?.[1].message)).not.toContain(
+          'audio/wav',
+        );
+        const recordedAudio = vi
+          .mocked(mockChatRecordingService.recordMidTurnUserMessage)
+          .mock.calls.find(
+            ([, display]) => display === 'please listen first',
+          )?.[0];
+        expect(JSON.stringify(recordedAudio)).toContain('batch transcript');
+        expect(JSON.stringify(recordedAudio)).not.toContain('audio/wav');
+      });
+
       it('fails closed when the active audio route cannot be resolved', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: [
@@ -11127,8 +11237,9 @@ describe('Session', () => {
         });
 
         expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
-        const secondMessage = vi.mocked(mockChat.sendMessageStream).mock
-          .calls[1]?.[1].message as Part[];
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[0]).toBe('qwen3-code-plus');
+        const secondMessage = secondCall?.[1].message as Part[];
         expect(textParts(secondMessage).join('\n')).toContain(
           'the active model override could not be resolved',
         );

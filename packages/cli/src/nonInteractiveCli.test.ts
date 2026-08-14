@@ -1892,6 +1892,9 @@ describe('runNonInteractive', () => {
       }),
     ]);
     expect(JSON.stringify(sentParts)).not.toContain('audio/wav');
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Audio was not sent'),
     );
