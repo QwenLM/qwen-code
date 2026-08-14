@@ -4519,6 +4519,7 @@ export class GeminiChat {
     let streamError: unknown = null;
     let yieldedAnyChunk = false;
     let deferredFirstChunk: GenerateContentResponse | null = null;
+    let pendingDegradedPlaceholderChunks: GenerateContentResponse[] = [];
 
     try {
       for await (const chunk of streamResponse) {
@@ -4722,6 +4723,16 @@ export class GeminiChat {
           }
         }
 
+        const pendingPlaceholderText = allModelParts
+          .filter((part) => !part.thought && part.text)
+          .map((part) => part.text)
+          .join('')
+          .trim();
+        const shouldHoldDegradedPlaceholder =
+          !hasToolCall &&
+          pendingPlaceholderText.length > 0 &&
+          UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(pendingPlaceholderText);
+
         if (chunk !== deferredFirstChunk) {
           if (
             !chunk.candidates?.length ||
@@ -4729,13 +4740,28 @@ export class GeminiChat {
             !protocolTextWasSuppressed ||
             !protocolTagDetector.blockingOutput
           ) {
-            yieldedAnyChunk = true;
-            yield chunk;
+            if (shouldHoldDegradedPlaceholder) {
+              pendingDegradedPlaceholderChunks.push(chunk);
+            } else {
+              yieldedAnyChunk = true;
+              for (const pendingChunk of pendingDegradedPlaceholderChunks) {
+                yield pendingChunk;
+              }
+              pendingDegradedPlaceholderChunks = [];
+              yield chunk;
+            }
           }
         }
       }
     } catch (e) {
       streamError = e;
+    }
+    if (streamError !== null) {
+      for (const pendingChunk of pendingDegradedPlaceholderChunks) {
+        yieldedAnyChunk = true;
+        yield pendingChunk;
+      }
+      pendingDegradedPlaceholderChunks = [];
     }
 
     if (
@@ -4936,6 +4962,16 @@ export class GeminiChat {
       streamError === null ||
       (hasToolCall &&
         (thoughtContentPart || consolidatedHistoryParts.length > 0));
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      contentText === UPSTREAM_DEGRADED_PLACEHOLDER
+    ) {
+      throw new InvalidStreamError(
+        'Model response is an upstream fail-fast placeholder.',
+        'UPSTREAM_DEGRADED_RESPONSE',
+      );
+    }
     // Transport-continuation merge (issue #8094). `allModelParts` is
     // per-attempt, so a continuation's parts carry the resumed remainder only.
     // Fold the already-delivered prefix back in HERE — into the parts
@@ -5109,6 +5145,9 @@ export class GeminiChat {
       throw streamError;
     }
 
+    for (const pendingChunk of pendingDegradedPlaceholderChunks) {
+      yield pendingChunk;
+    }
     if (deferredFirstChunk) {
       yield deferredFirstChunk;
     }

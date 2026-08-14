@@ -6382,6 +6382,62 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should retry a placeholder split across content and finish chunks without yielding it', async () => {
+      vi.useFakeTimers();
+      try {
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return streamResponse(
+              {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: '(request timeout)' }],
+                      role: 'model',
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse,
+              {
+                candidates: [{ finishReason: 'STOP' }],
+              } as unknown as GenerateContentResponse,
+            );
+          }
+
+          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-degraded-placeholder-split-finish',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                '(request timeout)',
+          ),
+        ).toBe(false);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should retry a tool result continuation placeholder without yielding it', async () => {
       vi.useFakeTimers();
       try {
@@ -8501,6 +8557,53 @@ describe('GeminiChat', async () => {
           expect(
             mockContentGenerator.generateContentStream,
           ).toHaveBeenCalledTimes(3);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'Recovered response' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('rejects a placeholder resumed after real delivered text', async () => {
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('The answer is 42. ')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('(request timeout)', 'STOP');
+              })(),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Recovered response', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-placeholder-remainder',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  '(request timeout)',
+            ),
+          ).toBe(false);
           expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
           expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
           expect(chatWithRecording.getHistory().at(-1)).toEqual({
