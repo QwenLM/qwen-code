@@ -6,9 +6,9 @@
 
 /**
  * Framework-neutral streaming state machine: folds agent-loop stream events
- * into render-ready history items. Extracted from the OpenTUI POC's
- * `tui-poc-lab/src/app.tsx` applyEvent reducer so any renderer binding
- * (ink today, OpenTUI tomorrow) shares one source of truth for history.
+ * into render-ready history items. Extracted from the OpenTUI POC's applyEvent
+ * reducer so any renderer binding (ink today, OpenTUI tomorrow) shares one
+ * source of truth for history.
  *
  * This module must not import react / solid / ink / @opentui — the rule is
  * enforced by `scripts/check-tui-dep-direction.mjs`.

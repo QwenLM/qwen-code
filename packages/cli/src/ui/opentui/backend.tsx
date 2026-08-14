@@ -55,6 +55,7 @@ import type { Part, PartListUnion } from '@google/genai';
 import { livePromptEvents } from './live-session.js';
 import { resumeEventsFromConfig } from './resume-session.js';
 import { isSlashCommandInput } from './slash-dispatch.js';
+import type { RemoteInputWatcher } from '../../remoteInput/RemoteInputWatcher.js';
 import {
   createOpenTuiSlashDispatcher,
   type OpenTuiSlashDispatcher,
@@ -540,9 +541,11 @@ function buildBanner(config: Config | undefined, width: number) {
 function App({
   events,
   config,
+  remoteInputWatcher,
 }: {
   events?: AsyncIterable<OpenTuiStreamEvent>;
   config?: Config;
+  remoteInputWatcher?: RemoteInputWatcher;
 }) {
   const renderer = useRenderer();
   const { width } = useTerminalDimensions();
@@ -714,13 +717,10 @@ function App({
 
   const applyEvent = useCallback((ev: OpenTuiStreamEvent) => {
     setItems((prev) => foldLiveEvent(prev, ev));
-    if (ev.type === 'done') {
-      setStreaming(false);
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    }
+    // NB: `done` fires once per model-stream segment — including segments that
+    // end in a tool call while the turn is still running — so it must not
+    // clear `streaming`; turn-level clears live in startLiveTurn's finally,
+    // the scripted/resume drain, and the Esc/interrupt handlers.
   }, []);
 
   // "Enter to steer": plain queued prompts leave the queue at the next tool
@@ -831,6 +831,13 @@ function App({
         for await (const ev of events) {
           if (cancelled) break;
           applyEvent(ev);
+        }
+        if (!cancelled) {
+          setStreaming(false);
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
         }
       })();
       return () => {
@@ -1173,6 +1180,10 @@ function App({
           );
         } finally {
           if (liveAbortRef.current === controller) liveAbortRef.current = null;
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
           setStreaming(false);
           const next = queuedPromptsRef.current.shift();
           setQueuedPrompts([...queuedPromptsRef.current]);
@@ -1306,6 +1317,24 @@ function App({
     ],
   );
   submitTextRef.current = submitText;
+
+  // Remote input (--input-file): route external `submit` commands into the
+  // same path as typed prompts. confirmation_response is not wired yet — it
+  // needs a DualOutputBridge on this renderer first.
+  useEffect(() => {
+    if (!remoteInputWatcher) return;
+    remoteInputWatcher.setSubmitFn((text: string) => {
+      submitTextRef.current?.(text);
+      return true;
+    });
+    return () => remoteInputWatcher.setSubmitFn(() => false);
+  }, [remoteInputWatcher]);
+
+  useEffect(() => {
+    if (remoteInputWatcher && !streaming && !commandProcessing) {
+      remoteInputWatcher.notifyIdle();
+    }
+  }, [remoteInputWatcher, streaming, commandProcessing]);
 
   const banner = buildBanner(config, width);
 

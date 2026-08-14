@@ -24,15 +24,19 @@ import { createRoot } from '@opentui/react';
 import { App } from '../opentui/backend.js';
 import type { StreamEvent } from '../model/streamingModel.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { RemoteInputWatcher } from '../../remoteInput/RemoteInputWatcher.js';
 
 /**
  * @param events optional pre-adapted neutral stream (resume mode).
  * @param config when provided, the backend submits prompts to the REAL client
  *   (`liveSession`) for live conversations (requires credentials).
+ * @param remoteInputWatcher when provided (--input-file), remote `submit`
+ *   commands are routed into the backend like typed prompts.
  */
 export async function startOpenTuiUI(opts?: {
   events?: AsyncIterable<StreamEvent>;
   config?: Config;
+  remoteInputWatcher?: RemoteInputWatcher | null;
 }): Promise<void> {
   const renderer = await createCliRenderer({
     targetFps: 60,
@@ -43,6 +47,10 @@ export async function startOpenTuiUI(opts?: {
     autoFocus: true,
   });
   createRoot(renderer).render(
-    <App events={opts?.events} config={opts?.config} />,
+    <App
+      events={opts?.events}
+      config={opts?.config}
+      remoteInputWatcher={opts?.remoteInputWatcher ?? undefined}
+    />,
   );
 }
