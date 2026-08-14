@@ -14624,6 +14624,9 @@ describe('Session', () => {
       });
 
       it('does not record /advisor in the ACP transcript', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
         ).mockResolvedValueOnce({
@@ -14653,6 +14656,7 @@ describe('Session', () => {
             _meta: { source: 'slash_command' },
           },
         });
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
       });
 
       it('keeps replay records for other ACP slash-command messages', async () => {

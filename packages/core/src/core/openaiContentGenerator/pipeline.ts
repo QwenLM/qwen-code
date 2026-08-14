@@ -963,9 +963,7 @@ export class ContentGenerationPipeline {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
-      ...(request.config?.responseMimeType === 'application/json'
-        ? { response_format: { type: 'json_object' } }
-        : {}),
+      ...this.buildResponseFormat(request),
     };
 
     if (isStreaming) {
@@ -1180,6 +1178,25 @@ export class ContentGenerationPipeline {
     }
 
     return providerRequest;
+  }
+
+  private buildResponseFormat(
+    request: PromptCacheSharingParameters,
+  ): Pick<OpenAI.Chat.ChatCompletionCreateParams, 'response_format'> {
+    if (request.config?.responseMimeType !== 'application/json') return {};
+    const schema =
+      request.config.responseJsonSchema ?? request.config.responseSchema;
+    if (!schema) return { response_format: { type: 'json_object' } };
+    return {
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: schema as Record<string, unknown>,
+          strict: true,
+        },
+      },
+    };
   }
 
   private requiresThinking(model: string): boolean {
