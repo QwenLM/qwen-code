@@ -2568,8 +2568,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // (ESC, expansion errors) and built-in submit_prompt commands without
       // the modelInvocable flag are not re-armed here; consuming at the true
       // admission choke point is a deeper refactor deferred for this feature.
-      // Known gap: /cd, /directory add, and performMemoryRefresh swap the
-      // attached context-file set within the same session but do not re-arm
+      // Known gap: /cd, /directory add, performMemoryRefresh, and
+      // /resume of the current session swap or wipe the attached
+      // context-file set within the same session but do not re-arm
       // the latch, so the new file set is never announced after the first
       // prompt consumes it. A self-healing latch that watches the
       // context-file set would cover these centrally; deferred as a
