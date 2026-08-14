@@ -85,9 +85,18 @@ export interface CoverageFromTranscripts {
   /**
    * Agents whose certified work came from an EARLIER attempt's session — a
    * resumed run crediting the interrupted attempt's evidence. Zero on any run
-   * that never resumed. Counted only for records that clear the same bar as
-   * everyone else (verbatim-delivered CLI prompt plus an opened brief or an
-   * opened diff); reading the prior directory grants nothing by itself.
+   * that never resumed; reading the prior directory grants nothing by itself.
+   *
+   * The bar is a STRICT SUBSET of the live credit bars, deliberately: a
+   * verbatim-delivered CLI prompt plus an opened brief or diff, with none of
+   * the drift rescues. Those rescues exist so a run is not made to relaunch
+   * agents over a normalized word — they protect work this run can still
+   * see. This number only reports how much a continuation reused, it caps
+   * nothing (compose-review renders it as a non-capping note), so it should
+   * under-claim rather than announce reuse the pairing cannot fully vouch
+   * for. Coverage itself still applies its own rescue-inclusive bars to the
+   * same records, so nothing is under-credited where credit decides
+   * anything.
    */
   recoveredAgents: number;
   /**
