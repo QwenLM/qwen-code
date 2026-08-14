@@ -899,6 +899,59 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('updates workspace title and description when the same path is recorded again', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-rerecord-title',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/dashboard.html'), 'hello');
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Draft',
+          description: 'First pass',
+          workspacePath: 'reports/dashboard.html',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]?.artifactId;
+
+    const updated = await store.upsertMany(
+      [
+        {
+          title: 'Final dashboard',
+          description: 'Ready for review',
+          workspacePath: 'reports/dashboard.html',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(updated.changes).toHaveLength(1);
+    expect(updated.changes[0]).toMatchObject({
+      action: 'updated',
+      artifactId,
+      artifact: {
+        id: artifactId,
+        storage: 'workspace',
+        title: 'Final dashboard',
+        description: 'Ready for review',
+        workspacePath: 'reports/dashboard.html',
+      },
+    });
+    expect((await store.list()).artifacts).toMatchObject([
+      {
+        id: artifactId,
+        title: 'Final dashboard',
+        description: 'Ready for review',
+        workspacePath: 'reports/dashboard.html',
+      },
+    ]);
+  });
+
   it('accepts trusted published file urls outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's2-published-file-url',

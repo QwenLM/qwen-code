@@ -59,9 +59,11 @@ import {
   hasControlCharacter,
   hasUnsafeDisplayPayload,
 } from './record-artifact.js';
+import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
 const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
+  ['.csv', 'file'],
   ['.htm', 'html'],
   ['.html', 'html'],
   ['.ipynb', 'notebook'],
@@ -71,6 +73,7 @@ const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
   ['.png', 'image'],
   ['.svg', 'image'],
   ['.webp', 'image'],
+  ['.xlsx', 'file'],
 ]);
 
 type WorkspaceToolArtifact = ToolArtifact & {
@@ -734,26 +737,7 @@ function getRecordArtifactWorkspacePath(
   if (!ARTIFACT_KIND_BY_EXTENSION.has(path.extname(filePath).toLowerCase())) {
     return null;
   }
-  // The daemon's file-read route resolves workspacePath against the
-  // original workspace root, not the session cwd. When the session
-  // runs inside a worktree (<root>/.qwen/worktrees/<slug>), anchor
-  // the relative path at the workspace root so artifact previews
-  // resolve correctly.
-  const targetDir = config.getTargetDir();
-  const wtMatch = targetDir.match(
-    /^(.+)[\\/]\.qwen[\\/]worktrees[\\/][^\\/]+$/,
-  );
-  const baseDir = wtMatch ? wtMatch[1] : targetDir;
-  const relativePath = path.relative(baseDir, filePath);
-  if (
-    !relativePath ||
-    relativePath === '..' ||
-    relativePath.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relativePath)
-  ) {
-    return null;
-  }
-  return relativePath.split(path.sep).join('/');
+  return toCanonicalWorkspaceArtifactPath(filePath, config.getTargetDir());
 }
 
 function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {

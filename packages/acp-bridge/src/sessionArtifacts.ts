@@ -1665,6 +1665,14 @@ function mergeBatchArtifact(
   }
   return {
     ...existing,
+    title:
+      existing.storage === 'workspace' && next.storage === 'workspace'
+        ? next.title
+        : existing.title,
+    description:
+      existing.storage === 'workspace' && next.storage === 'workspace'
+        ? (next.description ?? existing.description)
+        : existing.description,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
     metadata: mergeMetadata(existing, next),
@@ -1753,6 +1761,14 @@ function mergeArtifact(
     next.description = incoming.description;
     delete next.workspacePath;
     delete next.hideWorkspacePath;
+  } else if (
+    existing.storage === 'workspace' &&
+    incoming.storage === 'workspace'
+  ) {
+    // Workspace re-records keep the same locator identity; refresh the
+    // user-visible title/description so a later, better name is not dropped.
+    next.title = incoming.title;
+    next.description = incoming.description ?? existing.description;
   }
 
   const changed = !publicArtifactsEqual(

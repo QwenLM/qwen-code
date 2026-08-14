@@ -530,6 +530,8 @@ describe('WriteFileTool', () => {
       ['photo.jpg', 'image'],
       ['diagram.svg', 'image'],
       ['photo.webp', 'image'],
+      ['table.csv', 'file'],
+      ['table.xlsx', 'file'],
     ])('infers artifact kind for %s as %s', async (fileName, expectedKind) => {
       mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
       const filePath = path.join(rootDir, 'reports', fileName);

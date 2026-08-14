@@ -594,4 +594,50 @@ describe('TurnOutputs artifact downloads', () => {
 
     expect(click).not.toHaveBeenCalled();
   });
+
+  it('disables Open for a missing workspace artifact and shows the recorded path', () => {
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-missing"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'missing-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'missing',
+                title: 'Missing report',
+                workspacePath: 'w/agent/report.csv',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const open = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Open',
+    );
+    expect(open?.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      'File not found in the workspace · w/agent/report.csv',
+    );
+
+    act(() => open?.click());
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
 });

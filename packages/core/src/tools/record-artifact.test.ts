@@ -4,14 +4,68 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { makeFakeConfig } from '../test-utils/config.js';
+import { ToolErrorType } from './tool-error.js';
 import { RecordArtifactTool } from './record-artifact.js';
 
 const signal = new AbortController().signal;
 
+function makeTool(targetDir = '/') {
+  return new RecordArtifactTool(makeFakeConfig({ targetDir, cwd: targetDir }));
+}
+
+async function createWorkspace(subdir?: string) {
+  const root = await realpath(
+    await mkdtemp(path.join(os.tmpdir(), 'record-artifact-')),
+  );
+  const cwd = subdir ? path.join(root, subdir) : root;
+  if (subdir) {
+    await mkdir(cwd, { recursive: true });
+  }
+  return {
+    root,
+    cwd,
+    tool: makeTool(cwd),
+    async write(rel: string, content = 'artifact-bytes') {
+      const abs = path.join(cwd, rel);
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, content);
+      return abs;
+    },
+    async cleanup() {
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
+
 describe('RecordArtifactTool', () => {
+  const workspaces: Array<{ cleanup: () => Promise<void> }> = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      workspaces.splice(0).map((workspace) => workspace.cleanup()),
+    );
+  });
+
+  async function workspace(subdir?: string) {
+    const created = await createWorkspace(subdir);
+    workspaces.push(created);
+    return created;
+  }
+
   it('records a link artifact without touching the resource', async () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
     const result = await tool
       .build({
         title: 'Table details',
@@ -31,25 +85,8 @@ describe('RecordArtifactTool', () => {
     ]);
   });
 
-  it('records workspace and managed artifacts with inferred storage', async () => {
-    const tool = new RecordArtifactTool();
-
-    await expect(
-      tool
-        .build({
-          title: 'Workspace report',
-          workspacePath: 'reports/summary.html',
-        })
-        .execute(signal),
-    ).resolves.toMatchObject({
-      artifacts: [
-        {
-          title: 'Workspace report',
-          storage: 'workspace',
-          workspacePath: 'reports/summary.html',
-        },
-      ],
-    });
+  it('records a managed artifact with inferred storage', async () => {
+    const tool = makeTool();
 
     await expect(
       tool
@@ -69,32 +106,177 @@ describe('RecordArtifactTool', () => {
     });
   });
 
-  it('rejects published storage', () => {
-    const tool = new RecordArtifactTool();
+  it('records a cwd-relative workspace file as a root-relative canonical path', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', '<html>ok</html>');
 
-    expect(() =>
-      tool.build({
-        title: 'Forged',
-        storage: 'published' as never,
-        url: 'https://example.com/artifact',
-      }),
-    ).toThrow(/allowed values/);
+    const result = await ws.tool
+      .build({
+        title: 'Workspace report',
+        workspacePath: 'reports/summary.html',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts).toMatchObject([
+      {
+        title: 'Workspace report',
+        storage: 'workspace',
+        workspacePath: 'reports/summary.html',
+        sizeBytes: '<html>ok</html>'.length,
+      },
+    ]);
+    expect(String(result.llmContent)).toContain('status: available');
+    expect(String(result.llmContent)).toContain(
+      'workspacePath: reports/summary.html',
+    );
+    expect(String(result.llmContent)).toContain(
+      `resolvedPath: ${path.join(ws.cwd, 'reports/summary.html')}`,
+    );
   });
 
-  it('requires exactly one locator', () => {
-    const tool = new RecordArtifactTool();
+  it('normalizes a cwd-absolute workspace path to the canonical relative path', async () => {
+    const ws = await workspace();
+    const abs = await ws.write('report.csv', 'a,b\n1,2\n');
 
-    expect(() =>
-      tool.build({
-        title: 'Ambiguous',
-        workspacePath: 'report.html',
-        url: 'https://example.com/report',
-      }),
-    ).toThrow(/exactly one/);
+    const result = await ws.tool
+      .build({
+        title: 'CSV report',
+        workspacePath: abs,
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      storage: 'workspace',
+      workspacePath: 'report.csv',
+    });
+    expect(String(result.llmContent)).toContain('status: available');
+    expect(String(result.llmContent)).toContain('workspacePath: report.csv');
   });
 
-  it('rejects workspace paths that escape the workspace', () => {
-    const tool = new RecordArtifactTool();
+  it('normalizes Windows-style relative separators to posix', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', '<html>ok</html>');
+
+    const result = await ws.tool
+      .build({
+        title: 'Windows-style relative report',
+        workspacePath: 'reports\\summary.html',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: 'reports/summary.html',
+    });
+  });
+
+  it('canonicalizes a worktree-relative path against the bound workspace root', async () => {
+    const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
+    await ws.write('report.csv', 'a,b\n');
+
+    const result = await ws.tool
+      .build({
+        title: 'Worktree report',
+        workspacePath: 'report.csv',
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: '.qwen/worktrees/my-feature/report.csv',
+    });
+    expect(String(result.llmContent)).toContain(
+      'workspacePath: .qwen/worktrees/my-feature/report.csv',
+    );
+  });
+
+  it('does not fall back to the workspace root when a relative path misses in the worktree cwd', async () => {
+    const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
+    await mkdir(path.join(ws.root, 'docs'), { recursive: true });
+    await writeFile(path.join(ws.root, 'docs/review.md'), '# review');
+
+    const result = await ws.tool
+      .build({
+        title: 'Root review',
+        workspacePath: 'docs/review.md',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+  });
+
+  it('accepts an absolute path inside the bound workspace from a worktree session', async () => {
+    const ws = await workspace(path.join('.qwen', 'worktrees', 'my-feature'));
+    const abs = path.join(ws.root, 'docs/review.md');
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, '# review');
+
+    const result = await ws.tool
+      .build({
+        title: 'Absolute review',
+        workspacePath: abs,
+      })
+      .execute(signal);
+
+    expect(result.error).toBeUndefined();
+    expect(result.artifacts?.[0]).toMatchObject({
+      workspacePath: 'docs/review.md',
+    });
+  });
+
+  it('rejects a wrong workspace-folder prefix instead of reporting success', async () => {
+    const ws = await workspace();
+    await ws.write('report.csv', 'a,b\n');
+
+    const result = await ws.tool
+      .build({
+        title: 'Wrong prefix',
+        workspacePath: 'w/agent/report.csv',
+      })
+      .execute(signal);
+
+    expect(result.artifacts).toBeUndefined();
+    expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+    expect(String(result.llmContent)).toContain('file not found');
+    expect(String(result.llmContent)).toContain('report.csv');
+    expect(String(result.llmContent)).toContain('w/agent/');
+  });
+
+  it('rejects a missing workspace file instead of reporting success', async () => {
+    const ws = await workspace();
+
+    const result = await ws.tool
+      .build({
+        title: 'Missing',
+        workspacePath: 'missing.csv',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+  });
+
+  it('rejects a directory workspacePath', async () => {
+    const ws = await workspace();
+    await mkdir(path.join(ws.cwd, 'reports'));
+
+    const result = await ws.tool
+      .build({
+        title: 'Directory',
+        workspacePath: 'reports',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+  });
+
+  it('rejects a workspace-relative path that escapes the execution directory', () => {
+    const tool = makeTool();
 
     for (const workspacePath of [
       '../secret.txt',
@@ -117,34 +299,101 @@ describe('RecordArtifactTool', () => {
     }
   });
 
-  it('accepts safe workspace-relative artifact paths', async () => {
-    const tool = new RecordArtifactTool();
-
-    await expect(
-      tool
-        .build({
-          title: 'Safe report',
-          workspacePath: 'reports/summary.html',
-        })
-        .execute(signal),
-    ).resolves.toMatchObject({
-      artifacts: [{ workspacePath: 'reports/summary.html' }],
+  it('rejects an absolute path outside the execution directory', async () => {
+    const ws = await workspace();
+    const outside = await realpath(
+      await mkdtemp(path.join(os.tmpdir(), 'record-artifact-outside-')),
+    );
+    const outsideFile = path.join(outside, 'secret.csv');
+    await writeFile(outsideFile, 'secret');
+    workspaces.push({
+      cleanup: async () => {
+        await rm(outside, { recursive: true, force: true });
+      },
     });
 
-    await expect(
-      tool
-        .build({
-          title: 'Windows-style relative report',
-          workspacePath: 'reports\\summary.html',
-        })
-        .execute(signal),
-    ).resolves.toMatchObject({
-      artifacts: [{ workspacePath: 'reports\\summary.html' }],
+    expect(() =>
+      ws.tool.build({
+        title: 'Outside',
+        workspacePath: outsideFile,
+      }),
+    ).toThrow(/workspace/);
+  });
+
+  it('rejects a symlink that escapes the execution directory', async () => {
+    const ws = await workspace();
+    const outside = await realpath(
+      await mkdtemp(path.join(os.tmpdir(), 'record-artifact-link-')),
+    );
+    const secret = path.join(outside, 'secret.csv');
+    await writeFile(secret, 'secret');
+    await symlink(secret, path.join(ws.cwd, 'escape.csv'));
+    workspaces.push({
+      cleanup: async () => {
+        await rm(outside, { recursive: true, force: true });
+      },
     });
+
+    const result = await ws.tool
+      .build({
+        title: 'Escape link',
+        workspacePath: 'escape.csv',
+      })
+      .execute(signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.PATH_NOT_IN_WORKSPACE);
+    expect(String(result.llmContent)).not.toContain('Recorded artifact');
+  });
+
+  it('names the legacy path field instead of asking for a locator', () => {
+    const tool = makeTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Legacy path',
+        path: 'report.csv',
+      } as never),
+    ).toThrow(/"path" is not supported.*workspacePath/);
+  });
+
+  it('rejects unknown fields such as artifactType', () => {
+    const tool = makeTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Unknown field',
+        url: 'https://example.com/resource',
+        artifactType: 'csv',
+      } as never),
+    ).toThrow(/additional properties/);
+  });
+
+  it('rejects published storage', () => {
+    const tool = makeTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Forged',
+        storage: 'published' as never,
+        url: 'https://example.com/artifact',
+      }),
+    ).toThrow(/allowed values/);
+  });
+
+  it('requires exactly one locator', () => {
+    const tool = makeTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Ambiguous',
+        workspacePath: 'report.html',
+        url: 'https://example.com/report',
+      }),
+    ).toThrow(/exactly one/);
   });
 
   it('rejects unsafe urls before reporting success', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     expect(() =>
       tool.build({
@@ -162,7 +411,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('rejects path-like managed ids before reporting success', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     for (const managedId of ['../secret', 'folder/item', 'folder\\item']) {
       expect(() =>
@@ -175,7 +424,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('rejects storage values that do not match the locator', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     expect(() =>
       tool.build({
@@ -187,7 +436,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('rejects artifact metadata that the daemon store would drop', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     expect(() =>
       tool.build({
@@ -209,7 +458,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('rejects invalid artifact sizes before reporting success', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     for (const sizeBytes of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       expect(() =>
@@ -223,7 +472,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('rejects unsafe display markup before reporting success', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     expect(() =>
       tool.build({
@@ -304,7 +553,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('allows benign words ending with on before equals signs', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     expect(() =>
       tool.build({
@@ -316,7 +565,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('rejects Unicode control characters before reporting success', () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     expect(() =>
       tool.build({
@@ -349,7 +598,7 @@ describe('RecordArtifactTool', () => {
   });
 
   it('accepts line whitespace in descriptions but not titles', async () => {
-    const tool = new RecordArtifactTool();
+    const tool = makeTool();
 
     await expect(
       tool
