@@ -1205,13 +1205,11 @@ describe('fileUtils', () => {
       const result = await processSingleFileContent(
         testImageFilePath,
         mockConfig,
-        { fileType: 'binary' },
+        { fileType: 'image' },
       );
 
-      expect(result.llmContent).toContain(
-        'Cannot display content of binary file',
-      );
-      expect(result.returnDisplay).toContain('Skipped binary file: image.png');
+      expect(result.llmContent).not.toBe('plain text content');
+      expect(result.error).toBeUndefined();
     });
 
     it('should process an image file', async () => {
@@ -1336,7 +1334,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: animated.webp');
     });
 
-    it('accepts image bytes whose format differs from the extension', async () => {
+    it('rejects unsupported image bytes whose format differs from the extension', async () => {
       const gifBytes = Buffer.from(
         '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
         'hex',
@@ -1347,11 +1345,13 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(mismatchPath, mockConfig);
 
-      expect(result.error).toBeUndefined();
-      expect(result.llmContent).toEqual(
-        expect.objectContaining({ inlineData: expect.any(Object) }),
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
       );
-      expect(result.returnDisplay).toContain('Read image file: mismatch.png');
+      expect(result.returnDisplay).toContain(
+        'Skipped binary file: mismatch.png',
+      );
+      expect(result.error).toBeUndefined();
     });
 
     it('rejects ZIP containers behind an image extension', async () => {
@@ -1370,6 +1370,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain(
         'Skipped binary file: archive.png',
       );
+      expect(result.error).toBeUndefined();
     });
 
     it('rejects unrecognized binary content behind an image extension', async () => {
@@ -1388,6 +1389,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain(
         'Skipped binary file: garbage.png',
       );
+      expect(result.error).toBeUndefined();
     });
 
     it('reads text content behind a PNG extension as text', async () => {

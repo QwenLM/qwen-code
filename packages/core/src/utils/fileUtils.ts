@@ -63,6 +63,10 @@ const CANONICAL_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ]);
+// Magic-matched canonical images may be valid even when their image extension
+// differs. GIF is intentionally excluded because the canonical overview path
+// cannot render it and must not forward it under a mismatched image MIME.
+const CANONICAL_IMAGE_EXTENSIONS = new Set(['jpg', 'png', 'webp']);
 // Every entry must have a magic signature in sniffFileKind (binary-content.ts)
 // AND a MIME_EXTENSIONS entry (same file) mapping the mime to the exact
 // extension string the magic branch returns; missing either classifies every
@@ -832,7 +836,7 @@ async function classifyImageContent(
     if (sniffed.magicMatched) {
       result =
         sniffed.extension === extensionForMimeType(mimeType) ||
-        ['png', 'jpg', 'gif', 'webp'].includes(sniffed.extension)
+        CANONICAL_IMAGE_EXTENSIONS.has(sniffed.extension)
           ? 'image'
           : 'binary';
     } else {
