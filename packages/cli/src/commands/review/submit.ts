@@ -214,6 +214,7 @@ function compose(
   payload: ReviewPayload,
   cliVersion: string,
   attribution: boolean,
+  runtimeModelId: string | undefined,
 ): {
   event: string;
   body: string;
@@ -252,6 +253,7 @@ function compose(
     },
     cliVersion,
     attribution,
+    runtimeModelId,
   );
   return { event: r.event, body: r.body, cappedBy: r.cappedBy };
 }
@@ -490,7 +492,15 @@ export function runSubmit(
   let body: string;
   let cappedBy: string[];
   try {
-    ({ event, body, cappedBy } = compose(payload, cliVersion, attribution));
+    ({ event, body, cappedBy } = compose(
+      payload,
+      cliVersion,
+      attribution,
+      // The anchor's certifying identity is the model the session ACTUALLY
+      // runs — Config publishes it per session, the shell tool injects it
+      // into this subprocess — not the id the state JSON typed.
+      process.env['QWEN_CODE_MODEL'],
+    ));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
