@@ -223,6 +223,22 @@ function validateVerdict(value: unknown): PersistedVerdict {
       }
     }
   }
+  // Absent or null means zero, not malformed — the same absence semantics
+  // compose-review's own `toCount` boundary applies to this field's siblings:
+  // a composed JSON written by a build predating the convergence posture
+  // carries no deferredCount, and a mid-upgrade save must not fail over a
+  // count that only affects display. A PRESENT value of any other wrong
+  // shape is refused like every other field here.
+  const deferredCount = verdict['deferredCount'] ?? 0;
+  if (
+    typeof deferredCount !== 'number' ||
+    !Number.isInteger(deferredCount) ||
+    deferredCount < 0
+  ) {
+    throw new Error(
+      'Composed verdict.deferredCount must be a non-negative integer.',
+    );
+  }
   return {
     event: event(verdict['event'], 'Composed verdict.event'),
     body: string(verdict['body'], 'Composed verdict.body'),
@@ -234,6 +250,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
       verdict['remediation'],
       'Composed verdict.remediation',
     ),
+    deferredCount,
     lowSignal:
       lowSignal === null
         ? null
