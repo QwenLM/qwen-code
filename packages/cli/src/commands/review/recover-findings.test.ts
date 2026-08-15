@@ -432,8 +432,10 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     const recordDir = promptRecordDir(plan);
     const brief = briefPath(plan, key);
     writeFileSync(brief, 'The brief.');
+    // Production shape: NO `chunk N of M` line — the per-chunk audit prompt
+    // never carries one, and the key alone must supply the assignment.
     const prompt =
-      `You are review agent \`${key}\` — chunk 3 of 9.\n` +
+      `You are review agent \`${key}\`.\n` +
       `read_file(file_path="${roundList}")\n` +
       `read_file(file_path="${brief}")\n` +
       `read_file(file_path="${DIFF}")`;
@@ -457,6 +459,38 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
       key,
     ]);
+  });
+
+  it('refuses a per-chunk auditor that never opened the diff', () => {
+    // The fifth divergence: with the key parsed chunk-less and no prose
+    // identity line, the bar dropped the diff-read requirement for exactly
+    // the auditors whose territory is a chunk — certifying a died-early
+    // auditor over territory nobody read, while the live walk flags the same
+    // record unopened.
+    const key = 'reverse-audit--chunk-4--round-1--abc123def456';
+    const roundList = findingsFilePath(
+      plan,
+      'reverse-audit--round-1--abc123def456',
+    );
+    writeFileSync(roundList, '- **[Critical]** x.ts:1 — y');
+    const recordDir = promptRecordDir(plan);
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, 'The brief.');
+    const prompt =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${roundList}")\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(recordDir, `${encodeURIComponent(key)}.txt`), prompt);
+
+    // Brief and list read, diff never opened — the died-early shape.
+    transcript('S0', 'a0', prompt, {
+      opens: [brief, roundList],
+      finalText: 'No issues found — re-walked chunk 4.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
   });
 
   it('does not veto an auditor that QUOTES an uncoverable declaration', () => {

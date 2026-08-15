@@ -103,9 +103,16 @@ const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
  * same key. Each handed the resumed orchestrator uncertified prose labelled
  * as certified.
  */
-/** `chunk-13` → 13. The KEY is the assignment here, not a prose match. */
+/**
+ * The chunk a KEY assigns: `chunk-13` → 13, and the per-chunk audit shapes —
+ * `reverse-audit--chunk-13--round-2--<digest>` — carry theirs in a `--chunk-N`
+ * segment. Parsing only the bare form left those keys chunk-less, and with
+ * the production launch prompt carrying no `chunk N of M` line either, the
+ * bar's diff-read requirement silently vanished for exactly the auditors
+ * whose territory is a chunk.
+ */
 function chunkOfKey(key: string): number | null {
-  const m = /^chunk-(\d+)$/.exec(key);
+  const m = /^chunk-(\d+)$/.exec(key) ?? /--chunk-(\d+)(?:--|$)/.exec(key);
   return m ? Number(m[1]) : null;
 }
 
