@@ -136,8 +136,11 @@ export interface ReviewBudget {
    * one number: the same cap cannot price a single agent and a 19-way
    * fan-out. In a time-budgeted CI run the deadline gate already refuses a
    * round that will not fit; this static cap is the belt it works under and
-   * the ONLY bound a local run (no deadline) has. The huge tier is reduced
-   * to three, not two — not because two cannot converge (the all-dry
+   * the ONLY bound a local run (no deadline) has — which is also why the huge
+   * tier's reduction does not apply to such a run at all: with no ceiling to
+   * fit inside there is nothing for it to answer, so a huge diff without a
+   * deadline reads the 3B tier. Where a deadline does exist the huge tier is
+   * reduced to three, not two — not because two cannot converge (the all-dry
    * rounds-1-and-2 shape reaches CONVERGED at the round-3 build under any
    * cap of two or more, since the convergence check runs before the cap
    * gate) but to buy hot chunks one extra audit round before the cap.
@@ -489,9 +492,10 @@ export function reviewBudget(
  *    overriding a number the plan states, which is the one thing a reader of
  *    a CLI-written field must not do.
  *  - It does **not** always err toward more auditing. A field-less **huge**
- *    plan now reads 3 where the flat fallback read 5 — deliberately less: the
- *    huge tier is a finishability ruling, and the reviews it exists for are
- *    the ones that ran six hours and posted nothing.
+ *    plan reads 3 where the flat fallback read 5 — deliberately less — but
+ *    only in a run that has a deadline; without one the huge tier is 5 and the
+ *    fallback is unchanged. The reduction is a finishability ruling, and the
+ *    reviews it exists for are the ones that ran six hours and posted nothing.
  *
  * The range stays floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the smallest cap
  * the CLI ever writes. A value of one or two is out of band (a hand-edited

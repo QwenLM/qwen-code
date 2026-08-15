@@ -29,6 +29,10 @@ const run = (diffPath: string, out: string, maxChunkLines = 400) =>
   });
 
 beforeEach(() => {
+  // The settings mock is module-level, so a test that sets a ceiling leaves it
+  // set for every test after it — including the whole trailing describe, which
+  // would then run the real handler with an undeclared ceiling in play.
+  settingsMock.mockReturnValue({ merged: {} });
   dir = mkdtempSync(join(tmpdir(), 'plan-diff-'));
   cwd = process.cwd();
   process.chdir(dir);
