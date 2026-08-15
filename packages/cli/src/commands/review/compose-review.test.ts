@@ -1341,6 +1341,31 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
       ),
     ).toThrow(/suggestionsDroppedAsDuplicates/);
   });
+
+  it('a Critical beside duplicate drops keeps REQUEST_CHANGES and carries the duplicate account', () => {
+    // `c` forces the event, but the verdict still counted the duplicates in
+    // `s` — probe-verified on the pre-fix code, the RC body carried only the
+    // Critical and the footer, leaving the counted-but-unposted findings
+    // unaccounted for. The branch's own comment says every clause whose state
+    // holds appears on every event.
+    const r = composeReview(
+      base({
+        bodyCriticals: ['whole-PR blocker X'],
+        suggestionsDroppedAsDuplicates: [
+          'R1-1 pin gap — already reported (comment 3788857375)',
+          'R1-2 loose pins — already reported (comment 3788857379)',
+        ],
+      }),
+    );
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+    expect(r.body).toContain(
+      '2 Suggestion-level finding(s) this review confirmed are already reported on this PR and are not repeated:',
+    );
+    expect(r.body).toContain(
+      '- R1-1 pin gap — already reported (comment 3788857375)',
+    );
+  });
 });
 
 describe('composeReview — presubmit downgrades', () => {

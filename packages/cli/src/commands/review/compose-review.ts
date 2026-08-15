@@ -474,6 +474,27 @@ function toStringList(value: unknown, field: string): string[] {
   return [...(value as string[])];
 }
 
+/**
+ * One model-written list field, normalized for render. Entries render in the
+ * posted body above the canonical footer, so each is stripped of a relocated
+ * footer — per entry, not on the assembled body: the `$`-anchored strip regex
+ * only sees an entry's end, before the footer is appended, and a forged footer
+ * inside one would otherwise post directly above the canonical footer. Entries
+ * that normalize to nothing drop, so the field's count never overclaims its
+ * rendered list.
+ */
+function strippedList(
+  input: ComposeReviewInput,
+  key:
+    | 'bodyCriticals'
+    | 'suggestionsDroppedAsDuplicates'
+    | 'cannotTellCriticals',
+): string[] {
+  return toStringList(input[key], key)
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
+}
+
 // Booleans get the same boundary treatment as the counts: the JSON is
 // model-written, and a stringified `"false"` is truthy — it once stood to
 // fire the downgrade sentence on a review that was never downgraded, and to
@@ -569,9 +590,7 @@ function ledgerMarkerFor(
           line?: unknown;
           body?: unknown;
         }>,
-        toStringList(input.bodyCriticals, 'bodyCriticals')
-          .map(stripReviewFooter)
-          .filter((entry) => entry.trim() !== ''),
+        strippedList(input, 'bodyCriticals'),
       ),
       ...(sha ? { sha } : {}),
     });
@@ -591,34 +610,16 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  // Stripped per entry, not on the assembled body: these model-written
-  // strings render verbatim as the LAST body part, and a forged footer
-  // relocated into one would post directly above the canonical footer —
-  // the `$`-anchored regex only sees an entry's end, before the footer is
-  // appended.
-  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
+  const bodyCriticals = strippedList(input, 'bodyCriticals');
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );
-  // Footer-stripped per entry for the same reason `bodyCriticals` is: these
-  // model-written strings render in the posted body above the canonical
-  // footer, and a forged footer relocated into one would post directly
-  // above it.
-  const suggestionsDroppedAsDuplicates = toStringList(
-    input.suggestionsDroppedAsDuplicates,
+  const suggestionsDroppedAsDuplicates = strippedList(
+    input,
     'suggestionsDroppedAsDuplicates',
-  )
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
-  const cannotTell = toStringList(
-    input.cannotTellCriticals,
-    'cannotTellCriticals',
-  )
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
+  );
+  const cannotTell = strippedList(input, 'cannotTellCriticals');
   const uncoverable = toStringList(
     input.uncoverableChunks,
     'uncoverableChunks',
@@ -1492,6 +1493,33 @@ function composeReviewBody(
     .map((l) => withMarker(l))
     .map((l) => ({ en: l, zh: l }));
 
+  // Confirmed-but-duplicate Suggestions — dropped from the payload by the
+  // overlap rules (already on the PR), NOT by anchor failure. The verdict
+  // counted them in `s`, so the body owes the author a truthful account of
+  // where they went: reusing the discarded sentence's "could not be anchored"
+  // claim posts a fact the resolver's output contradicts (#9204 —
+  // resolve-anchors returned exact matches, the drop reason was duplication,
+  // the posted body said anchoring failed). Its own paragraph: entries are a
+  // list, not verdict prose. Rendered on every event — `s` counts them even
+  // when `c` forces REQUEST_CHANGES.
+  const duplicatesBlock: Bi[] =
+    suggestionsDroppedAsDuplicates.length === 0
+      ? []
+      : [
+          {
+            en:
+              `${suggestionsDroppedAsDuplicates.length} Suggestion-level ` +
+              `finding(s) this review confirmed are already reported on this PR ` +
+              `and are not repeated:\n\n` +
+              suggestionsDroppedAsDuplicates
+                .map((entry) => `- ${asListLine(entry, pr)}`)
+                .join('\n'),
+            zh:
+              `本轮确认的 ${suggestionsDroppedAsDuplicates.length} 条建议级发现已在 PR ` +
+              `上报告过，不再重复发布（列表见上方英文部分）。`,
+          },
+        ];
+
   const contextUnavailableClause: Bi = {
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
@@ -1584,6 +1612,7 @@ function composeReviewBody(
     const parts = [
       ...(coverageOpener ? [coverageOpener] : []),
       ...(contextUnavailable ? [contextUnavailableClause] : []),
+      ...duplicatesBlock,
       ...cannotTellBlock,
       ...notReviewedParts,
       ...unverifiedTagsBlock,
@@ -1745,28 +1774,9 @@ function composeReviewBody(
   // single unreadable wall.
   const openerCount = clauses.length;
 
-  // 4a. Confirmed-but-duplicate Suggestions — dropped from the payload by
-  //     the overlap rules (already on the PR), NOT by anchor failure. The
-  //     verdict counted them in `s`, so the body owes the author a truthful
-  //     account of where they went: reusing the discarded sentence's "could
-  //     not be anchored" claim posts a fact the resolver's output
-  //     contradicts (#9204 — resolve-anchors returned exact matches, the
-  //     drop reason was duplication, the posted body said anchoring
-  //     failed). Its own paragraph: entries are a list, not verdict prose.
-  if (suggestionsDroppedAsDuplicates.length > 0) {
-    clauses.push({
-      en:
-        `${suggestionsDroppedAsDuplicates.length} Suggestion-level ` +
-        `finding(s) this review confirmed are already reported on this PR ` +
-        `and are not repeated:\n\n` +
-        suggestionsDroppedAsDuplicates
-          .map((entry) => `- ${asListLine(entry, pr)}`)
-          .join('\n'),
-      zh:
-        `本轮确认的 ${suggestionsDroppedAsDuplicates.length} 条建议级发现已在 PR ` +
-        `上报告过，不再重复发布（列表见上方英文部分）。`,
-    });
-  }
+  // 4a. Duplicate-dropped Suggestions — built above with the other body
+  //     blocks; it renders on every event, RC included.
+  clauses.push(...duplicatesBlock);
 
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
