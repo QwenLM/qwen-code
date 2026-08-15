@@ -55,6 +55,7 @@ import {
   verifyBudgetMessage,
   writeBudgetStop,
   writeRoundCapStop,
+  hasReviewDeadline,
 } from './lib/deadline.js';
 import {
   READ_FILE_CHAR_CAP,
@@ -2177,7 +2178,7 @@ function runAllChunks(
     !admitReverseAuditRound(
       planPath,
       round,
-      reverseAuditRoundCap(report),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       chunks.length,
     )
   ) {
@@ -2233,7 +2234,10 @@ function runAllChunks(
       : `one per chunk still under audit (${skipped.length} retired ` +
         `chunk(s) skipped; the retirement note after the end-of-round line ` +
         `says which — relay it to the terminal)`;
-  const planRoundCap = reverseAuditRoundCap(report);
+  const planRoundCap = reverseAuditRoundCap(
+    report,
+    hasReviewDeadline(process.env),
+  );
   const retirementNote =
     skipped.length === 0
       ? []
@@ -2596,7 +2600,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     !admitReverseAuditRound(
       args.plan,
       args.round,
-      reverseAuditRoundCap(report),
+      reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
       1,
     )
   ) {
@@ -2679,7 +2683,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       !admitReverseAuditRound(
         args.plan,
         args.round,
-        reverseAuditRoundCap(report),
+        reverseAuditRoundCap(report, hasReviewDeadline(process.env)),
         planChunkIds.length,
       )
     )

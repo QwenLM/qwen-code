@@ -371,6 +371,25 @@ function readDeadlineSeconds(env: NodeJS.ProcessEnv): number | null {
 }
 
 /**
+ * Does this run have a clock at all?
+ *
+ * The budget's huge-diff round reduction is a *finishability* ruling — five
+ * ~90-minute rounds do not fit a six-hour CI ceiling — and a ruling about
+ * fitting inside a wall is meaningless where there is no wall. This is how the
+ * capture commands ask, and it deliberately reuses the same parse both gates
+ * read from, so "has a deadline" and "the gate will enforce a deadline" cannot
+ * come apart: a malformed value leaves the review ungated here exactly as it
+ * leaves it ungated there.
+ *
+ * The env, not `process.env`, for the reason every other function in this file
+ * takes it: a test must be able to ask the question without editing the
+ * process it runs in.
+ */
+export function hasReviewDeadline(env: NodeJS.ProcessEnv): boolean {
+  return readDeadlineSeconds(env) !== null;
+}
+
+/**
  * A non-negative seconds override from `env[key]`, or `fallback`. `>= 0`
  * (not `> 0`) is deliberate: 0 is a documented escape hatch on both gates.
  * A missing or malformed value falls back — never a silent zero.

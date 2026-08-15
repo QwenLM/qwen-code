@@ -38,6 +38,7 @@ import {
   stringifyPlanReport,
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
+import { hasReviewDeadline } from './lib/deadline.js';
 
 interface PlanDiffArgs {
   diff_path: string;
@@ -125,7 +126,10 @@ function runPlanDiff(args: PlanDiffArgs): void {
     // No `git show` is possible here — there is no ref to resolve a path
     // against — so per-file line counts and heaviness are unavailable. Chunk
     // coverage, which is what Step 3B needs, is not.
-    ...buildPlanReport(plan, null, operatorReviewSettings().reverseAuditRounds),
+    ...buildPlanReport(plan, null, {
+      operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+      hasDeadline: hasReviewDeadline(process.env),
+    }),
     ...planEffortField(args.effort),
   };
 

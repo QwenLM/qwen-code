@@ -53,7 +53,7 @@ describe('buildPlanReport', () => {
         asked.push(p);
         return 1000;
       },
-      undefined,
+      {},
     );
     expect(asked).toEqual(['src/a.ts']);
     expect(report.files[0].fileLines).toBe(1000);
@@ -65,20 +65,16 @@ describe('buildPlanReport', () => {
     // 900 added lines into a file that ends up 1 000 long: it existed at 100
     // lines, so it is not "large enough before" — not heavy.
     const plan = buildDiffPlan(editFile('src/a.ts', 3, 900), 400);
-    expect(buildPlanReport(plan, () => 1000, undefined).files[0].heavy).toBe(
-      false,
-    );
+    expect(buildPlanReport(plan, () => 1000, {}).files[0].heavy).toBe(false);
     // Same change into a file that ends up 6 000 long: it existed at 5 100,
     // and 900 changed lines clears the volume threshold.
-    expect(buildPlanReport(plan, () => 6000, undefined).files[0].heavy).toBe(
-      true,
-    );
+    expect(buildPlanReport(plan, () => 6000, {}).files[0].heavy).toBe(true);
   });
 
   it('treats a null resolver as "no tree to read", so nothing is heavy', () => {
     // `plan-diff` has a bare diff file and no ref. It must not guess.
     const plan = buildDiffPlan(addFile('src/big.ts', 2000), 400);
-    const report = buildPlanReport(plan, null, undefined);
+    const report = buildPlanReport(plan, null, {});
     expect(report.files[0].fileLines).toBe(0);
     expect(report.files[0].preLines).toBe(0);
     expect(report.files[0].heavy).toBe(false);
@@ -98,7 +94,7 @@ describe('buildPlanReport', () => {
         asked.push(p);
         return 500;
       },
-      undefined,
+      {},
     );
     expect(asked).toEqual([]);
     expect(report.files[0].binary).toBe(true);
@@ -110,7 +106,7 @@ describe('buildPlanReport', () => {
     const report = buildPlanReport(
       buildDiffPlan(diff, 400),
       (p) => (p === 'src/heavy.ts' ? 6000 : 30),
-      undefined,
+      {},
     );
     const heavy = report.files.find((f) => f.path === 'src/heavy.ts')!;
     const light = report.files.find((f) => f.path === 'src/light.ts')!;
@@ -135,11 +131,7 @@ describe('buildPlanReport', () => {
       '-gone2',
       '',
     ].join('\n');
-    const report = buildPlanReport(
-      buildDiffPlan(diff, 400),
-      () => 100,
-      undefined,
-    );
+    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 100, {});
     expect(report.files[0].hunks).toEqual([{ newStart: 1, newEnd: 2 }]);
   });
 
@@ -148,11 +140,7 @@ describe('buildPlanReport', () => {
     // `clearTimeout()` leaves nothing behind. This range points it at the `-`
     // lines that are the only evidence the call ever existed.
     const diff = editFile('src/heavy.ts', 3, 900);
-    const report = buildPlanReport(
-      buildDiffPlan(diff, 400),
-      () => 6000,
-      undefined,
-    );
+    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 6000, {});
     const f = report.files[0];
     expect(f.heavy).toBe(true);
     expect(f.diffRange).toEqual({
@@ -165,7 +153,7 @@ describe('buildPlanReport', () => {
     const report = buildPlanReport(
       buildDiffPlan(addFile('src/a.ts', 20), 400),
       () => 30,
-      undefined,
+      {},
     );
     expect(report.files[0].heavy).toBe(false);
     expect(report.files[0].diffRange).toBeUndefined();
@@ -178,7 +166,7 @@ describe('buildPlanReport', () => {
       addFile('docs/g.md', 30) +
       addFile('package-lock.json', 40);
     const plan = buildDiffPlan(diff, 400);
-    const report = buildPlanReport(plan, () => 100, undefined);
+    const report = buildPlanReport(plan, () => 100, {});
     expect(report.srcDiffLines).toBe(plan.srcDiffLines);
     expect(report.testDiffLines).toBe(plan.testDiffLines);
     expect(report.docsDiffLines).toBe(plan.docsDiffLines);
@@ -193,7 +181,7 @@ describe('stringifyPlanReport', () => {
     const report = buildPlanReport(
       buildDiffPlan(diff, 400),
       (p) => (p === 'src/heavy.ts' ? 6000 : 30),
-      undefined,
+      {},
     );
     expect(JSON.parse(stringifyPlanReport(report))).toEqual(report);
   });
@@ -202,7 +190,7 @@ describe('stringifyPlanReport', () => {
     const report = buildPlanReport(
       buildDiffPlan(editFile('src/heavy.ts', 3, 900), 400),
       () => 6000,
-      undefined,
+      {},
     );
     const text = stringifyPlanReport(report);
     // Not one giant line: `read_file` pages at line boundaries, so a compact
@@ -219,7 +207,7 @@ describe('stringifyPlanReport', () => {
     const report = buildPlanReport(
       buildDiffPlan(editFile('src/heavy.ts', 3, 900), 400),
       () => 6000,
-      undefined,
+      {},
     );
     const collapsed = stringifyPlanReport(report).length;
     const indented = JSON.stringify(report, null, 2).length + 1;
@@ -238,11 +226,7 @@ describe('stringifyPlanReport', () => {
       '+x',
       '',
     ].join('\n');
-    const report = buildPlanReport(
-      buildDiffPlan(diff, 400),
-      () => 1,
-      undefined,
-    );
+    const report = buildPlanReport(buildDiffPlan(diff, 400), () => 1, {});
     const parsed = JSON.parse(stringifyPlanReport(report)) as typeof report;
     expect(parsed.files[0].path).toBe(weird);
   });

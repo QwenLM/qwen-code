@@ -13,7 +13,11 @@ import { statSync } from 'node:fs';
 import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 import { classifyHeavy } from './heavy.js';
 import type { DiffChunk, DiffPlan, PathKind } from './diff-plan.js';
-import { reviewBudget, type ReviewBudget } from './budget.js';
+import {
+  reviewBudget,
+  type BudgetContext,
+  type ReviewBudget,
+} from './budget.js';
 import type { RepositoryContext } from './repository-context.js';
 
 export interface FileMetric {
@@ -107,19 +111,20 @@ export interface PlanReport {
  * null when there is no tree to resolve against — a bare diff file — in which
  * case heaviness cannot be decided and no file is heavy.
  *
- * `operatorRoundCap` is the standing `review.reverseAuditRounds` setting, which
- * may only lower the reverse-audit round tier. It is a **required** parameter,
- * and deliberately not resolved in here: three capture commands build a plan,
- * an optional parameter is one a call site can quietly omit, and a setting that
- * silently applies to two of the three review entry points is worse than one
- * that applies to none. Passing `undefined` is how a caller says "no operator
- * ceiling" — visibly, at the call site. Reading the setting here instead would
- * also make this builder's tests depend on the machine's own `~/.qwen`.
+ * `context` carries the two facts about the machine that the round cap depends
+ * on — the operator's `review.reverseAuditRounds` ceiling and whether this run
+ * has a deadline — and is a **required** parameter, deliberately not resolved
+ * in here. Three capture commands build a plan; an optional parameter is one a
+ * call site can quietly omit, and a policy that silently applies to two of the
+ * three review entry points is worse than one that applies to none. Passing
+ * `{}` is how a caller says "neither applies" — visibly, at the call site.
+ * Resolving them here instead would make this builder's tests depend on the
+ * machine's own `~/.qwen` and on its environment.
  */
 export function buildPlanReport(
   plan: DiffPlan,
   postImageLines: ((path: string) => number) | null,
-  operatorRoundCap: number | undefined,
+  context: BudgetContext,
 ): PlanReport {
   const files = plan.files.map((f): FileMetric => {
     const changedLines = f.addedLines + f.removedLines;
@@ -177,7 +182,7 @@ export function buildPlanReport(
         srcDiffLines: plan.srcDiffLines,
         diffLines: plan.diffLines,
       },
-      operatorRoundCap,
+      context,
     ),
   };
 }

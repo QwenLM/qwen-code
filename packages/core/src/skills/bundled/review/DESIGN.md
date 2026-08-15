@@ -103,9 +103,22 @@ The asymmetry that decides it is the one this whole design is built on: a missed
 
 So the cap is read from the plan's topology tier (`reverseAuditRoundTier`): **10** on 3A, **5** on 3B, **3** when huge. Three consequences worth naming:
 
-- **The huge tier is checked first and wins.** It is a finishability ruling, and a huge diff is territory-fanned-out by construction anyway. A 3A diff can never be huge — `effective = max(src, floor(total/8))` is at most `max(500, 400)` under the 3A gate — so the two tiers cannot contend.
+- **The huge tier is checked first and wins, and it applies only where there is a wall.** It is a finishability ruling, and a huge diff is territory-fanned-out by construction anyway. A 3A diff can never be huge — `effective = max(src, floor(total/8))` is at most `max(500, 400)` under the 3A gate — so the two tiers cannot contend. See "Why the huge reduction needs a clock" below for why it is conditional.
 - **One predicate, not two sets of numbers.** The tier reads `isTerritoryFanOut`, the same gate the roster turns on, which is why that function moved into `budget.ts`: a second copy of `500`/`3200` would eventually disagree with the roster about which fan-out a review owed.
 - **The cap is a belt, not the terminator.** The loop still ends on two consecutive dry rounds, and in a time-budgeted run the deadline gate — which prices the round it is admitting plus the reserve — is the operative bound. The static cap is what a local run (no deadline) has instead, which is exactly why it should not be a number borrowed from another topology's arithmetic.
+
+### Why the huge reduction needs a clock
+
+Three is the one tier that is _lower_ than the topology below it, and read as a statement about auditing it is backwards: a huge diff has more defects and more territory than a chunked one, converges later, and on recall deserves more rounds, not fewer. PR #6457 is the standing counterexample — 5,801 lines, eight review rounds, still surfacing Criticals in code that had been in the diff since the first commit.
+
+It is not a statement about auditing. It is a statement about a wall: a reverse-audit round on a 4,000-line PR is ~90 minutes, five of them are 450, and a six-hour CI ceiling does not hold that plus the fan-out and the tail. What the survey measured is not slow reviews but absent ones — 26 timed-out review jobs in one window, ~122 hours of compute, **zero posted** (DESIGN.md — The six-hour timeouts). Three rounds reported beat five rounds lost.
+
+That argument is sound exactly where the wall is, and nowhere else. A local run exports no `QWEN_REVIEW_DEADLINE_EPOCH`, nothing kills it at six hours, and the reduction there trades recall away to fit a ceiling that does not exist — on the tier where recall matters most. So the reduction is now conditional on the run having a deadline at all: with a clock, 3; without one, a huge diff is a large 3B diff and gets 5.
+
+Two things this does not pretend to fix, both worth naming rather than discovering:
+
+- **The gate cannot price the early rounds.** `expectedRoundSeconds` falls back to a flat 30-minute constant until a round has been measured, and a huge round is ~90 — so on the runs that time out, the deadline gate under-prices rounds 1 and 2 by 3x and cannot refuse them. That, not the round count, is why a static reduction was needed on top of a working gate. A size-aware round-1 estimate is the change that would let the reduction retire entirely.
+- **The cap is what stops retirement from paying for itself.** Chunk retirement (which predates this tier by five days) can only begin at round 3, and under a 3-round cap only round 3 can shrink before the loop ends. The expensive rounds are paid in full and the cheap ones are never reached, so the "5 × 90 = 450" arithmetic that justifies the cap is an arithmetic the cap guarantees stays true.
 
 What this does **not** change: a cap stop is still a non-converged stop. It writes the marker, caps the verdict, and owes its `unreviewedDimensions` entry, at ten exactly as at five.
 
