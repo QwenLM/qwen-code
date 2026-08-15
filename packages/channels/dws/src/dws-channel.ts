@@ -600,9 +600,23 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       }
     }
     this.cursor.documentIds = [...this.documentSet].slice(-MAX_PROCESSED_ITEMS);
-    this.cursor.selfSenderIds = [
-      ...new Set(identity.selfSenderIds ?? []),
-    ].slice(-MAX_SELF_SENDER_IDS);
+    const selfSenderIds = [...new Set(identity.selfSenderIds ?? [])].slice(
+      -MAX_SELF_SENDER_IDS,
+    );
+    if (
+      selfSenderIds.length === 0 &&
+      this.imStates.some(({ source }) => source.kind === 'direct')
+    ) {
+      throw new Error(
+        'DWS direct messages require the authenticated identity to expose an openDingTalkId.',
+      );
+    }
+    if (this.cursor.selfSenderIds.length === 0 && selfSenderIds.length > 0) {
+      this.cursor.imTargets = this.cursor.imTargets.filter(
+        ({ target }) => target.kind !== 'direct',
+      );
+    }
+    this.cursor.selfSenderIds = selfSenderIds;
     this.connected = true;
     try {
       await Promise.all(
@@ -763,9 +777,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         `[Channel:${this.name}] no DWS message target is known for the requested chat.`,
       );
     }
-    await this.sendImWithPeerBinding(chatId, target, () =>
-      this.client.sendImMessage(target, text, idempotencyKey),
-    );
+    await this.client.sendImMessage(target, text, idempotencyKey);
   }
 
   protected override async sendThreadMessage(
@@ -859,20 +871,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       await this.sendMessage(chatId, text);
       return;
     }
-    await this.sendImWithPeerBinding(
+    await this.client.replyToImMessage(
       chatId,
-      this.findImTarget(chatId) ?? {
-        kind: 'direct',
-        openDingTalkId: senderId,
-      },
-      () =>
-        this.client.replyToImMessage(
-          chatId,
-          messageId,
-          senderId,
-          text,
-          stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
-        ),
+      messageId,
+      senderId,
+      text,
+      stableUuid(`${this.name}\0${chatId}\0${messageId}\0${text}`),
     );
   }
 
@@ -1573,40 +1577,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     super.onSessionDied(sessionId);
   }
 
-  private async sendImWithPeerBinding(
-    conversationId: string,
-    target: DwsImTarget,
-    send: () => Promise<void>,
-  ): Promise<void> {
-    if (target.kind !== 'direct' || this.cursor.selfSenderIds.length > 0) {
-      await send();
-      return;
-    }
-    const existing = this.findImTarget(conversationId);
-    if (existing && !sameImTarget(existing, target)) {
-      throw new Error(
-        `[Channel:${this.name}] DWS direct conversation peer does not match the persisted binding.`,
-      );
-    }
-    const added = existing === undefined;
-    if (added) {
-      this.rememberImTarget(conversationId, target);
-      this.saveCursor();
-    }
-    await send();
-  }
-
   private isSelfMessage(message: DwsImMessage): boolean {
-    if (this.cursor.selfSenderIds.length > 0) {
-      return this.cursor.selfSenderIds.includes(message.senderId);
-    }
-    if (message.type !== 'user_im_message_receive_o2o_all') {
-      return false;
-    }
-    const target = this.findImTarget(message.conversationId);
-    return (
-      target?.kind === 'direct' && target.openDingTalkId !== message.senderId
-    );
+    return this.cursor.selfSenderIds.includes(message.senderId);
   }
 
   private async readDocumentContext(
@@ -1634,13 +1606,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
     if (existing) {
       if (sameImTarget(existing.target, target)) {
-        return false;
-      }
-      if (
-        this.cursor.selfSenderIds.length === 0 &&
-        existing.target.kind === 'direct' &&
-        target.kind === 'direct'
-      ) {
         return false;
       }
       existing.target = target;

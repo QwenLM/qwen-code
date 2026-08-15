@@ -282,6 +282,18 @@ class TestableDwsChannel extends DwsChannel {
   resolveImSession(): Promise<string> {
     return this.router.resolve(this.name, 'alice', 'cid-1');
   }
+
+  seedLegacyDirectTarget(profile: string): void {
+    this.cursor.selfProfile = profile;
+    this.cursor.selfSenderIds = [];
+    this.cursor.imTargets = [
+      {
+        conversationId: 'cid-1',
+        target: { kind: 'direct', openDingTalkId: 'open-operator' },
+      },
+    ];
+    this.saveCursor();
+  }
 }
 
 class PolicyDwsChannel extends DwsChannel {
@@ -347,7 +359,10 @@ describe('DwsChannel', () => {
     const name = 'profile-scoped-notification-dws';
     const card = documentMentionCard('doc-shared', 'comment-shared');
     const firstClient = new FakeDwsClient();
-    firstClient.identity = { profile: 'corp-one' };
+    firstClient.identity = {
+      profile: 'corp-one',
+      selfSenderIds: ['open-account-one'],
+    };
     const first = await readyChannel(firstClient, makeConfig(), name);
     firstClient.directMessages = [
       message('user_im_message_receive_o2o_all', 'notification-one', card),
@@ -357,7 +372,10 @@ describe('DwsChannel', () => {
     first.disconnect();
 
     const secondClient = new FakeDwsClient();
-    secondClient.identity = { profile: 'corp-two' };
+    secondClient.identity = {
+      profile: 'corp-two',
+      selfSenderIds: ['open-account-two'],
+    };
     const second = await readyChannel(secondClient, makeConfig(), name);
     secondClient.directMessages = [
       message('user_im_message_receive_o2o_all', 'notification-two', card),
@@ -439,8 +457,43 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('requires authoritative self sender metadata for direct messages', async () => {
+    const client = new FakeDwsClient();
+    client.identity = { profile: 'corp-only' };
+
+    await expect(readyChannel(client, makeConfig())).rejects.toThrow(
+      'DWS direct messages require the authenticated identity to expose an openDingTalkId.',
+    );
+    expect(client.streams).toEqual([]);
+  });
+
+  it('drops unverified direct targets after self identity becomes authoritative', async () => {
+    const name = 'legacy-direct-target-dws';
+    const client = new FakeDwsClient();
+    client.identity = {
+      profile: 'corp:user-self',
+      selfSenderIds: ['open-self'],
+    };
+    const channel = new TestableDwsChannel(
+      name,
+      makeConfig(),
+      makeBridge(),
+      undefined,
+      client,
+    );
+    channels.push(channel);
+    channel.seedLegacyDirectTarget(client.identity.profile!);
+
+    await channel.connect();
+
+    await expect(channel.sendMessage('cid-1', 'hello')).rejects.toThrow(
+      'no DWS message target is known',
+    );
+  });
+
   it('starts ambient groups without querying account identity metadata', async () => {
     const client = new FakeDwsClient();
+    client.identity = { profile: 'corp-only' };
 
     await expect(
       readyChannel(
@@ -1566,7 +1619,10 @@ describe('DwsChannel', () => {
     const config = makeConfig({ senderPolicy: 'pairing' });
     const name = 'profile-scoped-pending-document-dws';
     const firstClient = new FakeDwsClient();
-    firstClient.identity = { profile: 'corp-one' };
+    firstClient.identity = {
+      profile: 'corp-one',
+      selfSenderIds: ['open-account-one'],
+    };
     const { channel: first } = await readyPolicyChannel(
       firstClient,
       config,
@@ -1591,7 +1647,10 @@ describe('DwsChannel', () => {
     first.disconnect();
 
     const secondClient = new FakeDwsClient();
-    secondClient.identity = { profile: 'corp-two' };
+    secondClient.identity = {
+      profile: 'corp-two',
+      selfSenderIds: ['open-account-two'],
+    };
     const { channel: second, bridge } = await readyPolicyChannel(
       secondClient,
       config,
@@ -2086,144 +2145,24 @@ describe('DwsChannel', () => {
     }
   });
 
-  it('filters direct self events without authenticated self sender metadata', async () => {
-    const client = new FakeDwsClient();
-    client.identity = { profile: 'corp-only' };
-    const channel = await readyChannel(client);
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'request', 'hello'),
-    );
-    await channel.sendMessage('cid-1', 'shared text');
-
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'self', 'shared text', {
-        senderId: 'open-self',
-      }),
-    );
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'peer', 'shared text'),
-    );
-
-    expect(channel.inbound.map((item) => item.text)).toEqual([
-      'hello',
-      'shared text',
-    ]);
-  });
-
-  it('binds a response target before an untracked direct self echo arrives', async () => {
-    const client = new FakeDwsClient();
-    client.identity = { profile: 'corp-only' };
-    const channel = await readyChannel(client);
-    channel.responseMessageId = 'request-1';
-    channel.responseSenderId = 'open-alice';
-
-    await channel.respond('cid-1', 'hello there');
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'own-echo', 'hello there', {
-        senderId: 'open-self',
-      }),
-    );
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'real-peer',
-        'real user message',
-      ),
-    );
-    await channel.sendMessage('cid-1', 'follow up');
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'second-own-echo',
-        'follow up',
-        { senderId: 'open-self' },
-      ),
-    );
-
-    expect(channel.inbound.map((item) => item.text)).toEqual([
-      'real user message',
-    ]);
-    expect(client.sendImMessage).toHaveBeenLastCalledWith(
-      { kind: 'direct', openDingTalkId: 'open-alice' },
-      'follow up',
-      expect.any(String),
-    );
-  });
-
-  it('keeps a direct peer binding across reconnect when self metadata is unavailable', async () => {
-    const name = 'persistent-direct-peer-dws';
-    const firstClient = new FakeDwsClient();
-    firstClient.identity = { profile: 'corp-only' };
-    const first = await readyChannel(firstClient, makeConfig(), name);
-    await firstClient.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'peer-before', 'initial peer'),
-    );
-    await first.sendMessage('cid-1', 'shared text');
-    first.disconnect();
-
-    const secondClient = new FakeDwsClient();
-    secondClient.identity = { profile: 'corp-only' };
-    const second = await readyChannel(secondClient, makeConfig(), name);
-    await secondClient.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'own-redelivery',
-        'shared text',
-        { senderId: 'open-self' },
-      ),
-    );
-    await secondClient.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'peer-after',
-        'real peer after reconnect',
-      ),
-    );
-    await second.sendMessage('cid-1', 'follow up');
-    await secondClient.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'second-own-echo',
-        'follow up',
-        { senderId: 'open-self' },
-      ),
-    );
-
-    expect(second.inbound.map((item) => item.text)).toEqual([
-      'real peer after reconnect',
-    ]);
-    expect(secondClient.sendImMessage).toHaveBeenLastCalledWith(
-      { kind: 'direct', openDingTalkId: 'open-alice' },
-      'follow up',
-      expect.any(String),
-    );
-  });
-
   it('does not suppress matching peer text without an authoritative self sender', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const channel = await readyChannel(
       client,
-      makeConfig({ groups: { '*': { requireMention: false } } }),
+      makeConfig({
+        dmPolicy: 'disabled',
+        groups: { '*': { requireMention: false } },
+      }),
     );
     await client.emit(
-      2,
+      1,
       message('user_im_message_receive_group_all', 'request', 'please help'),
     );
     await channel.sendMessage('cid-1', 'ok');
 
     await client.emit(
-      2,
+      1,
       message('user_im_message_receive_group_all', 'peer', 'ok', {
         senderId: 'open-bob',
       }),
@@ -2265,202 +2204,6 @@ describe('DwsChannel', () => {
       'hello',
       'shared text',
     ]);
-  });
-
-  it('does not infer sender identity from matching outbound text', async () => {
-    const client = new FakeDwsClient();
-    client.identity = { profile: 'corp-only' };
-    const channel = await readyChannel(client, makeConfig(), 'learn-self-dws');
-
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'self-request', 'hello', {
-        senderId: 'open-self',
-        senderName: 'DataWorksAgent',
-      }),
-    );
-    await channel.sendMessage('cid-1', 'shared text');
-
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'matching-peer',
-        'shared text',
-        {
-          senderId: 'open-self',
-          senderName: 'DataWorksAgent',
-        },
-      ),
-    );
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'later-self-message',
-        'still me',
-        { senderId: 'open-self', senderName: 'DataWorksAgent' },
-      ),
-    );
-
-    expect(channel.inbound.map((item) => item.text)).toEqual([
-      'hello',
-      'shared text',
-      'still me',
-    ]);
-  });
-
-  it('filters JSON-wrapped direct self events without a self id', async () => {
-    const client = new FakeDwsClient();
-    client.identity = { profile: 'corp-only' };
-    const { bridge } = await readyPolicyChannel(
-      client,
-      makeConfig({ senderPolicy: 'pairing' }),
-      'markdown-echo-dws',
-    );
-
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'peer-request', 'hello'),
-    );
-    const pairingText = client.sendImMessage.mock.calls[0]?.[1];
-    expect(pairingText).toContain('pairing code');
-
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'pairing-markdown-echo',
-        JSON.stringify({ text: pairingText, title: 'Your pairing code' }),
-        { senderId: 'open-self', senderName: 'DataWorksAgent' },
-      ),
-    );
-
-    expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).toHaveBeenCalledOnce();
-  });
-
-  it('filters folded direct self events without a self id', async () => {
-    const client = new FakeDwsClient();
-    client.identity = { profile: 'corp-only' };
-    const { bridge } = await readyPolicyChannel(
-      client,
-      makeConfig({ senderPolicy: 'pairing' }),
-      'folded-markdown-echo-dws',
-    );
-
-    await client.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'peer-request', 'hello'),
-    );
-    const pairingText = client.sendImMessage.mock.calls[0]?.[1];
-    expect(pairingText).toContain('\n\n');
-    const folded = pairingText!.replace('\n\n', '  \n').replace(/\n\s+/gu, ' ');
-
-    await client.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'pairing-markdown-echo',
-        folded,
-        {
-          senderId: 'open-self',
-          senderName: 'DataWorksAgent',
-        },
-      ),
-    );
-
-    expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).toHaveBeenCalledOnce();
-  });
-
-  it('does not persist an echo sender as the authenticated identity', async () => {
-    const firstClient = new FakeDwsClient();
-    firstClient.identity = { profile: 'corp-only' };
-    const { channel: first } = await readyPolicyChannel(
-      firstClient,
-      makeConfig({ senderPolicy: 'pairing' }),
-      'persistent-self-dws',
-    );
-    await firstClient.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'self-request', 'hello', {
-        senderId: 'open-self',
-        senderName: 'DataWorksAgent',
-      }),
-    );
-    const pairingText = firstClient.sendImMessage.mock.calls[0]?.[1];
-    await firstClient.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'pairing-echo', pairingText!, {
-        senderId: 'open-self',
-        senderName: 'DataWorksAgent',
-      }),
-    );
-    first.disconnect();
-
-    const secondClient = new FakeDwsClient();
-    secondClient.identity = { profile: 'corp-only' };
-    const { bridge } = await readyPolicyChannel(
-      secondClient,
-      makeConfig({ senderPolicy: 'pairing' }),
-      'persistent-self-dws',
-    );
-    await secondClient.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'later-self-message',
-        'still me',
-        { senderId: 'open-self', senderName: 'DataWorksAgent' },
-      ),
-    );
-
-    expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(secondClient.sendImMessage).toHaveBeenCalledOnce();
-  });
-
-  it('does not carry an echo sender across DWS profiles', async () => {
-    const firstClient = new FakeDwsClient();
-    firstClient.identity = { profile: 'corp-one' };
-    const { channel: first } = await readyPolicyChannel(
-      firstClient,
-      makeConfig({ senderPolicy: 'pairing' }),
-      'profile-scoped-self-dws',
-    );
-    await firstClient.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'self-request', 'hello', {
-        senderId: 'open-account-one',
-      }),
-    );
-    const pairingText = firstClient.sendImMessage.mock.calls[0]?.[1];
-    await firstClient.emit(
-      1,
-      message('user_im_message_receive_o2o_all', 'pairing-echo', pairingText!, {
-        senderId: 'open-account-one',
-      }),
-    );
-    first.disconnect();
-
-    const secondClient = new FakeDwsClient();
-    secondClient.identity = { profile: 'corp-two' };
-    await readyPolicyChannel(
-      secondClient,
-      makeConfig({ senderPolicy: 'pairing' }),
-      'profile-scoped-self-dws',
-    );
-    await secondClient.emit(
-      1,
-      message(
-        'user_im_message_receive_o2o_all',
-        'account-one-as-a-peer',
-        'hello from another account',
-        { senderId: 'open-account-one' },
-      ),
-    );
-
-    expect(secondClient.sendImMessage).toHaveBeenCalledOnce();
   });
 
   it('dispatches ambient messages from an explicit non-mention group', async () => {
