@@ -27,11 +27,13 @@ import {
   fitsAnotherMutantRun,
   probeCleanupFailureDetail,
   findVitestBin,
-  exposeDependencies,
   MAX_MUTANTS,
   runControlMutant,
 } from './test-efficacy.js';
-import { worktreeCreateFailureDetail } from './lib/worktree.js';
+import {
+  exposeDependencies,
+  worktreeCreateFailureDetail,
+} from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
@@ -253,6 +255,44 @@ describe('exposeDependencies', () => {
         join(probe, 'node_modules', '@scope', 'inner-pkg'),
       ).isSymbolicLink(),
     ).toBe(true);
+  });
+
+  it('farms a workspace member’s own node_modules, which npm could not hoist', () => {
+    // A version conflict leaves a package installed under the MEMBER, and Node
+    // resolves it by walking up from the importing file — so a tree with only
+    // the root farm fails to resolve exactly the package that could not be
+    // hoisted. Measured on this repo: a scratch tree with 1 560 root packages
+    // linked still could not resolve `@testing-library/react` for a UI probe.
+    const root = mkdtempSync(join(tmpdir(), 'expose-ws-root-'));
+    const probe = mkdtempSync(join(tmpdir(), 'expose-ws-probe-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ workspaces: ['packages/*'] }),
+    );
+    mkdirSync(join(root, 'node_modules', 'hoisted'), { recursive: true });
+    for (const member of ['cli', 'absent']) {
+      mkdirSync(join(root, 'packages', member), { recursive: true });
+      writeFileSync(
+        join(root, 'packages', member, 'package.json'),
+        JSON.stringify({ name: `@x/${member}` }),
+      );
+      mkdirSync(join(root, 'packages', member, 'node_modules', 'nested'), {
+        recursive: true,
+      });
+    }
+    // The probe tree holds one of the two members.
+    mkdirSync(join(probe, 'packages', 'cli'), { recursive: true });
+
+    const got = exposeDependencies(probe, root);
+
+    expect(got).toEqual({ linked: 2, failed: 0 });
+    expect(existsSync(join(probe, 'node_modules', 'hoisted'))).toBe(true);
+    expect(
+      existsSync(join(probe, 'packages', 'cli', 'node_modules', 'nested')),
+    ).toBe(true);
+    // A member the tree does not contain gets nothing — creating its directory
+    // would put a path in the tree that its commit does not have.
+    expect(existsSync(join(probe, 'packages', 'absent'))).toBe(false);
   });
 
   it('leaves an already-built probe farm untouched', () => {

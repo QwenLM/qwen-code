@@ -1,0 +1,323 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// `qwen review scratch-tree`: a private copy of the PR head for one verifier to
+// mutate, so the tree everyone else is READING stays exactly as the PR left it.
+//
+// Step 4's verifier is the one review agent whose job requires writing code: it
+// writes a probe, runs it, applies the one-line fix the finding implies to show
+// the probe flips, and restores. Until now it did all of that in the shared
+// review worktree — the tree `working_dir` pins every other agent to as well.
+//
+// That is a race, and the pipeline's own shape is what makes it structural
+// rather than unlucky: round k's verifiers are launched in the SAME response as
+// round k+1's reverse auditors ("Verification rides alongside the next round"),
+// so a verifier's probe is live in the tree precisely while auditors read it.
+// Measured on a real review (#9207): a round-5 auditor read `compose-review.ts`
+// carrying a probe's mutant plus a leftover `__probe__.test.ts`, and came within
+// a step of filing a Critical against code no commit contains. It recovered by
+// improvising `git show HEAD:` — a fallback no brief mentions. Two other agents
+// in the same run reported the residue.
+//
+// "Leave the tree as you found it" — which the verifier brief has always said,
+// and which verifiers do obey — cannot close this: the exposure window is DURING
+// the probe, not after it. The only fix that removes the window is a tree of
+// one's own, which is the pattern this pipeline already uses twice: the
+// test-efficacy probe's `-probe` sibling (#6832) and the A/B's `-base` sibling.
+// This is the third, and the last mutating step that lacked one.
+//
+// What it deliberately does NOT do: run anything. Like `base-tree`, it owns the
+// fiddly half — a detached add at the right SHA, a leftover from a crashed run,
+// a dependency farm so a unit harness can actually start — and hands back a
+// path. WHAT to probe is the verifier's question, and no fixed scenario fits it.
+
+import type { CommandModule } from 'yargs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { scratchWorktreePath } from './lib/paths.js';
+import {
+  discardWorktree,
+  exposeDependencies,
+  worktreeCreateFailureDetail,
+  worktreeResidue,
+  type SweepResult,
+} from './lib/worktree.js';
+
+export interface ScratchTreeReport {
+  /** True when a tree stands at `path`, checked out at the commit under review. */
+  available: boolean;
+  /** Absolute path to this agent's scratch worktree, when one was created. */
+  path?: string;
+  /** The commit it holds — the review worktree's HEAD, i.e. the PR head. */
+  headSha?: string;
+  /**
+   * True when an earlier call had already created it and this one restored it
+   * to `headSha` instead of rebuilding it. Disclosed because it is the answer
+   * to "where did my probe file go" — every call hands back a PRISTINE tree.
+   */
+  reused: boolean;
+  /**
+   * The `node_modules` farm: how many top-level packages were symlinked in from
+   * the review worktree, and how many could not be. `null` when the review
+   * worktree has no `node_modules` at all — then a JS unit harness will not
+   * start here, and the note says so rather than letting the verifier discover
+   * it as a mysterious `vitest: not found`.
+   */
+  dependencies: { linked: number; failed: number } | null;
+  /**
+   * Paths the SHARED review worktree carries that its HEAD does not, at the
+   * moment of this call. Normally empty. Non-empty means residue is in the tree
+   * the other agents are reading right now — most likely this verifier's own,
+   * from before it had a scratch tree to work in — and the note says to restore
+   * it. This is the cleanliness check the fix is incomplete without: isolation
+   * removes the source, and this catches the case where something wrote to the
+   * shared tree anyway.
+   */
+  sharedTreeResidue: string[];
+  /** What happened, in one line. Rendered to the verifier verbatim. */
+  note: string;
+}
+
+export interface ScratchTreeArgs {
+  worktree: string;
+  label: string;
+  out?: string;
+}
+
+function gitOut(cwd: string, ...args: string[]): string {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (r.error) throw r.error;
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
+  }
+  return (r.stdout ?? '').trim();
+}
+
+function git(cwd: string, ...args: string[]): void {
+  gitOut(cwd, ...args);
+}
+
+/**
+ * Put an existing scratch tree back at `headSha`, or say why it could not be.
+ *
+ * Every call hands back the PR head, not "the PR head plus whatever the last
+ * probe left" — a mutant surviving into the next finding's probe is a wrong
+ * verdict with a deterministic source tag on it, which is the worst failure
+ * this command could have. `checkout --force` reverts the tracked edits and
+ * `clean -fd` removes the probe files; ignored paths are deliberately spared,
+ * because that is where the dependency farm lives and rebuilding it every call
+ * is the whole cost this reuse path exists to avoid.
+ */
+function resetScratchTree(tree: string, headSha: string): boolean {
+  try {
+    git(tree, 'checkout', '--force', '--detach', headSha);
+    git(tree, 'clean', '-fd');
+    return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
+  } catch {
+    // A tree too broken to reset is not a tree to probe in. The caller
+    // discards and rebuilds it rather than handing back a half-known state.
+    return false;
+  }
+}
+
+export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
+  const unavailable = (note: string): ScratchTreeReport => ({
+    available: false,
+    reused: false,
+    dependencies: null,
+    sharedTreeResidue: [],
+    note,
+  });
+
+  const worktree = resolve(args.worktree);
+  if (!existsSync(worktree)) {
+    return unavailable(`the review worktree ${worktree} does not exist`);
+  }
+  // The label is what keeps concurrent verifier shards out of each other's
+  // trees, so an empty one is refused rather than defaulted: a default is a
+  // shared tree by another name, and it would reintroduce the very race this
+  // command exists to remove — one shard editing the file another is measuring.
+  if (!args.label || args.label.trim().length === 0) {
+    return unavailable(
+      '--label is required: it is what gives each verifier shard its own tree, ' +
+        'and shards of one round run concurrently. Pass the record key from ' +
+        'your launch block.',
+    );
+  }
+
+  let headSha: string;
+  try {
+    headSha = gitOut(worktree, 'rev-parse', 'HEAD');
+  } catch (err) {
+    return unavailable(
+      `cannot read HEAD in ${worktree}: ${(err as Error).message}`,
+    );
+  }
+
+  // Read BEFORE the tree is created, so it describes the shared tree as this
+  // call found it and can never be confused with anything this call did.
+  const sharedTreeResidue = worktreeResidue(worktree);
+  const residueNote =
+    sharedTreeResidue.length > 0
+      ? ` WARNING: the shared review worktree is NOT clean — ${sharedTreeResidue.join(', ')} ` +
+        `${sharedTreeResidue.length === 1 ? 'is' : 'are'} not in ${headSha.slice(0, 9)}. ` +
+        'Other agents are reading that tree right now and will take those lines for the ' +
+        "PR's own code. Restore it (`git checkout -- <path>` / delete the file) before you " +
+        'do anything else.'
+      : '';
+
+  const tree = scratchWorktreePath(worktree, args.label);
+  if (existsSync(tree) && resetScratchTree(tree, headSha)) {
+    const dependencies = farmDependencies(tree, worktree);
+    return {
+      available: true,
+      path: tree,
+      headSha,
+      reused: true,
+      dependencies,
+      sharedTreeResidue,
+      note:
+        `your scratch tree is at ${tree}, restored to ${headSha.slice(0, 9)} ` +
+        `(reusing the one an earlier call created — anything you left in it is gone).` +
+        dependencyNote(dependencies) +
+        residueNote,
+    };
+  }
+
+  let sweep: SweepResult | undefined;
+  try {
+    // Clears both a leftover from a crashed run and a tree the reset above
+    // could not rescue; either would fail `add` with `already exists`.
+    sweep = discardWorktree(worktree, tree);
+    git(worktree, 'worktree', 'add', '--detach', tree, headSha);
+  } catch (e) {
+    // Not `unavailable()`: the residue was already measured, and a report whose
+    // note names contaminated paths while its `sharedTreeResidue` field says
+    // `[]` would tell a reader and a script two different things.
+    return {
+      available: false,
+      reused: false,
+      dependencies: null,
+      sharedTreeResidue,
+      note:
+        `${worktreeCreateFailureDetail('scratch', e, String(sweep?.stderr ?? ''))}. ` +
+        'Do NOT fall back to probing in the review worktree — other agents are ' +
+        'reading it. A probe you cannot isolate is inconclusive, and the ' +
+        'finding keeps the reading-based verdict and its low-confidence floor.' +
+        residueNote,
+    };
+  }
+
+  const dependencies = farmDependencies(tree, worktree);
+  return {
+    available: true,
+    path: tree,
+    headSha,
+    reused: false,
+    dependencies,
+    sharedTreeResidue,
+    note:
+      `your scratch tree is at ${tree}, checked out at ${headSha.slice(0, 9)}. ` +
+      'Write your probe there, mutate there, apply the candidate fix there; the ' +
+      'review worktree stays read-only. `cleanup` sweeps this at the end of the ' +
+      'review.' +
+      dependencyNote(dependencies) +
+      residueNote,
+  };
+}
+
+/**
+ * Link the review worktree's `node_modules` into the scratch tree, so a unit
+ * harness starts without a per-tree install.
+ *
+ * The same farm the test-efficacy probe builds, and shared with it for the same
+ * reason: an install per probe would cost minutes the verifier does not have,
+ * and a scratch tree a probe cannot run in is a scratch tree nobody uses. The
+ * review worktree is the source because that is the tree Agent 7 installed and
+ * built — workspace packages resolve through it to code the PR head produced.
+ * (Those links point OUT of the scratch tree, which is why a cross-package
+ * mutation is one this isolation cannot show flipping. Reads are unaffected,
+ * and reads are all that leave the scratch tree.)
+ */
+function farmDependencies(
+  tree: string,
+  worktree: string,
+): { linked: number; failed: number } | null {
+  if (!existsSync(resolve(worktree, 'node_modules'))) return null;
+  try {
+    return exposeDependencies(tree, worktree);
+  } catch {
+    // Best effort, exactly as it is for the probe: a farm that could not be
+    // built costs the verifier a runnable harness, never a wrong verdict.
+    return null;
+  }
+}
+
+function dependencyNote(
+  dependencies: { linked: number; failed: number } | null,
+): string {
+  if (dependencies === null) {
+    return (
+      ' The review worktree has no `node_modules`, so nothing was linked in and ' +
+      'a JS unit harness will not start here — install in the SCRATCH tree if you ' +
+      'need one, never in the review worktree.'
+    );
+  }
+  if (dependencies.linked === 0 && dependencies.failed === 0) {
+    return ' Its `node_modules` was already in place.';
+  }
+  return (
+    ` ${dependencies.linked} dependencies linked in` +
+    (dependencies.failed > 0
+      ? `, ${dependencies.failed} could not be — a harness that cannot resolve a package is an environment gap, not a finding.`
+      : '.')
+  );
+}
+
+export const scratchTreeCommand: CommandModule = {
+  command: 'scratch-tree',
+  describe:
+    "Create this agent's own throwaway worktree at the commit under review, so " +
+    'probes, mutants and candidate fixes never touch the shared review worktree ' +
+    'other agents are reading',
+  builder: (yargs) =>
+    yargs
+      .option('worktree', {
+        type: 'string',
+        demandOption: true,
+        describe:
+          'The PR worktree — the scratch tree is created beside it, at its HEAD',
+      })
+      .option('label', {
+        type: 'string',
+        demandOption: true,
+        describe:
+          'What makes this tree yours: pass the record key from your launch ' +
+          'block. Two agents sharing a label share a tree, which is the race ' +
+          'this command exists to remove.',
+      })
+      .option('out', {
+        type: 'string',
+        describe: 'Write the JSON report here',
+      }),
+  handler: (argv) => {
+    const args = argv as unknown as ScratchTreeArgs;
+    try {
+      const report = runScratchTree(args);
+      if (args.out) {
+        mkdirSync(dirname(resolve(args.out)), { recursive: true });
+        writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));
+      }
+      writeStdoutLine(JSON.stringify(report, null, 2));
+      writeStderrLine(`scratch-tree: ${report.note}`);
+    } catch (err) {
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
+    }
+  },
+};

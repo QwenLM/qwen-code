@@ -82,6 +82,7 @@ vi.mock('./lib/paths.js', () => ({
   worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
   probeWorktreePath: (path: string) => `${path}-probe`,
   baseWorktreePath: (path: string) => `${path}-base`,
+  scratchWorktreePrefix: (path: string) => `${path}-scratch-`,
   reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
   REVIEW_TMP_DIR: '/repo/.qwen/tmp',
   tmpFile: (target: string, suffix: string) =>
@@ -100,6 +101,10 @@ import {
 describe('runCleanup', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` clears calls, not implementations: a `mockReturnValue`
+    // set in one test would otherwise decide what the next one's directory
+    // sweep sees.
+    mocks.readdirSync.mockReturnValue([]);
     mocks.existsSync.mockReturnValue(false);
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
@@ -152,6 +157,33 @@ describe('runCleanup', () => {
       '/repo/.qwen/tmp/review-pr-123',
       '/repo/.qwen/tmp/review-pr-123-probe',
       '/repo/.qwen/tmp/review-pr-123-base',
+    ]);
+  });
+
+  it('sweeps every verifier scratch tree, which it can only find by prefix', () => {
+    // One per verifier shard, named for the shard's record key — so unlike the
+    // probe and base siblings, the sweeper cannot reconstruct the names and
+    // reads the directory instead. Missing them leaks a checkout per shard and
+    // wedges the next review's `git worktree add` on the leftovers.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.readdirSync.mockReturnValue([
+      'review-pr-123',
+      'review-pr-123-scratch-verify--round-1--aaa',
+      'review-pr-123-scratch-verify--round-2--bbb',
+      // Neither of these belongs to this review: one is another PR's scratch
+      // tree, the other an ordinary side file.
+      'review-pr-999-scratch-verify--round-1--ccc',
+      'qwen-review-pr-123-diff.txt',
+    ] as unknown as []);
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree.mock.calls.map((c) => c[0])).toEqual([
+      '/repo/.qwen/tmp/review-pr-123',
+      '/repo/.qwen/tmp/review-pr-123-probe',
+      '/repo/.qwen/tmp/review-pr-123-base',
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-1--aaa',
+      '/repo/.qwen/tmp/review-pr-123-scratch-verify--round-2--bbb',
     ]);
   });
 

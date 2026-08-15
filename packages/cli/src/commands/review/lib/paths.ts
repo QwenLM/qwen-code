@@ -95,6 +95,76 @@ export function baseWorktreePath(worktree: string): string {
   return `${resolve(worktree)}-base`;
 }
 
+/**
+ * The infix that marks a verifier's private scratch worktree. Private to this
+ * module and reached through the two functions below, so the creator
+ * (`scratch-tree`) and the sweeper (`cleanup.ts`, which can only match on the
+ * prefix — the label half is per-agent and unknown to it) cannot drift apart on
+ * it, the way the `-probe` suffix once did.
+ */
+const SCRATCH_INFIX = '-scratch-';
+
+/**
+ * A Step 4 verifier's own throwaway worktree — the tree its probes run in
+ * (#9207).
+ *
+ * The review worktree is READ by concurrent agents for the whole run: the
+ * pipelined loop launches round k's verifiers alongside round k+1's reverse
+ * auditors, all pinned to that one tree by `working_dir`. A verifier that
+ * writes a probe file there, or applies the one-line fix its flip-check needs,
+ * is mutating a tree other agents are reading mid-review — measured live, an
+ * auditor read a probe's mutant plus a leftover probe test and nearly filed a
+ * Critical against residue no commit contains. Restoring afterwards does not
+ * close it; the exposure is the window *during* the probe.
+ *
+ * So each verifier gets its own, and the LABEL is what keeps them apart: shards
+ * of one round run concurrently too, and a shared scratch tree would just move
+ * the same race one level down (shard B's probe editing the file shard A is
+ * measuring). Callers pass their record key, which is already unique per role,
+ * round and findings digest.
+ *
+ * Absolute, and for the same reason as {@link probeWorktreePath}: `git worktree
+ * add` runs with the review worktree as cwd, so a relative path would land the
+ * scratch tree *inside* the tree it is meant to sit beside — the one place it
+ * must never be, since that is the tree it exists to keep clean.
+ */
+export function scratchWorktreePath(worktree: string, label: string): string {
+  return `${resolve(worktree)}${SCRATCH_INFIX}${scratchLabel(label)}`;
+}
+
+/**
+ * The `<worktree>-scratch-` prefix every scratch tree of one review shares, so
+ * `cleanup` can sweep a family whose members it cannot name.
+ */
+export function scratchWorktreePrefix(worktree: string): string {
+  return `${resolve(worktree)}${SCRATCH_INFIX}`;
+}
+
+/**
+ * A scratch label reduced to one safe path component.
+ *
+ * The label reaching this is a record key (`verify--round-2--<digest>`), but it
+ * arrives over a CLI flag, so it is treated as untrusted: a `../` in it would
+ * put the tree — and the `git worktree add` that creates it, and the sweep that
+ * later deletes it — somewhere else entirely. Same flattening as
+ * {@link safeTarget}, plus a length cap: the suffix rides on a path that is
+ * already deep, and a 200-character label is how a `git worktree add` starts
+ * failing with ENAMETOOLONG on the platforms with the shortest limits.
+ *
+ * Exported because the label makes one more journey the path does not:
+ * `agent-prompt` writes it into a shell command inside the verifier's brief.
+ * Sanitising there with this same function keeps the label shell-inert (no
+ * quoting to get right, no metacharacter to reach a shell) AND keeps the brief
+ * honest — the flag it shows is exactly the label the tree will be named for.
+ */
+export function scratchLabel(label: string): string {
+  const flat = label
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/\.\.+/g, '_')
+    .replace(/^[._]+/, '');
+  return (flat || 'agent').slice(0, 64);
+}
+
 /** Local branch ref name for a fetched PR head. */
 export function reviewBranch(prNumber: string | number): string {
   return `qwen-review/pr-${prNumber}`;

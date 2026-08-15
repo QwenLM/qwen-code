@@ -21,7 +21,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
@@ -33,6 +33,7 @@ import {
   worktreePath,
   probeWorktreePath,
   baseWorktreePath,
+  scratchWorktreePrefix,
   reviewBranch,
   REVIEW_TMP_DIR,
   tmpFile,
@@ -379,6 +380,33 @@ function auditPrWrites(target: string, prNumber: string): void {
   }
 }
 
+/**
+ * Every scratch worktree standing beside `worktree`, in name order.
+ *
+ * A verifier's scratch tree is named for the shard that owns it, so the sweeper
+ * cannot reconstruct the names — it recognises the family instead. Reading the
+ * directory rather than trusting a pattern is deliberate: these are paths this
+ * function is about to delete, and a real directory entry that starts with the
+ * review's own `<worktree>-scratch-` prefix is a much narrower thing than any
+ * string that matches a glob.
+ */
+function scratchWorktreesOf(worktree: string): string[] {
+  const prefix = scratchWorktreePrefix(worktree);
+  const parent = dirname(resolve(worktree));
+  let entries: string[];
+  try {
+    entries = readdirSync(parent);
+  } catch {
+    // No temp dir at all: a review whose worktree was never created, or one
+    // already cleaned. Nothing to sweep, and nothing worth reporting.
+    return [];
+  }
+  return entries
+    .map((name) => join(parent, name))
+    .filter((path) => path.startsWith(prefix))
+    .sort();
+}
+
 export function runCleanup(target: string): void {
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
@@ -429,6 +457,17 @@ export function runCleanup(target: string): void {
     // its only removal — not just a crash sweep. Same shared path helper, same
     // reason: the suffix must not drift between creator and sweeper.
     report('base worktree', baseWorktreePath(wt));
+
+    // The Step 4 verifiers' scratch trees (#9207). One per verifier shard, and
+    // the count is not knowable here — the label half is the shard's record key
+    // — so this is the one sibling family swept by PREFIX rather than by name.
+    // Listing the parent directory is what makes that safe: a glob over
+    // `<wt>-scratch-*` is matched against real entries, never expanded into a
+    // path that does not exist, and nothing outside the review's own temp dir
+    // can match the prefix.
+    for (const path of scratchWorktreesOf(wt)) {
+      report('scratch worktree', path);
+    }
     // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
     // not a git worktree, so `releaseWorktree` above does not touch it. A builder
     // killed mid-build leaves it behind (its `finally` rmSync never runs), and every

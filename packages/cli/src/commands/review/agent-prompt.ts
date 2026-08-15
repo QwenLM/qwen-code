@@ -91,6 +91,8 @@ import {
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { scratchLabel } from './lib/paths.js';
+import { worktreeResidue } from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -483,6 +485,7 @@ export function buildChunkAgentPrompt(
   report: PlanReport,
   id: number,
   rules?: string,
+  residue?: string[],
 ): string {
   const { chunk, total } = chunkFrom(report, id);
 
@@ -554,6 +557,10 @@ export function buildChunkAgentPrompt(
       "hunk's correctness depends on code outside it. Diff context is three lines deep; state " +
       'invariants are not. Page a source file that comes back truncated rather than reasoning ' +
       'from its first screenful.',
+    // A chunk agent reads source files out of the shared worktree, which is
+    // exactly the exposure #9207 is about — so it gets the same rule the role
+    // briefs do, from the same builder.
+    ...worktreeEvidenceBlock(report, residue),
     '',
     '## What to review',
     '',
@@ -1044,6 +1051,69 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
   ];
 }
 
+/**
+ * The review worktree's residue, or nothing at all when there is no worktree to
+ * have any. Resolved against the process cwd, like every other use of
+ * `worktreePath` here: the report stores it repo-relative and review commands
+ * run from the project root.
+ */
+function worktreeResidueOf(report: PlanReport): string[] {
+  const wt = report.worktreePath;
+  if (typeof wt !== 'string' || !wt) return [];
+  return worktreeResidue(resolve(wt));
+}
+
+/**
+ * What every code-reading agent of a worktree-mode review needs to know about
+ * the tree it is standing in: it is shared, and shared with agents that write.
+ *
+ * The isolation half of #9207 removes the source — a verifier's probes now run
+ * in its own scratch tree — and this is the reader half, because "no agent
+ * writes here any more" is exactly the kind of guarantee that is one regression
+ * away from being false, and the reader is the one who pays. Measured live: an
+ * auditor read a probe's mutant plus a leftover probe file, nearly filed a
+ * Critical against them, and recovered only by improvising evidence from
+ * `git show HEAD:` — a fallback no brief mentioned. It is one sentence here so
+ * the next auditor does not have to invent it.
+ *
+ * `residue` is that check made concrete: the paths the tree carried when this
+ * launch was built. Named, not counted — a reader can only act on "distrust
+ * THESE files". Nothing is emitted when the review has no worktree (a local,
+ * file-path or cross-repo review, where the working tree is the user's own and
+ * uncommitted changes may be the very thing under review).
+ */
+function worktreeEvidenceBlock(
+  report: PlanReport,
+  residue: string[] | undefined,
+): string[] {
+  const wt = report.worktreePath;
+  if (typeof wt !== 'string' || !wt) return [];
+  const parts = [
+    '',
+    '**Your working directory is a SHARED review worktree.** Other agents read it ' +
+      'while you do, and Step 4 verifiers may write in it — their probes run in ' +
+      'their own throwaway trees, but a stray uncommitted change here is still ' +
+      'possible, and it is not part of the pull request. So: **code that is not in ' +
+      'the diff and not in the commit is not a finding.** Before reporting anything ' +
+      'that surprises you — a test file the diff never added, a line the diff never ' +
+      'touched — check it against the commit under review with ' +
+      '`git show HEAD:<path>` and judge THAT. (An auditor of a real run took a ' +
+      "verifier's live probe for the PR's own code and came within a step of filing " +
+      'a Critical against it.)',
+  ];
+  if (residue && residue.length > 0) {
+    parts.push(
+      '',
+      `**And right now it is not clean.** These paths differ from the commit under ` +
+        `review: ${residue.map((p) => `\`${inertPath(p)}\``).join(', ')}. Take your ` +
+        'evidence for them from `git show HEAD:<path>`, not from the file on disk, ' +
+        'and say in your return that you saw them, so the orchestrator can have ' +
+        'the tree cleared.',
+    );
+  }
+  return parts;
+}
+
 function repositoryBuildBoundary(context: RepositoryContext): string[] {
   return [
     '## Repository-specific verification boundary',
@@ -1073,6 +1143,14 @@ export function buildRoleBrief(
     file?: string;
     planPath?: string;
     chunk?: number;
+    /**
+     * This launch's record key — unique per role, round and findings digest.
+     * The verifier's scratch tree is named after it, which is what keeps the
+     * shards of one round out of each other's trees (`scratchWorktreePath`).
+     */
+    key?: string;
+    /** Paths the review worktree carries that its commit does not, if any. */
+    residue?: string[];
   } = {},
 ): string {
   const brief = BRIEFS[role];
@@ -1221,6 +1299,56 @@ export function buildRoleBrief(
           'signature, the read sites of a new field — you cannot check it, and you must not ' +
           'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
           'the check could not be made. A false Critical blocks a merge.',
+      );
+    }
+  }
+
+  // The other side of the same coin: in worktree mode there IS a tree, and it is
+  // shared with agents that write into it. Every code-reading role gets the rule
+  // (#9207); Agent 7 does not, because it owns the build and its own commands are
+  // the only writes it will see.
+  if (brief.reviewsCode) {
+    parts.push(...worktreeEvidenceBlock(report, opts.residue));
+  }
+
+  // The verifier is the review's one WRITING agent, so it gets a tree of its own
+  // — the command welded in with its path and its per-shard label, the way Agent
+  // 7's build-test invocation is, because a probe run in the shared worktree is
+  // read by the next round's auditors as the PR's own code (#9207).
+  if (role === 'verify') {
+    const wt = report.worktreePath;
+    if (typeof wt === 'string' && wt) {
+      // The record key is unique per role, round and findings digest, so two
+      // shards of one round get two trees. Falling back to the role name keeps a
+      // direct build working; it is never the roster/CLI path, which always has
+      // a key.
+      // Sanitised HERE, not just where the path is built: this string is
+      // written into a shell command, and the one function that decides the
+      // tree's name is also what keeps a metacharacter out of that command.
+      const label = scratchLabel(opts.key ?? role);
+      parts.push(
+        '',
+        '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
+          'Stand it up the first time a finding needs a run, and again whenever you ' +
+          'want it pristine: every call hands back the commit under review, with ' +
+          "the review worktree's `node_modules` linked in so a unit harness starts " +
+          'without an install.',
+        '',
+        '```bash',
+        `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${resolve(wt)} \\`,
+        `  --label ${label}`,
+        '```',
+        '',
+        'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +
+          'it at the end of the review. `available: false` means the isolation ' +
+          'failed, and then the probe does not run at all: an unisolated probe ' +
+          'contaminates the tree the next round is reading, so the finding falls ' +
+          'back to its reading-based verdict and the low-confidence floor. It also ' +
+          'reports `sharedTreeResidue` — paths the REVIEW worktree carries that its ' +
+          'commit does not. That list must be empty; if it is not, something has ' +
+          'written into the tree the other agents are reading, so restore those ' +
+          'paths (`git checkout -- <path>`, delete stray files) before you go on, ' +
+          'and say so in your report.',
       );
     }
   }
@@ -1718,6 +1846,7 @@ function buildLaunch(
     round?: number;
   },
   rules?: string,
+  residue?: string[],
 ): { key: string; prompt: string } {
   if (spec.role) {
     const key =
@@ -1735,6 +1864,8 @@ function buildLaunch(
         file: spec.file,
         planPath,
         chunk: spec.chunk,
+        key,
+        residue,
       }),
     );
     return {
@@ -1751,7 +1882,7 @@ function buildLaunch(
   const briefFile = writeBrief(
     planPath,
     key,
-    buildChunkAgentPrompt(report, id, rules),
+    buildChunkAgentPrompt(report, id, rules, residue),
   );
   return { key, prompt: buildChunkLaunchPrompt(report, id, briefFile) };
 }
@@ -1870,7 +2001,12 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
-function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+function runRoster(
+  report: PlanReport,
+  planPath: string,
+  rules?: string,
+  residue?: string[],
+): void {
   // The roster reads `plan.effort` (written by the capturing command), so a
   // `medium` plan builds the reduced set here without an `--effort` flag — and
   // `check-coverage` holds the run to that same set from the same field.
@@ -1883,6 +2019,7 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         ? { chunk: req.chunk }
         : { role: req.role, file: req.file },
       rules,
+      residue,
     );
     // The roster is what coverage checks; the key is what this command records
     // under. They are derived in two files, and if they ever disagree, every
@@ -2149,6 +2286,7 @@ function runAllChunks(
   findingsContent: string,
   rules?: string,
   round?: number,
+  residue?: string[],
 ): void {
   const chunks = requireAuditableChunks(report);
 
@@ -2259,6 +2397,7 @@ function runAllChunks(
       planPath,
       { role, chunk: c.id, key, round },
       rules,
+      residue,
     );
     const printed = foldFindings(role, findingsContent, prompt, findingsFile);
     recordPrompt(planPath, key, printed);
@@ -2567,6 +2706,23 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     }
   }
 
+  // The state of the shared review worktree AT BUILD TIME (#9207), read once and
+  // handed to every brief this call builds. Every wave of agents — the roster,
+  // each verify shard, each reverse-audit round — passes through this command
+  // just before it is launched, which makes this the one place the pipeline can
+  // notice that the tree those agents are about to read is not the commit they
+  // think it is. Cheap enough to do unconditionally (one `git status` per call,
+  // not per agent) and silent on a clean tree, which is every healthy run.
+  const residue = worktreeResidueOf(report);
+  if (residue.length > 0) {
+    writeStderrLine(
+      `warning: the review worktree carries changes its commit does not: ${residue.join(', ')}. ` +
+        'Every agent built by this call is told to take its evidence for those paths from ' +
+        '`git show HEAD:<path>`. Restore them before the next round — a probe left in the ' +
+        "shared tree reads to an auditor as the PR's own code.",
+    );
+  }
+
   // Write down what was handed out, at a path derived from the plan. The caller is
   // never told this path and is never asked to write to it: it is the CLI's record
   // of its own output, and the only thing that can tell a delivered prompt from a
@@ -2576,7 +2732,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // summary of its own — and every check downstream passed, because a paraphrase
   // keeps the diff path.
   if (args.roster) {
-    runRoster(report, args.plan, rules);
+    runRoster(report, args.plan, rules, residue);
     return;
   }
 
@@ -2778,6 +2934,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       findingsContent,
       rules,
       args.round,
+      residue,
     );
     return;
   }
@@ -2834,6 +2991,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           }
         : { chunk: args.chunk },
       rules,
+      residue,
     ));
   }
 

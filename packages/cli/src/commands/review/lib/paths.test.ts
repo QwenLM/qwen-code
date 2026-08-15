@@ -9,6 +9,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 import {
   tmpFile,
   probeWorktreePath,
+  scratchWorktreePath,
+  scratchWorktreePrefix,
   worktreePath,
   PARSE_ARGS_REPORT,
 } from './paths.js';
@@ -75,5 +77,54 @@ describe('probeWorktreePath', () => {
     expect(probeWorktreePath(worktreePath(7))).toBe(
       `${resolve(worktreePath(7))}-probe`,
     );
+  });
+});
+
+describe('scratchWorktreePath', () => {
+  const worktree = resolve('/a/b/review-pr-1');
+
+  it('names the tree after the agent that owns it', () => {
+    // The label is what keeps concurrent verifier shards apart; a scratch tree
+    // they share is the race the whole mechanism exists to remove.
+    expect(scratchWorktreePath(worktree, 'verify--round-2--abc')).toBe(
+      `${worktree}-scratch-verify--round-2--abc`,
+    );
+    expect(scratchWorktreePath(worktree, 'verify--round-2--abc')).not.toBe(
+      scratchWorktreePath(worktree, 'verify--round-2--def'),
+    );
+  });
+
+  it('resolves a relative worktree so the tree is a SIBLING, not a child', () => {
+    // `git worktree add` runs with the review worktree as cwd. A relative path
+    // would land the scratch tree inside the one tree it must never touch.
+    expect(scratchWorktreePath('.qwen/tmp/review-pr-1', 'verify')).toBe(
+      `${resolve('.qwen/tmp/review-pr-1')}-scratch-verify`,
+    );
+  });
+
+  it('flattens a crafted label instead of following it out of the temp dir', () => {
+    // The label reaches this over a CLI flag, and the path it builds is both
+    // created by `git worktree add` and later DELETED by cleanup's sweep.
+    const p = scratchWorktreePath(worktree, '../../../etc/passwd');
+    expect(p).not.toContain('..');
+    expect(dirname(p)).toBe(dirname(worktree));
+    expect(p.startsWith(`${worktree}-scratch-`)).toBe(true);
+  });
+
+  it('caps a long label — the suffix rides on an already-deep path', () => {
+    const p = scratchWorktreePath(worktree, 'v'.repeat(400));
+    expect(basename(p).length).toBeLessThanOrEqual(
+      'review-pr-1-scratch-'.length + 64,
+    );
+  });
+
+  it('shares its prefix with the sweep that has to find trees it cannot name', () => {
+    // cleanup lists the parent directory and matches this prefix: the label half
+    // is the shard's record key, which the sweeper never sees.
+    expect(
+      scratchWorktreePath(worktreePath(7), 'verify--round-1--x').startsWith(
+        scratchWorktreePrefix(worktreePath(7)),
+      ),
+    ).toBe(true);
   });
 });

@@ -51,24 +51,23 @@ import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
-  readdirSync,
   writeFileSync,
   readFileSync,
   rmSync,
   lstatSync,
   existsSync,
-  statSync,
-  symlinkSync,
-  type Stats,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
-// stale-sweep-then-remove step (its rationale lives there, with the helper).
+// stale-sweep-then-remove step (its rationale lives there, with the helper), and
+// `exposeDependencies` followed it when `scratch-tree` needed the same
+// dependency farm for the verifier's own probe tree.
 import {
   discardWorktree,
+  exposeDependencies,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
@@ -1378,70 +1377,6 @@ export function probeCleanupFailureDetail(
       : String(removeError)
     : sweepStderr.trim();
   return `could not remove probe worktree ${probeTree}${why ? `: ${why}` : ''}`;
-}
-
-export function exposeDependencies(
-  probeTree: string,
-  dependencyRoot: string,
-): { linked: number; failed: number } {
-  const done = { linked: 0, failed: 0 };
-  if (probeTree === dependencyRoot) return done;
-  const source = join(dependencyRoot, 'node_modules');
-  const target = join(probeTree, 'node_modules');
-  if (!existsSync(source) || existsSync(target)) return done;
-  mkdirSync(target);
-  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
-    if (entry.name === '.vite' || entry.name === '.vite-temp') continue;
-    const sourceEntry = join(source, entry.name);
-    const targetEntry = join(target, entry.name);
-    // Every per-entry step is guarded: this is best-effort, so one locked or
-    // concurrently-unlinked entry must not throw out of the probe run (which
-    // would mark every probe `inconclusive`). What cannot be linked is counted
-    // and disclosed by the caller — never silently dropped.
-    let sourceStats: Stats;
-    try {
-      sourceStats = lstatSync(sourceEntry);
-    } catch {
-      done.failed++;
-      continue;
-    }
-    if (sourceStats.isSymbolicLink()) {
-      try {
-        if (!statSync(sourceEntry).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-    } else if (!sourceStats.isDirectory()) {
-      continue;
-    }
-    if (entry.name.startsWith('@')) {
-      let pkgs: string[];
-      try {
-        mkdirSync(targetEntry);
-        pkgs = readdirSync(sourceEntry);
-      } catch {
-        done.failed++;
-        continue;
-      }
-      for (const pkg of pkgs) {
-        try {
-          symlinkSync(join(sourceEntry, pkg), join(targetEntry, pkg), linkType);
-          done.linked++;
-        } catch {
-          done.failed++;
-        }
-      }
-    } else {
-      try {
-        symlinkSync(sourceEntry, targetEntry, linkType);
-        done.linked++;
-      } catch {
-        done.failed++;
-      }
-    }
-  }
-  return done;
 }
 
 /**
