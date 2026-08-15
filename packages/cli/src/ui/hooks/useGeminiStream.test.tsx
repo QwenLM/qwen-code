@@ -2973,6 +2973,70 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('does not expose the main steer queue to detached tool continuations', async () => {
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValue(['keep this follow-up on the main turn']);
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const detachedController = new AbortController();
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        [
+          {
+            functionResponse: {
+              id: 'detached-tool',
+              name: 'testTool',
+              response: { output: 'done' },
+            },
+          },
+        ],
+        SendMessageType.ToolResult,
+        'prompt-id-detached',
+        {
+          toolContinuationOwner: {
+            promptId: 'prompt-id-detached',
+            signal: detachedController.signal,
+            survivesGenerationChange: true,
+            detachedAbortController: detachedController,
+          },
+        },
+      );
+    });
+
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    expect(sendOptions.getSteerInput).toBeUndefined();
+    expect(drainSteer).not.toHaveBeenCalled();
+  });
+
   it('processes queued /goal clear at the next sampling boundary', async () => {
     const goalCommand = '/goal clear';
     const restoreSteer = vi.fn();

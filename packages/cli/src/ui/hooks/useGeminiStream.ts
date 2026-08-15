@@ -3700,7 +3700,9 @@ export const useGeminiStream = (
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
-            ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
+            ...(!allowConcurrentBtwDuringResponse &&
+            !isDetachedToolContinuation &&
+            midTurnDrainRef
               ? { getSteerInput: drainSteerAtBoundary }
               : {}),
           };
