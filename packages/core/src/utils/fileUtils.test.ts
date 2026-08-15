@@ -886,7 +886,10 @@ describe('fileUtils', () => {
 
     it('should detect image type by extension (jpeg)', async () => {
       mockMimeGetType.mockReturnValueOnce('image/jpeg');
-      expect(await detectFileType('file.jpg')).toBe('image');
+      const jpgPath = path.join(tempRootDir, 'file.jpg');
+      actualNodeFs.writeFileSync(jpgPath, Buffer.from([0xff, 0xd8, 0xff]));
+
+      expect(await detectFileType(jpgPath)).toBe('image');
     });
 
     it('should detect svg type by extension', async () => {
@@ -1180,7 +1183,10 @@ describe('fileUtils', () => {
     });
 
     it('should handle read errors for image/pdf files', async () => {
-      actualNodeFs.writeFileSync(testImageFilePath, 'content'); // File must exist
+      actualNodeFs.writeFileSync(
+        testImageFilePath,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
       mockMimeGetType.mockReturnValue('image/png');
       const readError = new Error('Simulated image read error');
       vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(readError);
@@ -1191,6 +1197,21 @@ describe('fileUtils', () => {
       );
       expect(result.error).toContain('Simulated image read error');
       expect(result.returnDisplay).toContain('Simulated image read error');
+    });
+
+    it('honors an explicitly provided file type without re-detecting content', async () => {
+      actualNodeFs.writeFileSync(testImageFilePath, 'plain text content');
+
+      const result = await processSingleFileContent(
+        testImageFilePath,
+        mockConfig,
+        { fileType: 'binary' },
+      );
+
+      expect(result.llmContent).toContain(
+        'Cannot display content of binary file',
+      );
+      expect(result.returnDisplay).toContain('Skipped binary file: image.png');
     });
 
     it('should process an image file', async () => {
@@ -1315,7 +1336,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Read image file: animated.webp');
     });
 
-    it('rejects image bytes whose format disagrees with the extension', async () => {
+    it('accepts image bytes whose format differs from the extension', async () => {
       const gifBytes = Buffer.from(
         '47494638396101000100800000000000ffffff21f90400010000002c000000000100010000020244010021f90400010000002c00000000010001000002024c01003b',
         'hex',
@@ -1326,12 +1347,11 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(mismatchPath, mockConfig);
 
-      expect(result.llmContent).toContain(
-        'Cannot display content of binary file',
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toEqual(
+        expect.objectContaining({ inlineData: expect.any(Object) }),
       );
-      expect(result.returnDisplay).toContain(
-        'Skipped binary file: mismatch.png',
-      );
+      expect(result.returnDisplay).toContain('Read image file: mismatch.png');
     });
 
     it('rejects ZIP containers behind an image extension', async () => {
