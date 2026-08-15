@@ -464,6 +464,16 @@ function testid(id: string): HTMLElement | null {
   return container!.querySelector(`[data-testid="${id}"]`);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
+}
+
 describe('ChatPane', () => {
   it('locks goal controls while the current snapshot refresh is in flight', async () => {
     const current = {
@@ -507,6 +517,138 @@ describe('ChatPane', () => {
       resolveGoal?.({ snapshot: current });
     });
     expect(controlGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not dispatch a Goal control after the pane session changes during refresh', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingGoal = deferred<{ snapshot: typeof current }>();
+    connectionState.goalState = current;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    act(() => {
+      ownerVersion += 1;
+      connectionState = { ...connectionState, sessionId: 'sess-2' };
+      rerender();
+    });
+    await act(async () => pendingGoal.resolve({ snapshot: current }));
+
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+
+  it('releases Goal control busy state after a same-session reattach', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingControl = deferred<{ snapshot: typeof current }>();
+    connectionState.goalState = current;
+    getGoal.mockResolvedValue({ snapshot: current });
+    controlGoal.mockReturnValueOnce(pendingControl.promise);
+    render();
+
+    const pause = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+    );
+    if (!pause) throw new Error('pause control was not rendered');
+    act(() => pause.click());
+    await vi.waitFor(() => expect(controlGoal).toHaveBeenCalledOnce());
+    act(() => {
+      ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => pendingControl.resolve({ snapshot: current }));
+
+    expect(
+      container!.querySelector<HTMLButtonElement>(
+        '[data-testid="goal-status-strip"] button[aria-label="Pause goal"]',
+      )?.disabled,
+    ).toBe(false);
+  });
+
+  it('reports an edit failure after the edited Goal disappears', async () => {
+    const current = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 5,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    const pendingGoal = deferred<{
+      snapshot: { v: 2; activity: 'idle'; goal: null };
+    }>();
+    const onError = vi.fn();
+    connectionState.goalState = current;
+    getGoal.mockReturnValueOnce(pendingGoal.promise);
+    render({ onError });
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="goal-status-strip"] button[aria-label="Edit goal"]',
+        )
+        ?.click();
+    });
+    const save = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Save');
+    if (!save) throw new Error('save control was not rendered');
+    act(() => save.click());
+    act(() => {
+      connectionState = {
+        ...connectionState,
+        goalState: { v: 2, activity: 'idle', goal: null },
+      };
+      rerender({ onError });
+    });
+    await act(async () =>
+      pendingGoal.resolve({
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      }),
+    );
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Failed to edit the goal',
+    );
   });
 
   it.each(['resolve', 'reject'] as const)(

@@ -8330,6 +8330,7 @@ export function App({
       objective?: string,
     ) => {
       const busyOwner = sessionOwnerGuard.capture();
+      const busySessionId = connectionRef.current.sessionId;
       setGoalControlBusy(true);
       try {
         const snapshot = await refreshGoal();
@@ -8357,6 +8358,9 @@ export function App({
           } as GoalControlRequest;
         }
 
+        if (!busyOwner.isCurrent()) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
         const owner = sessionOwnerGuard.capture();
         try {
           const response = await sessionActions.controlGoal(request);
@@ -8367,7 +8371,9 @@ export function App({
           throw error;
         }
       } finally {
-        if (busyOwner.isCurrent()) setGoalControlBusy(false);
+        if (connectionRef.current.sessionId === busySessionId) {
+          setGoalControlBusy(false);
+        }
       }
     },
     [refreshGoal, sessionActions, sessionOwnerGuard, t],
@@ -8492,9 +8498,10 @@ export function App({
           setGoalEditError(
             error instanceof Error ? error.message : String(error),
           );
+          reportError(error, t('goals.error.editFailed'));
         });
     },
-    [controlCurrentGoal, sessionOwnerGuard],
+    [controlCurrentGoal, reportError, sessionOwnerGuard, t],
   );
 
   const hiddenCommands = useMemo(

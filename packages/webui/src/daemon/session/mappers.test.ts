@@ -13,6 +13,7 @@ import {
   getReplayTokenCount,
   getReplayTokenUsage,
   mapWorkspaceSkills,
+  selectGoalState,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
@@ -333,6 +334,56 @@ describe('updateConnectionFromDaemonEvent', () => {
     } as DaemonEvent);
 
     expect(next.goalState).toBe(current.goalState);
+  });
+
+  it('orders equal-revision Goal snapshots by updatedAt', () => {
+    const current = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'paused' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const stale = {
+      ...current,
+      activity: 'running' as const,
+      goal: { ...current.goal, status: 'active' as const, updatedAt: 20 },
+    };
+
+    expect(selectGoalState(current, stale)).toBe(current);
+  });
+
+  it('does not resurrect a cleared Goal from a stale snapshot', () => {
+    const active = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const cleared = selectGoalState(active, {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+
+    expect(selectGoalState(cleared, active)).toBe(cleared);
   });
 
   it('ignores malformed Goal snapshots', () => {

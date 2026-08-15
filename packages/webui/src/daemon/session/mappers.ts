@@ -366,11 +366,35 @@ export function selectGoalState(
   current: GoalSnapshotV2 | undefined,
   incoming: GoalSnapshotV2,
 ): GoalSnapshotV2 {
+  if (incoming.goal === null) {
+    const clearedGoal =
+      current?.goal ?? (current ? clearedGoalOrder.get(current) : undefined);
+    if (clearedGoal) {
+      clearedGoalOrder.set(incoming, {
+        goalId: clearedGoal.goalId,
+        revision: clearedGoal.revision,
+        updatedAt: clearedGoal.updatedAt,
+      });
+    }
+  }
+  if (current?.goal === null && incoming.goal) {
+    const clearedGoal = clearedGoalOrder.get(current);
+    if (
+      clearedGoal?.goalId === incoming.goal.goalId &&
+      (incoming.goal.revision < clearedGoal.revision ||
+        (incoming.goal.revision === clearedGoal.revision &&
+          incoming.goal.updatedAt <= clearedGoal.updatedAt))
+    ) {
+      return current;
+    }
+  }
   if (
     current?.goal &&
     incoming.goal &&
     current.goal.goalId === incoming.goal.goalId &&
-    incoming.goal.revision < current.goal.revision
+    (incoming.goal.revision < current.goal.revision ||
+      (incoming.goal.revision === current.goal.revision &&
+        incoming.goal.updatedAt < current.goal.updatedAt))
   ) {
     return current;
   }
@@ -378,6 +402,11 @@ export function selectGoalState(
   // their existing transport arrival-order semantics.
   return incoming;
 }
+
+const clearedGoalOrder = new WeakMap<
+  GoalSnapshotV2,
+  { goalId: string; revision: number; updatedAt: number }
+>();
 
 function getGoalState(
   update: Record<string, unknown> | undefined,

@@ -1512,6 +1512,7 @@ export function useQueuedPrompts({
           | 'midTurnMessageId'
           | 'admissionOutcome'
           | 'payloadAvailable'
+          | 'serverState'
         >
       >,
     ) => {
@@ -1812,6 +1813,7 @@ export function useQueuedPrompts({
             | 'midTurnMessageId'
             | 'admissionOutcome'
             | 'payloadAvailable'
+            | 'serverState'
           >
         > = { isInserting: false },
       ) => {
@@ -1825,6 +1827,42 @@ export function useQueuedPrompts({
             item.id === prompt.id ? { ...item, ...flags } : item,
           ),
         );
+      };
+      const recoverAfterSettledInsert = (
+        flags: Partial<
+          Pick<
+            QueuedPrompt,
+            | 'isInserting'
+            | 'midTurnMessageId'
+            | 'admissionOutcome'
+            | 'payloadAvailable'
+            | 'serverState'
+          >
+        >,
+      ): boolean => {
+        const submitAtIdle =
+          isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
+          queueOwnerKey(
+            latestWorkspaceCwdRef.current,
+            latestSessionIdRef.current,
+          ) === promptOwnerKey &&
+          (latestStreamingStateRef.current as DaemonStreamingState) ===
+            'idle' &&
+          !writeBlockedRef.current &&
+          !holdQueuedPromptsLocallyRef.current;
+        const nextFlags = {
+          ...flags,
+          ...(submitAtIdle ? { serverState: 'submitting' as const } : {}),
+        };
+        clearInsertionFlag(nextFlags);
+        finishInsertion();
+        if (submitAtIdle) {
+          const pendingPrompt = queuedPromptsRef.current.find(
+            (item) => item.id === prompt.id,
+          );
+          if (pendingPrompt) submitPendingPrompt(pendingPrompt);
+        }
+        return submitAtIdle;
       };
       setQueuedPromptFlags(prompt.id, {
         isInserting: true,
@@ -1843,6 +1881,15 @@ export function useQueuedPrompts({
         });
       } catch (error) {
         if (!isCurrentInsertion()) return;
+        if (abort.signal.aborted) {
+          recoverAfterSettledInsert({
+            isInserting: false,
+            midTurnMessageId: undefined,
+            admissionOutcome: undefined,
+            payloadAvailable: undefined,
+          });
+          return;
+        }
         if (messageId) {
           clearInsertionFlag({
             isInserting: false,
@@ -1888,14 +1935,15 @@ export function useQueuedPrompts({
       }
       if (!isCurrentInsertion()) return;
       if (!result.accepted) {
-        clearInsertionFlag({
+        const submitted = recoverAfterSettledInsert({
           isInserting: false,
           midTurnMessageId: undefined,
           admissionOutcome: undefined,
           payloadAvailable: undefined,
         });
-        finishInsertion();
         if (
+          !abort.signal.aborted &&
+          !submitted &&
           queueOwnerKey(
             latestWorkspaceCwdRef.current,
             latestSessionIdRef.current,

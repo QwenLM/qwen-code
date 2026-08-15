@@ -262,6 +262,8 @@ export function ChatPane({
   const [goalControlBusy, setGoalControlBusy] = useState(false);
   const [goalEditOpen, setGoalEditOpen] = useState(false);
   const [goalEditError, setGoalEditError] = useState<string | null>(null);
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const connectionGoalComplete =
     connection.goalState?.goal?.status === 'complete';
   const liveGoalSnapshot = connectionGoalComplete
@@ -599,6 +601,7 @@ export function ChatPane({
       objective?: string,
     ) => {
       const busyOwner = sessionOwnerGuard.capture();
+      const busySessionId = connectionRef.current.sessionId;
       setGoalControlBusy(true);
       try {
         const snapshot = (await actions.getGoal()).snapshot;
@@ -625,6 +628,9 @@ export function ChatPane({
             expectedRevision: goal.revision,
           } as GoalControlRequest;
         }
+        if (!busyOwner.isCurrent()) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
         try {
           return await actions.controlGoal(request);
         } catch (error) {
@@ -632,7 +638,9 @@ export function ChatPane({
           throw error;
         }
       } finally {
-        if (busyOwner.isCurrent()) setGoalControlBusy(false);
+        if (connectionRef.current.sessionId === busySessionId) {
+          setGoalControlBusy(false);
+        }
       }
     },
     [actions, sessionOwnerGuard, t],
@@ -660,9 +668,10 @@ export function ChatPane({
           setGoalEditError(
             error instanceof Error ? error.message : String(error),
           );
+          reportError(error, t('goals.error.editFailed'));
         });
     },
-    [controlGoal, sessionOwnerGuard],
+    [controlGoal, reportError, sessionOwnerGuard, t],
   );
 
   const handleSubmit = useCallback(

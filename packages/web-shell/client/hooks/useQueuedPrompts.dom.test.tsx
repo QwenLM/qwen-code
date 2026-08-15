@@ -334,6 +334,79 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  it('silently submits an explicit insert aborted as the turn becomes idle', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, opts) => {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => admission.reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+        return admission.promise;
+      },
+    );
+    const { render, reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+
+    act(() => latest.enqueuePrompt('submit after settle'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, false);
+    await act(async () => insertion);
+
+    expect(reportError).not.toHaveBeenCalled();
+    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'submit after settle', serverState: 'submitting' },
+    ]);
+  });
+
+  it('silently holds an explicit insert aborted while a Goal remains active', async () => {
+    const { actions } = createActions();
+    const admission = deferred<{ accepted: boolean; messageId?: string }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, opts) => {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => admission.reject(new DOMException('aborted', 'AbortError')),
+          { once: true },
+        );
+        return admission.promise;
+      },
+    );
+    const { render, reportError } = mount(
+      'responding',
+      actions,
+      true,
+      false,
+      false,
+      true,
+    );
+
+    act(() => latest.enqueuePrompt('keep held'));
+    let insertion!: Promise<void>;
+    act(() => {
+      insertion = latest.insertQueuedPrompt(1);
+    });
+    render('idle', 'session-1', false, false, true);
+    await act(async () => insertion);
+
+    expect(reportError).not.toHaveBeenCalled();
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'keep held' }]);
+    expect(latest.queuedPrompts[0]?.admissionOutcome).toBeUndefined();
+  });
+
   it('lets an explicit insert settle into its source-session stash', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();

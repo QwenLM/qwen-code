@@ -32,6 +32,7 @@ import {
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
+  type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -1787,7 +1788,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.context !== undefined);
           const configGeneration =
             sessionConfigGenerationRef.current.get(activeSession) ?? 0;
-          const goalStateAtLoadStart = connectionRef.current.goalState;
+          const goalStateAtLoadStart =
+            connectionRef.current.sessionId === activeSession.sessionId
+              ? connectionRef.current.goalState
+              : undefined;
           const gitPromise = skipMetadataRefreshThisIteration
             ? Promise.resolve({ branch: connectionRef.current.gitBranch })
             : activeSession.workspaceCwd
@@ -1838,7 +1842,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const goalState =
             goalResult.status === 'fulfilled'
               ? goalResult.value.snapshot
-              : undefined;
+              : goalStateAtLoadStart === undefined
+                ? ({
+                    v: 2,
+                    goal: null,
+                    activity: 'idle',
+                  } satisfies GoalSnapshotV2)
+                : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
               ? loadWarningsRef.current?.models

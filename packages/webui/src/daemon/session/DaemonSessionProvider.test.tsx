@@ -1604,6 +1604,34 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.goalState).toBe(streamedGoal);
   });
 
+  it('releases unknown Goal state when the session-load Goal request fails', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        goal: vi.fn().mockRejectedValue(new Error('goal route unavailable')),
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.goalState).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+  });
+
   it('routes mid_turn_message_injected frames to the sidechannel and transcript', async () => {
     // The frame seeds the dedupe sidechannel and also normalizes into a
     // transcript status block so consumers can show the inserted message.

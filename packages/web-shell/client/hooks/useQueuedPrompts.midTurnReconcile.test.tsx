@@ -1338,6 +1338,50 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('silently submits a query-capable insert aborted at turn settle', async () => {
+    let rejectAdmission: ((error: Error) => void) | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          rejectAdmission = reject;
+          opts?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('query settle');
+      });
+      let insertion!: Promise<void>;
+      act(() => {
+        insertion = harness.result().insertQueuedPrompt(1);
+      });
+      await harness.render({
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: false,
+      });
+      await act(async () => insertion);
+
+      expect(rejectAdmission).toBeDefined();
+      expect(harness.reportError).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'query settle',
+        expect.objectContaining({ optimisticUserMessage: false }),
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('settles a callback from the settled ring exactly once', async () => {
     const onComplete = vi.fn();
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
