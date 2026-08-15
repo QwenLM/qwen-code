@@ -32,11 +32,18 @@ if jq -e 'type == "array" and length == 0' "${FINDINGS}" > /dev/null 2>&1; then
   exit 0
 fi
 
-# Shape gate: non-empty array; id numeric; reason string; path, when
-# present, a string (one malformed sibling must not drop the batch — it
-# fails the whole file loudly instead of being silently formatted away).
+# Shape gate: non-empty array; id a positive integer that renders as PLAIN
+# digits; reason string; path, when present, a string (one malformed sibling
+# must not drop the batch — it fails the whole file loudly instead of being
+# silently formatted away). The `tostring | test("^[0-9]+$")` belt rejects
+# integer-valued floats that jq renders in scientific notation past 2^53
+# (e.g. 1e21 -> "1e+21"): the "+" is a regex-active byte in the line-anchored
+# dedupe below and never index-matches an integer resolved id. Comment ids
+# are ~10 digits, far under the bound.
 if ! jq -e 'type == "array" and length > 0 and all(.[];
-    (.id | type == "number" and . == floor and . > 0) and (.reason | type == "string")
+    (.id | type == "number" and . == floor and . > 0 and . < 9007199254740992
+      and (tostring | test("^[0-9]+$")))
+    and (.reason | type == "string")
     and ((.path // "?") | type == "string"))' "${FINDINGS}" > /dev/null 2>&1; then
   echo "::warning::deferred-findings.json is malformed; skipping the follow-up upsert"
   exit 0
@@ -57,7 +64,13 @@ if ! ISSUE_NUM="$(gh api "repos/${REPO}/issues?state=all&creator=${AUTOFIX_BOT}&
   exit 0
 fi
 
-KNOWN_FILE="$(mktemp)"
+if ! KNOWN_FILE="$(mktemp)"; then
+  # A silent exit here would violate the header contract (every failure
+  # warns) and is exactly when visibility matters — /tmp exhaustion is a
+  # known CI state.
+  echo "::warning::could not create a temp file for the deferred-findings corpus; skipping this round"
+  exit 0
+fi
 trap 'rm -f "${KNOWN_FILE}"' EXIT
 if [[ -n "${ISSUE_NUM}" && "${ISSUE_NUM}" != 'null' ]]; then
   # Known-id corpus = issue body + every comment. Any fetch failure skips
@@ -102,12 +115,17 @@ NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLVED_RA
   | .[]' "${FINDINGS}" 2> /dev/null |
   sed 's/<!--/<!\\-\\-/g')" || NEW_LINES=''
 [[ -n "${NEW_LINES}" ]] || exit 0
-# Cap in bash, loudly: clipped items are never retried (the workdir is
-# deleted at job end), so a silent clip would read as full persistence.
+# Cap in bash, loudly. Clipped items are NOT recoverable automatically: the
+# eval-watermark permanently filters this round's evaluated feedback out of
+# every later round, so the agent never re-derives the clipped ids. The
+# warning names them for a maintainer to persist by hand (or raise the cap);
+# it must not imply a later round will re-defer them.
 TOTAL_NEW="$(printf '%s\n' "${NEW_LINES}" | wc -l)"
 if (( TOTAL_NEW > 20 )); then
+  DROPPED="$(printf '%s\n' "${NEW_LINES}" | tail -n +21)"
   NEW_LINES="$(printf '%s\n' "${NEW_LINES}" | head -n 20)"
-  echo "::warning::deferred-findings cap: persisting 20 of ${TOTAL_NEW} new findings; the remaining $(( TOTAL_NEW - 20 )) are NOT persisted (re-defer them in a later round)"
+  echo "::warning::deferred-findings cap: persisting 20 of ${TOTAL_NEW} new findings; the remaining $(( TOTAL_NEW - 20 )) will NOT be re-evaluated (watermark-gated) — a maintainer should persist them or raise the cap. Dropped:"
+  printf '%s\n' "${DROPPED}"
   KEPT=20
 else
   KEPT="${TOTAL_NEW}"

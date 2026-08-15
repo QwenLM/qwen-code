@@ -8232,8 +8232,15 @@ exit 1
     // The in-shell BASH_FUNC/proxy denylist sweep an earlier round added to
     // these steps was removed: an in-shell sweep bootstraps trust from the
     // very namespace it sanitizes (a planted BASH_FUNC_env%%/unset%%/alias/
-    // DEBUG-trap defeats it). Nothing re-introduces it.
-    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+    // DEBUG-trap defeats it). Nothing re-introduces it. The failure/handoff
+    // step (reviewAddressReportStep) demonstrably carried the sweep in round
+    // 3, so it is covered too — round 3 re-introduced the pattern once.
+    for (const step of [
+      publishPrStep,
+      pushAndReportStep,
+      prepareStep,
+      reviewAddressReportStep,
+    ]) {
       expect(step).not.toContain('BASH_FUNC_*%%');
       expect(step).not.toContain('done < <(env)');
     }
@@ -10400,13 +10407,48 @@ exit 1
     // 'Push and report' share run_deferred_upsert; the failure path has its
     // own).
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
-      expect(step).toContain('/usr/bin/env -i \\');
+      // LD_* is stripped by a command-prefix assignment BEFORE /usr/bin/env,
+      // the one channel env -i cannot block (ld.so preloads into the env
+      // binary itself at execve). Pin the assignment immediately precedes
+      // the launch (indent-agnostic across the two call sites).
+      expect(step).toMatch(
+        /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\\n\s*\/usr\/bin\/env -i \\/,
+      );
       expect(step).toContain('bash --norc -c');
       // GH_CONFIG_DIR is minted INSIDE the clean child (its mktemp cannot be
-      // shadowed there), and PATH is the trusted staged value passed in.
+      // shadowed there); PATH is the trusted staged value and GH_HOST is
+      // pinned in the allow-list (a reroute cannot spoof the identity check).
       expect(step).toContain('PATH="${TRUSTED_PATH}"');
+      expect(step).toContain('GH_HOST=github.com');
+      // Ordering: the digest gate runs, and ONLY on a match does the staged
+      // script execute — both inside the same clean child. A reordering or a
+      // gate-condition flip must fail here.
+      const gateIdx = step.indexOf(
+        'if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+      );
+      const execIdx = step.indexOf(
+        'bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
+      );
+      const launchIdx = step.indexOf('/usr/bin/env -i');
+      expect(gateIdx).toBeGreaterThan(launchIdx);
+      expect(execIdx).toBeGreaterThan(gateIdx);
     }
     expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(2);
+    // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
+    // child — tie their shared security scaffold together so drift in one is
+    // caught. Compare the allow-list + prelude + digest gate (everything up
+    // to where the failure path inserts its identity check), whitespace-
+    // normalized to absorb the one-level indent difference.
+    const childCore = (step) =>
+      step
+        .match(
+          /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?sha256sum -c - > \/dev\/null 2>&1; then[\s\S]*?NOT persisted this round"\n\s*exit 0\n\s*fi/,
+        )?.[0]
+        .replace(/\s+/g, ' ');
+    expect(childCore(pushAndReportStep)).toBeTruthy();
+    expect(childCore(reviewAddressReportStep)).toBe(
+      childCore(pushAndReportStep),
+    );
     // The failure-path clean-child launch sits INSIDE the DRY_RUN/STALE/token
     // guard (deleting the guard or relocating the call breaks this slice).
     expect(reviewAddressReportStep).toMatch(
@@ -10443,9 +10485,13 @@ exit 1
     );
     expect(
       workflow.split(
-        '"${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+        'if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
       ).length - 1,
     ).toBe(2);
+    // R5-5: both --paginate sites are pinned at the source (the recording gh
+    // stub ignores the flag). Dropping either silently truncates the lookup
+    // or the dedupe corpus.
+    expect(upsertDeferredScript.match(/--paginate/g) ?? []).toHaveLength(2);
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
       expect(step).toContain(
         "UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'",
@@ -10474,12 +10520,19 @@ exit 1
       comments = '[]',
       commentsFail = false,
       writeFail = false,
+      mktempFail = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(join(dir, 'deferred-findings.json'), findings);
       if (resolved) writeFileSync(join(dir, 'resolved-comments.txt'), resolved);
+      if (mktempFail) {
+        // Shadow mktemp on PATH with a failing stub (simulates /tmp
+        // exhaustion): the script must warn+skip, not silently exit 0.
+        writeFileSync(join(bin, 'mktemp'), '#!/usr/bin/env bash\nexit 1\n');
+        chmodSync(join(bin, 'mktemp'), 0o755);
+      }
       writeFileSync(
         join(bin, 'gh'),
         [
@@ -10722,6 +10775,43 @@ exit 1
     // it (`set +C`), and the workflow additionally runs it in an env -i
     // child that drops the read-only SHELLOPTS entirely.
     expect(upsertDeferredScript).toContain('set +C');
+    // R5-3: an integer-valued float that jq renders in scientific notation
+    // past 2^53 (1e21 -> "1E+21") carries a regex-active byte into the
+    // anchored dedupe. The shape gate's plain-digits belt rejects it loudly.
+    const sci = runUpsert({ findings: '[{"id":1e21,"reason":"r"}]' });
+    expect(sci.out).toContain('malformed');
+    expect(sci.calls).toBe('');
+    // R5-4: an unguarded mktemp failure would turn the whole upsert into a
+    // silent exit 0 — the one failure path that skips the header contract.
+    // Now it warns and makes no gh call.
+    const mktempFailed = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      mktempFail: true,
+    });
+    expect(mktempFailed.out).toContain('could not create a temp file');
+    expect(mktempFailed.calls).not.toContain('-f title=');
+    // R5-10: the anchored dedupe's trailing-space boundary. A corpus bullet
+    // `- rc:70 …` must NOT suppress this round's id 7 (space-less prefix
+    // match would); removing the `+ " "` in the script would flip this.
+    const prefixCollide = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- rc:70 `x`: unrelated' },
+      ]),
+    });
+    expect(prefixCollide.calls).toContain('- rc:7 ');
+    // R5-2: the cap warning names the dropped bullets (they are NOT
+    // re-evaluated — watermark-gated) instead of promising a later re-defer.
+    const capped2 = runUpsert({
+      findings: JSON.stringify(
+        Array.from({ length: 22 }, (_, i) => ({ id: i + 1, reason: 'r' })),
+      ),
+    });
+    expect(capped2.out).toContain('will NOT be re-evaluated');
+    expect(capped2.out).not.toContain('re-defer them in a later round');
+    expect(capped2.out).toContain('- rc:21 ');
+    expect(capped2.out).toContain('- rc:22 ');
   });
 
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {

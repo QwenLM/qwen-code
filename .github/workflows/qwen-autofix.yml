@@ -5690,7 +5690,13 @@ jobs:
             # GH_CONFIG_DIR. RUNNER_TEMP stays agent-writable between staging
             # and here, so the digest is verified INSIDE the child; a
             # mismatch skips persistence, never the round.
-            /usr/bin/env -i \
+            # LD_* is the one channel env -i cannot block: ld.so maps a
+            # planted library into /usr/bin/env ITSELF at execve, before -i
+            # runs. Neutralize it with a command-prefix assignment (pure
+            # shell parameter assignment — no function/alias lookup, so no
+            # BASH_FUNC can shadow it — applied to env's own environment).
+            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              /usr/bin/env -i \
               PATH="${TRUSTED_PATH}" \
               GITHUB_TOKEN="${GITHUB_TOKEN}" \
               GH_HOST=github.com \
@@ -6659,7 +6665,11 @@ jobs:
               # gate, the PAT bot-identity check (POST_HANDOFF's own check is
               # skipped on the fixed/noop-outcome path that also reaches here)
               # and the staged script all run in a clean allow-listed shell.
-              /usr/bin/env -i \
+              # LD_* is the one channel env -i cannot block (ld.so preloads
+              # into /usr/bin/env itself at execve): neutralize it with a
+              # command-prefix assignment, unshadowable by any BASH_FUNC.
+              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+                /usr/bin/env -i \
                 PATH="${TRUSTED_PATH}" \
                 GITHUB_TOKEN="${GITHUB_TOKEN}" \
                 GH_HOST=github.com \
