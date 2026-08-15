@@ -389,11 +389,17 @@ export const INLINE_BUDGET_GAP_RE =
  *    `None.`, `no gaps`), and the non-answer idioms `nothing skipped`,
  *    `none found`, `nothing to report`;
  *  - the stayed-under-budget idiom, end-anchored like its siblings
- *    (`N/A - stayed under budget`); text continuing past `budget` keeps
- *    (`N/A - stayed under budget, but the Windows matrix never ran`);
+ *    (`N/A - stayed under budget`), with the same position words and
+ *    budget qualifiers as the completion tail below (`stayed inside the
+ *    tool-call budget`) — one vocabulary for one idiom family; text
+ *    continuing past `budget` keeps (`N/A - stayed under budget, but the
+ *    Windows matrix never ran`);
  *  - the completion idiom — token, dash, an "all done" head, then a
  *    completion word the text ENDS with (`none — all planned checks
- *    completed`). The head alone is not completion (`none — all 5
+ *    completed`), tolerating one trailing budget adverbial (`none — all
+ *    checks above completed within budget` — three of these reached two
+ *    posted bodies in one live round because the completion word was not
+ *    final). The head alone is not completion (`none — all 5
  *    Windows checks failed to start` keeps), the completion word must be
  *    AFFIRMED (`none — all checks crashed, none completed` keeps), and
  *    the span must not cross an exception (`none — all but the Windows
@@ -408,8 +414,33 @@ export const INLINE_BUDGET_GAP_RE =
  * spans are tempered (a per-character exception lookahead), which keeps
  * them linear too.
  */
-const PLACEHOLDER_GAP_RE =
-  /^(?:<[^>]*>$|[-—*_~`]+$|(?:none|n\/a|nothing|no (?:gaps?|checks?))\b(?:[.!…,;:\s]*$|\s+(?:skipped|found|to report)\b[.!…,;:\s]*$|\s*[-—–]\s*(?:stayed\s+(?:under|within|below)\s+budget\b[.!…,;:\s]*$|(?:all|every(?:thing)?|planned|further|no further)\b(?:(?!\b(?:but|except|excepting|excluding)\b).)*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*$)|\s*\(\s*(?:all|every(?:thing)?)\b(?:(?!\b(?:but|except|excepting|excluding)\b)[^()])*(?<!\b(?:none|nothing|no|zero|never|not)\s)\b(?:complete[ds]?|done|finished|covered)\b[.!…,;:\s]*\)\s*$))/i;
+// The budget-position vocabulary, spelled ONCE for the whole idiom family:
+// the stayed idiom and both completion tails read the same words. As a
+// regex literal the family was hand-copied three times, and the copies had
+// already drifted twice in two review rounds (`below` missing from one
+// branch, the qualifiers from another).
+const BUDGET_QUALIFIED =
+  '(?:under|within|below|inside)\\s+(?:the\\s+)?(?:tool(?:[- ]call)?\\s+)?budget';
+const COMPLETION_TAIL = `(?:\\s+${BUDGET_QUALIFIED})?`;
+
+const PLACEHOLDER_GAP_RE = new RegExp(
+  '^(?:<[^>]*>$' +
+    '|[-—*_~`]+$' +
+    '|(?:none|n/a|nothing|no (?:gaps?|checks?))\\b(?:' +
+    '[.!…,;:\\s]*$' +
+    '|\\s+(?:skipped|found|to report)\\b[.!…,;:\\s]*$' +
+    `|\\s*[-—–]\\s*(?:stayed\\s+${BUDGET_QUALIFIED}\\b[.!…,;:\\s]*$` +
+    '|(?:all|every(?:thing)?|planned|further|no further)\\b' +
+    '(?:(?!\\b(?:but|except|excepting|excluding)\\b).)*' +
+    '(?<!\\b(?:none|nothing|no|zero|never|not)\\s)' +
+    `\\b(?:complete[ds]?|done|finished|covered)\\b${COMPLETION_TAIL}[.!…,;:\\s]*$)` +
+    '|\\s*\\(\\s*(?:all|every(?:thing)?)\\b' +
+    '(?:(?!\\b(?:but|except|excepting|excluding)\\b)[^()])*' +
+    '(?<!\\b(?:none|nothing|no|zero|never|not)\\s)' +
+    `\\b(?:complete[ds]?|done|finished|covered)\\b${COMPLETION_TAIL}[.!…,;:\\s]*\\)\\s*$` +
+    '))',
+  'i',
+);
 
 /** Keep an operator-facing NOTE readable; a gap names a check, not an essay. */
 const MAX_GAP_LENGTH = 160;
