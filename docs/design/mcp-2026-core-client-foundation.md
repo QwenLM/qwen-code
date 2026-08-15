@@ -59,8 +59,10 @@ contains no session data or credentials. WebShell loads that proxy from a
 different loopback origin, then uses the official AppBridge and postMessage
 transport to deliver the validated HTML, tool input, and tool result to an
 inner sandboxed iframe. The proxy validates parent and child origins, applies
-resource CSP as an HTTP response header, and relays only JSON-RPC messages
-between the two frames. The inner App iframe deliberately omits
+resource CSP as an HTTP response header, and forwards AppBridge postMessage
+traffic between the two frames. The host AppBridge schema-validates inbound
+messages; the proxy itself does not filter payload shape. The inner App iframe
+deliberately omits
 `allow-same-origin`, giving untrusted HTML an opaque origin that cannot call the
 daemon's loopback API as a same-origin client. The first host slice does not
 advertise privileged App capabilities.
@@ -77,6 +79,11 @@ advertise privileged App capabilities.
   server-declared CSP enforced by the daemon response.
 - If the isolation origin is unavailable, WebShell displays the ordinary tool
   text rather than rendering the App.
+- Compacted session history keeps `type: 'mcp_app'` with empty `html` and the
+  original `fallbackText`; WebShell renders that text instead of mounting an
+  empty sandbox.
+- The host sends `ui/resource-teardown` and waits for it to settle before
+  unloading the sandbox iframe.
 
 ## Verification
 
@@ -92,6 +99,8 @@ advertise privileged App capabilities.
   dashboard resource, and render that dashboard inside an actual daemon-backed
   WebShell transcript. The PR description includes the external test fixture
   used for this verification without shipping it in the product repository.
+- Compacted replay of an App result must show fallback text and must not mount
+  a sandbox iframe.
 - Invalid App resource MIME types and unavailable resources must retain the
   ordinary text result.
 - The sandbox route must reject CSP directive injection and remain a static,

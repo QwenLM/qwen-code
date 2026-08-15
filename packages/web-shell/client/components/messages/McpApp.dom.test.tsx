@@ -214,4 +214,54 @@ describe('McpApp host lifetime', () => {
       }),
     );
   });
+
+  it('renders fallbackText for compacted html and never mounts the sandbox', () => {
+    const { container } = renderApp(appDisplay({ html: '' }));
+
+    expect(container.textContent).toContain('Demo result');
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(appBridgeMocks.constructed).toBe(0);
+  });
+
+  it('tears down the resource before unloading the iframe', async () => {
+    let resolveTeardown: (() => void) | undefined;
+    appBridgeMocks.teardownResource.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveTeardown = resolve;
+        }),
+    );
+
+    const { container } = renderApp(appDisplay());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      appBridgeMocks.last?.onsandboxready?.();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      appBridgeMocks.last?.oninitialized?.();
+      await Promise.resolve();
+    });
+
+    const iframe = container.querySelector('iframe');
+    expect(iframe).not.toBeNull();
+    const removeAttribute = vi.spyOn(iframe!, 'removeAttribute');
+
+    const entry = mounted.pop();
+    act(() => entry?.root.unmount());
+
+    expect(appBridgeMocks.teardownResource).toHaveBeenCalled();
+    expect(removeAttribute).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveTeardown?.();
+      await Promise.resolve();
+    });
+
+    expect(removeAttribute).toHaveBeenCalledWith('src');
+    expect(appBridgeMocks.close).toHaveBeenCalled();
+    entry?.container.remove();
+  });
 });

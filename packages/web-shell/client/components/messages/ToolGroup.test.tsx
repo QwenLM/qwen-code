@@ -486,6 +486,27 @@ describe('tool group summary logic', () => {
     expect(container.textContent).toContain('Dashboard ready');
   });
 
+  it('renders fallbackText for a compacted MCP App without mounting the iframe', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '',
+          toolResult: {},
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain('Dashboard ready');
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+  });
+
   it('keeps an MCP App open in a summary-only row', () => {
     const container = renderToolLine(
       makeTool({

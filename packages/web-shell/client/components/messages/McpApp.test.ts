@@ -20,7 +20,7 @@ describe('MCP App host helpers', () => {
     ).toMatchObject({ resourceUri: 'ui://demo/app' });
   });
 
-  it('rejects compacted displays with empty html', () => {
+  it('recognizes compacted displays so the host can render fallbackText', () => {
     expect(
       getMcpAppDisplay({
         type: 'mcp_app',
@@ -31,7 +31,7 @@ describe('MCP App host helpers', () => {
         toolArguments: {},
         fallbackText: 'Demo result',
       }),
-    ).toBeUndefined();
+    ).toMatchObject({ fallbackText: 'Demo result', html: '' });
   });
 
   it('uses the daemon origin and swaps the hostname when needed', () => {

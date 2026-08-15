@@ -33,7 +33,6 @@ export function getMcpAppDisplay(value: unknown): McpAppDisplay | undefined {
     typeof value['serverName'] !== 'string' ||
     typeof value['resourceUri'] !== 'string' ||
     typeof value['html'] !== 'string' ||
-    value['html'] === '' ||
     typeof value['fallbackText'] !== 'string' ||
     !isRecord(value['toolResult']) ||
     !isRecord(value['toolArguments'])
@@ -197,15 +196,18 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
 
     return () => {
       bridgeRef.current = null;
-      iframe.removeAttribute('src');
+      const unload = () => {
+        iframe.removeAttribute('src');
+        void bridge.close().catch(() => {});
+      };
       if (initialized) {
         void bridge
           .teardownResource({}, { timeout: 500 })
           .catch(() => {})
-          .finally(() => bridge.close().catch(() => {}));
+          .finally(unload);
         return;
       }
-      void bridge.close().catch(() => {});
+      unload();
     };
   }, [
     sandboxUrl,
@@ -222,7 +224,7 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
     bridgeRef.current?.setHostContext(mcpAppHostContext(theme));
   }, [theme]);
 
-  if (!sandboxUrl) {
+  if (!display.html || !sandboxUrl) {
     return <div className={styles.fallback}>{display.fallbackText}</div>;
   }
 
