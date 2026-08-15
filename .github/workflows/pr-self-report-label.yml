@@ -100,11 +100,20 @@ jobs:
             # failure (403 rate limit, 5xx, network) also keeps the step
             # green — the job only re-runs on the next PR event — but must
             # not disappear: without the warning, the log claims "removed"
-            # while the label stays on the PR.
+            # while the label stays on the PR. LBL_DEL_FAILED is keyed on the
+            # exit status, with the exact "HTTP 404" token as the only
+            # text-derived exception (a bare 404 substring also rides
+            # transport failures' embedded URLs), and mirrors the identical
+            # idiom in qwen-autofix.yml (a contract test pins them in sync).
+            LBL_DEL_FAILED=false
             if ! REMOVE_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${LABEL}" '$l|@uri')" 2>&1)"; then
-              [[ "${REMOVE_ERR}" == *404* ]] || echo "::warning::#${PR}: ${LABEL} removal failed — ${REMOVE_ERR}"
+              [[ "${REMOVE_ERR}" == *"HTTP 404"* ]] || { LBL_DEL_FAILED=true; echo "::warning::#${PR}: ${LABEL} removal failed — ${REMOVE_ERR}"; }
             fi
-            echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
+            if [[ "${LBL_DEL_FAILED}" == "true" ]]; then
+              echo "#${PR}: ${LABEL} removal did not land — will retry on the next PR event"
+            else
+              echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
+            fi
           else
             echo "#${PR}: no change (self=${SELF}, labeled=${HAS_LABEL}, api=${API_OK})"
           fi
