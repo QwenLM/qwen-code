@@ -10392,10 +10392,12 @@ exit 1
     // verified findings); it is staged from the trusted base; the agent
     // file rides the artifact dump and the repair cleanup; SKILL documents
     // the fourth disposition.
-    expect(
-      workflow.split('bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"').length -
-        1,
-    ).toBe(2);
+    // The staged script is executed from the bytes read and hashed in the
+    // child, never re-opened by path (R9-1), at both call sites.
+    expect(workflow.split('bash -c "${UPSERT_SRC}"').length - 1).toBe(2);
+    expect(workflow).not.toContain(
+      'bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
+    );
     // Placement, not just counts: the digest-gated invocation is a step-local
     // function defined ONCE in 'Push and report' and called immediately after
     // resolve_and_reply_threads in BOTH arms; the failure/handoff step keeps
@@ -10434,11 +10436,41 @@ exit 1
       // The entries must live INSIDE the `env -i` argument list (between the
       // launch and `bash --norc -c`): a symmetric relocation out of the
       // child's environment keeps a bare toContain — and childCore — green.
-      const argList = step.slice(
-        step.indexOf('/usr/bin/env -i'),
-        step.indexOf('bash --norc -c'),
-      );
+      // Anchor on the launch LINE, not the first textual mention: a comment
+      // elsewhere in the step names `/usr/bin/env -i` too, and slicing from
+      // there swallowed the whole step (which quietly weakened these pins).
+      const argStart = step.indexOf('LD_PRELOAD= LD_AUDIT=');
+      expect(argStart).toBeGreaterThan(-1);
+      const argList = step.slice(argStart, step.indexOf('bash --norc -c'));
       expect(argList.length).toBeGreaterThan(0);
+      // R9-10: contains-only pins accept a symmetric ADDITION that widens the
+      // child's environment. Enumerate what is actually passed and compare
+      // against the sanctioned set.
+      const passed = (argList.match(/[A-Z_][A-Z0-9_]*=/g) ?? []).map((m) =>
+        m.replace('=', ''),
+      );
+      expect(new Set(passed)).toEqual(
+        new Set([
+          // the LD_* command-prefix assignments lead the launch line
+          'LD_PRELOAD',
+          'LD_AUDIT',
+          'LD_LIBRARY_PATH',
+          'LD_PROFILE',
+          'LD_PROFILE_OUTPUT',
+          'LD_DEBUG',
+          'LD_DEBUG_OUTPUT',
+          'PATH',
+          'GITHUB_TOKEN',
+          'GH_HOST',
+          'RUNNER_TEMP',
+          'WORKDIR',
+          'PR',
+          'REPO',
+          'AUTOFIX_BOT',
+          'UPSERT_SHA256',
+          'UPSERT_LOG',
+        ]),
+      );
       for (const entry of [
         'PATH="${TRUSTED_PATH}"',
         'GITHUB_TOKEN="${GITHUB_TOKEN}"',
@@ -10452,10 +10484,34 @@ exit 1
       ]) {
         expect(argList).toContain(entry);
       }
-      // R6-8: LD_* cannot be enumerated (LD_TRACE_LOADED_OBJECTS is
-      // presence-tested — even an empty assignment makes the loader print and
-      // exit 0 without running the child), so liveness is VERIFIED: the child
-      // prints a sentinel first, and its absence is reported.
+      // R9-1: the bytes that are HASHED are the bytes that RUN. A gate that
+      // hashes a path and then re-opens it to execute loses to a rename(2)
+      // between the two opens (measured: 20/20 payload executions against the
+      // old shape, 0/20 against this one).
+      expect(step).toContain(
+        'UPSERT_SRC="$(cat "${RUNNER_TEMP}/upsert-deferred-issue.sh"; printf x)"',
+      );
+      expect(step).toContain('UPSERT_SRC="${UPSERT_SRC%x}"');
+      expect(step).toContain('bash -c "${UPSERT_SRC}"');
+      expect(step).not.toMatch(
+        /bash "\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh"/,
+      );
+      // R8-4: loader side channels (auxv dumps, ldd traces) write to the
+      // LAUNCH's stdout, which is discarded — the child logs to a private
+      // file instead, so no content filter is needed to keep them out of the
+      // parsed output. Path and read-back are fork-free: under a planted
+      // channel every external command in the parent prints to stdout, so
+      // $(mktemp)/$(cat) would return that noise inside the value.
+      expect(step).toContain(
+        'UPSERT_LOG="${RUNNER_TEMP}/autofix-upsert-log.$$"',
+      );
+      expect(step).toContain('exec > "${UPSERT_LOG}" 2>&1');
+      expect(step).toContain('UPSERT_OUT="$(<"${UPSERT_LOG}")"');
+      expect(step).toMatch(/' > \/dev\/null 2>&1 \|\| true/);
+      // R6-8: LD_* cannot be enumerated (LD_TRACE_LOADED_OBJECTS and
+      // LD_SHOW_AUXV are presence-tested — even an empty assignment leaves
+      // them on), so liveness is VERIFIED: the child prints a sentinel
+      // first, and its absence is reported.
       expect(step).toContain('printf "%s\\n" "__upsert_child_live__"');
       expect(step).toContain(
         '::warning::deferred-findings upsert child never started',
@@ -10479,17 +10535,15 @@ exit 1
       // R8-5: the captured output is re-emitted, so the child's warnings
       // actually reach the log (deleting both loops was invisible).
       expect(step).toMatch(
-        /while IFS= read -r _upsert_line; do[\s\S]*?printf '%s\\n' "\$\{_upsert_line\}"[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
+        /while IFS= read -r _upsert_line; do\n\s*\[\[ "\$\{_upsert_line\}" == '__upsert_child_live__' \]\] \|\|\n\s*printf '%s\\n' "\$\{_upsert_line\}"\n\s*done <<< "\$\{UPSERT_OUT\}"/,
       );
       // Ordering: the digest gate runs, and ONLY on a match does the staged
       // script execute — both inside the same clean child. A reordering or a
       // gate-condition flip must fail here.
       const gateIdx = step.indexOf(
-        'if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+        'if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then',
       );
-      const execIdx = step.indexOf(
-        'bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
-      );
+      const execIdx = step.indexOf('bash -c "${UPSERT_SRC}"');
       const launchIdx = step.indexOf('/usr/bin/env -i');
       expect(gateIdx).toBeGreaterThan(launchIdx);
       expect(execIdx).toBeGreaterThan(gateIdx);
@@ -10503,7 +10557,7 @@ exit 1
     const childCore = (step) =>
       step
         .match(
-          /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?sha256sum -c - > \/dev\/null 2>&1; then[\s\S]*?NOT persisted this round"\n\s*exit 0\n\s*fi/,
+          /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?sha256sum \| cut -d" " -f1\)" != "\$\{UPSERT_SHA256\}" \]\]; then[\s\S]*?NOT persisted this round"\n\s*exit 0\n\s*fi/,
         )?.[0]
         .replace(/\s+/g, ' ');
     expect(childCore(pushAndReportStep)).toBeTruthy();
@@ -10536,13 +10590,16 @@ exit 1
     );
     expect(idIdx).toBeGreaterThan(
       reviewAddressReportStep.indexOf(
-        'if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+        'if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then',
       ),
     );
     expect(idIdx).toBeLessThan(
-      reviewAddressReportStep.indexOf(
-        'bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
-      ),
+      reviewAddressReportStep.indexOf('bash -c "${UPSERT_SRC}"'),
+    );
+    // R9-9: and the mismatch branch must ENFORCE — presence and ordering say
+    // nothing about whether a mismatch actually stops the write.
+    expect(reviewAddressReportStep).toMatch(
+      /\[\[ "\$\{UPSERT_ACTOR\}" != "\$\{AUTOFIX_BOT\}" \]\]; then\n[^\n]*identity check failed[^\n]*\n\s*exit 0\n/,
     );
     // The failure step carries TRUSTED_PATH in env so the clean child gets a
     // trusted PATH; the in-shell BASH_FUNC/proxy sweep and the in-step PATH
@@ -10573,7 +10630,7 @@ exit 1
     );
     expect(
       workflow.split(
-        'if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+        'if [[ "$(printf "%s" "${UPSERT_SRC}" | sha256sum | cut -d" " -f1)" != "${UPSERT_SHA256}" ]]; then',
       ).length - 1,
     ).toBe(2);
     // R5-5: both --paginate sites are pinned at the source (the recording gh
@@ -10596,6 +10653,12 @@ exit 1
     }
     expect(reviewAddressJob).toContain(
       'comment-replies.json deferred-findings.json deferred-findings.carry.json pr.diff',
+    );
+    // R9-11: that dump prints agent-written files, so it neutralizes `::`
+    // like every other echo of them (a line-start `::error::` in the raw file
+    // would otherwise be a workflow command).
+    expect(reviewAddressJob).toMatch(
+      /=============== \$\{f\} ==============="\n(?:\s*#[^\n]*\n)*\s*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
     );
     expect(reviewAddressJob).toContain(
       '"${WORKDIR}/deferred-findings.json" \\',
@@ -11095,11 +11158,45 @@ exit 1
       resolved: 'rc:21\n',
       list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
       comments: JSON.stringify([
-        { user: { login: 'bot' }, body: '- rv:21 `x`: already tracked' },
+        { user: { login: 'bot' }, body: '- rv:21 `?`: dup' },
       ]),
     });
-    expect(perSource.calls).not.toContain('- rv:21 ');
+    // Suppression for the multi-finding sources is per RENDERED LINE, not per
+    // id: the corpus carries this exact bullet, so the review item is already
+    // tracked while the issue-comment sibling is new. (Keying those on the id
+    // alone silently ate every sibling but the first — R9-2.)
+    expect(perSource.calls).not.toContain('`?`: dup');
     expect(perSource.calls).toContain('- ic:21 ');
+    // A DIFFERENT finding under the same review id is still appended.
+    const siblingFinding = runUpsert({
+      findings:
+        '[{"id":21,"source":"review","reason":"a second, distinct finding"}]',
+      list: JSON.stringify([{ number: 42, body: marker, pull_request: null }]),
+      comments: JSON.stringify([
+        { user: { login: 'bot' }, body: '- rv:21 `?`: dup' },
+      ]),
+    });
+    expect(siblingFinding.calls).toContain('a second, distinct finding');
+    // R9-2: a review body / issue comment carries ONE id but can raise
+    // several findings. Keying the intra-batch dedupe on the id collapsed
+    // them and reported success ("2 of 2 new") while losing one for good.
+    const multiPerId = runUpsert({
+      findings:
+        '[{"id":77,"source":"review","reason":"first"},' +
+        '{"id":77,"source":"review","reason":"second"},' +
+        '{"id":78,"source":"review","reason":"third"}]',
+    });
+    expect(multiPerId.calls.split('- rv:77 ').length - 1).toBe(2);
+    expect(multiPerId.calls).toContain('first');
+    expect(multiPerId.calls).toContain('second');
+    expect(multiPerId.out).toContain('(3 of 3 new)');
+    // Byte-identical records still collapse — the dedupe is per finding, not
+    // per record.
+    const identicalTwice = runUpsert({
+      findings:
+        '[{"id":77,"source":"review","reason":"same"},{"id":77,"source":"review","reason":"same"}]',
+    });
+    expect(identicalTwice.calls.split('- rv:77 ').length - 1).toBe(1);
     // An unknown source value fails the gate loudly rather than silently
     // rendering under the default prefix.
     const badSource = runUpsert({

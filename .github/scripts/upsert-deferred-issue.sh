@@ -62,7 +62,13 @@ lost() {
   echo "::warning::$1 — these findings are LOST (watermark-gated — no later round re-derives them). Raw deferrals follow for manual recovery:"
   for f in "${FINDINGS}" "${CARRY}"; do
     [[ -s "${f}" ]] || continue
-    echo "--- ${f}"
+    local size
+    size="$(wc -c < "${f}" 2> /dev/null | tr -d ' ')"
+    if [[ -n "${size}" ]] && (( size > 4000 )); then
+      echo "--- ${f} (first 4000 of ${size} bytes — TRUNCATED; the full file is in this run's artifact dump)"
+    else
+      echo "--- ${f}"
+    fi
     head -c 4000 "${f}" | sed 's/::/;;/g'
     echo
   done
@@ -77,7 +83,12 @@ if [[ -s "${CARRY}" ]]; then
     if jq -s 'add' "${FINDINGS}" "${CARRY}" > "${MERGED}" 2> /dev/null; then
       FINDINGS="${MERGED}"
     else
-      echo "::warning::could not merge the carried deferrals; persisting only this round's (the carried ones are dumped below)"
+      CARRY_SIZE="$(wc -c < "${CARRY}" 2> /dev/null | tr -d ' ')"
+      if [[ -n "${CARRY_SIZE}" ]] && (( CARRY_SIZE > 4000 )); then
+        echo "::warning::could not merge the carried deferrals; persisting only this round's. The carried set follows, TRUNCATED at 4000 of ${CARRY_SIZE} bytes (full file in the artifact dump):"
+      else
+        echo "::warning::could not merge the carried deferrals; persisting only this round's (the carried ones are dumped below)"
+      fi
       head -c 4000 "${CARRY}" | sed 's/::/;;/g'
       echo
     fi
@@ -212,19 +223,30 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLV
     | map(sub("^rc:"; "") | sub("\r$"; "")
       | select(test("^[0-9]+$")) | tonumber)) as $done
   | ($known | split("\n")) as $klines
-  | unique_by([(.source // "review_comment"), .id])
   | map(.id as $id
     | ((.source // "review_comment")) as $src
     | (if $src == "review" then "rv"
        elif $src == "issue_comment" then "ic"
        else "rc" end) as $pfx
     | select(($src != "review_comment") or (($done | index($id)) | not))
-    | select(($klines | any(test("^- " + $pfx + ":" + ($id | tostring) + " "))) | not)
-    | "- \($pfx):\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
+    | {src: $src, id: $id,
+       line: "- \($pfx):\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
         | gsub("[\r\n]+"; " ")
         | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
         | gsub("@"; "@\u200b")
-        | .[0:500])")
+        | .[0:500])",
+       anchor: ("^- " + $pfx + ":" + ($id | tostring) + " ")})
+  # An inline comment is one finding, so its id IS the identity (and the
+  # anchor keeps working across rounds). A review body or an issue-level
+  # comment can raise SEVERAL findings under one id, so there the identity —
+  # and the corpus check — is the rendered line itself; keying those on the
+  # id alone silently ate every sibling but the first.
+  | unique_by(if .src == "review_comment" then [.src, .id] else [.src, .id, .line] end)
+  | map(. as $r
+    | select(if $r.src == "review_comment"
+        then ($klines | any(test($r.anchor))) | not
+        else ($klines | index($r.line)) == null end)
+    | $r.line)
   | .[]' "${FINDINGS}" 2> /dev/null |
   sed 's/<!--/<!\\-\\-/g')"; then
   # The only remaining silent-exit path: a jq/sed failure here would leave
