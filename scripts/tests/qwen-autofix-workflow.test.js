@@ -10418,8 +10418,43 @@ exit 1
       // GH_CONFIG_DIR is minted INSIDE the clean child (its mktemp cannot be
       // shadowed there); PATH is the trusted staged value and GH_HOST is
       // pinned in the allow-list (a reroute cannot spoof the identity check).
-      expect(step).toContain('PATH="${TRUSTED_PATH}"');
-      expect(step).toContain('GH_HOST=github.com');
+      // R6-7: every allow-list entry that mints the child's environment is
+      // pinned by name — a symmetric deletion from both children (invisible
+      // to the childCore equality below) must fail here.
+      for (const entry of [
+        'PATH="${TRUSTED_PATH}"',
+        'GITHUB_TOKEN="${GITHUB_TOKEN}"',
+        'GH_HOST=github.com',
+        'RUNNER_TEMP="${RUNNER_TEMP}"',
+        'WORKDIR="${WORKDIR}"',
+        'PR="${PR}"',
+        'REPO="${REPO}"',
+        'AUTOFIX_BOT="${AUTOFIX_BOT}"',
+        'UPSERT_SHA256="${UPSERT_SHA256}"',
+      ]) {
+        expect(step).toContain(entry);
+      }
+      // R6-8: LD_* cannot be enumerated (LD_TRACE_LOADED_OBJECTS is
+      // presence-tested — even an empty assignment makes the loader print and
+      // exit 0 without running the child), so liveness is VERIFIED: the child
+      // prints a sentinel first, and its absence is reported.
+      expect(step).toContain('printf "%s\\n" "__upsert_child_live__"');
+      expect(step).toContain(
+        '::warning::deferred-findings upsert child never started',
+      );
+      // The inspection uses bash BUILTINS only: under trace mode an external
+      // grep would itself print-and-exit-0, neutering the very check meant to
+      // detect it (measured).
+      expect(step).toMatch(
+        /if \[\[ "\$\{UPSERT_OUT\}" != \*'__upsert_child_live__'\* \]\]; then/,
+      );
+      expect(step).not.toMatch(/UPSERT_OUT\}" \| grep/);
+      // R6-4: the child's own GH_CONFIG_DIR mktemp is guarded — an empty value
+      // would silently fall back to the shared ~/.config/gh.
+      expect(step).toContain(
+        'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then',
+      );
+      expect(step).toContain('::warning::could not create a gh config dir');
       // Ordering: the digest gate runs, and ONLY on a match does the staged
       // script execute — both inside the same clean child. A reordering or a
       // gate-condition flip must fail here.
@@ -10466,6 +10501,22 @@ exit 1
     );
     expect(reviewAddressReportStep).toContain(
       '[[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]',
+    );
+    // R6-5: and it runs AFTER the digest gate but BEFORE the staged script —
+    // presence alone would survive a reordering that writes with an unverified
+    // identity.
+    const idIdx = reviewAddressReportStep.indexOf(
+      'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user',
+    );
+    expect(idIdx).toBeGreaterThan(
+      reviewAddressReportStep.indexOf(
+        'if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then',
+      ),
+    );
+    expect(idIdx).toBeLessThan(
+      reviewAddressReportStep.indexOf(
+        'bash "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
+      ),
     );
     // The failure step carries TRUSTED_PATH in env so the clean child gets a
     // trusted PATH; the in-shell BASH_FUNC/proxy sweep and the in-step PATH
@@ -10521,12 +10572,26 @@ exit 1
       commentsFail = false,
       writeFail = false,
       mktempFail = false,
+      jqFail = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(join(dir, 'deferred-findings.json'), findings);
       if (resolved) writeFileSync(join(dir, 'resolved-comments.txt'), resolved);
+      if (jqFail) {
+        // Fail ONLY the line-builder jq (the sole call passing --rawfile), so
+        // the shape gate still passes and the failure lands where intended.
+        writeFileSync(
+          join(bin, 'jq'),
+          [
+            '#!/usr/bin/env bash',
+            'for a in "$@"; do [[ "$a" == "--rawfile" ]] && exit 3; done',
+            'exec /usr/bin/jq "$@"',
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'jq'), 0o755);
+      }
       if (mktempFail) {
         // Shadow mktemp on PATH with a failing stub (simulates /tmp
         // exhaustion): the script must warn+skip, not silently exit 0.
@@ -10647,12 +10712,18 @@ exit 1
     });
     expect(badShape.out).toContain('malformed');
     expect(badShape.calls).toBe('');
-    // A failed write logs NOT persisted — success is never claimed.
+    // A failed write never claims success, and says the findings are LOST —
+    // the watermark filters this round's feedback out of every later round, so
+    // "NOT persisted this round" would wrongly imply a retry. The lost bullets
+    // are named for a maintainer.
     const writeFail = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
       writeFail: true,
     });
-    expect(writeFail.out).toContain('NOT persisted');
+    expect(writeFail.out).toContain('are LOST');
+    expect(writeFail.out).toContain('watermark-gated');
+    expect(writeFail.out).toContain('- rc:7 ');
+    expect(writeFail.out).not.toContain('NOT persisted this round');
     // Path bytes are sanitized before rendering (no forged bullet lines).
     const forged = runUpsert({
       findings: '[{"id":4,"path":"a`\\n- rc:999 `z","reason":"r"}]',
@@ -10717,7 +10788,8 @@ exit 1
       writeFail: true,
     });
     expect(appendFail.out).toContain('could not append');
-    expect(appendFail.out).toContain('NOT persisted');
+    expect(appendFail.out).toContain('are LOST');
+    expect(appendFail.out).toContain('- rc:7 ');
     // The dedupe corpus is BOT-authored comments only: a third party posting
     // a line-start bullet on the public tracking issue cannot permanently
     // suppress a deferred finding.
@@ -10812,6 +10884,38 @@ exit 1
     expect(capped2.out).not.toContain('re-defer them in a later round');
     expect(capped2.out).toContain('- rc:21 ');
     expect(capped2.out).toContain('- rc:22 ');
+    // R6-9: the reason is agent-influenced prose published under the bot
+    // identity, so mentions are defused before rendering. Bare `@` gets a
+    // ZWSP; the entity spellings GitHub decodes BEFORE its mention filter
+    // (&#64; &#x40; &#0064; &commat;) get their `&` escaped. Both measured
+    // inert against the real renderer — `\@` and leaving `&` alone are NOT.
+    const mentions = runUpsert({
+      findings:
+        '[{"id":12,"reason":"ping @wenshao &#64;bot &#x40;x &commat;y &#0064;z"}]',
+    });
+    expect(mentions.calls).toContain('@\u200bwenshao');
+    expect(mentions.calls).not.toMatch(/@wenshao/);
+    for (const ent of ['&#64;', '&#x40;', '&commat;', '&#0064;']) {
+      expect(mentions.calls).toContain(`&amp;${ent.slice(1)}`);
+    }
+    // R6-2: the shape gate's reason-type clause and the `. > 0` id bound.
+    // id 0 is the discriminator for the latter — "0" passes the plain-digits
+    // belt, so only `. > 0` rejects it.
+    for (const bad of ['[{"id":7,"reason":5}]', '[{"id":0,"reason":"r"}]']) {
+      const r = runUpsert({ findings: bad });
+      expect(r.out).toContain('malformed');
+      expect(r.calls).toBe('');
+    }
+    // R6-6: a line-builder failure warns instead of exiting silently as
+    // "nothing new" (the last path that skipped the header contract).
+    const builderFail = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      jqFail: true,
+    });
+    expect(builderFail.out).toContain(
+      'could not build the deferred-findings lines',
+    );
+    expect(builderFail.calls).not.toContain('-f title=');
   });
 
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {

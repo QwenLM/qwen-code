@@ -5695,7 +5695,14 @@ jobs:
             # runs. Neutralize it with a command-prefix assignment (pure
             # shell parameter assignment — no function/alias lookup, so no
             # BASH_FUNC can shadow it — applied to env's own environment).
-            LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            # Enumerating LD_* names cannot be complete (LD_TRACE_LOADED_OBJECTS
+            # is presence-tested, so even an empty assignment still makes the
+            # loader print and exit 0 without ever running the child), so the
+            # result is VERIFIED instead: the child's first act is to print a
+            # liveness sentinel, and its absence — for any reason, loader trace
+            # mode, exec failure, a missing interpreter — is reported instead of
+            # passing silently for a successful persistence.
+            UPSERT_OUT="$(LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
               /usr/bin/env -i \
               PATH="${TRUSTED_PATH}" \
               GITHUB_TOKEN="${GITHUB_TOKEN}" \
@@ -5708,14 +5715,30 @@ jobs:
               UPSERT_SHA256="${UPSERT_SHA256}" \
               bash --norc -c '
                 set -uo pipefail
-                export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+                printf "%s\n" "__upsert_child_live__"
+                if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                  echo "::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                  exit 0
+                fi
+                export GH_CONFIG_DIR
                 if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
                   echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
                   exit 0
                 fi
                 bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
                   echo "::warning::deferred-findings upsert failed; continuing"
-              ' || echo "::warning::deferred-findings upsert child failed to launch; continuing"
+              ' 2>&1)" || true
+            # Inspect with bash BUILTINS only ([[ ]], read, printf — no exec):
+            # under loader trace mode every external binary, grep included,
+            # would itself print-and-exit-0, so a grep-based check would be
+            # neutered by the very condition it is meant to detect.
+            if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
+              echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
+            fi
+            while IFS= read -r _upsert_line; do
+              [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
+                printf '%s\n' "${_upsert_line}"
+            done <<< "${UPSERT_OUT}"
           }
 
                     # Take this PAT-bearing step off every mutable host git surface —
@@ -6665,10 +6688,12 @@ jobs:
               # gate, the PAT bot-identity check (POST_HANDOFF's own check is
               # skipped on the fixed/noop-outcome path that also reaches here)
               # and the staged script all run in a clean allow-listed shell.
-              # LD_* is the one channel env -i cannot block (ld.so preloads
-              # into /usr/bin/env itself at execve): neutralize it with a
-              # command-prefix assignment, unshadowable by any BASH_FUNC.
-              LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              # LD_* enumeration cannot be complete (LD_TRACE_LOADED_OBJECTS is
+              # presence-tested: even an empty assignment makes the loader print
+              # and exit 0 without running the child), so the child's liveness
+              # is VERIFIED via a sentinel rather than assumed — same shape as
+              # run_deferred_upsert in 'Push and report'.
+              UPSERT_OUT="$(LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
                 /usr/bin/env -i \
                 PATH="${TRUSTED_PATH}" \
                 GITHUB_TOKEN="${GITHUB_TOKEN}" \
@@ -6681,7 +6706,12 @@ jobs:
                 UPSERT_SHA256="${UPSERT_SHA256}" \
                 bash --norc -c '
                   set -uo pipefail
-                  export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+                  printf "%s\n" "__upsert_child_live__"
+                  if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                    echo "::warning::could not create a gh config dir; deferred findings NOT persisted this round"
+                    exit 0
+                  fi
+                  export GH_CONFIG_DIR
                   if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
                     echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
                     exit 0
@@ -6693,7 +6723,15 @@ jobs:
                   fi
                   bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
                     echo "::warning::deferred-findings upsert failed; continuing"
-                ' || echo "::warning::deferred-findings upsert child failed to launch; continuing"
+                ' 2>&1)" || true
+              # Builtin-only inspection, same rationale as the twin.
+              if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
+                echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
+              fi
+              while IFS= read -r _upsert_line; do
+                [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
+                  printf '%s\n' "${_upsert_line}"
+              done <<< "${UPSERT_OUT}"
             fi
           fi
 

@@ -102,7 +102,14 @@ RESOLVED_RAW=''
 # --rawfile, not --arg: a large corpus in one argv element hits Linux
 # MAX_ARG_STRLEN and the exec failure would be swallowed into a silent
 # "nothing new" exit.
-NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLVED_RAW}" '
+#
+# The reason is agent-influenced prose published under the bot identity, so
+# it is mention-defused before rendering: `@` gets a trailing ZWSP, and the
+# entity spellings GitHub decodes BEFORE its mention filter (&#64; &#x40;
+# &#0064; &commat;) get their `&` escaped — both measured inert against the
+# real renderer; `\@` and bare entity-escaping are NOT. Paths are already
+# reduced to a safe charset (no `@` survives).
+if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLVED_RAW}" '
   ($resolved | split("\n")
     | map(sub("^rc:"; "") | sub("\r$"; "")
       | select(test("^[0-9]+$")) | tonumber)) as $done
@@ -111,9 +118,18 @@ NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLVED_RA
   | map(.id as $id
     | select(($done | index($id)) | not)
     | select(($klines | any(test("^- rc:" + ($id | tostring) + " "))) | not)
-    | "- rc:\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason | gsub("[\r\n]+"; " ") | .[0:500])")
+    | "- rc:\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
+        | gsub("[\r\n]+"; " ")
+        | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
+        | gsub("@"; "@\u200b")
+        | .[0:500])")
   | .[]' "${FINDINGS}" 2> /dev/null |
-  sed 's/<!--/<!\\-\\-/g')" || NEW_LINES=''
+  sed 's/<!--/<!\\-\\-/g')"; then
+  # The only remaining silent-exit path: a jq/sed failure here would leave
+  # NEW_LINES empty and read as "nothing new". Warn, per the header contract.
+  echo "::warning::could not build the deferred-findings lines; skipping this round"
+  exit 0
+fi
 [[ -n "${NEW_LINES}" ]] || exit 0
 # Cap in bash, loudly. Clipped items are NOT recoverable automatically: the
 # eval-watermark permanently filters this round's evaluated feedback out of
@@ -138,13 +154,17 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
     -f body="${BODY}" --jq '.number' 2> /dev/null)"; then
     echo "🗂 deferred findings tracked in new issue #${NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
-    echo "::warning::could not create the deferred-findings issue for PR #${PR}; findings NOT persisted this round"
+    # Not "this round": the eval watermark filters this round's feedback out
+    # of every later round, so nothing retries. Name the lost items.
+    echo "::warning::could not create the deferred-findings issue for PR #${PR}; these findings are LOST (watermark-gated — no later round re-derives them). A maintainer should file them:"
+    printf '%s\n' "${NEW_LINES}"
   fi
 else
   if gh api "repos/${REPO}/issues/${ISSUE_NUM}/comments" \
     -f body="${NEW_LINES}" > /dev/null 2>&1; then
     echo "🗂 deferred findings appended to issue #${ISSUE_NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
-    echo "::warning::could not append to deferred-findings issue #${ISSUE_NUM}; findings NOT persisted this round"
+    echo "::warning::could not append to deferred-findings issue #${ISSUE_NUM}; these findings are LOST (watermark-gated — no later round re-derives them). A maintainer should add them:"
+    printf '%s\n' "${NEW_LINES}"
   fi
 fi
