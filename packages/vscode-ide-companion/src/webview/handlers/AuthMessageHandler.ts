@@ -43,8 +43,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     currentConversationId: string | null,
     sendToWebView: (message: unknown) => void,
     private readonly getModelProviders: () =>
-      | Record<string, unknown>
-      | undefined = () => undefined,
+      Record<string, unknown> | undefined = () => undefined,
   ) {
     super(
       agentManager,

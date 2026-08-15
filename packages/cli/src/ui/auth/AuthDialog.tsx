@@ -37,15 +37,10 @@ import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
-  | 'main'
-  | 'alibaba-select'
-  | 'thirdparty-select'
-  | 'provider-setup';
+  'main' | 'alibaba-select' | 'thirdparty-select' | 'provider-setup';
 
 type MainOption =
-  | 'ALIBABA_MODELSTUDIO'
-  | 'THIRD_PARTY_PROVIDERS'
-  | 'CUSTOM_PROVIDER';
+  'ALIBABA_MODELSTUDIO' | 'THIRD_PARTY_PROVIDERS' | 'CUSTOM_PROVIDER';
 
 // ---------------------------------------------------------------------------
 // Static data

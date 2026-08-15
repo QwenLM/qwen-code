@@ -1682,7 +1682,7 @@ export async function extractFilesFromTarGz(
       : '';
   const files: DownloadedSkillFile[] = [];
 
-  for (let offset = 0; offset + 512 <= archive.length; ) {
+  for (let offset = 0; offset + 512 <= archive.length;) {
     if (isZeroTarBlock(archive, offset)) break;
 
     const fullPath = readTarPath(archive, offset);
@@ -2224,8 +2224,7 @@ function readExistingProviderConfig(
   const existing = findExistingProviderModels(
     config,
     (settings.merged as Record<string, unknown>)['modelProviders'] as
-      | Record<string, unknown>
-      | undefined,
+      Record<string, unknown> | undefined,
   );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
@@ -2359,8 +2358,7 @@ function readProviderSetupInputs(
   modelProviders?: Record<string, unknown>,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | AuthType
-    | undefined;
+    AuthType | undefined;
   if (
     protocol &&
     protocol !== config.protocol &&
@@ -3900,10 +3898,7 @@ class QwenAgent implements Agent {
   /** Set once the daemon negotiates active-work reporting; one per channel. */
   private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
-    | 'uninitialized'
-    | 'trusted'
-    | 'untrusted'
-    | 'rejected' = 'uninitialized';
+    'uninitialized' | 'trusted' | 'untrusted' | 'rejected' = 'uninitialized';
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
   // cadence, so successive calls form a clean delta window independent of tool
@@ -4198,8 +4193,7 @@ class QwenAgent implements Agent {
 
   private getMcpServerStatus(config: Config, serverName: string) {
     const manager = config.getToolRegistry()?.getMcpClientManager() as
-      | { getServerStatus?: (name: string) => MCPServerStatus }
-      | undefined;
+      { getServerStatus?: (name: string) => MCPServerStatus } | undefined;
     return (
       manager?.getServerStatus?.(serverName) ?? getMCPServerStatus(serverName)
     );
