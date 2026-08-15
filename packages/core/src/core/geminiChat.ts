@@ -1791,20 +1791,6 @@ export class GeminiChat {
   private manualPlanExitNoticesEnabled = false;
 
   /**
-   * One-shot flag for #9026: set by the invalid-stream retry loop when
-   * it schedules the FINAL retry for a `NO_TOOL_RESULT_PROGRESS` error.
-   * The next `processStreamResponse` attempt captures and clears it at
-   * entry; while captured, a still-quiet post-tool-result completion
-   * (valid finish reason, no visible progress) is accepted as a
-   * legitimate turn end instead of throwing again. Some model families
-   * legitimately end turns silently after a tool result — once the retry
-   * budget is exhausted, re-throwing loses the whole run's work. The
-   * `NO_TOOL_RESULT_PROGRESS_MAX_TOKENS` variant stays fatal: a truncated
-   * turn is genuinely incomplete.
-   */
-  private acceptQuietToolResultCompletion = false;
-
-  /**
    * Reset both partial-push markers in lockstep. Every history-mutation
    * site uses this — single-field resets are a bug because the fields
    * are always paired by lifecycle.
@@ -2761,6 +2747,7 @@ export class GeminiChat {
           transportAttemptText = '';
         };
 
+        let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
           transportAttemptText = '';
           let streamYieldedChunk = false;
@@ -2789,6 +2776,9 @@ export class GeminiChat {
               yield { type: StreamEventType.RETRY };
             }
 
+            const acceptQuietToolResultCompletion =
+              acceptQuietToolResultCompletionOnNextAttempt;
+            acceptQuietToolResultCompletionOnNextAttempt = false;
             const stream = await self.makeApiCallAndProcessStream(
               model,
               buildAttemptContents(),
@@ -2802,6 +2792,7 @@ export class GeminiChat {
               transportContinuationPrefix.length > 0
                 ? transportContinuationPrefix
                 : undefined,
+              acceptQuietToolResultCompletion,
             );
 
             lastFinishReason = undefined;
@@ -3240,7 +3231,7 @@ export class GeminiChat {
                 // The attempt this retry schedules is the LAST one. If it
                 // still ends quietly after the tool result, accept that as
                 // a completion instead of re-throwing (#9026).
-                self.acceptQuietToolResultCompletion = true;
+                acceptQuietToolResultCompletionOnNextAttempt = true;
               }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -3328,9 +3319,13 @@ export class GeminiChat {
         ): AsyncGenerator<InvalidStreamRetryEvent> {
           let transientRetryCount = 0;
           let protocolTagLeakRetryCount = 0;
+          let acceptQuietToolResultCompletionOnNextAttempt = false;
           for (;;) {
             const attemptState = buildAttempt();
             try {
+              const acceptQuietToolResultCompletion =
+                acceptQuietToolResultCompletionOnNextAttempt;
+              acceptQuietToolResultCompletionOnNextAttempt = false;
               const stream = await self.makeApiCallAndProcessStream(
                 model,
                 attemptState.requestContents,
@@ -3338,6 +3333,8 @@ export class GeminiChat {
                 prompt_id,
                 requestOverrides,
                 turnGoalContext,
+                undefined,
+                acceptQuietToolResultCompletion,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -3372,7 +3369,7 @@ export class GeminiChat {
                 // Same final-retry quiet-completion acceptance as the main
                 // send loop (#9026) — continuation streams hit the same
                 // guard through the same processStreamResponse path.
-                self.acceptQuietToolResultCompletion = true;
+                acceptQuietToolResultCompletionOnNextAttempt = true;
               }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -3920,6 +3917,7 @@ export class GeminiChat {
     },
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    acceptQuietToolResultCompletion = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -4001,6 +3999,7 @@ export class GeminiChat {
       streamResponse,
       goalContext,
       transportContinuationPrefix,
+      acceptQuietToolResultCompletion,
     );
   }
 
@@ -4476,6 +4475,7 @@ export class GeminiChat {
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    acceptQuietToolResultCompletion = false,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4520,13 +4520,6 @@ export class GeminiChat {
     const isToolResultContinuation =
       currentUserTurn?.role === 'user' &&
       currentUserTurn.parts?.some((part) => part.functionResponse) === true;
-    // One-shot acceptance from the invalid-stream retry loop (#9026):
-    // captured and cleared per attempt so it can only ever apply to the
-    // exact attempt scheduled as the final NO_TOOL_RESULT_PROGRESS retry —
-    // never to an unrelated later send.
-    const acceptQuietToolResultCompletion =
-      this.acceptQuietToolResultCompletion;
-    this.acceptQuietToolResultCompletion = false;
     let deferredFinishReason: FinishReason | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
