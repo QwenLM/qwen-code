@@ -140,6 +140,8 @@ interface ToolContinuationOwner {
   promptId: string;
   signal: AbortSignal;
   survivesGenerationChange: boolean;
+  detachedAbortController?: AbortController;
+  foregroundAbortController?: AbortController;
 }
 
 // The per-turn model override is held in two coupled refs: the model id and a
@@ -847,6 +849,9 @@ export const useGeminiStream = (
   const continuationOwnersByToolCallIdRef = useRef(
     new Map<string, ToolContinuationOwner>(),
   );
+  const detachedToolContinuationAbortControllersRef = useRef(
+    new Set<AbortController>(),
+  );
   const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
   const handleCompletedToolsRef = useRef<
     (completedTools: TrackedToolCall[]) => Promise<void>
@@ -1093,10 +1098,14 @@ export const useGeminiStream = (
   }, [streamingState, config, history]);
 
   const cancelOngoingRequest = useCallback(() => {
-    if (streamingState !== StreamingState.Responding) {
+    if (turnCancelledRef.current) {
+      for (const controller of detachedToolContinuationAbortControllersRef.current) {
+        controller.abort();
+      }
+      detachedToolContinuationAbortControllersRef.current.clear();
       return;
     }
-    if (turnCancelledRef.current) {
+    if (streamingState !== StreamingState.Responding) {
       return;
     }
     // Flush throttled stream chunks FIRST so anything sitting in the
@@ -1119,7 +1128,18 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     submissionLeaseGenerationRef.current += 1;
     setSubmissionInFlight(false);
-    abortControllerRef.current?.abort();
+    const foregroundAbortController = abortControllerRef.current;
+    if (
+      foregroundAbortController &&
+      !foregroundAbortController.signal.aborted
+    ) {
+      foregroundAbortController.abort();
+    } else {
+      for (const controller of detachedToolContinuationAbortControllersRef.current) {
+        controller.abort();
+      }
+      detachedToolContinuationAbortControllersRef.current.clear();
+    }
     const activeInteractionPromptId = activeInteractionPromptIdRef.current;
     const activeInteractionOwner = activeInteractionOwnerRef.current;
     if (
@@ -1322,6 +1342,7 @@ export const useGeminiStream = (
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
+      scheduledToolCallId?: string;
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1391,7 +1412,11 @@ export const useGeminiStream = (
                 prompt_id,
               };
               scheduleToolCalls([toolCallRequest], abortSignal);
-              return { queryToSend: null, shouldProceed: false };
+              return {
+                queryToSend: null,
+                shouldProceed: false,
+                scheduledToolCallId: toolCallRequest.callId,
+              };
             }
             case 'submit_prompt': {
               localQueryToSendToGemini = slashCommandResult.content;
@@ -3389,6 +3414,19 @@ export const useGeminiStream = (
       const inheritedToolContinuationOwner = metadata?.toolContinuationOwner;
       const isDetachedToolContinuation =
         inheritedToolContinuationOwner?.survivesGenerationChange === true;
+      const detachedAbortController =
+        inheritedToolContinuationOwner?.detachedAbortController ??
+        (allowConcurrentBtwDuringResponse ? abortController : undefined);
+      const foregroundAbortController =
+        allowConcurrentBtwDuringResponse || isDetachedToolContinuation
+          ? undefined
+          : abortController;
+      let keepToolContinuationAbortController = false;
+      if (detachedAbortController) {
+        detachedToolContinuationAbortControllersRef.current.add(
+          detachedAbortController,
+        );
+      }
 
       // Keep the main stream's cancellation state intact while /btw is handled
       // in parallel. The side-question can use its own local abort signal.
@@ -3418,6 +3456,7 @@ export const useGeminiStream = (
         let preparedQuery: {
           queryToSend: PartListUnion | null;
           shouldProceed: boolean;
+          scheduledToolCallId?: string;
         };
         try {
           preparedQuery =
@@ -3456,7 +3495,18 @@ export const useGeminiStream = (
           metadata?.onAdmissionFailed?.();
           throw error;
         }
-        const { queryToSend, shouldProceed } = preparedQuery;
+        const { queryToSend, shouldProceed, scheduledToolCallId } =
+          preparedQuery;
+
+        if (scheduledToolCallId && foregroundAbortController) {
+          keepToolContinuationAbortController = true;
+          continuationOwnersByToolCallIdRef.current.set(scheduledToolCallId, {
+            promptId: prompt_id!,
+            signal: abortSignal,
+            survivesGenerationChange: false,
+            foregroundAbortController,
+          });
+        }
 
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -3524,6 +3574,8 @@ export const useGeminiStream = (
           survivesGenerationChange:
             allowConcurrentBtwDuringResponse ||
             inheritedToolContinuationOwner?.survivesGenerationChange === true,
+          detachedAbortController,
+          foregroundAbortController,
         };
         const turnAdmission =
           turnKey && turnController
@@ -3702,6 +3754,8 @@ export const useGeminiStream = (
             goalBinding = activeGoalTurnRef.current;
           }
           keepGoalBinding = processingResult.scheduledToolContinuation;
+          keepToolContinuationAbortController =
+            processingResult.scheduledToolContinuation;
 
           if (
             processingResult.status === StreamProcessingStatus.UserCancelled
@@ -3927,7 +3981,21 @@ export const useGeminiStream = (
           }
         }
       });
-      return submission.finally(releaseSubmissionActivity);
+      return submission.finally(() => {
+        releaseSubmissionActivity();
+        if (detachedAbortController && !keepToolContinuationAbortController) {
+          detachedToolContinuationAbortControllersRef.current.delete(
+            detachedAbortController,
+          );
+        }
+        if (
+          foregroundAbortController &&
+          !keepToolContinuationAbortController &&
+          abortControllerRef.current === foregroundAbortController
+        ) {
+          abortControllerRef.current = null;
+        }
+      });
     },
     [
       streamingState,
@@ -4161,9 +4229,41 @@ export const useGeminiStream = (
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
+        const detachedAbortControllers = new Set<AbortController>();
+        const foregroundAbortControllers = new Set<AbortController>();
         for (const callId of dedupedCallIds) {
+          const continuationOwner =
+            continuationOwnersByToolCallIdRef.current.get(callId);
+          if (continuationOwner?.detachedAbortController) {
+            detachedAbortControllers.add(
+              continuationOwner.detachedAbortController,
+            );
+          }
+          if (continuationOwner?.foregroundAbortController) {
+            foregroundAbortControllers.add(
+              continuationOwner.foregroundAbortController,
+            );
+          }
           interactionOwnersByToolCallIdRef.current.delete(callId);
           continuationOwnersByToolCallIdRef.current.delete(callId);
+        }
+        for (const controller of detachedAbortControllers) {
+          const isStillOwned = [
+            ...continuationOwnersByToolCallIdRef.current.values(),
+          ].some((owner) => owner.detachedAbortController === controller);
+          if (!isStillOwned) {
+            detachedToolContinuationAbortControllersRef.current.delete(
+              controller,
+            );
+          }
+        }
+        for (const controller of foregroundAbortControllers) {
+          const isStillOwned = [
+            ...continuationOwnersByToolCallIdRef.current.values(),
+          ].some((owner) => owner.foregroundAbortController === controller);
+          if (!isStillOwned && abortControllerRef.current === controller) {
+            abortControllerRef.current = null;
+          }
         }
       }
 
@@ -4315,6 +4415,18 @@ export const useGeminiStream = (
         errorMessage?: string,
         errorType?: string,
       ) => {
+        if (continuationOwner?.detachedAbortController) {
+          detachedToolContinuationAbortControllersRef.current.delete(
+            continuationOwner.detachedAbortController,
+          );
+        }
+        if (
+          continuationOwner?.foregroundAbortController &&
+          abortControllerRef.current ===
+            continuationOwner.foregroundAbortController
+        ) {
+          abortControllerRef.current = null;
+        }
         if (
           !promptId ||
           !interactionOwner ||
