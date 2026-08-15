@@ -868,14 +868,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // topology. The daemon exposes this path; the gateway re-exposes it (OWNER-gated)
   // so remote clients can enumerate sessions at the same URL shape they would use
   // against the daemon directly. `:cwd` is honored the same way as `/rc/sessions`'s
-  // `?cwd` (decoded + `path.resolve`d), falling back to the boot workspace.
+  // `?cwd` (`path.resolve`d), falling back to the boot workspace. Express
+  // already URL-decodes route params, so no manual `decodeURIComponent` here
+  // (doing so would throw `URIError` on a literal `%` in the path segment).
   app.get(
     '/workspace/:cwd/sessions',
     requireScope(OWNER, audit),
     createSessionListRoute(async (req) => {
       const p = req.params.cwd;
       if (typeof p === 'string' && p.length > 0) {
-        return resolve(decodeURIComponent(p));
+        return resolve(p);
       }
       try {
         return (await deps.daemon.capabilities()).workspaceCwd;

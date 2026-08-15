@@ -74,8 +74,13 @@ export function runtimeBaseDir(
  * The chats dir for a workspace: `<runtimeBaseDir>/projects/<sanitizeCwd>/chats`
  * — byte-identical to core's `Storage#getProjectDir()` + `'chats'`.
  *
- * `cwd` must come from the trusted `daemon.capabilities().workspaceCwd`, never
- * request input — no untrusted value reaches a filesystem path.
+ * `cwd` may come from request input (e.g. `GET /rc/sessions?cwd=`, or
+ * `/workspace/:cwd/sessions`), not only the trusted
+ * `daemon.capabilities().workspaceCwd`. That is safe only because `sanitizeCwd`
+ * flattens every non-alphanumeric character (including `/`, `.`, `\`) to `-`,
+ * so no path separator or traversal sequence ever survives into the
+ * filesystem path built below. Any future caller of this function MUST keep
+ * routing untrusted `cwd` values through `sanitizeCwd` — do not bypass it.
  */
 export function resolveChatsDir(
   cwd: string,
