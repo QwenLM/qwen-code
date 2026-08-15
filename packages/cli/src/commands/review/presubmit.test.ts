@@ -901,7 +901,7 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
 
-    it('does not treat a different account\'s colliding id as a re-post', async () => {
+    it("does not treat a different account's colliding id as a re-post", async () => {
       // Ledger ids are per-account: another reviewer's `R3-2` at the same
       // line is a plain location overlap, not a re-post target — exempting
       // it would post the duplicate the gate exists to prevent.
@@ -928,7 +928,11 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
 
-    it('keeps a location overlap without a ledger id out of repost', async () => {
+    it('exempts an id-less first-round original when the target is unambiguous (#9208)', async () => {
+      // First-round originals carry no id token in the body (buildLedger
+      // assigns first-round ids positionally). With exactly one own-account
+      // comment at the location and one carried finding, the re-post must
+      // still be exempted instead of dropped.
       const result = await presubmitWithComments(
         [
           {
@@ -939,8 +943,30 @@ describe('presubmitCommand', () => {
         [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
       );
       expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps the strict match when the id-less target is ambiguous (#9208)', async () => {
+      // Two id-less own-account comments at the same location: the re-post
+      // target is ambiguous, so no exemption — the drop stays visible in the
+      // drop log rather than silently picking one thread.
+      const first = {
+        ...CARRIED_COMMENT,
+        id: 10,
+        body: '**[Critical]** claim A without an id',
+      };
+      const second = {
+        ...CARRIED_COMMENT,
+        id: 11,
+        body: '**[Critical]** claim B without an id',
+      };
+      const result = await presubmitWithComments(
+        [first, second],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(2);
       expect(result.existingComments.byBucket.repost).toBe(0);
-      expect(result.existingComments.repost).toEqual([]);
     });
 
     it('does not match a different carried id', async () => {

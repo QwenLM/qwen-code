@@ -453,6 +453,26 @@ function classifyExistingComments(
     carriedIdsByLocation.set(key, ids);
   }
 
+  // Own-account Qwen comments per location among comments that can reach the
+  // overlap branch (current SHA, not a reply). A count of exactly one makes an
+  // id-less original unambiguous as a re-post target (#9212 review).
+  const ownOverlapCountByLocation = new Map<string, number>();
+  if (currentUserLogin !== '') {
+    for (const c of qwenComments) {
+      if (
+        c.commit_id === commitSha &&
+        !repliedToIds.has(c.id) &&
+        (c.user?.login ?? '').toLowerCase() === currentUserLogin.toLowerCase()
+      ) {
+        const key = `${c.path ?? ''}:${c.line ?? 0}`;
+        ownOverlapCountByLocation.set(
+          key,
+          (ownOverlapCountByLocation.get(key) ?? 0) + 1,
+        );
+      }
+    }
+  }
+
   for (const c of qwenComments) {
     const summary: CommentSummary = {
       id: c.id,
@@ -490,6 +510,23 @@ function classifyExistingComments(
         );
         if (matchedIds.length > 0) {
           buckets.repost.push({ ...summary, matchedIds });
+        } else if (
+          extractCarriedIds(c.body || '').length === 0 &&
+          wantedIds.size === 1 &&
+          ownOverlapCountByLocation.get(`${c.path}:${c.line}`) === 1
+        ) {
+          // First-round originals can carry NO id token in their body
+          // (buildLedger assigns first-round ids positionally), so the body
+          // match alone would drop exactly the re-post this gate protects.
+          // When the target is unambiguous — a TRULY id-less own comment (no
+          // carried id at all, so it cannot belong to a different finding),
+          // one carried finding, and exactly one own-account comment at this
+          // location — treat it as the re-post target. A comment carrying
+          // SOME OTHER id is a different finding's thread and keeps the
+          // strict match; ambiguous cases (several id-less comments or
+          // several carried ids at one line) keep the strict body match too,
+          // staying dropped and visible in the drop log (#9212 review).
+          buckets.repost.push({ ...summary, matchedIds: [...wantedIds] });
         }
       }
     } else {
@@ -783,7 +820,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          'Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding\'s carried ledger id (`R<round>-<n>`); an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post.',
+          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`); an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post.",
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);
