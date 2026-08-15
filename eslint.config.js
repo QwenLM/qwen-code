@@ -27,7 +27,7 @@ const relativeServeImportPatterns = [
   '../../serve/**',
 ];
 const serveDynamicImportPathPattern =
-  String.raw`^(?:\.\.\x2f)+(?:[^\x2f]+\x2f\.\.\x2f)*serve(?:\x2f|$)`;
+  String.raw`^(?:\.\x2f)*(?:\.\.\x2f)+(?:[^\x2f]+\x2f(?:\.\.\x2f)*)*serve(?:\x2f|$)`;
 
 const restrictedServeImports = (message) => ({
   patterns: [
@@ -223,15 +223,8 @@ export default tseslint.config(
       'no-duplicate-case': 'error',
       'no-restricted-syntax': [
         'error',
-        {
-          selector: 'CallExpression[callee.name="require"]',
-          message: 'Avoid using require(). Use ES6 imports instead.',
-        },
-        {
-          selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
-          message:
-            'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
-        },
+        restrictedRequire,
+        restrictedStringThrow,
       ],
       'no-unsafe-finally': 'error',
       'no-console': 'error',

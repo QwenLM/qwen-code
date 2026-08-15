@@ -49,5 +49,27 @@ describe('eslint cli serve boundary rules', () => {
       'packages/cli/src/acp-integration/boundary-fixture.ts',
       "export async function load() { await import('../runtime/../serve/index.js'); }",
     );
+
+    await expectServeBoundaryError(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "export async function load() { await import('./../serve/index.js'); }",
+    );
+
+    await expectServeBoundaryError(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "import '../serve/index.js';",
+    );
+  });
+
+  it('rejects static and dynamic serve imports from utils', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/utils/boundary-fixture.ts',
+      "import '../serve/index.js';",
+    );
+
+    await expectServeBoundaryError(
+      'packages/cli/src/utils/boundary-fixture.ts',
+      "export async function load() { await import('../serve/index.js'); }",
+    );
   });
 });
