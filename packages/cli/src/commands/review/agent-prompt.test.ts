@@ -4764,3 +4764,67 @@ describe('the verify gate — compose survives a budget stop', () => {
     expect(readRecordedPrompts(plan).size).toBe(1);
   });
 });
+
+describe('--all-chunks topology anomaly note (#9242)', () => {
+  // The 3A→whole-diff / 3B→`--all-chunks` routing exists only as SKILL.md
+  // prose; nothing in the CLI enforces it. A plan whose own size fields say
+  // Step 3A (one whole-diff auditor per round, and the round-cap tier is
+  // priced for that) can still be fanned out one auditor per chunk — a
+  // doctored plan, or an orchestrator that took the wrong fork. Refusal
+  // would collateral-damage legitimate repair paths, so the CLI notes the
+  // mismatch on stderr and proceeds; the orchestrator owes an explanation
+  // for a deliberate one.
+
+  function runAllChunksWith(planPatch: Record<string, unknown>): void {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-topology-'));
+    process.exitCode = undefined;
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify({ ...PLAN, ...planPatch }));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (writeStderrLine as unknown as Mock).mockClear();
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        findings,
+        round: 1,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const stderrLines = () =>
+    ((writeStderrLine as unknown as Mock).mock.calls as unknown[][]).map(
+      (call) => String(call[0]),
+    );
+
+  it('notes the mismatch when the plan numbers say 3A but --all-chunks fans out per chunk', () => {
+    // PLAN carries chunks 13, 14, 15; size fields well inside the 3A gate
+    // (src <= 500 && total <= 3200).
+    runAllChunksWith({ srcDiffLines: 100, diffLines: 800 });
+    const note = stderrLines().find((line) => line.includes('Step 3A'));
+    expect(note).toBeDefined();
+    expect(note).toContain('3 chunk auditors');
+    // Purely diagnostic: the round is still built, nothing refused.
+    expect(process.exitCode).toBeUndefined();
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('3 auditors required this round');
+  });
+
+  it('stays silent for a territory fan-out plan — the normal 3B path', () => {
+    runAllChunksWith({ srcDiffLines: 5000, diffLines: 6000 });
+    expect(stderrLines().some((line) => line.includes('Step 3A'))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('stays silent when the plan carries no size fields — unknown is not a mismatch', () => {
+    runAllChunksWith({});
+    expect(stderrLines().some((line) => line.includes('Step 3A'))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+});

@@ -86,6 +86,7 @@ import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  isTerritoryFanOut,
   requiredAgents,
   reviewMode,
   type RequiredAgent,
@@ -139,6 +140,12 @@ interface PlanReport {
   host?: unknown;
   repositoryContext?: unknown;
   budget?: { agentToolBudget?: unknown };
+  // The two size fields the topology gate reads (#9242). Declared so
+  // `runAllChunks` can notice a `--all-chunks` fan-out the plan's own
+  // numbers never asked for; `isTerritoryFanOut` already tolerates the
+  // `unknown` via the `RosterPlan` cast, same bridge `runRoster` uses.
+  srcDiffLines?: unknown;
+  diffLines?: unknown;
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -2066,6 +2073,32 @@ function runAllChunks(
   round?: number,
 ): void {
   const chunks = requireAuditableChunks(report);
+
+  // Topology anomaly note (#9242): the plan's own size fields decide the
+  // topology (Step 3A whole-diff vs Step 3B territory fan-out), and the
+  // reverse-audit round-cap tier is priced against that decision — but
+  // nothing on THIS path consults it, so `--all-chunks` can fan out one
+  // auditor per chunk on a plan whose numbers say one whole-diff auditor per
+  // round (a hand-edited/corrupted plan, or an orchestrator that took the
+  // wrong fork). This is a note, not a refusal: legitimate repair paths
+  // exist (an honest 3A plan can carry up to ~8 chunks for read paging, and
+  // `--chunk`-by-`--chunk` rebuilds are supported), so the CLI surfaces the
+  // mismatch and proceeds, and the orchestrator owes an explanation for a
+  // deliberate one. Size fields that are absent are unknown topology, not a
+  // mismatch — silence.
+  if (
+    (report.srcDiffLines !== undefined || report.diffLines !== undefined) &&
+    !isTerritoryFanOut(report as RosterPlan)
+  ) {
+    writeStderrLine(
+      `agent-prompt: --all-chunks is fanning out ${chunks.length} chunk ` +
+        `auditors, but the plan's own numbers (srcDiffLines=${report.srcDiffLines}, ` +
+        `diffLines=${report.diffLines}) say Step 3A — one whole-diff auditor per ` +
+        'round, which is what the reverse-audit round cap is priced for. ' +
+        'Proceeding; if this is a deliberate rebuild on a hand-maintained ' +
+        'plan, ignore this note.',
+    );
+  }
 
   // Which chunks this round actually owes an auditor. Rounds 1 and 2 always
   // fan out to every chunk — they establish each chunk's record — and from
