@@ -881,7 +881,6 @@ export function registerSessionRoutes(
     paramName: 'id' | 'workspace',
   ): Promise<WorkspaceRuntime | null | undefined> => {
     if (
-      paramName !== 'workspace' ||
       req.query['sourceType'] !== 'default' ||
       req.query['sourceId'] !== undefined ||
       !deps.ensureConversationRuntime
@@ -889,7 +888,7 @@ export function registerSessionRoutes(
       return undefined;
     }
 
-    const selector = req.params['workspace'] ?? '';
+    const selector = req.params[paramName] ?? '';
     let entry = workspaceRegistry.getManagedEntryByWorkspaceId(selector);
     if (!entry && path.isAbsolute(selector)) {
       entry = workspaceRegistry.getManagedEntryByWorkspaceCwd(selector);

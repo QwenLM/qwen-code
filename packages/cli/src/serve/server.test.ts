@@ -29845,6 +29845,76 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('boots the singular Conversations catalog under exact default-source proof', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    const rootSelector = encodeURIComponent(setup.root.configuredRoot);
+    try {
+      const unfiltered = await request(setup.app)
+        .get(`/workspace/${rootSelector}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unfiltered.status).toBe(400);
+      const sourceId = await request(setup.app)
+        .get(
+          `/workspace/${rootSelector}/sessions?sourceType=default&sourceId=unexpected`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(sourceId.status).toBe(400);
+      expect(setup.createWorkspaceRuntime).not.toHaveBeenCalled();
+
+      const catalogPromise = request(setup.app)
+        .get(`/workspace/${rootSelector}/sessions?sourceType=default`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+
+      const catalog = await catalogPromise;
+      expect(catalog.status).toBe(200);
+      expect(catalog.body.sessions).toEqual([]);
+      expect(
+        setup.registry.getManagedByWorkspaceCwd(setup.root.canonicalRoot),
+      ).toBe(setup.liveRuntime);
+    } finally {
+      await restoreLiveSettings();
+    }
+  });
+
+  it('classifies post-publication root revalidation failure as terminal', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    vi.mocked(setup.conversationWorkspace.revalidate)
+      .mockResolvedValueOnce(setup.root)
+      .mockRejectedValueOnce(new Error('/private/root changed'));
+    const rootSelector = encodeURIComponent(setup.root.configuredRoot);
+    try {
+      const catalogPromise = request(setup.app)
+        .get(`/workspaces/${rootSelector}/sessions?sourceType=default`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+
+      const catalog = await catalogPromise;
+      expect(catalog.status).toBe(503);
+      expect(catalog.body).toEqual({
+        error: 'The Conversations root could not be verified.',
+        code: 'conversation_root_compromised',
+        retryable: false,
+      });
+      expect(JSON.stringify(catalog.body)).not.toContain('/private/root');
+      expect(
+        setup.registry.getManagedByWorkspaceCwd(setup.root.canonicalRoot),
+      ).toBeUndefined();
+    } finally {
+      await restoreLiveSettings();
+    }
+  });
+
   it('serializes catalog boot failure and allows an explicit retry', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();

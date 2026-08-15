@@ -280,6 +280,7 @@ import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
+import { conversationRootCompromisedError } from './conversations/conversation-runtime-errors.js';
 import { ConversationRuntimeManager } from './conversations/conversation-runtime-manager.js';
 import {
   createConversationRuntimeOwnership,
@@ -1350,7 +1351,11 @@ export function createServeApp(
             'live-conversation',
             async (candidate) => {
               await validate(candidate);
-              await deps.liveConversationWorkspace!.revalidate();
+              try {
+                await deps.liveConversationWorkspace!.revalidate();
+              } catch (error) {
+                throw conversationRootCompromisedError(error);
+              }
             },
           );
           invalidateServeFeaturesCache();
