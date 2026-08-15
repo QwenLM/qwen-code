@@ -36,7 +36,6 @@ import {
 } from '../../../config/skill-settings.js';
 import { t } from '../../../i18n/index.js';
 import { levelLabel } from '../../utils/skill-level-label.js';
-import { truncateToWidth } from '../../utils/textUtils.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
@@ -57,18 +56,6 @@ interface SkillsManagerDialogProps {
    */
   setInputBuffer: (text: string) => void;
   availableTerminalHeight?: number;
-  /**
-   * Width the dialog renders into (DialogManager passes `mainAreaWidth`).
-   * Used to cap MultiSelect labels so each item stays one terminal row;
-   * when undefined (e.g. unit tests) only the static label caps apply.
-   */
-  terminalWidth?: number;
-}
-
-interface SkillItemValue {
-  name: string;
-  description: string;
-  level: SkillLevel;
 }
 
 const LEVEL_ORDER: Record<SkillLevel, number> = {
@@ -81,13 +68,8 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
 const NAME_COLUMN = 24;
 // Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
 // + search row(2) + list marginTop(1) + footer(2). The optional locked-skills
-// block adds 2 + N rows when present; not counted here. Every counted text
-// renders with wrap="truncate" and list labels are capped to the terminal
-// width, so the count stays valid at any width.
+// block adds 2 + N rows when present; not counted here.
 const SKILLS_DIALOG_FIXED_ROWS = 11;
-// Terminal cells a MultiSelect row spends outside its label: dialog
-// border(2) + paddingX(2) + active marker(2) + checkbox(4).
-const LABEL_ROW_OVERHEAD = 10;
 
 function lower(name: string): string {
   return name.trim().toLowerCase();
@@ -149,13 +131,9 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
-// Collapse whitespace — including newlines from YAML block scalars in skill
-// descriptions (`description: |` / `>`) — so one composed label always
-// renders as one terminal row. Width-based truncation treats '\n' as
-// zero-width, so without this a single item can wrap to 2+ rows and break
-// the height budget.
+// Collapse line breaks from YAML block scalars so one label stays on one row.
 function oneLine(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
+  return text.replace(/[\n\r\v\f\u0085\u2028\u2029]+/g, ' ').trim();
 }
 
 export function SkillsManagerDialog({
@@ -166,16 +144,10 @@ export function SkillsManagerDialog({
   reloadCommands,
   setInputBuffer,
   availableTerminalHeight,
-  terminalWidth,
 }: SkillsManagerDialogProps): React.JSX.Element {
   const [skills, setSkills] = useState<SkillConfig[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  // Track which row the MultiSelect is currently highlighting so Enter
-  // (which the dialog interprets as "invoke the highlighted skill") knows
-  // what to launch. Updated via the `onHighlight` callback on every up/down.
-  const [activeValue, setActiveValue] = useState<SkillItemValue | null>(null);
-
   // Capture the workspace and higher-scope disabled lists once at mount.
   // The dialog is short-lived and these are derived from the *current*
   // settings snapshot at open time — using `useMemo` keyed on `settings`
@@ -276,30 +248,6 @@ export function SkillsManagerDialog({
     );
   }, [unlockedSkills, query, bare]);
 
-  // `activeValue` is what Enter operates on. MultiSelect's `onHighlight`
-  // populates it on arrow-key navigation, but NOT on initial mount or
-  // after a search filter that drops the previously highlighted row
-  // (`useSelectionList` re-INITIALIZE's with `pendingHighlight: false`).
-  // Without this effect, Enter on the first render is a no-op and Enter
-  // after a filter would invoke a stale (now-invisible) skill.
-  useEffect(() => {
-    if (filteredUnlocked.length === 0) {
-      if (activeValue !== null) setActiveValue(null);
-      return;
-    }
-    const stillVisible =
-      activeValue !== null &&
-      filteredUnlocked.some((s) => s.name === activeValue.name);
-    if (!stillVisible) {
-      const top = filteredUnlocked[0];
-      setActiveValue({
-        name: top.name,
-        description: top.description,
-        level: top.level,
-      });
-    }
-  }, [filteredUnlocked, activeValue]);
-
   const filteredLocked = useMemo(() => {
     if (constrained) return [];
     const normalizedQuery = query.trim().toLowerCase();
@@ -311,30 +259,17 @@ export function SkillsManagerDialog({
     );
   }, [lockedSkills, query, constrained]);
 
-  // Cap labels to the render width so each item is exactly one terminal
-  // row — an uncapped label wraps to 2 rows below ~115 columns and
-  // silently overflows the height budget below. The floor is 1 (not
-  // NAME_COLUMN) so the one-row invariant holds at any width; below ~34
-  // columns labels degrade to short truncated strings instead of wrapping.
-  const labelCap =
-    terminalWidth === undefined
-      ? Number.POSITIVE_INFINITY
-      : Math.max(1, terminalWidth - LABEL_ROW_OVERHEAD);
-
-  const items = useMemo<Array<MultiSelectItem<SkillItemValue>>>(
+  const items = useMemo<Array<MultiSelectItem<string>>>(
     () =>
       filteredUnlocked.map((s) => ({
         key: s.name,
-        value: { name: s.name, description: s.description, level: s.level },
-        label: truncateToWidth(
-          `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
-            oneLine(s.description),
-            80,
-          )}  (${levelLabel(s.level)})`,
-          labelCap,
-        ),
+        value: s.name,
+        label: `${truncate(s.name, NAME_COLUMN).padEnd(NAME_COLUMN)} ${truncate(
+          oneLine(s.description),
+          80,
+        )}  (${levelLabel(s.level)})`,
       })),
-    [filteredUnlocked, labelCap],
+    [filteredUnlocked],
   );
 
   // Persist any pending toggle changes. Returns:
@@ -496,20 +431,14 @@ export function SkillsManagerDialog({
   // Enter themselves to send. This is "select" semantic — the dialog
   // points at a skill, the user decides whether/when to invoke.
   const handlePick = useCallback(
-    async (skill: SkillItemValue) => {
-      // Don't pick a skill the user has just toggled off — `/<name>` would
-      // resolve to the disabled error path on submit. The same gate applies
-      // to skills locked by higher scope (those don't appear in the
-      // MultiSelect at all, so we only see them via stale `activeValue`).
-      const isEnabled =
-        selectedKeys !== null &&
-        selectedKeys.includes(skill.name) &&
-        !higher.set.has(lower(skill.name));
+    async (skillName: string) => {
+      // Don't pick a skill the user has just toggled off.
+      const isEnabled = selectedKeys?.includes(skillName) ?? false;
       if (!isEnabled) {
         // Persist any OTHER pending toggles before bailing — otherwise
         // the user's session-long edits get silently discarded just
-        // because their cursor happened to land on a toggled-off (or
-        // locked) row when they pressed Enter. Mirrors handleSaveAndClose
+        // because their cursor happened to land on a toggled-off row when
+        // they pressed Enter. Mirrors handleSaveAndClose
         // (Esc) which persists unconditionally once data has loaded.
         if (skills !== null && selectedKeys !== null) {
           await persistChanges();
@@ -520,10 +449,10 @@ export function SkillsManagerDialog({
       const result = await persistChanges();
       onClose();
       if (result === 'ok') {
-        setInputBuffer(`/${skill.name}`);
+        setInputBuffer(`/${skillName}`);
       }
     },
-    [higher.set, onClose, persistChanges, selectedKeys, setInputBuffer, skills],
+    [onClose, persistChanges, selectedKeys, setInputBuffer, skills],
   );
 
   useKeypress(
@@ -587,44 +516,38 @@ export function SkillsManagerDialog({
       : Math.max(0, availableTerminalHeight - frameRows);
   const maxItemsToShow = Math.min(15, Math.max(1, residual));
 
-  // -- Render --
-  if (loadError) {
+  if (loadError || skills === null) {
     return (
       <Box
-        borderStyle="round"
+        borderStyle={compact ? undefined : 'round'}
         borderColor={theme.border.default}
         flexDirection="column"
         paddingX={1}
-        paddingY={1}
+        paddingY={compact ? 0 : 1}
         width="100%"
       >
-        <Text bold>{t('Manage Skills')}</Text>
-        <Box marginTop={1}>
-          <Text color={theme.status.error}>
-            {t('Failed to load skills: {{error}}', { error: loadError ?? '' })}
+        {!bare && (
+          <Text bold wrap="truncate">
+            {t('Manage Skills')}
+          </Text>
+        )}
+        <Box marginTop={bare ? 0 : 1}>
+          <Text
+            color={loadError ? theme.status.error : theme.text.secondary}
+            wrap="truncate"
+          >
+            {loadError
+              ? t('Failed to load skills: {{error}}', { error: loadError })
+              : t('Loading skills…')}
           </Text>
         </Box>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Press esc to close.')}</Text>
-        </Box>
-      </Box>
-    );
-  }
-
-  if (skills === null) {
-    return (
-      <Box
-        borderStyle="round"
-        borderColor={theme.border.default}
-        flexDirection="column"
-        paddingX={1}
-        paddingY={1}
-        width="100%"
-      >
-        <Text bold>{t('Manage Skills')}</Text>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Loading skills…')}</Text>
-        </Box>
+        {loadError && !compact && (
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary} wrap="truncate">
+              {t('Press esc to close.')}
+            </Text>
+          </Box>
+        )}
       </Box>
     );
   }
@@ -692,12 +615,9 @@ export function SkillsManagerDialog({
             selectedKeys={selectedKeys ?? []}
             onSelectedKeysChange={setSelectedKeys}
             // Enter saves and fills the input with the highlighted skill.
-            onConfirm={() => {
-              if (activeValue) {
-                void handlePick(activeValue);
-              }
+            onConfirm={(_selected, activeSkillName) => {
+              void handlePick(activeSkillName);
             }}
-            onHighlight={(v) => setActiveValue(v)}
             showNumbers={false}
             checkedText="[x]"
             showActiveMarker
@@ -719,6 +639,7 @@ export function SkillsManagerDialog({
           <Text color={theme.text.secondary} wrap="truncate">
             {t('Locked by higher-scope settings (cannot toggle here):')}
           </Text>
+          {/* Scope names match settings-file identifiers and stay untranslated. */}
           {filteredLocked.map((skill) => (
             <Text key={skill.name} dimColor wrap="truncate">
               {t('  {{name}} {{description}}  [locked: {{scope}}]', {

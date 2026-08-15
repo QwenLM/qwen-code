@@ -138,36 +138,37 @@ describe('statusLinePresets', () => {
   });
 
   it.each([
-    ['/repo/pro\nject', '/repo/pro ject'],
-    ['/repo/pro\vject\ftory', '/repo/pro ject tory'],
-    ['/repo/pro\rject', '/repo/pro ject'],
-  ])(
-    'collapses line-breaking whitespace in dynamic fields',
-    (currentDir, expected) => {
-      const data = buildStatusLinePresetData({
-        sessionId: 'session-123',
-        version: '1.2.3',
-        modelDisplayName: 'qwen3-code-plus',
-        currentDir,
-        branch: undefined,
-        contextWindowSize: 1000,
-        currentUsage: 250,
-        totalInputTokens: 1200,
-        totalOutputTokens: 340,
-        totalLinesAdded: 12,
-        totalLinesRemoved: 3,
-        streamingState: StreamingState.Idle,
-      });
+    ['LF', '\n', ' '],
+    ['CR', '\r', ' '],
+    ['VT', '\v', ' '],
+    ['FF', '\f', ' '],
+    ['NEL', '\u0085', ' '],
+    ['LS', '\u2028', ' '],
+    ['PS', '\u2029', ' '],
+    ['horizontal whitespace', '  \t', '  \t'],
+  ])('normalizes only line breaks: %s', (_name, input, expected) => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      currentDir: `/repo/pro${input}ject`,
+      branch: undefined,
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 1200,
+      totalOutputTokens: 340,
+      totalLinesAdded: 12,
+      totalLinesRemoved: 3,
+      streamingState: StreamingState.Idle,
+    });
 
-      const lines = buildStatusLinePresetLines(
+    expect(
+      buildStatusLinePresetLines(
         { type: 'preset', items: ['current-dir'] },
         data,
-      );
-      expect(lines).toHaveLength(1);
-      expect(lines[0]).not.toMatch(/[\n\v\f\r]/);
-      expect(lines[0]).toContain(expected);
-    },
-  );
+      ),
+    ).toEqual([`/repo/pro${expected}ject`]);
+  });
 
   it('renders every preset item with representative data', () => {
     const data = buildStatusLinePresetData({

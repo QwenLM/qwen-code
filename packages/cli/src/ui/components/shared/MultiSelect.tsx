@@ -21,7 +21,7 @@ export interface MultiSelectProps<T> {
   items: Array<MultiSelectItem<T>>;
   initialIndex?: number;
   selectedKeys?: string[];
-  onConfirm: (selectedValues: T[]) => void;
+  onConfirm: (selectedValues: T[], activeValue: T) => void;
   onChange?: (selectedValues: T[]) => void;
   onSelectedKeysChange?: (selectedKeys: string[]) => void;
   onHighlight?: (value: T) => void;
@@ -78,8 +78,8 @@ export function MultiSelect<T>({
     // Numbers are still rendered visually via the showNumbers prop below.
     showNumbers: false,
     onHighlight,
-    onSelect: () => {
-      onConfirm(getSelectedValues(items, selectedKeySet));
+    onSelect: (activeValue) => {
+      onConfirm(getSelectedValues(items, selectedKeySet), activeValue);
     },
   });
 
@@ -179,7 +179,9 @@ export function MultiSelect<T>({
                 <Text> </Text>
               </Box>
               <Box flexGrow={1}>
-                <Text color={theme.text.secondary}>{item.label}</Text>
+                <Text color={theme.text.secondary} wrap="truncate">
+                  {item.label}
+                </Text>
               </Box>
             </Box>
           );
@@ -201,7 +203,9 @@ export function MultiSelect<T>({
               </Box>
             )}
             <Box flexGrow={1}>
-              <Text color={textColor}>{item.label}</Text>
+              <Text color={textColor} wrap="truncate">
+                {item.label}
+              </Text>
             </Box>
           </Box>
         );

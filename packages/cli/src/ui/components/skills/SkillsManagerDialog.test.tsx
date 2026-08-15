@@ -42,13 +42,6 @@ const manyLockedSkills: SkillConfig[] = Array.from({ length: 12 }, (_, i) => {
     body: '',
   };
 });
-const verboseSkills: SkillConfig[] = ['alpha', 'beta', 'gamma'].map((name) => ({
-  name,
-  description: `A fairly long ${name} description that runs on and on and on`,
-  level: 'user' as const,
-  filePath: `/skills/${name}/SKILL.md`,
-  body: '',
-}));
 
 function createConfig(skills: SkillConfig[]): Config {
   const skillManager = { listSkills: vi.fn().mockResolvedValue(skills) };
@@ -101,7 +94,7 @@ function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
 }
 
 describe('SkillsManagerDialog', () => {
-  it.each([18, 11, 10, 8, 5, 3, 1])(
+  it.each([18, 12, 11, 6, 5, 1])(
     'keeps the interactive list within a %i-row budget',
     async (availableTerminalHeight) => {
       const { lastFrame } = renderDialog({ availableTerminalHeight });
@@ -113,7 +106,7 @@ describe('SkillsManagerDialog', () => {
     },
   );
 
-  it('keeps bare-mode navigation and escape active with a retained query', async () => {
+  it('keeps bare-mode keys active without changing a retained query', async () => {
     const settings = createSettings([]);
     const config = createConfig(mixedSkills.slice(5));
     const onClose = vi.fn();
@@ -129,11 +122,51 @@ describe('SkillsManagerDialog', () => {
     await vi.waitFor(() => expect(lastFrame()).not.toContain('Search:'));
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
     expect(lastFrame()).toContain('› [x] eight');
+
+    act(() => {
+      stdin.write('z');
+      stdin.write('\x7f');
+      stdin.write('\x7f');
+    });
     act(() => stdin.write('j'));
     await vi.waitFor(() => expect(lastFrame()).toContain('› [x] nine'));
+    act(() => stdin.write('k'));
+    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
 
     act(() => stdin.write('\u001B'));
     await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+
+    rerender(renderAt(18));
+    expect(lastFrame()).toContain('Search: six');
+  });
+
+  it('picks the visibly highlighted skill after entering bare mode', async () => {
+    const settings = createSettings([]);
+    const config = createConfig(mixedSkills.slice(5));
+    const onClose = vi.fn();
+    const setInputBuffer = vi.fn();
+    const renderAt = (availableTerminalHeight: number) =>
+      dialog({
+        settings,
+        config,
+        onClose,
+        setInputBuffer,
+        availableTerminalHeight,
+      });
+    const { stdin, lastFrame, rerender } = render(renderAt(18));
+
+    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    act(() => stdin.write('six'));
+    await vi.waitFor(() => expect(lastFrame()).toContain('Search: six'));
+
+    rerender(renderAt(5));
+    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
+    act(() => stdin.write('\r'));
+
+    await vi.waitFor(() =>
+      expect(setInputBuffer).toHaveBeenCalledWith('/eight'),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('prioritizes unlocked rows and summarizes locked skills', async () => {
@@ -161,18 +194,25 @@ describe('SkillsManagerDialog', () => {
     },
   );
 
-  it('does not search hidden locked rows in a constrained dialog', async () => {
+  it('searches unlocked rows but not hidden locked rows when constrained', async () => {
     const { stdin, lastFrame } = renderDialog({
-      availableTerminalHeight: 18,
+      availableTerminalHeight: 8,
     });
 
+    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    act(() => stdin.write('six'));
     await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
+    expect(lastFrame()).toContain('1 / 10 skills');
+
+    act(() => stdin.write('\u001B'));
+    await vi.waitFor(() => expect(lastFrame()).not.toContain('Search: six'));
     act(() => stdin.write('one'));
     await vi.waitFor(() =>
       expect(lastFrame()).toContain('No skills match the search.'),
     );
     expect(lastFrame()).toContain('0 / 10 skills');
     expect(lastFrame()).not.toContain('one skill');
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(8);
   });
 
   it('shows every locked skill without a height constraint', async () => {
@@ -201,22 +241,48 @@ describe('SkillsManagerDialog', () => {
     }
   });
 
-  it.each([80, 54, 30])(
-    'keeps item rows single at %i columns',
-    async (terminalWidth) => {
-      const { lastFrame } = renderDialog(
-        {
-          settings: createSettings([]),
-          config: createConfig(verboseSkills),
-          availableTerminalHeight: 16,
-          terminalWidth,
-        },
-        terminalWidth,
-      );
+  it('keeps item rows within the height budget at 10 columns', async () => {
+    const { lastFrame } = renderDialog(
+      {
+        settings: createSettings([]),
+        availableTerminalHeight: 16,
+      },
+      10,
+    );
 
-      await vi.waitFor(() => expect(lastFrame()).toContain('alpha'));
-      expect(lastFrame()).toContain('…');
-      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(16);
+    await vi.waitFor(() => expect(lastFrame()).toContain('[x]'));
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(16);
+  });
+
+  it.each([
+    ['loading', 1, false],
+    ['loading', 6, false],
+    ['loading', 12, false],
+    ['error', 1, true],
+    ['error', 6, true],
+    ['error', 12, true],
+  ])(
+    'keeps %s state within a %i-row budget',
+    async (_state, availableTerminalHeight, rejects) => {
+      const listSkills = rejects
+        ? vi.fn().mockRejectedValue(new Error('load failed'))
+        : vi.fn(() => new Promise<SkillConfig[]>(() => undefined));
+      const config = {
+        getSkillManager: () => ({ listSkills }),
+      } as unknown as Config;
+      const { lastFrame } = renderDialog({
+        config,
+        availableTerminalHeight,
+      });
+
+      await vi.waitFor(() =>
+        expect(lastFrame()).toContain(
+          rejects ? 'Failed to load skills' : 'Loading skills',
+        ),
+      );
+      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
     },
   );
 
@@ -249,7 +315,7 @@ describe('SkillsManagerDialog', () => {
 
   it('keeps a long search query within a narrow height budget', async () => {
     const { stdin, lastFrame } = renderDialog(
-      { availableTerminalHeight: 12, terminalWidth: 54 },
+      { availableTerminalHeight: 12 },
       54,
     );
 

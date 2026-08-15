@@ -15,7 +15,6 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import type { UIState } from '../contexts/UIStateContext.js';
-import { truncateToWidth } from '../utils/textUtils.js';
 import { MultiSelect, type MultiSelectItem } from './shared/MultiSelect.js';
 import {
   aggregateModelTokens,
@@ -46,17 +45,28 @@ interface StatusLineDialogProps {
 
 const THEME_COLORS_KEY = 'theme-colors';
 const DESCRIPTION_COLUMN = 24;
-// Fixed non-list rows: border(2) + paddingY(2) + title(1) + subtitle(1)
-// + search block(3) + list marginTop(1) + preview block(3) + footer(2).
-// The preview block is exactly one content line: buildStatusLinePresetLines
-// returns at most one line, and the empty state renders one fallback line.
-// Every counted text renders with wrap="truncate", and option labels plus
-// the separator are capped to the terminal width, so the count stays valid
-// at any width.
+// border + paddingY + title + subtitle + search + margins + preview + footer
 const STATUS_LINE_DIALOG_FIXED_ROWS = 15;
-// Terminal cells an option row spends outside its label: dialog
-// border(2) + paddingX(2) + active marker(2) + checkbox(4).
-const LABEL_ROW_OVERHEAD = 10;
+
+const STATUS_LINE_OPTIONS: Array<MultiSelectItem<StatusLineOption>> = [
+  {
+    key: THEME_COLORS_KEY,
+    value: { kind: 'theme-colors' },
+    label: `${'Use theme colors'.padEnd(DESCRIPTION_COLUMN)} Apply colors from the active /theme`,
+  },
+  {
+    key: 'statusline-separator',
+    value: { kind: 'separator' },
+    label: '─'.repeat(23),
+    disabled: true,
+    separator: true,
+  },
+  ...STATUS_LINE_PRESET_ITEMS.map((item) => ({
+    key: item.id,
+    value: { kind: 'item' as const, id: item.id },
+    label: `${item.label.padEnd(DESCRIPTION_COLUMN)} ${item.description}`,
+  })),
+];
 
 function buildInitialSelectedKeys(settings: LoadedSettings): string[] {
   const preset =
@@ -89,29 +99,6 @@ function getEffectiveStatusLineScope(settings: LoadedSettings): SettingScope {
     return SettingScope.Workspace;
   }
   return SettingScope.User;
-}
-
-// Search text is derived from the untruncated source data, never from
-// option.label: labels are display-truncated to the render width (labelCap
-// below), so filtering on them would make results width-dependent — words
-// lost to truncation would silently stop matching.
-const PRESET_ITEM_BY_ID = new Map(
-  STATUS_LINE_PRESET_ITEMS.map((item) => [item.id, item]),
-);
-
-function getOptionSearchText(
-  option: MultiSelectItem<StatusLineOption>,
-): string {
-  if (option.value.kind === 'theme-colors') {
-    return 'use theme colors apply colors from the active /theme theme colors active theme';
-  }
-  if (option.value.kind === 'separator') {
-    return '';
-  }
-  const item = PRESET_ITEM_BY_ID.get(option.value.id);
-  return item
-    ? `${item.label} ${item.description} ${item.id}`.toLowerCase()
-    : option.value.id;
 }
 
 function getPreviewData(config: Config, uiState: UIState) {
@@ -151,60 +138,18 @@ export function StatusLineDialog({
     buildInitialSelectedKeys(settings),
   );
 
-  // Cap labels to the render width so each option is exactly one terminal
-  // row — an uncapped label (e.g. model-with-reasoning, ~86 cells with the
-  // marker/checkbox columns) wraps to 2 rows at narrow widths and
-  // overflows the height budget. The floor is 1 (not DESCRIPTION_COLUMN) so
-  // the one-row invariant holds at any width; below ~34 columns labels
-  // degrade to short truncated strings instead of wrapping.
-  const labelCap = Math.max(
-    1,
-    (uiState.mainAreaWidth ?? 80) - LABEL_ROW_OVERHEAD,
-  );
-
-  const options = useMemo<Array<MultiSelectItem<StatusLineOption>>>(
-    () => [
-      {
-        key: THEME_COLORS_KEY,
-        value: { kind: 'theme-colors' },
-        label: truncateToWidth(
-          `${'Use theme colors'.padEnd(DESCRIPTION_COLUMN)} Apply colors from the active /theme`,
-          labelCap,
-        ),
-      },
-      {
-        key: 'statusline-separator',
-        value: { kind: 'separator' },
-        // The decorative rule gets no truncateToWidth from MultiSelect; cap
-        // it to the label budget so it stays one row at narrow widths.
-        label: '─'.repeat(Math.min(23, labelCap)),
-        disabled: true,
-        separator: true,
-      },
-      ...STATUS_LINE_PRESET_ITEMS.map((item) => ({
-        key: item.id,
-        value: { kind: 'item' as const, id: item.id },
-        label: truncateToWidth(
-          `${item.label.padEnd(DESCRIPTION_COLUMN)} ${item.description}`,
-          labelCap,
-        ),
-      })),
-    ],
-    [labelCap],
-  );
-
   const terminalHeight = availableTerminalHeight ?? 18;
   const hasFullLayout = terminalHeight >= STATUS_LINE_DIALOG_FIXED_ROWS + 1;
 
   const filteredOptions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!hasFullLayout || !normalizedQuery) {
-      return options;
+      return STATUS_LINE_OPTIONS;
     }
-    return options.filter((option) =>
-      getOptionSearchText(option).includes(normalizedQuery),
+    return STATUS_LINE_OPTIONS.filter(({ key, label }) =>
+      `${label} ${key}`.toLowerCase().includes(normalizedQuery),
     );
-  }, [hasFullLayout, options, query]);
+  }, [hasFullLayout, query]);
 
   const presetConfig = useMemo(
     () => buildConfigFromKeys(selectedKeys),

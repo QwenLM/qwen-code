@@ -6,7 +6,6 @@
 
 import { act, type ComponentProps } from 'react';
 import { render } from 'ink-testing-library';
-import stripAnsi from 'strip-ansi';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { mkdtempSync } from 'node:fs';
@@ -17,7 +16,6 @@ import type { UIState } from '../contexts/UIStateContext.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { MessageType, StreamingState } from '../types.js';
 import { STATUS_LINE_PRESET_ITEMS } from '../statusLinePresets.js';
-import { truncateToWidth } from '../utils/textUtils.js';
 import { StatusLineDialog } from './StatusLineDialog.js';
 
 function createSettings(): LoadedSettings {
@@ -75,8 +73,8 @@ const uiState = {
 
 type DialogProps = ComponentProps<typeof StatusLineDialog>;
 
-function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
-  const ui = (
+function dialog(overrides: Partial<DialogProps> = {}) {
+  return (
     <KeypressProvider kittyProtocolEnabled={false}>
       <StatusLineDialog
         settings={createSettings()}
@@ -89,6 +87,10 @@ function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
       />
     </KeypressProvider>
   );
+}
+
+function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
+  const ui = dialog(overrides);
   const result = render(ui);
   if (columns !== undefined) {
     Object.defineProperty(result.stdout, 'columns', { value: columns });
@@ -346,33 +348,6 @@ describe('StatusLineDialog', () => {
     },
   );
 
-  it('caps option labels to the render width', () => {
-    // ink-testing-library renders at 100 columns, so wrapping can't be
-    // observed directly; assert the width-derived string cap instead —
-    // the ~79-cell model-with-reasoning label must be clipped with an
-    // ellipsis at mainAreaWidth 60 (cap = 60 - 10 overhead = 50). A width
-    // below the component's ?? 80 fallback is used so a broken
-    // uiState.mainAreaWidth read (cap 70) renders a different string and
-    // fails this test.
-    const narrowUiState = { ...uiState, mainAreaWidth: 60 };
-    const { lastFrame } = renderDialog({
-      uiState: narrowUiState,
-      availableTerminalHeight: 25,
-    });
-
-    const frame = lastFrame() ?? '';
-    expect(frame.split('\n').length).toBeLessThanOrEqual(25);
-    // 24 = DESCRIPTION_COLUMN inside StatusLineDialog.
-    const item = STATUS_LINE_PRESET_ITEMS.find(
-      (preset) => preset.id === 'model-with-reasoning',
-    );
-    const expectedLabel = truncateToWidth(
-      `${item?.label.padEnd(24)} ${item?.description}`,
-      50,
-    );
-    expect(stripAnsi(frame)).toContain(expectedLabel);
-  });
-
   it('uses every available row in an intermediate compact layout', () => {
     const { lastFrame } = renderDialog({ availableTerminalHeight: 5 });
 
@@ -386,16 +361,35 @@ describe('StatusLineDialog', () => {
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(1);
     expect(lastFrame()).not.toContain('Configure Status Line');
 
-    // 8 j presses: theme-colors -> (skip separator) -> ... -> current-dir.
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < STATUS_LINE_PRESET_ITEMS.length; i++) {
       act(() => {
         stdin.write('j');
       });
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    expect(lastFrame()).toContain('current-dir');
-    // The active item must stay inside the visible window.
-    expect(lastFrame()).toMatch(/›.*current-dir/);
+    expect(lastFrame()).toMatch(/›.*session-id/);
+  });
+
+  it('bypasses a hidden query in compact mode and restores it', async () => {
+    const settings = createSettings();
+    const renderAt = (availableTerminalHeight: number) =>
+      dialog({ settings, availableTerminalHeight });
+    const { stdin, lastFrame, rerender } = render(renderAt(18));
+
+    act(() => stdin.write('identifier'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lastFrame()).toContain('> identifier');
+    expect(lastFrame()).toContain('session-id');
+    expect(lastFrame()).not.toContain('project-name');
+
+    rerender(renderAt(15));
+    expect(lastFrame()).not.toContain('Type to search');
+    expect(lastFrame()).toContain('project-name');
+
+    rerender(renderAt(18));
+    expect(lastFrame()).toContain('> identifier');
+    expect(lastFrame()).toContain('session-id');
+    expect(lastFrame()).not.toContain('project-name');
   });
 
   it('closes on escape in the compact layout', async () => {
@@ -416,55 +410,14 @@ describe('StatusLineDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('matches search against untruncated label text at narrow widths', async () => {
-    // At mainAreaWidth 80 (cap 70) the model-with-reasoning label loses its
-    // tail — including "available" — to display truncation. Search must
-    // still match the full source text, so results stay width-independent.
-    const narrowUiState = { ...uiState, mainAreaWidth: 80 };
-    const { stdin, lastFrame } = renderDialog({
-      uiState: narrowUiState,
-      availableTerminalHeight: 25,
-    });
-
-    act(() => {
-      stdin.write('available');
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(lastFrame()).toContain('model-with-reasoning');
-    expect(lastFrame()).toContain('project-name');
-  });
-
-  it('stays within the height budget at a 54-column terminal width', () => {
-    // Wrap-driven overflow below ink-testing-library's 100 columns: at 54
-    // columns the dialog content is 50 cells and the ~79-cell
-    // model-with-reasoning label (5th option, inside the budget-20 window)
-    // must stay on one capped row.
-    const narrowUiState = { ...uiState, mainAreaWidth: 54 };
+  it('stays within the height budget at 10 columns', () => {
     const { lastFrame, unmount } = renderDialog(
-      { uiState: narrowUiState, availableTerminalHeight: 20 },
-      54,
+      { availableTerminalHeight: 20 },
+      10,
     );
     try {
-      const frame = lastFrame() ?? '';
-      expect(frame).toContain('model-with-reasoning');
-      expect(frame.split('\n').length).toBeLessThanOrEqual(20);
-    } finally {
-      unmount();
-    }
-  });
-
-  it('keeps option rows single at a 30-column terminal width', () => {
-    // Below ~34 columns a labelCap floor at the 24-cell name column would
-    // exceed the available label width (30 - 10 overhead = 20) and wrap
-    // every option to 2 rows — the floor must be 1 instead.
-    const narrowUiState = { ...uiState, mainAreaWidth: 30 };
-    const { lastFrame, unmount } = renderDialog(
-      { uiState: narrowUiState, availableTerminalHeight: 25 },
-      30,
-    );
-    try {
-      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(25);
+      expect(lastFrame()).toContain('[x]');
+      expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(20);
     } finally {
       unmount();
     }

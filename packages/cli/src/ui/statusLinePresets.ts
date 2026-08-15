@@ -431,13 +431,10 @@ export function buildStatusLinePresetLines(
   config: StatusLinePresetConfig,
   data: StatusLinePresetData,
 ): string[] {
-  // Collapse embedded newlines: dynamic fields (e.g. the working directory
-  // behind current-dir / project-name) can legally contain them on POSIX,
-  // and one status line must never render as multiple terminal rows.
-  // \s+ also folds \v/\f — legal in POSIX paths, line-feed-equivalent on
-  // VT100-class terminals — matching the skills-side oneLine() collapse.
+  // Dynamic path fields may contain line breaks, but valid horizontal
+  // whitespace must survive unchanged.
   const line = buildStatusLinePresetParts(config, data)
     .join(' \u00b7 ')
-    .replace(/\s+/g, ' ');
+    .replace(/[\n\r\v\f\u0085\u2028\u2029]+/g, ' ');
   return line ? [line] : [];
 }
