@@ -135,8 +135,10 @@ export function installTerminalRedrawOptimizer(
     return () => {};
   }
 
-  // The optimizer is the only path that emits cursor-down (CSI 1 B) and
-  // multi-count cursor-up (CSI n A); Ink's native erase path uses neither.
+  // During Ink's per-frame erase-and-redraw of streaming output, the optimizer
+  // is the only path emitting cursor-down (CSI 1 B) and multi-count cursor-up
+  // (CSI n A); Ink's native eraseLines() path uses neither. Ink's
+  // cursor-positioning path still emits both sequence classes on cursor moves.
   // ConPTY's (Windows Console Pseudo Terminal) row tracking diverges on those,
   // so the erase lands on the wrong rows and streaming frames stack, causing
   // duplicate text. Skip the optimizer on WSL (ConPTY is the default pty there),
