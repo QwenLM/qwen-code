@@ -30,6 +30,7 @@ import {
   appendRunSession,
   priorSessionEntries,
   priorSessionIds,
+  sessionEntryCount,
   runSessionsPath,
   readResumeMarker,
   recordResume,
@@ -62,6 +63,32 @@ beforeEach(() => {
   writeFileSync(plan, JSON.stringify({ diffLines: 1, chunks: [] }));
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+describe('sessionEntryCount — the cap term the gate must not swallow', () => {
+  it('counts every ledgered session without any authorization', () => {
+    // The gate on `priorSessionEntries` protects evidence, and a session is
+    // recorded as an authorized resume only after its ruling passes — so a
+    // cap that read its ledger term through the gate always saw zero, and
+    // deleting `resume.json` reset the very cap the ledger backstops.
+    appendRunSession(plan, envOf('S1'));
+    appendRunSession(plan, envOf('S2'));
+    // No `authorize()` call anywhere: that is the point.
+    expect(sessionEntryCount(plan)).toBe(2);
+  });
+
+  it('is zero when there is no ledger at all', () => {
+    expect(sessionEntryCount(plan)).toBe(0);
+  });
+
+  it('applies the same fences as every other read', () => {
+    // A count that admitted a foreign or stale entry would cap the wrong
+    // number: it runs through `readSessions`, so the epoch, plan-mtime and
+    // charset fences all still hold.
+    appendRunSession(plan, envOf('S1'));
+    appendRunSession(plan, envOf('../evil'));
+    expect(sessionEntryCount(plan)).toBe(1);
+  });
+});
 
 describe('appendRunSession / priorSessionIds', () => {
   it('records a session and surfaces it to a LATER session as prior', () => {

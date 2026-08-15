@@ -233,6 +233,26 @@ export function appendRunSession(
 }
 
 /**
+ * How many sessions this run's ledger records — a COUNT, ungated.
+ *
+ * The authorization gate on `priorSessionEntries` protects EVIDENCE: it stops
+ * a session that was never granted a resume from reading another attempt's
+ * transcripts. A count is not evidence. It says how many times this review has
+ * been picked up, which is exactly what a cap needs and reveals nothing about
+ * what any attempt did.
+ *
+ * The distinction matters because the cap read both terms through the gate,
+ * and the gate cannot be satisfied at ruling time: a session is recorded as an
+ * authorized resume only AFTER its ruling passes, so the ledger term was
+ * structurally zero for every ruling. Deleting `resume.json` then reset the
+ * cap that the ledger was supposed to backstop — the one attack the two-counter
+ * design existed to defeat.
+ */
+export function sessionEntryCount(planPath: string): number {
+  return readSessions(planPath).length;
+}
+
+/**
  * Session ids of EARLIER attempts of this same run — the current session
  * excluded, order preserved, deduplicated by the ledger's own append guard.
  * These are addresses for `subagents/<id>` lookups, nothing more.
