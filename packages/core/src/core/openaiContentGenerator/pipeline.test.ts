@@ -117,6 +117,9 @@ describe('ContentGenerationPipeline', () => {
     mockContentGeneratorConfig = {
       model: 'test-model',
       authType: 'openai' as AuthType,
+      // Official endpoint so response_format assertions exercise the
+      // buildResponseFormat gate (custom endpoints suppress it).
+      baseUrl: 'https://api.openai.com/v1',
       samplingParams: {
         temperature: 0.7,
         top_p: 0.9,
@@ -4346,6 +4349,25 @@ describe('ContentGenerationPipeline', () => {
         ).length;
       }
       expect(totalFunctionCalls).toBe(1);
+    });
+  });
+
+  describe('buildResponseFormat endpoint gate', () => {
+    const jsonModeRequest = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      config: { responseMimeType: 'application/json' },
+    };
+
+    it('omits response_format on custom OpenAI-compatible endpoints', () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.custom-provider.com/v1';
+      const body = pipeline['buildResponseFormat'](jsonModeRequest);
+      expect(body.response_format).toBeUndefined();
+    });
+
+    it('keeps json_object response_format on the official endpoint', () => {
+      const body = pipeline['buildResponseFormat'](jsonModeRequest);
+      expect(body.response_format).toEqual({ type: 'json_object' });
     });
   });
 

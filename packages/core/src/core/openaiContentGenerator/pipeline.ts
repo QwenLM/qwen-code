@@ -1278,6 +1278,14 @@ export class ContentGenerationPipeline {
   private buildResponseFormat(
     request: PromptCacheSharingParameters,
   ): Pick<OpenAI.Chat.ChatCompletionCreateParams, 'response_format'> {
+    // `response_format` (both `json_object` and the strict `json_schema`
+    // variant) is official-OpenAI-specific wire shape. Third-party
+    // OpenAI-compatible endpoints reject it (DeepSeek accepts only
+    // text/json_object; older vLLM builds and validating gateways refuse
+    // unknown fields), and this pipeline never sent the field before this
+    // feature. Gate on the official endpoint, same precedent as the
+    // prompt-caching feature above.
+    if (!isOfficialOpenAIEndpoint(this.contentGeneratorConfig)) return {};
     if (request.config?.responseMimeType !== 'application/json') return {};
     const schema =
       request.config.responseJsonSchema ?? request.config.responseSchema;

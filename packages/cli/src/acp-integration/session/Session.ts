@@ -4051,8 +4051,6 @@ export class Session implements SessionContext {
             const inputText = firstTextBlock?.text || '';
             const isSlashInput = !isContinue && isSlashCommand(inputText);
             const slashCommandName = getSlashCommandFirstToken(inputText);
-            const shouldRecordSlashCommand =
-              !isSlashInput || slashCommandName !== 'advisor';
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -4111,8 +4109,11 @@ export class Session implements SessionContext {
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
-            } else if (shouldRecordSlashCommand) {
-              // record user message for session management
+            } else if (!isSlashInput) {
+              // record user message for session management. Slash input is
+              // recorded after command resolution below: a user-defined
+              // command shadowing the built-in `advisor` name keeps its
+              // user-turn record (R18-6).
               const recorder = this.config.getChatRecordingService();
               if (promptDisplayText !== undefined) {
                 recorder?.recordUserMessage(promptText, goalTurn?.permit, {
@@ -4176,6 +4177,32 @@ export class Session implements SessionContext {
                   ),
                 );
                 return { stopReason: 'cancelled' };
+              }
+
+              // Classify by the RESOLVED command, not the raw token: a
+              // custom command named `advisor` shadows the built-in and
+              // must keep its transcript records (R18-6).
+              const resolvedCommandInfo = slashCommandResult.resolvedCommand;
+              const shouldRecordSlashCommand = !(
+                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                resolvedCommandInfo.name === 'advisor'
+              );
+              if (
+                shouldRecordSlashCommand &&
+                goalTurn?.origin !== 'runtime' &&
+                !isRetry
+              ) {
+                const recorder = this.config.getChatRecordingService();
+                if (promptDisplayText !== undefined) {
+                  recorder?.recordUserMessage(promptText, goalTurn?.permit, {
+                    displayText: promptDisplayText,
+                    hookContext: '',
+                  });
+                } else if (goalTurn) {
+                  recorder?.recordUserMessage(promptText, goalTurn.permit);
+                } else {
+                  recorder?.recordUserMessage(promptText);
+                }
               }
 
               try {

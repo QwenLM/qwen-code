@@ -809,6 +809,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -836,6 +837,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -863,6 +865,7 @@ describe('handleSlashCommand', () => {
     expect(result).toEqual({
       type: 'submit_prompt',
       content: 'Expanded prompt',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 
@@ -896,6 +899,7 @@ describe('handleSlashCommand', () => {
       type: 'message',
       messageType: 'error',
       content: 'UserPromptExpansion blocked: Blocked by policy',
+      resolvedCommand: { name: 'custom', kind: CommandKind.FILE },
     });
   });
 

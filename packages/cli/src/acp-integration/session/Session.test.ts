@@ -14926,6 +14926,10 @@ describe('Session', () => {
           type: 'message',
           messageType: 'info',
           content: 'Review complete.',
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.BUILT_IN,
+          },
         });
         mockChatRecordingService.recordUserMessage.mockClear();
         mockChatRecordingService.recordSlashCommand.mockClear();
@@ -15024,6 +15028,10 @@ describe('Session', () => {
             type: 'message',
             messageType: 'error',
             content: 'Advisor review failed: aborted',
+            resolvedCommand: {
+              name: 'advisor',
+              kind: CommandKind.BUILT_IN,
+            },
           };
         });
 
@@ -15048,6 +15056,10 @@ describe('Session', () => {
           type: 'message',
           messageType: 'error',
           content: 'Advisor review failed: provider rejected schema',
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.BUILT_IN,
+          },
         });
 
         await expect(
@@ -15058,6 +15070,30 @@ describe('Session', () => {
         ).rejects.toThrow('Advisor review failed: provider rejected schema');
 
         expect(finishedSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('records a custom command shadowing the advisor name', async () => {
+        // R18-6: the recording gate must classify by the RESOLVED command,
+        // not the raw token — a user-defined `advisor` command keeps its
+        // user-turn record while the built-in advisor's is skipped.
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/advisor check my work' }],
+        });
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
       });
 
       it('preserves an expanded slash prompt cancelled before model send', async () => {
