@@ -831,7 +831,8 @@ async function classifyImageContent(
     let result: FileType;
     if (sniffed.magicMatched) {
       result =
-        sniffed.extension === extensionForMimeType(mimeType)
+        sniffed.extension === extensionForMimeType(mimeType) ||
+        ['png', 'jpg', 'gif', 'webp'].includes(sniffed.extension)
           ? 'image'
           : 'binary';
     } else {
