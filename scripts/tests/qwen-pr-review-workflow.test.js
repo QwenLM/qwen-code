@@ -2552,6 +2552,11 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(run).not.toContain('${{');
 
     const dir = mkdtempSync(join(tmpdir(), 'pr-review-context-'));
+    const markerRows = onHoldMarkers.map((marker) =>
+      typeof marker === 'string'
+        ? { author: 'qwen-code-ci-bot', body: marker }
+        : marker,
+    );
     const callsFile = join(dir, 'gh-calls');
     const ghPath = join(dir, 'gh');
     writeFileSync(
@@ -2565,7 +2570,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             'echo "$@" >> "$CONTEXT_GH_CALLS"',
             'case "$*" in',
             "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
-            '  */comments*) printf \'%s\\n\' "$CONTEXT_MARKERS" ;;',
+            '  */comments*) node -e \'const rows = JSON.parse(process.env.CONTEXT_MARKERS || "[]"); for (const row of rows) if (["github-actions[bot]", "qwen-code-ci-bot"].includes(row.author)) console.log(row.body);\' ;;',
             '  *pulls/*) printf \'%s\\n\' "$CONTEXT_HEAD_SHA" ;;',
             '  *) ;;',
             'esac',
@@ -2580,13 +2585,14 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     execFileSync('bash', ['-c', run], {
       env: {
         PATH: [dir, process.env.PATH].join(':'),
+        HOME: dir,
         GITHUB_OUTPUT: outputFile,
         GITHUB_STEP_SUMMARY: summaryFile,
         GITHUB_REPOSITORY: 'QwenLM/qwen-code',
         GH_TOKEN: 'test-token',
         TRIGGER_BODY: triggerBody,
         CONTEXT_LABELS: labels.join(' '),
-        CONTEXT_MARKERS: onHoldMarkers.join('\n'),
+        CONTEXT_MARKERS: JSON.stringify(markerRows),
         CONTEXT_HEAD_SHA: headSha,
         CONTEXT_GH_CALLS: callsFile,
       },
@@ -2638,6 +2644,24 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     });
     expect(r.output).toContain('should_run=true');
     expect(r.summary).toContain('not pinned to the live head');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('ignores forged on-hold markers from non-bot comments (#9219)', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'abc123def456',
+      onHoldMarkers: [
+        {
+          author: 'contributor',
+          body: '<!-- qwen-triage on-hold sha=abc123def456 -->',
+        },
+      ],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain('not pinned to the live head');
+    expect(r.ghCalls).toContain('.user.login');
     rmSync(r.dir, { recursive: true, force: true });
   });
 

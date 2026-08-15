@@ -551,9 +551,11 @@ jobs:
           # applied "parked" label has no marker and never skips. Unreadable
           # head fails open like the label read.
           if [ "$AUTO_REVIEW" = "true" ]; then
-            if gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels?per_page=100" --paginate --jq '.[].name' | grep -Fxq 'status/on-hold'; then
+            LABELS="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels?per_page=100" --paginate --jq '.[].name' 2>/dev/null || true)"
+            if printf '%s\n' "$LABELS" | grep -Fxq 'status/on-hold'; then
               HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
-              if [ -n "$HEAD_SHA" ] && gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --paginate --jq '.[].body' | grep -Fq "qwen-triage on-hold sha=${HEAD_SHA}"; then
+              MARKERS="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot") | .body' 2>/dev/null || true)"
+              if [ -n "$HEAD_SHA" ] && printf '%s\n' "$MARKERS" | grep -Fq "qwen-triage on-hold sha=${HEAD_SHA}"; then
                 echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold pinned to head ${HEAD_SHA} (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
                 echo "should_run=false" >> "$GITHUB_OUTPUT"
                 exit 0
