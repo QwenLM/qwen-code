@@ -8,6 +8,7 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from '../tools/tools.js';
 import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
+import { getToolResultMarkerPrefix } from '../core/tool-result-markers.js';
 import { createDebugLogger } from './debugLogger.js';
 import {
   observeToolResultBoundary,
@@ -142,12 +143,21 @@ function collectTextSlots(
         }
       }
       if (typeof error === 'string') {
-        slots.push({
-          entryIndex,
-          partIndex,
-          field: 'error',
-          text: error,
-        });
+        const protectedPrefix = excludeBudgetExemptOutput
+          ? getToolResultMarkerPrefix(error)
+          : undefined;
+        const budgetedError = protectedPrefix
+          ? error.slice(protectedPrefix.length)
+          : error;
+        if (budgetedError.length > 0) {
+          slots.push({
+            entryIndex,
+            partIndex,
+            field: 'error',
+            text: budgetedError,
+            ...(protectedPrefix ? { protectedPrefix } : {}),
+          });
+        }
       }
     }
   }

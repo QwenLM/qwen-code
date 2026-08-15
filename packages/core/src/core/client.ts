@@ -2665,6 +2665,18 @@ export class GeminiClient {
     let experienceInputRecorded = false;
     const recordAcceptedExperienceInput = () => {
       if (experienceInputRecorded) return;
+      // A Retry whose strip popped a trailing user turn is re-submitting
+      // content whose original push landed — and was already recorded by the
+      // original send. Scanning it again would feed identical
+      // functionResponse parts to accumulateExperienceSignals a second time,
+      // where a leading ok part "closes" the pending failure the first scan
+      // left behind and latches a spurious retryArc.
+      if (
+        messageType === SendMessageType.Retry &&
+        strippedRetryEntries.length > 0
+      ) {
+        return;
+      }
       const content =
         messageType === SendMessageType.ToolResult ||
         messageType === SendMessageType.Retry

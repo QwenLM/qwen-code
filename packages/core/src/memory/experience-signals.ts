@@ -66,7 +66,10 @@ function isFailedResponse(part: {
       error.startsWith(OPERATION_CANCELLED_PREFIX) ||
       error.startsWith(DUPLICATE_PROVIDER_TOOL_CALL_PREFIX) ||
       error === ORPHAN_TOOL_USE_REPAIR_REASON ||
-      error === PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE ||
+      // Prefix match, not exact equality: PostToolBatch hooks can append
+      // `\n\n${additionalContext}` to a skipped sibling's error, and the
+      // suffixed string must still classify as a never-executed skip.
+      error.startsWith(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE) ||
       error.startsWith(PERMISSION_DECLINED_MESSAGE_PREFIX) ||
       error.startsWith(SUPPRESSED_SIBLING_SKIP_PREFIX)
     ) {
