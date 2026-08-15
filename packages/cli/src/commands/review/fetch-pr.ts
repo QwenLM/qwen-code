@@ -380,6 +380,19 @@ export function containmentRuling(
   inner: string,
   outer: string,
 ): { ok: boolean; unverified: boolean } {
+  // Both captures reach here already decoded as UTF-8, and that decode is
+  // LOSSY: every byte git emitted that is not valid UTF-8 — in a path or in a
+  // line's content — arrives as one U+FFFD. Distinct bytes therefore become
+  // the same character, and everything below compares decoded strings: two
+  // filenames differing only in an invalid byte share one map key, so one
+  // file's hunks get judged against the other's ranges; two byte-distinct
+  // deleted lines match each other 1:1. Neither is detectable after the
+  // decode, so the oracle declines to rule rather than ruling on text it
+  // knows is not the text git produced. A file that legitimately contains
+  // U+FFFD refuses too — a full review, which is the safe direction.
+  if (inner.includes('�') || outer.includes('�')) {
+    return { ok: false, unverified: true };
+  }
   const innerSections = sectionsOf(inner);
   const outerSections = sectionsOf(outer);
   if (innerSections === null || outerSections === null) {
@@ -452,6 +465,21 @@ function sectionsContained(
   for (const [file, section] of inner) {
     const covering = outer.get(file);
     if (!covering) return false;
+    // A delta section with nothing comparable — a mode change, a pure rename,
+    // a binary replacement — carries no range and no deletion, so both loops
+    // below iterate zero times and the section passes vacuously. That is the
+    // right answer only when the PR's own section is equally contentless (two
+    // binary sections, say). When the covering section HAS hunks, the delta is
+    // asserting a change of a kind the PR's diff does not show — an "undo per
+    // feedback" round that reverts round 1's `chmod +x` is exactly this shape —
+    // and vacuous truth is the wrong verdict for it.
+    if (
+      section.ranges.length === 0 &&
+      section.deletions.length === 0 &&
+      covering.ranges.length > 0
+    ) {
+      return false;
+    }
     for (const [start, end] of section.ranges) {
       // Strict containment, no slack. Both captures share the head tree, so
       // a deletion the PR's own diff performs yields an identical junction
@@ -479,13 +507,22 @@ function sectionsContained(
     // entire all-or-nothing Create Review call.
     //
     // Content, not position: the two captures' old sides are different trees,
-    // so old-side line numbers are not comparable at all. This does let two
-    // textually identical deletions in one file stand in for each other —
-    // narrower than the blanket blindness it replaces, and it fails in the
-    // accepting direction only when the same text is deleted twice.
-    const displayed = new Set(covering.deletions);
+    // so old-side line numbers are not comparable at all.
+    //
+    // Counted, not set-membership. A set lets ONE `-X` in the PR's diff clear
+    // ANY number of `-X` lines in the delta, so a round that deletes two
+    // identical lines — a duplicated guard clause, a repeated import, a blank
+    // line — where the PR deletes one is accepted, and the second deletion is
+    // a line GitHub's diff does not display. Each delta deletion must consume
+    // its own occurrence.
+    const budget = new Map<string, number>();
+    for (const d of covering.deletions) {
+      budget.set(d, (budget.get(d) ?? 0) + 1);
+    }
     for (const deleted of section.deletions) {
-      if (!displayed.has(deleted)) return false;
+      const left = budget.get(deleted) ?? 0;
+      if (left === 0) return false;
+      budget.set(deleted, left - 1);
     }
   }
   return true;

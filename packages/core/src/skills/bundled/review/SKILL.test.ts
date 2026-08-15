@@ -79,6 +79,48 @@ describe('bundled review skill', () => {
     const body = skillBody();
     expect(body).toContain('`fetch-pr` before all of them');
     expect(body).toContain('`agent-prompt --roster` after the rules load');
+    // The re-run ordering, same class as the two above and newer. A side-file
+    // `--since` re-run rewrites the fetch report from scratch, while
+    // `repo-context` enriches that same file in place: run in the other
+    // order the enrichment is silently discarded and the roster builds
+    // without the manifest's required agents.
+    expect(body).toContain(
+      '**any side-file `fetch-pr --since` re-run before `repo-context`**',
+    );
+  });
+
+  it('keeps anchor validation inside the CLI, not in the orchestrator', () => {
+    // The whole point of routing the anchor through `--since`: a hand-run
+    // check is one a run can skip, and the skill forbids hand-computed diffs
+    // everywhere else. Reverting this section to the pre-`--since` wording
+    // restores `git cat-file` / `merge-base --is-ancestor` as orchestrator
+    // steps, and nothing else in this file notices — checking out the
+    // merge-base SKILL.md leaves every other test here green.
+    const body = skillBody();
+    expect(body).toContain(
+      '**You never run `git` against an anchor yourself**',
+    );
+    expect(body).toContain('no `git diff <sha>..HEAD`');
+    // The report field the check acts on, and the separation the reason
+    // taxonomy rests on: one field names the CAUSE, another says whether a
+    // plan exists.
+    expect(body).toContain(
+      '**Whether a PLAN exists is a separate field: `diffPath`.**',
+    );
+    // …and the re-run instruction, including the flag-replacement rule that
+    // keeps a second `--since` from reading as two anchors.
+    expect(body).toContain(
+      'REPLACING any `--since` it already carries, never appending a second one',
+    );
+  });
+
+  it('records the range the round actually reviewed in provenance', () => {
+    // A saved report is read by someone who cannot re-derive its scope, so
+    // recording the merge base for a round that reviewed `diffBase..head`
+    // hands that reader a range the run never had.
+    expect(skillBody()).toContain(
+      '`incremental.diffBase` on a delta-scoped round',
+    );
   });
 
   it('launches the 3B convergence pair in the same response', () => {

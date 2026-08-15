@@ -927,6 +927,26 @@ describe('fetch-pr report assembly', () => {
         answer: { out: null, status: null },
         reason: 'capture-failed',
       },
+      // The same kill, on the other two probes. Each classifies status
+      // independently, and the unit describe cannot reach them — it injects
+      // already-interpreted answers, while the classification lives in
+      // `runFetchPr`'s closures. Folding `null` into `resolveCommit`'s
+      // not-a-commit arm reports a killed `rev-parse` as `unknown-commit`;
+      // folding it into `isAncestor`'s NO reports a killed `merge-base` as
+      // `not-an-ancestor`. Neither is retried, so a transient kill retires a
+      // valid anchor for good.
+      {
+        what: 'a signalled rev-parse is the surface',
+        probe: 'rev-parse',
+        answer: { out: null, status: null },
+        reason: 'capture-failed',
+      },
+      {
+        what: 'a signalled merge-base is the surface',
+        probe: 'merge-base',
+        answer: { out: null, status: null },
+        reason: 'capture-failed',
+      },
     ];
 
     const mod = await import('./lib/git.js');
@@ -993,6 +1013,45 @@ describe('fetch-pr report assembly', () => {
     );
     expect(brief).toContain(`--base ${ANCHOR}`);
     expect(brief).not.toContain(`--base ${BASE}`);
+  });
+
+  it('reads collapsedFromUpstream off the FULL range on a delta round', async () => {
+    // Both `--since` fixtures assert the flag is `undefined`, which pins only
+    // that the flag is not computed from the DELTA — in both, the full range
+    // would not fire either, so a mutant suppressing the flag outright on
+    // delta rounds (`!scopedDelta && isCollapsedFromUpstream(...)`) survives.
+    // Agent 0 then never gets the rebase-lag disclosure and narrates
+    // already-landed work as this PR's current change.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    // Advertised 900 against a full range of 4 changed lines: 4 × 4 ≤ 900,
+    // and ≥ 200, so the full range HAS collapsed.
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 800,
+        deletions: 100,
+        changedFiles: 9,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+    const report = await reportFor({ since: ANCHOR });
+    // Still delta-scoped…
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
+    expect(writtenDiff()).toBe(DELTA_DIFF);
+    // …and the full-range fact is still reported.
+    expect(report.collapsedFromUpstream).toBe(true);
   });
 
   it('ignores a value-less --since instead of blaming the anchor', async () => {
@@ -1262,6 +1321,17 @@ describe('fetch-pr report assembly', () => {
       String(c[0]),
     );
     expect(said.some((l) => l.includes('Retried the partition'))).toBe(false);
+    // The PLAN stayed empty. `plan = rescued` assigned before the write is
+    // checked ships the full range's chunk ranges beside a null `diffPath` —
+    // chunk agents handed ranges naming a file nobody wrote.
+    expect(report.diffLines).toBe(0);
+    // …and the narration names the write, not the partitioner. The delta plan
+    // DID throw here, so a ternary reading `partitionFailed` alone announces
+    // "could not be partitioned" for a round whose only fault was a transient
+    // ENOSPC — contradicting the report's own retryable reason.
+    const line = said.find((l) => l.includes('Incremental anchor'));
+    expect(line).toContain('no diff could be captured');
+    expect(line).not.toContain('could not be partitioned');
   });
 
   it('survives a partition failure when NO base ever resolved', async () => {
@@ -1760,6 +1830,26 @@ describe('resolveIncrementalAnchor', () => {
     expect(r.diffBase).toBe(sha256);
   });
 
+  it('accepts a valid UPPERCASE anchor, probing the lowercased value', () => {
+    // The normalisation is exercised only on the refusal path today — every
+    // bad-anchor input is invalid in either case, so none of them distinguishes
+    // a mutant testing the CASED string against the lowercase-only `SHA_RE`.
+    // That mutant refuses a valid in-history anchor as `unknown-commit`: the
+    // deterministic reason, never retried, asserting the history never held a
+    // sha it holds.
+    const asked: string[] = [];
+    const r = resolveIncrementalAnchor(ANCHOR.toUpperCase(), HEAD, {
+      commitExists: (sha) => (asked.push(sha), true),
+      isAncestor: () => true,
+      resolveCommit: (sha) => (asked.push(sha), sha === ANCHOR ? ANCHOR : null),
+    });
+    expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
+    expect(r.diffBase).toBe(ANCHOR);
+    // git resolves hex case-insensitively, but the value handed to it is the
+    // normalised one, so the echoed `since` and the probed sha agree.
+    expect(asked).toEqual([ANCHOR, ANCHOR]);
+  });
+
   it('never hands a flag-shaped or non-hex anchor to git', () => {
     // The anchor arrives from a cache file or a posted marker; the hex
     // allowlist runs BEFORE any probe so nothing flag-shaped reaches git.
@@ -1869,10 +1959,12 @@ describe('containmentRuling — the containment oracle', () => {
       `diff --git a/${file} b/${file}`,
       `--- a/${file}`,
       `+++ b/${file}`,
-      // A PURE ADDITION: zero old-side lines, `count` new ones. Declaring
-      // old-side lines the body never emits leaves the hunk unclosed, and
-      // the next `@@` header is swallowed as body content — a fixture that
-      // models a truncated diff while reading like a whole one.
+      // A PURE ADDITION: zero old-side lines, `count` new ones. The counts
+      // are declared truthfully so the fixture models a real capture:
+      // `parseDiff` closes a hunk STRUCTURALLY, at the next `@@` /
+      // `diff --git` header or EOF, and reads the declared counts only to
+      // compute `newEnd` — so a mismatched count does not truncate anything,
+      // it just misplaces the range the containment check then compares.
       ...hunks.flatMap(([start, count]) => [
         `@@ -${start},0 +${start},${count} @@`,
         ...Array.from({ length: count }, (_, i) => `+line ${start + i}`),
@@ -1901,6 +1993,25 @@ describe('containmentRuling — the containment oracle', () => {
       `@@ -${start},${deleted.length} +${start},${count} @@`,
       ...deleted.map((d) => `-${d}`),
       ...Array.from({ length: count }, (_, i) => `+line ${start + i}`),
+      '',
+    ].join('\n');
+
+  /**
+   * A delta section that DELETES `what`, wrapped in context.
+   *
+   * The shape `--unified=3` actually emits: the hunk is not `newCount === 0`,
+   * so a rule keyed on pure-deletion hunks never sees it, and its surviving
+   * new-side range is just the context a covering hunk contains for free.
+   */
+  const deletes = (file: string, at: number, what: string[]) =>
+    [
+      `diff --git a/${file} b/${file}`,
+      `--- a/${file}`,
+      `+++ b/${file}`,
+      `@@ -${at},${what.length + 2} +${at},2 @@`,
+      ' ctx before',
+      ...what.map((w) => `-${w}`),
+      ' ctx after',
       '',
     ].join('\n');
 
@@ -1936,8 +2047,9 @@ describe('containmentRuling — the containment oracle', () => {
   });
 
   it('records EVERY hunk of a section, not just the first', () => {
-    // The parser closes a hunk by its declared line counts; a fixture (or a
-    // parse) that leaves one open swallows the next `@@` header as body.
+    // A second hunk must be seen as a hunk. `parseDiff` closes hunks at the
+    // next header, so this does not test truncation — it tests that the loop
+    // over `section.ranges` reads every entry and not just the first.
     const two = sec('a.ts', [
       [10, 3],
       [50, 2],
@@ -1947,9 +2059,10 @@ describe('containmentRuling — the containment oracle', () => {
   });
 
   it('consumes the no-newline marker without spending a body line', () => {
-    // `\ No newline at end of file` is a marker, not content: counting it
-    // as a body line closes the hunk early and the next header is read as
-    // content. The most common real-world diff artifact there is.
+    // `\ No newline at end of file` is a marker, not content: it belongs to
+    // neither side, so counting it as a body line shifts the new-side cursor
+    // and every range after it. The most common real-world diff artifact
+    // there is.
     const withMarker = [
       'diff --git a/a.ts b/a.ts',
       '--- a/a.ts',
@@ -2040,27 +2153,105 @@ describe('containmentRuling — the containment oracle', () => {
     expect(contained(spoofing, sec('x.ts', [[1, 200]]))).toBe(true);
   });
 
+  it('counts deletions, so one displayed line clears only one', () => {
+    // Set membership let a SINGLE `-X` in the PR's diff clear ANY number of
+    // `-X` lines in the delta. A round that deletes two identical lines — a
+    // duplicated guard clause, a repeated import, a blank line — where the PR
+    // deletes one was accepted, and the second deletion is a line GitHub does
+    // not display.
+    const twice = deletes('a.ts', 6, ['return true;', 'return true;']);
+    expect(
+      contained(twice, secDeleting('a.ts', [1, 100], ['return true;'])),
+    ).toBe(false);
+    expect(
+      contained(
+        twice,
+        secDeleting('a.ts', [1, 100], ['return true;', 'return true;']),
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses a delta section with nothing comparable against a covering one that has hunks', () => {
+    // A mode change, a pure rename, a binary replacement: no range and no
+    // deletion, so both containment loops iterate zero times and the section
+    // used to pass vacuously. An "undo per feedback" round that reverts round
+    // 1's `chmod +x` is exactly this shape, and the PR's own diff — which
+    // ends at the same head — shows no mode change at all.
+    const modeOnly = [
+      'diff --git a/m.sh b/m.sh',
+      'old mode 100755',
+      'new mode 100644',
+      '',
+    ].join('\n');
+    expect(contained(modeOnly, sec('m.sh', [[1, 100]]))).toBe(false);
+    // Still vacuous-true when the PR's section is equally contentless: two
+    // binary sections have nothing to compare on either side.
+    const binary = [
+      'diff --git a/i.png b/i.png',
+      'Binary files a/i.png and b/i.png differ',
+      '',
+    ].join('\n');
+    expect(contained(binary, binary)).toBe(true);
+  });
+
+  it('declines to rule when either capture decoded lossily', () => {
+    // Captures arrive decoded as UTF-8, and that decode is lossy: every byte
+    // git emitted that is not valid UTF-8 becomes one U+FFFD. Distinct bytes
+    // then compare EQUAL — two filenames differing only in an invalid byte
+    // share one map key, and two byte-distinct deleted lines match 1:1 — and
+    // nothing downstream can tell. Refusing to rule is the only honest answer.
+    // (Built from buffers: macOS rejects invalid-UTF-8 filenames outright, so
+    // no filesystem fixture can carry this shape.)
+    const bytes = (...parts: Array<string | number[]>) =>
+      Buffer.concat(
+        parts.map((x) =>
+          typeof x === 'string' ? Buffer.from(x) : Buffer.from(x),
+        ),
+      );
+    const nameA = bytes('data_', [0xe9], '.log').toString('utf8');
+    const nameB = bytes('data_', [0xf1], '.log').toString('utf8');
+    expect(nameA).toBe(nameB); // the collision itself
+
+    // Distinct files, one decoded key: the delta's hunks would be judged
+    // against the OTHER file's ranges.
+    expect(
+      containmentRuling(
+        deletes(nameA, 6, ['X']),
+        secDeleting(nameB, [1, 100], ['X']),
+      ),
+    ).toEqual({ ok: false, unverified: true });
+
+    // Same path, byte-distinct deleted lines that decode identically — the
+    // count map cannot see the difference either.
+    const sentA = bytes('sentinel ', [0xff]).toString('utf8');
+    const sentB = bytes('sentinel ', [0xfe]).toString('utf8');
+    expect(
+      containmentRuling(
+        deletes('a.ts', 6, [sentA]),
+        secDeleting('a.ts', [1, 100], [sentB]),
+      ),
+    ).toEqual({ ok: false, unverified: true });
+  });
+
+  it('keys the deletion rule per FILE, not across the whole diff', () => {
+    // Every other deletion fixture is single-file, and the only cross-file
+    // test uses addition-only sections — so a mutant pooling all outer
+    // sections' deletions into one set survives. Real shape: round 1 moves
+    // line X from b.ts to a.ts, and the undo round deletes it from a.ts. The
+    // PR's own diff displays `-X` only in b.ts, so a comment anchored on the
+    // a.ts deletion hits a line GitHub does not show there.
+    const full = `${secDeleting('a.ts', [1, 100], [])}${secDeleting('b.ts', [1, 100], ['X'])}`;
+    expect(contained(deletes('a.ts', 6, ['X']), full)).toBe(false);
+    // …and it is displayed where the PR actually deletes it.
+    expect(contained(deletes('b.ts', 6, ['X']), full)).toBe(true);
+  });
+
   it('refuses a deletion the PR diff does not itself perform', () => {
     // New-side ranges cannot see a deletion: what survives it on the new side
     // is context, which a covering hunk contains for free. So a delta that
     // removes a line the PR introduced after the merge base — the "undo per
     // feedback" round — passed the range check outright, and the review scope
     // became a diff whose content GitHub displays on neither side.
-    const deletes = (file: string, at: number, what: string[]) =>
-      [
-        `diff --git a/${file} b/${file}`,
-        `--- a/${file}`,
-        `+++ b/${file}`,
-        // Context on both sides, the shape `--unified=3` actually emits: the
-        // hunk is NOT `newCount === 0`, so a rule keyed on pure-deletion
-        // hunks never sees it.
-        `@@ -${at},${what.length + 2} +${at},2 @@`,
-        ' ctx before',
-        ...what.map((w) => `-${w}`),
-        ' ctx after',
-        '',
-      ].join('\n');
-
     const delta = deletes('a.ts', 6, ['X1']);
     // Same file, and a range wide enough to cover — only the deletion differs.
     expect(contained(delta, secDeleting('a.ts', [1, 100], ['X1']))).toBe(true);

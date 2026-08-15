@@ -262,6 +262,34 @@ describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
           head,
         ).status,
       ).toBe(128);
+
+      // The `out` half, from real git. `resolveCommit` returns this value
+      // verbatim as the anchor's `diffBase`, so the trim is load-bearing: a
+      // refactor dropping it makes `resolved === fetchedSha` false and
+      // `merge-base --is-ancestor "<sha>\n" <head>` exit 128 → the anchor is
+      // called `capture-failed` and retried forever. On Windows, where
+      // rev-parse output carries CRLF, that is the DEFAULT shape, not a mutant.
+      expect(gitProbe('-C', repo, 'rev-parse', `${head}^{commit}`).out).toBe(
+        head,
+      );
+
+      // `status: null` — no exit code at all, which is what a spawn failure
+      // or a timeout kill leaves. It is the whole reason the probe returns a
+      // nullable status instead of a number: this is the retryable half of
+      // the split, and every fetch-pr test mocks `./lib/git.js`, so nothing
+      // else exercises the real catch. A mutant returning a number here reads
+      // a killed probe as the predicate's answer and permanently retires a
+      // valid anchor on a transient fault.
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = join(repo, 'no-such-bin');
+        expect(gitProbe('-C', repo, 'rev-parse', 'HEAD')).toEqual({
+          out: null,
+          status: null,
+        });
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

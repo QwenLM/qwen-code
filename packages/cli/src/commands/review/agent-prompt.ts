@@ -89,6 +89,7 @@ import {
   type RepositoryContext,
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
+import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
@@ -1339,11 +1340,24 @@ export function buildRoleBrief(
     const inc = report.incremental as
       | { effective?: unknown; upToDate?: unknown; diffBase?: unknown }
       | undefined;
+    // Shape-checked, not merely non-empty. This value is interpolated
+    // UNQUOTED into the fenced bash block below, which the agent runs with a
+    // 600s budget, so `typeof === 'string'` is not the guard it looks like:
+    // `abc123; touch /tmp/pwned` is a non-empty string and passed every
+    // conjunct. `SHA_RE` is the same predicate the anchor itself must satisfy,
+    // and it subsumes the emptiness check.
+    //
+    // This falls back where the sibling `host` guard above throws, and the
+    // difference is that a fallback exists here: the merge base is what every
+    // non-incremental round already welds, so a plan whose `diffBase` is not a
+    // sha costs a wider probe scope rather than the round. `host` has no such
+    // second-best — a wrong hostname reroutes the evidence fetch — so it
+    // refuses instead.
     const base =
       inc?.effective === true &&
       inc.upToDate !== true &&
       typeof inc.diffBase === 'string' &&
-      inc.diffBase !== ''
+      SHA_RE.test(inc.diffBase)
         ? inc.diffBase
         : report.mergeBaseSha;
     const pr = report.prNumber;

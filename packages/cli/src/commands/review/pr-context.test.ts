@@ -1305,6 +1305,14 @@ describe('renderLedgerSection', () => {
     // the CLI now owns — with no other test red.
     expect(anchored).toContain('pass it as `--since <sha>`');
     expect(anchored).toContain('never run git against an anchor yourself');
+    // The CONDITION, not just the instruction. Dropping the clause leaves the
+    // tail telling the orchestrator, unconditionally and in imperative tone,
+    // to re-run with a sha that may already have been deterministically
+    // refused — `not-an-ancestor`, `hunks-outside-pr-diff`, `partition-failed`
+    // — which the recovered-anchor flow says must NOT be retried.
+    expect(anchored).toContain(
+      "when Step 1's recovered-anchor check rules a re-run admissible",
+    );
     expect(
       renderLedgerSection({
         v: 1,
@@ -1322,6 +1330,19 @@ describe('renderLedgerSection', () => {
         findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
       }),
     ).not.toContain('--since');
+    // Every sentence of the tail, not just the ones carrying `--since`. The
+    // first one is written "reviewed-at sha" — hyphenated — so it matches
+    // neither the space-form phrase nor `--since`, and could be hoisted out
+    // of the ternary with every assertion above still green: a sha-less
+    // ledger would then render a dangling reference to a reviewed-at sha the
+    // side file deliberately withholds.
+    expect(
+      renderLedgerSection({
+        v: 1,
+        round: 2,
+        findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
+      }),
+    ).not.toContain('reviewed-at sha');
   });
 
   it('renders a work-list table that names the ruling owed per entry', () => {
