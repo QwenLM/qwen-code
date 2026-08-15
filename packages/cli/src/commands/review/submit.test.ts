@@ -1010,7 +1010,15 @@ describe('payload consistency — refuse before GitHub sees it', () => {
         ...REVIEW.state,
         planPath: verifiedPlan(),
         severityFloor: 'critical',
-        deferredSuggestions: ['a.ts:1 — tighten the retry backoff'],
+        deferredSuggestions: [
+          {
+            file: 'a.ts',
+            line: 1,
+            source: 'review',
+            severity: 'Suggestion',
+            title: 'tighten the retry backoff',
+          },
+        ],
       },
       comments: [],
     });
@@ -1019,7 +1027,9 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(ghMock).toHaveBeenCalledOnce();
     const sent = JSON.parse(ghMock.mock.calls[0][0] as string);
     expect(sent.body).toContain('Deferred under the convergence posture');
-    expect(sent.body).toContain('- `a.ts:1 — tighten the retry backoff`');
+    expect(sent.body).toContain(
+      '- `a.ts:1 — [review] tighten the retry backoff`',
+    );
   });
 
   it('rejects a line that is not a positive whole number', () => {

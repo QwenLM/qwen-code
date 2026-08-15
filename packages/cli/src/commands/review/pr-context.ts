@@ -697,6 +697,9 @@ export function recoverOwnLedger(
   login: string | null,
 ): { recovered: RecoveredLedger | null; sawOwnReview: boolean } {
   if (!login) return { recovered: null, sawOwnReview: false };
+  // GitHub logins are case-insensitive; a case mismatch here would turn "own
+  // review exists" into "proven absence" and license deleting the counter.
+  const me = login.toLowerCase();
   let sawOwnReview = false;
   let best: {
     at: string;
@@ -705,7 +708,7 @@ export function recoverOwnLedger(
     commitId: string | null;
   } | null = null;
   for (const r of reviews) {
-    if (r.user?.login !== login) continue;
+    if (r.user?.login?.toLowerCase() !== me) continue;
     // A PENDING review is an unsubmitted draft — the API serves the caller's
     // own drafts in this list — and a draft is not a previous round: a run
     // that crashed between creating and submitting one must not hand the
@@ -807,6 +810,29 @@ export function persistRecoveredLedger(
   };
   if (recovered) {
     try {
+      // Never lower the round: a walked review list can be STALE relative
+      // to a side file another run wrote (a concurrent lane, or a paginated
+      // fetch that came back short), and overwriting round 7 with round 2
+      // would drop the anchor sha and rewind the posture clock. Compare on
+      // `round`, `reviewId` as the tiebreak — both already in the file.
+      try {
+        const existing = JSON.parse(readFileSync(sideFilePath, 'utf8')) as {
+          round?: unknown;
+          reviewId?: unknown;
+        };
+        const exRound =
+          typeof existing.round === 'number' ? existing.round : -1;
+        const exId =
+          typeof existing.reviewId === 'number' ? existing.reviewId : -1;
+        if (
+          exRound > recovered.ledger.round ||
+          (exRound === recovered.ledger.round && exId > recovered.reviewId)
+        ) {
+          return;
+        }
+      } catch {
+        // No readable existing file: nothing to protect.
+      }
       mkdirSync(dirname(sideFilePath), { recursive: true });
       writeAtomic(
         JSON.stringify(

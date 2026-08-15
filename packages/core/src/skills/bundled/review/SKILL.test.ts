@@ -217,11 +217,14 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'an unverified claim does not become publishable by being deferred',
     );
-    // ...and the entry format carries the source tag, because the floor's
-    // deterministic exclusion reads it: dropping the tag from the format
-    // makes every [test] deferral demand a verifier that cannot exist
-    // (round-2 review finding).
-    expect(body).toContain('`file:line — [source] title`');
+    // ...and the entry is TYPED — one object per finding copied from the
+    // artifact's own fields, never a sentence: four review rounds of regex
+    // misses on the free-text form (kebab paths, the aggregate suffix, an
+    // en dash, a title-borne tag) closed only by carrying the fields.
+    expect(body).toContain(
+      "as a **TYPED entry, one object per finding, copied from the artifact's own fields**",
+    );
+    expect(body).toContain('never write that line into the state');
     // The age command is hostile-input-hardened in both operands (round-1
     // review findings: shell injection via unquoted PR-controlled filename;
     // glob pathspec matching a sibling file). A "simplify the command"

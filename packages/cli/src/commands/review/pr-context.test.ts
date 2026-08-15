@@ -1138,6 +1138,15 @@ describe('latestOwnLedger', () => {
     );
     expect(absent.recovered).toBeNull();
     expect(absent.sawOwnReview).toBe(false);
+    // Logins compare case-insensitively (GitHub's rule): a case mismatch
+    // would read "own review exists" as "proven absence" and delete the
+    // counter (self-audit finding).
+    const cased = recoverOwnLedger(
+      [review('Bot', '2026-01-01T00:00:00Z', marker(2))],
+      'bot',
+    );
+    expect(cased.sawOwnReview).toBe(true);
+    expect(cased.recovered?.ledger.round).toBe(2);
     // A PENDING draft is not "seen" either — it is not a submitted review.
     const draftOnly = recoverOwnLedger(
       [
@@ -1259,6 +1268,45 @@ describe('persistRecoveredLedger', () => {
       );
       persistRecoveredLedger(side, null, true);
       expect(existsSync(side)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never lowers the round — a stale walk cannot overwrite a newer side file', () => {
+    // Self-audit finding: a lower-round recovery (a concurrent lane's stale
+    // list, or a paginated fetch that came back short) overwrote round 7
+    // with round 2 and dropped the anchor sha. Compare on round, reviewId
+    // as the tiebreak.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const newer = { ...ledger, round: 7, sha: 'ffff1111', reviewId: 70 };
+      writeFileSync(side, JSON.stringify(newer));
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, round: 2 },
+          commitId: 'a'.repeat(40),
+          reviewId: 20,
+        },
+        false,
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
+      // Same round, older reviewId: also kept.
+      persistRecoveredLedger(
+        side,
+        { ledger: { ...ledger, round: 7 }, commitId: null, reviewId: 60 },
+        false,
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8'))).toEqual(newer);
+      // A genuinely newer recovery still writes.
+      persistRecoveredLedger(
+        side,
+        { ledger: { ...ledger, round: 8 }, commitId: null, reviewId: 80 },
+        false,
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).round).toBe(8);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

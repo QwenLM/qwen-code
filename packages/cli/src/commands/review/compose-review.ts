@@ -30,7 +30,13 @@ import {
   verificationGaps,
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
-import { compressSummary } from './findings.js';
+import {
+  compressSummary,
+  SEVERITIES,
+  SOURCES,
+  type Severity,
+  type Source,
+} from './findings.js';
 import {
   BUDGET_STOP_PHRASE,
   ROUND_CAP_PHRASE,
@@ -113,62 +119,157 @@ const MAX_DEFERRED_SUGGESTION_CHARS = 240;
 const DETERMINISTIC_TAG_RE = /\[(?:build|test|probe)\]/i;
 
 /**
- * The deferral entry's deterministic classification — SOURCE POSITION only.
- * The entry format is `file:line — [source] title`, and the tag must sit
- * immediately after the first em-dash: scanning the whole entry classified
- * `a.ts:1 — [review] mishandles [test] configuration files` deterministic
- * off its TITLE, which skipped the verifier floor for an unverified claim
- * (probe-confirmed fail-open). The position is the FIRST WHITESPACE-FLANKED
- * separator after the leading `file:line` token — anchored `^\S+\s+`, not a
- * negated-class walk: `[^—–-]*` stopped at the first hyphen INSIDE a
- * kebab-case path (this repo's enforced .ts convention), misclassifying
- * every `packages/.../my-file.ts — [test] …` entry non-deterministic and
- * demanding a verifier that cannot exist — the self-inflicted permanent
- * cap. Separator-agnostic like the Critical tripwire (hyphen/en/em — the
- * cheapest real spelling drift); the SKILL-prescribed aggregate suffix
- * `(+N locations)` between the anchor and the separator is tolerated
- * (round-8 probe: the prescribed aggregate line itself was misclassified);
- * entries are trimmed before the scan (a leading space defeated the `^`
- * anchor); and an entry with no whitespace-flanked separator matches
- * nothing: non-deterministic, the fail-closed direction.
+ * A deferred finding, TYPED. The convergence posture removes findings from
+ * posting through exactly one channel, and for four review rounds that
+ * channel was free text re-parsed for provenance it did not carry: a
+ * separator regex classified deterministic source, a marker regex caught
+ * mis-routed Criticals, and every round's probe found the spelling each
+ * regex excluded — kebab paths, the SKILL's own aggregate suffix, an en
+ * dash, `(Critical)`, a title-borne `[test]`. The class closes only by
+ * carrying the fields: the model already holds `file`/`line`/`source`/
+ * `severity`/`title` for every finding in the artifact it wrote in Step 6,
+ * so the entry carries them, `deterministic` derives from `source`, the
+ * relocation from `severity`, and the rendered `file:line — [source] title`
+ * is formatting — nothing downstream ever parses it back.
+ *
+ * Validated at the boundary like every other model-written state field:
+ * a present entry of the wrong shape is refused (a NaN count is refused
+ * the same way), because a channel that un-posts findings must not be
+ * guessed at.
  */
-const DETERMINISTIC_DEFERRAL_RE =
-  /^\S+(?:\s+\([^)]*\))?\s+[—–-]\s*\[(?:build|test|probe)\]/i;
+export interface DeferredEntry {
+  file: string;
+  line?: number;
+  /** The finding's source tag — decides deterministic (`build`/`test`/`probe`). */
+  source: Source;
+  /**
+   * The finding's severity. Only `Suggestion` defers; a `Critical` here is
+   * RELOCATED into the body Criticals (a Critical is never deferred), and a
+   * `Nice to have` is refused (terminal-only, never publishable).
+   */
+  severity: Severity;
+  /** One-line claim, rendered inside a code span; a location count may be appended. */
+  title: string;
+  /** For a pattern aggregate: how many further locations the finding covers. */
+  locations?: number;
+}
+
+const DETERMINISTIC_SOURCES: ReadonlySet<Source> = new Set([
+  'build',
+  'test',
+  'probe',
+]);
+
+/** Render one entry as the human line — formatting only, never re-parsed. */
+export function renderDeferredEntry(entry: DeferredEntry): string {
+  const loc =
+    entry.line !== undefined ? `${entry.file}:${entry.line}` : entry.file;
+  const agg =
+    entry.locations && entry.locations > 0
+      ? ` (+${entry.locations} locations)`
+      : '';
+  return `${loc}${agg} — [${entry.source}] ${entry.title}`;
+}
+
+function toDeferredEntries(value: unknown): DeferredEntry[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      `compose-review: deferredSuggestions must be an array of {file, line?, source, severity, title, locations?} entries, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value.map((raw, i) => {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}] must be an object {file, line?, source, severity, title, locations?} — a free-text entry is not accepted, the channel is typed`,
+      );
+    }
+    const o = raw as Record<string, unknown>;
+    const file = typeof o['file'] === 'string' ? o['file'].trim() : '';
+    const title =
+      typeof o['title'] === 'string'
+        ? stripReviewFooter(o['title']).trim()
+        : '';
+    const source = o['source'];
+    const severity = o['severity'];
+    const line = o['line'];
+    const locations = o['locations'];
+    if (file === '' || title === '') {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}] needs a non-empty file and title`,
+      );
+    }
+    if (typeof source !== 'string' || !SOURCES.includes(source as Source)) {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}].source must be one of ${SOURCES.join('|')}, got ${JSON.stringify(source)}`,
+      );
+    }
+    if (
+      typeof severity !== 'string' ||
+      !SEVERITIES.includes(severity as Severity)
+    ) {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}].severity must be one of ${SEVERITIES.join('|')}, got ${JSON.stringify(severity)}`,
+      );
+    }
+    if (severity === 'Nice to have') {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}] is a Nice to have — terminal-only findings are never deferred to the PR; drop it from the state`,
+      );
+    }
+    if (
+      line !== undefined &&
+      line !== null &&
+      (typeof line !== 'number' || !Number.isInteger(line) || line < 1)
+    ) {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}].line must be a positive integer when present`,
+      );
+    }
+    if (
+      locations !== undefined &&
+      locations !== null &&
+      (typeof locations !== 'number' ||
+        !Number.isInteger(locations) ||
+        locations < 0)
+    ) {
+      throw new TypeError(
+        `compose-review: deferredSuggestions[${i}].locations must be a non-negative integer when present`,
+      );
+    }
+    return {
+      file,
+      ...(typeof line === 'number' ? { line } : {}),
+      source: source as Source,
+      severity: severity as Severity,
+      title,
+      ...(typeof locations === 'number' && locations > 0 ? { locations } : {}),
+    };
+  });
+}
 
 /**
- * The deferral channel's Critical filter, shared by the body composer and
- * the ledger marker: entries carrying a Critical marker are RELOCATED into
- * the body Criticals (annotated), the rest defer. One split, two readers —
- * a relocated blocker must ride the machine-ledger work list too, or the
- * next round's ruling table loses its id for a round ("the findings always
- * ride" includes the ones the model mis-routed).
+ * The deferral channel's split, shared by the body composer and the ledger
+ * marker: `Critical` entries are RELOCATED into the body Criticals (a
+ * Critical is never deferred — it counts toward `C`, blocks, and rides the
+ * machine ledger), the rest defer. One split, two readers, no parsing.
  */
-const CRITICAL_DEFERRAL_RE = /\[critical\]|(?<![\w-])critical\s*:/i;
 function splitDeferralChannel(raw: unknown): {
-  deferred: string[];
+  deferred: DeferredEntry[];
   relocated: string[];
-  /**
-   * How many relocated entries are DETERMINISTIC by the source-position
-   * classifier — the body composer uses this so a relocated Critical is
-   * classified by the same position-anchored rule as a deferred one, never
-   * by the whole-entry tag scan the model's own body Criticals get: a
-   * title-borne `[test]` in a relocated unverified claim exempted it from
-   * the floor and posted it as a blocker (round-8 probe).
-   */
+  /** Relocated entries whose `source` is deterministic — no verifier owed. */
   relocatedDeterministic: number;
 } {
-  const entries = toStringList(raw, 'deferredSuggestions')
-    .map((entry) => stripReviewFooter(entry).trim())
-    .filter((entry) => entry !== '');
-  const relocatedRaw = entries.filter((x) => CRITICAL_DEFERRAL_RE.test(x));
+  const entries = toDeferredEntries(raw);
+  const relocatedEntries = entries.filter((e) => e.severity === 'Critical');
   return {
-    deferred: entries.filter((x) => !CRITICAL_DEFERRAL_RE.test(x)),
-    relocated: relocatedRaw.map(
-      (stray) =>
-        `${stray} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
+    deferred: entries.filter((e) => e.severity !== 'Critical'),
+    relocated: relocatedEntries.map(
+      (e) =>
+        `${renderDeferredEntry(e)} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
     ),
-    relocatedDeterministic: relocatedRaw.filter((x) =>
-      DETERMINISTIC_DEFERRAL_RE.test(x),
+    relocatedDeterministic: relocatedEntries.filter((e) =>
+      DETERMINISTIC_SOURCES.has(e.source),
     ).length,
   };
 }
@@ -205,23 +306,20 @@ export interface ComposeReviewInput {
   /** Suggestions discarded as unanchorable (offline validation or 422). */
   suggestionsDiscarded?: number;
   /**
-   * Non-Critical findings the convergence posture deferred — Step 6's
-   * round-aware posting discipline (from round 6, or under an explicit
-   * `--severity-floor critical`, and the rounds-2-5 code-age rule). One line
-   * each, source tag included (`file:line — [source] title` — the
-   * verifier-delivery floor excludes deterministic `[build]`/`[test]`/
-   * `[probe]` entries by that tag, exactly as it does body Criticals), and
-   * only **high-confidence Suggestions that
-   * would otherwise post**: low-confidence and Nice-to-have findings stay
-   * terminal-only as ever — deferral publishes, and must not publish what
-   * the posting path never would. They are neither drafted inline nor counted
-   * toward `S` — the whole point is that a deferral must not regenerate a
-   * review round — but they must not vanish either: the body renders them as
-   * a disclosed, NON-capping list, so the record survives on the PR while
-   * the round stays convergent. A deferral never withholds the ledger
-   * anchor: it is a posting decision, not unreviewed scope.
+   * The findings the convergence posture deferred — Step 6's round-aware
+   * posting discipline (from round 6, or under an explicit `--severity-floor
+   * critical`, and the rounds-2-5 code-age rule). TYPED entries — see
+   * `DeferredEntry`: only otherwise-postable high-confidence Suggestions
+   * belong here (a `Critical` is relocated into the body Criticals, a
+   * `Nice to have` is refused; low-confidence findings stay terminal-only and
+   * never enter the state). They are neither drafted inline nor counted
+   * toward `S` — a deferral must not regenerate a review round — but they
+   * must not vanish either: the body renders them as a disclosed,
+   * NON-capping list, so the record survives on the PR while the round
+   * stays convergent. A deferral never withholds the ledger anchor: it is a
+   * posting decision, not unreviewed scope.
    */
-  deferredSuggestions?: string[];
+  deferredSuggestions?: DeferredEntry[];
   /**
    * The UNRESOLVED posting floor from the Step 1 verdict (`critical`,
    * `suggestion`, or the literal `auto`) — never the level `auto` resolved
@@ -1167,7 +1265,7 @@ function composeReviewBody(
         criticalsInline +
         suggestionsInline +
         nonDeterministicBodyCriticals +
-        deferredSuggestions.filter((x) => !DETERMINISTIC_DEFERRAL_RE.test(x))
+        deferredSuggestions.filter((e) => !DETERMINISTIC_SOURCES.has(e.source))
           .length;
       const verification = verificationGaps(
         input.planPath,
@@ -1825,6 +1923,7 @@ function composeReviewBody(
   // spare; the findings artifact keeps every entry whole.
   const deferredShown = deferredSuggestions
     .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
+    .map(renderDeferredEntry)
     .map((entry) => {
       const collapsed = entry
         .split('\n')
