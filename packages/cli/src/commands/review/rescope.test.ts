@@ -164,8 +164,10 @@ describe('rescope', () => {
       { path: CALLER, importsChanged: [CHANGED] },
     ]);
     expect(plan.incremental.contextFileCount).toBe(1);
+    // ABSOLUTE: a later step reaching for the superseded diff need not
+    // share this command's cwd.
     expect(plan.incremental.fullDiffPath).toBe(
-      '.qwen/tmp/qwen-review-pr-7-diff.txt',
+      join(repo, '.qwen/tmp/qwen-review-pr-7-diff.txt'),
     );
     expect(plan['diffPathAbsolute']).toBe(
       join(repo, '.qwen/tmp/qwen-review-pr-7-diff-incremental.txt'),
@@ -184,9 +186,9 @@ describe('rescope', () => {
     expect(diff).not.toContain('bystander');
     // The superseded full-range diff file stays intact for `fullDiffPath`
     // readers — a successful rescope must not consume what it supersedes.
-    expect(
-      readFileSync(join(repo, plan.incremental.fullDiffPath!), 'utf8'),
-    ).toContain('bystander');
+    expect(readFileSync(plan.incremental.fullDiffPath!, 'utf8')).toContain(
+      'bystander',
+    );
 
     // The plan's chunks/files were rebuilt from the composite by the shared
     // builders — the same shapes every downstream reader already parses.
@@ -543,5 +545,65 @@ describe('rescope — round-2 findings', () => {
       maxChunkLines: 400,
     });
     expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+  });
+});
+
+describe('rescope — round-3 findings', () => {
+  it('a rename-before-anchor then delete refuses rather than losing the lineage', () => {
+    // parseDiff labels a deletion with its LEFT-side path, so the PR diff
+    // calls this file `old.ts` while the interdiff calls it `new.ts`; the
+    // section carrying its unreviewed hunks matches no scoped name. Dropping
+    // it would narrow BELOW the un-widened interdiff floor.
+    seedHistory();
+    write('packages/app/src/old.ts', 'export const o = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'seed old.ts');
+    const base2 = git('rev-parse', 'HEAD');
+    git('mv', 'packages/app/src/old.ts', 'packages/app/src/new.ts');
+    git('commit', '-q', '--no-verify', '-m', 'round 1 renames it');
+    const anchor2 = git('rev-parse', 'HEAD');
+    git('rm', '-q', 'packages/app/src/new.ts');
+    git('commit', '-q', '--no-verify', '-m', 'fix round deletes it');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base2, head2);
+    const before = readFileSync(planPath, 'utf8');
+    run(planPath, anchor2);
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+
+  it('exit 3 when every delta file was restored to its merge-base state', () => {
+    const { base, head } = seedHistory();
+    // Anchor at the LAST reviewed head, then restore the ONE file this round
+    // touches (the bystander, which nobody imports, so the widening adds
+    // nothing): the interdiff is non-empty, yet no scoped file carries a
+    // section of the PR's own diff. The rest of the PR still does — this is
+    // not the empty-diff case.
+    const anchor = head;
+    write(BYSTANDER, 'export const b = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'restore the bystander');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    const before = readFileSync(planPath, 'utf8');
+    run(planPath, anchor);
+    expect(process.exitCode).toBe(RESCOPE_EXIT_NOTHING_NEW);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+
+  it('the unwritable --out refusal leaves the input plan byte-identical', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const before = readFileSync(planPath, 'utf8');
+    const blocked = join(repo, 'blocked-2');
+    writeFileSync(blocked, 'a plain file where a directory must go');
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      out: join(blocked, 'nested', 'plan.json'),
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
   });
 });

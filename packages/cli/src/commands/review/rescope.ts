@@ -28,9 +28,11 @@
 // Failure is directional ON PURPOSE. Exit 2 means "could not scope" — the
 // caller falls back to the FULL diff, never to a skip: the plan file is left
 // untouched, so the fetched full-range plan simply remains the plan of record.
-// Exit 3 means "the interdiff is empty" — the anchor state and the head state
-// are identical trees, the same outcome as the same-SHA shortcut. Only exit 0
-// rewrites the plan, atomically.
+// Exit 3 means "nothing new to review": the interdiff is empty (the anchor's
+// tree and the head's are identical, the same outcome as the same-SHA
+// shortcut), or every file it named turned out to be restored to its
+// merge-base state and so carries no section of the PR's own diff. Only
+// exit 0 rewrites the plan, atomically.
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -337,6 +339,45 @@ function runRescope(args: RescopeArgs): void {
   const sections = parseDiff(origDiff.toString('utf8')).files.filter((f) =>
     scoped.has(f.path),
   );
+  const composite = sliceDiffByLines(
+    origDiff,
+    sections.map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
+  );
+  // Reconcile the reported delta with what the composite actually holds: a
+  // file restored to its merge-base state is in the interdiff but has no
+  // hunks here, and a plan naming delta files with zero hunks sends agents
+  // hunting for scope that does not exist. (The WIDENING above still used
+  // the full changed set — a restoration still moves its importers' seams.)
+  const sectionPaths = new Set(sections.map((f) => f.path));
+  const unmatched = deltaFiles.filter((p) => !sectionPaths.has(p));
+  // A delta file with no section of the PR's own diff is one of two things,
+  // and only one of them is safe to drop. A RESTORATION (the fix round put
+  // the file back to its merge-base content) genuinely has nothing left to
+  // review. A LINEAGE MISMATCH does not: a file renamed before the anchor
+  // and deleted in the fix round is `new.ts` in the interdiff but `old.ts`
+  // in the PR diff (parseDiff labels a deletion with its left-side path),
+  // so the section carrying its unreviewed hunks is scoped out under a name
+  // nothing matched. Distinguishing them is one cheap probe per unmatched
+  // file: identical blobs on both sides of the PR range means restored.
+  const restored = (p: string): boolean => {
+    const at = (ref: string) =>
+      gitOpt('-C', worktreePath, 'rev-parse', `${ref}:${p}`);
+    const b = at(mergeBaseSha);
+    const h = at(fetchedSha);
+    return b !== null && h !== null && b === h;
+  };
+  const lineageLost = unmatched.filter((p) => !restored(p));
+  if (lineageLost.length > 0) {
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      `rescope: ${lineageLost.length} file(s) changed since ${args.anchor} ` +
+        `carry no section of the PR's own diff under that name ` +
+        `(${lineageLost.slice(0, 3).join(', ')}${lineageLost.length > 3 ? ', …' : ''}) ` +
+        `— a rename or lineage change the scoped slice cannot follow. ` +
+        `Continue with the full-range plan.`,
+    );
+    return;
+  }
   if (sections.length === 0) {
     // Changed since the anchor, but present in no section of the PR's own
     // diff — every delta file was restored to its merge-base state. There
@@ -349,16 +390,6 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
-  const composite = sliceDiffByLines(
-    origDiff,
-    sections.map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
-  );
-  // Reconcile the reported delta with what the composite actually holds: a
-  // file restored to its merge-base state is in the interdiff but has no
-  // hunks here, and a plan naming delta files with zero hunks sends agents
-  // hunting for scope that does not exist. (The WIDENING above still used
-  // the full changed set — a restoration still moves its importers' seams.)
-  const sectionPaths = new Set(sections.map((f) => f.path));
   const deltaReported = deltaFiles.filter((p) => sectionPaths.has(p));
   let diffPlan;
   try {
@@ -385,7 +416,9 @@ function runRescope(args: RescopeArgs): void {
       importsChanged,
     })),
     contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
-    fullDiffPath: typeof plan.diffPath === 'string' ? plan.diffPath : null,
+    // Absolute: the field's whole job is to let a later step reach the
+    // superseded diff, and that step need not share this command's cwd.
+    fullDiffPath: origDiffPath,
   };
 
   // The rescoped plan is the fetched plan with its diff swapped: identity and

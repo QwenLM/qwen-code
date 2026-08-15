@@ -183,6 +183,15 @@ describe('resolveSpecifier', () => {
     ).toBeNull();
   });
 
+  it('resolves a specifier that already names its source extension', () => {
+    // The literal-form candidate: `./a.ts` from a repo that imports source
+    // extensions directly (deno-style, or a `.json`/`.css` asset import).
+    expect(
+      resolveSpecifier('a.ts', './data.json', new Set(['data.json'])),
+    ).toBe('data.json');
+    expect(resolveSpecifier('a.ts', './b.ts', new Set(['b.ts']))).toBe('b.ts');
+  });
+
   it('returns null outside membership, above the root, and for unknown packages', () => {
     expect(
       resolveSpecifier('packages/cli/src/z.ts', './missing', files),
