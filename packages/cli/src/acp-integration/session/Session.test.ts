@@ -33405,6 +33405,49 @@ describe('Session', () => {
       });
     });
 
+    it('forwards enableCacheSharing as enabled when unset (schema default)', async () => {
+      // Regression for #9230: the schema declares `default: true`, but
+      // mergeSettings doesn't apply schema defaults — an unset value must be
+      // forwarded as enabled so the cache-aware forked path actually runs.
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {};
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(generateMock).toHaveBeenCalledWith(
+          mockConfig,
+          expect.any(Array),
+          expect.any(AbortSignal),
+          expect.objectContaining({ enableCacheSharing: true }),
+        );
+      });
+    });
+
+    it('forwards enableCacheSharing as disabled only on explicit false', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {
+        enableCacheSharing: false,
+      };
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(generateMock).toHaveBeenCalledWith(
+          mockConfig,
+          expect.any(Array),
+          expect.any(AbortSignal),
+          expect.objectContaining({ enableCacheSharing: false }),
+        );
+      });
+    });
+
     it('does not emit in PLAN approval mode', async () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       generateMock.mockResolvedValue({ suggestion: 'something' });

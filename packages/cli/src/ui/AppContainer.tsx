@@ -3153,7 +3153,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // causes transient heap peaks that trigger OOM (#4624).
       const conversationHistory = geminiClient.getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+        // Schema default is `true`, but `mergeSettings` doesn't apply schema
+        // defaults — treat unset as enabled; only an explicit `false` opts
+        // out (same convention as `followupSuggestionsEnabled` above).
+        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {
           if (ac.signal.aborted) return;

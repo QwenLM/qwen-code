@@ -3945,8 +3945,11 @@ export class Session implements SessionContext {
           conversationHistory,
           ac.signal,
           {
+            // Schema default is `true`, but `mergeSettings` doesn't apply
+            // schema defaults — treat unset as enabled; only an explicit
+            // `false` opts out.
             enableCacheSharing:
-              this.settings.merged.ui?.enableCacheSharing === true,
+              this.settings.merged.ui?.enableCacheSharing !== false,
           },
         );
         if (ac.signal.aborted) return;
