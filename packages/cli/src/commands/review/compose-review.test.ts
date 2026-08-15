@@ -17,9 +17,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
-import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
+import {
+  budgetStopEntry,
+  writeBudgetStop,
+  writeRoundCapStop,
+} from './lib/deadline.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
-import { parseLedger } from './lib/ledger.js';
+import { LEDGER_MAX_ROUND, parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
@@ -4456,6 +4460,93 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(r.scopeUnproven).toBe(false);
     expect(r.dimensionGapsAreDepthOnly).toBe(true);
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('classifies a budget stop the same whether or not the entry is relayed', () => {
+    // The stderr instruction MANDATES relaying the stop entry, so a rule that
+    // reads only the prose withheld the anchor from every compliant run and
+    // carried it for every non-compliant one — identical machine state,
+    // opposite outcomes by relay. The marker is the state; the entry is its
+    // echo; a truncated reverse audit is DEPTH over lines the receipts
+    // already prove read.
+    const composeWith = (dims: string[]): ReturnType<typeof composeReview> => {
+      const planPath = coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      });
+      writeBudgetStop(
+        planPath,
+        { remainingSeconds: 10, reserveSeconds: 300, expectedRoundSeconds: 60 },
+        3,
+      );
+      return composeReview({
+        planPath,
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+        unreviewedDimensions: dims,
+      });
+    };
+
+    // Compliant: the canonical entry is relayed. The anchor rides.
+    const relayed = composeWith([budgetStopEntry(3)]);
+    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(relayed.body)?.sha).toBe('deadbeef00112233');
+
+    // Non-compliant: the entry is dropped. Same machine state, same anchor.
+    const dropped = composeWith([]);
+    expect(dropped.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(dropped.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it('gives stop-shaped PROSE no exemption when no marker backs it', () => {
+    // Marker-anchored on purpose: without the machine state, an entry that
+    // merely looks like the stop must not buy an anchor — and a lens entry
+    // that mentions the phrase in its reason withholds either way (its head
+    // names the lens, not the reverse audit).
+    const r = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: [budgetStopEntry(3)],
+    });
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it('keeps the marker round-trip whole AT the round cap', () => {
+    // The stamp is capped because the round is the id space: an uncapped
+    // prevRound + 1 met the serializer's round clamp at exactly the cap and
+    // produced a marker whose own parser dropped every finding — invisibly,
+    // with the anchor still riding.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: LEDGER_MAX_ROUND, findings: [] }),
+    );
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
+    });
+    const ledger = parseLedger(r.body);
+    expect(ledger?.round).toBe(LEDGER_MAX_ROUND);
+    // The finding survives its own round trip — id round == marker round.
+    expect(ledger?.findings).toHaveLength(1);
+    expect(ledger?.findings[0]?.id).toBe(`R${LEDGER_MAX_ROUND}-1`);
   });
 
   it("sees a debt the deterministic gates push in AFTER the caller's entries", () => {

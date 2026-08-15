@@ -241,33 +241,49 @@ function resumeNpmToolchain(
 
   const ranSet = new Set(ranDirs);
   const prevScope = previous.testScope;
-  const testScope: TestScope | undefined = prevScope
-    ? {
-        workspaces: [...prevScope.workspaces, ...ranDirs],
-        ...(stillPending.length > 0 ? { notRun: stillPending } : {}),
-        ...(prevScope.caveat ? { caveat: prevScope.caveat } : {}),
-      }
-    : undefined;
   /** Suites this call left provisional: killed again on a shortened deadline,
    *  or never reached. They are what makes a further continuation worth it. */
   const stillClamped = mergedTest
     .filter((t) => t.clamped)
     .map((t) => t.command);
-  const left = stillPending.length + unattemptedRetries.length;
-  if (testScope) {
-    // The caveat the previous call wrote names suites this one has now run;
-    // leaving it would tell the reader the review skipped work it did.
-    const resumedNote =
-      left > 0
-        ? `a --resume call ran ${ranDirs.length + replaced.size} more command(s); ` +
-          `${left} still to run: ${[...stillPending, ...unattemptedRetries].join(', ')}`
-        : `a --resume call ran the remaining ${ranDirs.length + replaced.size} command(s)`;
-    testScope.caveat = testScope.caveat
-      ? `${testScope.caveat}; ${resumedNote}`
-      : resumedNote;
-    testScope.workspaces = testScope.workspaces.filter(
-      (d) => !stillPending.includes(d) || ranSet.has(d),
-    );
+  let testScope: TestScope | undefined;
+  if (prevScope) {
+    // The caveat is REWRITTEN, not appended to, for the same staleness reason
+    // the note is: the previous call's budget-stop clause names suites as
+    // "still to run" that this call just ran, and the dimension brief tells
+    // the agent "caveat present ⇒ scope may be incomplete — quote it". So the
+    // superseded segments — the budget-stop clauses and any earlier resume
+    // clause — are retired, LIVE limitations (a negated-workspace caveat, an
+    // ungraphable closure) survive verbatim, a fresh clause is written only
+    // while work actually remains, and a chain that finishes with no live
+    // limitation ends with the caveat ABSENT, which is the field's own
+    // contract for "the run covers everything the diff can break".
+    const SUPERSEDED_SEGMENT_RE =
+      /whole-call budget|the build phase reached|a --resume call/;
+    const liveSegments = (prevScope.caveat ?? '')
+      .split('; ')
+      .filter((seg) => seg.trim() !== '' && !SUPERSEDED_SEGMENT_RE.test(seg));
+    const outstanding = [...stillPending, ...unattemptedRetries];
+    if (outstanding.length > 0) {
+      liveSegments.push(
+        `a --resume call ran ${ranDirs.length + replaced.size} more ` +
+          `command(s); ${outstanding.length} still to run: ` +
+          outstanding.join(', '),
+      );
+    } else if (stillClamped.length > 0) {
+      liveSegments.push(
+        `a --resume call left ${stillClamped.length} command(s) provisional ` +
+          `(killed on a budget-shortened deadline): ${stillClamped.join(', ')}`,
+      );
+    }
+    const caveat = liveSegments.join('; ');
+    testScope = {
+      workspaces: [...prevScope.workspaces, ...ranDirs].filter(
+        (d) => !stillPending.includes(d) || ranSet.has(d),
+      ),
+      ...(stillPending.length > 0 ? { notRun: stillPending } : {}),
+      ...(caveat ? { caveat } : {}),
+    };
   }
 
   const timedOut = [

@@ -11,12 +11,14 @@ import {
   writeFileSync,
   readFileSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   run,
   runBuildTest,
+  type BuildTestReport,
   trimOutput,
   unresolvedWorkspaceDeps,
   buildRunEnv,
@@ -205,11 +207,13 @@ describe('runBuildTest', () => {
       timeout: 5,
       install: false,
     });
+    const st = statSync(root);
     expect(rep).toEqual({
       toolchain: 'unsupported',
       // The identity a future --resume verifies rides every adapter-routed
-      // report; this plan carries no sha, so only the root does.
-      run: { root },
+      // report; this plan carries no sha, so the root and the tree
+      // fingerprint do.
+      run: { root, tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) } },
       affected: [],
       buildSet: [],
       widenedWith: [],
@@ -2751,8 +2755,16 @@ describe('runBuildTest', () => {
       }),
     );
     // And the report runBuildTest returns is the adapter's report with
-    // exactly one addition: the run identity a future --resume verifies.
-    expect(rep).toEqual({ ...runSpy.mock.results[0]?.value, run: { root } });
+    // exactly one addition: the run identity a future --resume verifies —
+    // the root, and the tree-instance fingerprint of the dir it stat'd.
+    const st = statSync(root);
+    expect(rep).toEqual({
+      ...runSpy.mock.results[0]?.value,
+      run: {
+        root,
+        tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) },
+      },
+    });
     runSpy.mockRestore();
   });
 
@@ -2776,7 +2788,6 @@ describe('runBuildTest', () => {
         receivedExec = args.exec;
         return {
           toolchain: 'npm',
-          run: { root },
           affected: [],
           buildSet: [],
           widenedWith: [],
@@ -2878,6 +2889,17 @@ describe('runBuildTest', () => {
     // the builds + `packages/core` (106s) + `packages/cli` (401s, measured) is
     // already past a 570s budget, before four more suites. One call cannot
     // finish; a second one can carry on where it stopped.
+    /** The instance fingerprint the identity check verifies — of a live dir. */
+    const treeOf = (dir: string): { ino: number; birth: number } => {
+      const st = statSync(dir);
+      return { ino: st.ino, birth: Math.round(st.birthtimeMs) };
+    };
+    /** A report `run` stamp matching THIS test's tree, as a fresh call writes. */
+    const runId = (dir: string = root): object => ({
+      root: dir,
+      tree: treeOf(dir),
+    });
+
     const threePackages = (): void => {
       writeFileSync(
         join(root, 'package.json'),
@@ -2915,7 +2937,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a', 'packages/b'],
           widenedWith: [],
@@ -2991,7 +3013,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           widenedWith: [],
@@ -3041,7 +3063,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           notBuilt: ['packages/a'],
@@ -3114,7 +3136,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],
@@ -3173,7 +3195,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           widenedWith: [],
@@ -3235,7 +3257,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],
@@ -3288,6 +3310,75 @@ describe('runBuildTest', () => {
       expect(rep.note).toContain('npm test --workspace="packages/a"');
     });
 
+    it('retires the superseded budget-stop caveat and keeps live limitations', () => {
+      // The caveat is rewritten like the note, and for the same reason: the
+      // previous call's "still to run — not run: X" names suites this call
+      // just ran, and the dimension brief tells the agent to quote a present
+      // caveat as possibly-incomplete scope. A live limitation — a
+      // negated-workspace disclosure — is not superseded by any resume and
+      // must survive verbatim; a chain that finishes with none ends with the
+      // caveat ABSENT, the field's own contract for full coverage.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const liveSegment =
+        '10 changed file(s) sit in negated workspaces (e.g. pkg/x) — excluded';
+      const report = (caveat: string): object => ({
+        toolchain: 'npm',
+        run: runId(),
+        affected: ['packages/core'],
+        buildSet: ['packages/core', 'packages/a', 'packages/b'],
+        widenedWith: [],
+        install: null,
+        build: [okResult('npm run build --workspace="packages/core"')],
+        test: [okResult('npm test --workspace="packages/core"')],
+        ok: true,
+        timedOut: [],
+        note: 'the whole-call budget was spent with 2 suite(s) still to run',
+        testScope: {
+          workspaces: ['packages/core'],
+          notRun: ['packages/a', 'packages/b'],
+          caveat,
+        },
+      });
+      const resume = (): BuildTestReport =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        });
+
+      writeFileSync(
+        outPath,
+        JSON.stringify(
+          report(
+            `${liveSegment}; the whole-call budget (61s) was spent with 2 ` +
+              `suite(s) still to run — not run: packages/a, packages/b`,
+          ),
+        ),
+      );
+      const kept = resume();
+      expect(kept.testScope?.caveat).toBe(liveSegment);
+      expect(kept.testScope?.caveat).not.toContain('still to run');
+
+      writeFileSync(
+        outPath,
+        JSON.stringify(
+          report(
+            'the whole-call budget (61s) was spent with 2 suite(s) still ' +
+              'to run — not run: packages/a, packages/b',
+          ),
+        ),
+      );
+      const clean = resume();
+      expect(clean.testScope?.caveat).toBeUndefined();
+      expect(clean.testScope?.notRun).toBeUndefined();
+      expect(clean.note).toContain('Every suite in scope has now run');
+    });
+
     it('carries the install-failure framing through the merge', () => {
       // The framing exists because the structured field alone was judged
       // insufficient: the brief's standing rule is to correlate failures with
@@ -3299,7 +3390,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           widenedWith: [],
@@ -3413,9 +3504,22 @@ describe('runBuildTest', () => {
       // run's.
       writeFileSync(
         outPath,
-        JSON.stringify({ ...base, run: { root, sha: 'aaaa1111' } }),
+        JSON.stringify({ ...base, run: { ...runId(), sha: 'aaaa1111' } }),
       );
       expect(attempt).toThrow(/certify another round's results/);
+
+      // Same path, same sha, RECREATED tree — fetch-pr rebuilds the worktree
+      // every round, so this is what every cross-round stale report looks
+      // like: identical strings, a different instance, and none of the
+      // installed or compiled state the resume path skips re-creating.
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          ...base,
+          run: { root, tree: { ino: 12345, birth: 1 } },
+        }),
+      );
+      expect(attempt).toThrow(/PREVIOUS instance/);
     });
 
     it('stamps the run identity a future resume will verify', () => {
@@ -3440,7 +3544,11 @@ describe('runBuildTest', () => {
         install: false,
         exec: okResult,
       });
-      expect(rep.run).toEqual({ root, sha: 'feedbeef2222' });
+      expect(rep.run).toEqual({
+        root,
+        sha: 'feedbeef2222',
+        tree: treeOf(root),
+      });
       // And the round trip: write it, resume it, no refusal.
       writeFileSync(outPath, JSON.stringify(rep));
       const resumed = runBuildTest({
@@ -3452,7 +3560,11 @@ describe('runBuildTest', () => {
         resume: true,
         exec: okResult,
       });
-      expect(resumed.run).toEqual({ root, sha: 'feedbeef2222' });
+      expect(resumed.run).toEqual({
+        root,
+        sha: 'feedbeef2222',
+        tree: treeOf(root),
+      });
     });
 
     it('refuses a corrupt report with a named fix, never a stack trace', () => {
@@ -3536,7 +3648,7 @@ describe('runBuildTest', () => {
         const outPath = join(root, 'report.json');
         const inFlight = {
           toolchain: 'npm',
-          run: { root: bare },
+          run: runId(bare),
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],
@@ -3575,7 +3687,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'unsupported',
-          run: { root },
+          run: runId(),
           affected: [],
           buildSet: [],
           widenedWith: [],
@@ -3611,7 +3723,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
-          run: { root },
+          run: runId(),
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],

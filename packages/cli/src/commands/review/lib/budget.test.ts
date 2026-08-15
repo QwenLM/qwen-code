@@ -425,6 +425,12 @@ describe('budgetGapDisclosures — the one parser of the disclosure format', () 
       // A real gap that merely opens with the token's characters.
       'Budget gap: 无法验证 Windows 矩阵的集成测试',
       'Budget gap: 无障碍检查未运行',
+      // "did not check" — a live gap the bare-noun token shape swallowed: the
+      // brief mandates a Budget gap line ONLY when a check was cut short, so a
+      // compliant agent writing these is asserting one.
+      'Budget gap: 没有检查',
+      'Budget gap: 无检查',
+      'Budget gap: 暂无检查',
     ]) {
       expect(budgetGapDisclosures(line)).toHaveLength(1);
     }

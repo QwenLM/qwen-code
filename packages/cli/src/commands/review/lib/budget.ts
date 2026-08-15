@@ -466,7 +466,10 @@ const COMPLETION_TAIL = `(?:\\s+${BUDGET_QUALIFIED})?`;
  * is only a token when what follows it is punctuation, whitespace, a
  * separator, or the end of the text.
  */
-const ZH_TOKEN = '(?:无|没有|不适用|暂无)(?:缺口|跳过的?检查|检查)?';
+// No bare `检查` in the noun group: `没有检查` reads "did not check" — a live
+// gap — and the module's rule for ambiguity is to KEEP. `无缺口` and
+// `没有跳过的检查` are the documented placeholder nouns and still drop.
+const ZH_TOKEN = '(?:无|没有|不适用|暂无)(?:缺口|跳过的?检查)?';
 /** One separator, in the forms a model actually writes (double em-dash too). */
 const ZH_SEPARATOR = '[-—–]{1,2}|[、,，:：]';
 /** "every planned check", spelled out — no free characters anywhere. */

@@ -39,7 +39,7 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -163,8 +163,18 @@ export interface BuildTestReport {
    * keep the old commit's passing entries on the new round's tree —
    * certifying old-commit passes for the new commit — and skip the install
    * the fresh worktree never had.
+   *
+   * `tree` is the part path and sha cannot supply: `fetch-pr` DESTROYS and
+   * recreates the worktree every round, at the same path, for the same sha —
+   * so a stale report from an interrupted round matches both and is admitted
+   * onto a bare tree with no node_modules and no dist, whose every suite then
+   * fails with resolution errors framed as candidate PR Criticals. The inode
+   * and birth time of the worktree root name the INSTANCE: a recreated
+   * directory keeps the path and changes both. No legitimate continuation
+   * crosses a recreation — the valid resumes all happen inside one round,
+   * on the tree the first call ran in.
    */
-  run?: { sha?: string; root: string };
+  run?: { sha?: string; root: string; tree?: { ino: number; birth: number } };
 }
 
 /** Output kept per command: the head and tail, which is where a failure names itself. */
@@ -504,9 +514,26 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   }
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
-  const runIdentity: { sha?: string; root: string } = {
+  const runIdentity: {
+    sha?: string;
+    root: string;
+    tree?: { ino: number; birth: number };
+  } = {
     ...((sha) => (sha ? { sha } : {}))(planShaFrom(args.plan)),
     root,
+    ...(() => {
+      try {
+        const st = statSync(root);
+        // birthtimeMs is 0 on filesystems that do not record it; the inode
+        // still separates instances there. Rounded: a serialized float that
+        // re-parses a hair off must not fail an honest same-tree resume.
+        return { tree: { ino: st.ino, birth: Math.round(st.birthtimeMs) } };
+      } catch {
+        // No tree to fingerprint is no tree to build in; the adapter's own
+        // errors say that better than a stat failure here could.
+        return {};
+      }
+    })(),
   };
   // A resumed call continues a report; without one there is nothing to
   // continue, and silently starting a fresh run would re-install and re-build
@@ -520,16 +547,30 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // predates the stamp, or something else wrote it — and the safe reading
     // is the same as a mismatch.
     const prev = previous.run;
+    // The tree fingerprint mismatches when EITHER side has one and the other
+    // does not, or both do and they differ. Both-absent passes: a filesystem
+    // that yields no stat cannot be held to a fingerprint it never produced.
+    const treeMismatch =
+      (prev?.tree === undefined) !== (runIdentity.tree === undefined) ||
+      (prev?.tree !== undefined &&
+        runIdentity.tree !== undefined &&
+        (prev.tree.ino !== runIdentity.tree.ino ||
+          prev.tree.birth !== runIdentity.tree.birth));
     if (
       !prev ||
       prev.root !== runIdentity.root ||
-      (prev.sha ?? null) !== (runIdentity.sha ?? null)
+      (prev.sha ?? null) !== (runIdentity.sha ?? null) ||
+      treeMismatch
     ) {
       throw new Error(
         `build-test: --resume found a report at ${args.out} from a different ` +
           `run (${
             prev
-              ? `it ran in ${prev.root}${prev.sha ? ` at ${prev.sha}` : ''}`
+              ? treeMismatch && prev.root === runIdentity.root
+                ? `it ran in a PREVIOUS instance of ${prev.root} — the ` +
+                  `worktree has been recreated since (fetch-pr rebuilds it ` +
+                  `every round), so its installed and compiled state is gone`
+                : `it ran in ${prev.root}${prev.sha ? ` at ${prev.sha}` : ''}`
               : 'it records no run identity'
           }; this run is in ${runIdentity.root}${
             runIdentity.sha ? ` at ${runIdentity.sha}` : ''

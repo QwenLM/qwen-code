@@ -232,8 +232,10 @@ export function parseLedger(body: string | undefined): Ledger | null {
         // carrying `R<N+1>-*` ids would pre-claim exactly the prefix the next
         // compose stamps, splitting one claim across two ids and renumbering
         // every genuinely new finding past the squatted block. Read-side only,
-        // deliberately: the writer cannot produce the violation, so there is
-        // nothing to mirror.
+        // deliberately: the pipeline's one writer stamps
+        // `min(prevRound + 1, LEDGER_MAX_ROUND)` (compose-review), so its ids
+        // never exceed the round it writes — the coexisting round clamp below
+        // cannot reintroduce the mismatch this filter would then hide.
         !(() => {
           const m = /^R(\d+)-/.exec(f.id);
           return m !== null && Number(m[1]) > raw.round;

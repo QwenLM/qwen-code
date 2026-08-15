@@ -60,6 +60,7 @@ import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
+  LEDGER_MAX_ROUND,
   serializeLedger,
   type Ledger,
   type LedgerFinding,
@@ -629,7 +630,15 @@ function ledgerMarkerFor(
         : undefined;
     return serializeLedger({
       ...buildLedger(
-        prevRound + 1,
+        // Capped, because the round is the id space and the parser refuses an
+        // id from past the cap: an uncapped stamp of prevRound + 1 met the
+        // serializer's round clamp at exactly LEDGER_MAX_ROUND and produced a
+        // marker whose own parser dropped every finding — invisibly, with the
+        // anchor still riding. The recovery path already refuses rounds above
+        // the cap, so prevRound can reach it only AT the cap, where staying
+        // there loses id uniqueness across those rounds and nothing else —
+        // against a counter no real PR approaches.
+        Math.min(prevRound + 1, LEDGER_MAX_ROUND),
         (input.draftedComments ?? []) as Array<{
           path?: unknown;
           line?: unknown;
@@ -733,10 +742,20 @@ function composeReviewBody(
    * decision therefore reads the LIVE list plus these.
    */
   const splicedForBudgetPhrase: string[] = [];
+  /**
+   * True when the machine's own budget-stop marker exists — set below, read by
+   * the anchor decision. The stop's relayed entry must classify the same
+   * whether the orchestrator relayed it or not: the marker is the machine
+   * state, the entry is its echo, and the stderr instruction MANDATES the
+   * echo — so a rule that reads only the prose withholds the anchor from
+   * every compliant run and carries it for every non-compliant one.
+   */
+  let budgetStopMarkerPresent = false;
   let budgetEntry: (typeof coverageEntries)[number] | undefined;
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
     if (stop !== null) {
+      budgetStopMarkerPresent = true;
       // A round-cap stop and a time-budget stop both cap the verdict, but
       // read differently and dedup against a different relayed phrase. The
       // marker's `cause` picks which; an absent cause is a time stop, for
@@ -1234,10 +1253,37 @@ function composeReviewBody(
   // snapshot an earlier fix took (the script-lint and layer-audit gates, whose
   // debts are machine-owed line-coverage claims). Reading it here plus the
   // entries the phrase splice removed is the only list that sees every writer.
+  //
+  // The stop's own relayed entry classifies as DEPTH, and only against the
+  // marker. A budget/round-cap stop truncates how many audit PASSES ran over
+  // lines whose reading the receipts already prove — the same depth claim the
+  // build-and-test exemption rests on — and its verdict cap (`budgetEntry`) is
+  // pushed from the marker whether or not the orchestrator relayed the entry.
+  // Without this the outcome was relay-dependent: a compliant run (entry
+  // relayed, as stderr mandates) withheld the anchor while an identical run
+  // that dropped the entry carried it. The exemption is marker-anchored on
+  // purpose — no marker, no exemption — so prose that merely LOOKS like a
+  // stop entry cannot buy an anchor the machine state does not support, and a
+  // lens entry that mentions the phrase in its free-form reason still
+  // withholds: its head names the lens, not the reverse audit.
+  const isRelayedStopEntry = (entry: string): boolean => {
+    if (!budgetStopMarkerPresent) return false;
+    const head = entry
+      .split(/[—–-]{1,2}\s|——/)[0]
+      .trim()
+      .toLowerCase();
+    return (
+      (head === 'reverse audit' || head === '反向审计') &&
+      (entry.includes(BUDGET_STOP_PHRASE) ||
+        entry.includes(ROUND_CAP_PHRASE) ||
+        entry.includes('评审时间预算') ||
+        entry.includes('反审轮数上限'))
+    );
+  };
   const dimensionGapsAreDepthOnly = [
     ...unreviewed,
     ...splicedForBudgetPhrase,
-  ].every(isNonDiffDimensionGap);
+  ].every((entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry));
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
