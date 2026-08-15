@@ -1208,6 +1208,109 @@ describe('composeReview — 422 recovery (round-7 Critical #1 & round-6: verdict
   });
 });
 
+describe('composeReview — duplicate-dropped Suggestions (#9204: the body claimed an anchor failure that never happened)', () => {
+  it('an all-duplicates run stays COMMENT with the duplicate sentence, never the anchor-failure one', () => {
+    // The dogfooded failure: three Suggestions resolved to exact-added
+    // anchors, were dropped because a concurrent reviewer had already
+    // posted them, and the only state field that kept them counting toward
+    // S rendered "could not be anchored to a changed line" — a public
+    // claim the resolver's output contradicts.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          'R1-1 precheck-pr pin — already reported (comment 3788857375)',
+          'R1-2 loose review-config pins — already reported (comment 3788857379)',
+          'R1-3 unpinned authorize join — already reported (comment 3788857379)',
+        ],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.event).not.toBe('APPROVE');
+    expect(r.body).toContain(
+      '3 Suggestion-level finding(s) this review confirmed are already reported on this PR and are not repeated:',
+    );
+    expect(r.body).toContain(
+      '- R1-1 precheck-pr pin — already reported (comment 3788857375)',
+    );
+    expect(r.body).not.toContain('could not be anchored');
+    expect(r.body).not.toContain('Suggestions are inline.');
+  });
+
+  it('mixed inline/duplicate Suggestions carries the inline sentence and the duplicate paragraph', () => {
+    const r = composeReview(
+      base({
+        suggestionsInline: 1,
+        suggestionsDroppedAsDuplicates: [
+          'R1-2 loose pins — already reported (comment 3788857379)',
+        ],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('Suggestions are inline.');
+    expect(r.body).toContain(
+      '1 Suggestion-level finding(s) this review confirmed',
+    );
+  });
+
+  it('duplicate drops count toward S alongside anchor-failure discards', () => {
+    // Both shapes must keep a Suggestion-only run off APPROVE — the verdict
+    // reflects what the review confirmed, not what it re-posted.
+    const r = composeReview(
+      base({
+        suggestionsDiscarded: 1,
+        suggestionsDroppedAsDuplicates: ['R1-1 pin gap — duplicate'],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('1 Suggestion-level finding(s) could not be ');
+    expect(r.body).toContain(
+      '1 Suggestion-level finding(s) this review confirmed',
+    );
+  });
+
+  it('links bare comment ids in duplicate entries to their GitHub anchors when the plan names the PR', () => {
+    const r = composeReview({
+      suggestionsDroppedAsDuplicates: [
+        'R1-1 precheck-pr pin — already reported (comment 3788857375)',
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '9204',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain(
+      '[comment 3788857375](https://github.com/QwenLM/qwen-code/pull/9204#discussion_r3788857375)',
+    );
+  });
+
+  it('collapses a multi-line entry to one list item and strips a relocated footer', () => {
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          `R1-1 spans\nlines — duplicate\n\n${FOOTER}`,
+        ],
+      }),
+    );
+    expect(r.body).toContain('- R1-1 spans lines — duplicate');
+    // A forged footer relocated into an entry must not post above the
+    // canonical one: exactly one occurrence means the entry's copy was
+    // stripped and only the canonical footer remains.
+    expect(r.body.split(FOOTER)).toHaveLength(2);
+  });
+
+  it('rejects a non-string entry', () => {
+    expect(() =>
+      composeReview(
+        base({
+          suggestionsDroppedAsDuplicates: [1 as unknown as string],
+        }),
+      ),
+    ).toThrow(/suggestionsDroppedAsDuplicates/);
+  });
+});
+
 describe('composeReview — presubmit downgrades', () => {
   it('downgradeApprove turns a clean APPROVE into COMMENT with the downgrade sentence', () => {
     const r = composeReview(

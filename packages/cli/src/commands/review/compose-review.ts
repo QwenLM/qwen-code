@@ -126,6 +126,17 @@ export interface ComposeReviewInput {
   /** Suggestions discarded as unanchorable (offline validation or 422). */
   suggestionsDiscarded?: number;
   /**
+   * Suggestions this review confirmed but did not re-post because they are
+   * already reported on the PR (a prior round, or a concurrent reviewer) —
+   * one entry each, naming the finding and where it already lives, e.g.
+   * `R1-1 precheck-pr pin — already reported (comment 3788857375)`. Distinct
+   * from `suggestionsDiscarded`: these anchored fine, and rendering them
+   * under the anchor-failure sentence posts a claim the resolver's output
+   * contradicts. They still count toward `S` — a run must not read as
+   * zero-finding because its findings were duplicates.
+   */
+  suggestionsDroppedAsDuplicates?: string[];
+  /**
    * Existing Criticals already on the PR whose Step 6 re-check landed on
    * `cannot tell` — one line each (location + what could not be decided).
    * Not counted in `C` (the review did not confirm them), but their
@@ -348,6 +359,29 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
 }
 
 /**
+ * A model-written entry flattened to one renderable list line, its `comment
+ * <id>` refs linked to the PR's anchors. Entries render as one-line list
+ * items: an unindented newline ends a list item (CommonMark), so an entry
+ * spanning lines would leak its continuation out of the list. Collapsed by
+ * split/join, not by a regex replace: a whitespace-normalising regex
+ * backtracks quadratically on a long whitespace run with no newline in it,
+ * and these entries are model-written with no length cap — one such entry
+ * stalled a measured probe for seconds at 80k characters.
+ */
+function asListLine(text: string, pr: PrIdentity | null): string {
+  return linkifyCommentRefs(
+    text.includes('\n')
+      ? text
+          .split('\n')
+          .map((seg) => seg.trim())
+          .filter((seg) => seg !== '')
+          .join(' ')
+      : text,
+    pr,
+  );
+}
+
+/**
  * The unresolved-existing-Critical block, as a Markdown list instead of a
  * space-joined paragraph: #8388's posted body ran 31 of these together in
  * one unreadable wall. Entries sharing the exact reason after their first
@@ -361,26 +395,10 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  */
 function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
   const parsed = cannotTell.map((raw) => {
-    // Entries render as one-line list items: an unindented newline ends a
-    // list item (CommonMark), so a model-written entry spanning lines would
-    // leak its continuation out of the list. Collapsed by split/join, not
-    // by a `/\s*\n+\s*/g` replace: that regex backtracks quadratically on
-    // a long whitespace run with no newline in it, and these entries are
-    // model-written with no length cap — one such entry stalled a measured
-    // probe for seconds at 80k characters.
     const unmarked = raw.startsWith(CRITICAL_PREFIX)
       ? raw.slice(CRITICAL_PREFIX.length).trim()
       : raw;
-    const line = linkifyCommentRefs(
-      unmarked.includes('\n')
-        ? unmarked
-            .split('\n')
-            .map((seg) => seg.trim())
-            .filter((seg) => seg !== '')
-            .join(' ')
-        : unmarked,
-      pr,
-    );
+    const line = asListLine(unmarked, pr);
     const idx = line.indexOf(' — ');
     // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
     // empty-string reason would become a group key and render `2 entries — :`.
@@ -585,6 +603,16 @@ function composeReviewBody(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );
+  // Footer-stripped per entry for the same reason `bodyCriticals` is: these
+  // model-written strings render in the posted body above the canonical
+  // footer, and a forged footer relocated into one would post directly
+  // above it.
+  const suggestionsDroppedAsDuplicates = toStringList(
+    input.suggestionsDroppedAsDuplicates,
+    'suggestionsDroppedAsDuplicates',
+  )
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
@@ -1067,12 +1095,16 @@ function composeReviewBody(
   }
 
   // `C` counts every Critical the review posts anywhere — inline or body.
-  // `S` counts every *confirmed* Suggestion — anchored or discarded: the
-  // verdict reflects the findings the review confirmed, not the ones that
-  // anchored, so dropping every Suggestion's anchor must never upgrade the
-  // event to APPROVE.
+  // `S` counts every *confirmed* Suggestion — anchored, discarded, or dropped
+  // as an already-reported duplicate: the verdict reflects the findings the
+  // review confirmed, not the ones that anchored or were worth re-posting, so
+  // neither dropping every anchor nor every duplicate may upgrade the event
+  // to APPROVE.
   const c = criticalsInline + bodyCriticals.length;
-  const s = suggestionsInline + suggestionsDiscarded;
+  const s =
+    suggestionsInline +
+    suggestionsDiscarded +
+    suggestionsDroppedAsDuplicates.length;
 
   const baseEvent: ReviewEvent =
     c >= 1 ? 'REQUEST_CHANGES' : s >= 1 ? 'COMMENT' : 'APPROVE';
@@ -1713,6 +1745,30 @@ function composeReviewBody(
   // of it with spaces, 31 unresolved entries and seven disclosures in a
   // single unreadable wall.
   const openerCount = clauses.length;
+
+  // 4a. Confirmed-but-duplicate Suggestions — dropped from the payload by
+  //     the overlap rules (already on the PR), NOT by anchor failure. The
+  //     verdict counted them in `s`, so the body owes the author a truthful
+  //     account of where they went: reusing the discarded sentence's "could
+  //     not be anchored" claim posts a fact the resolver's output
+  //     contradicts (#9204 — resolve-anchors returned exact matches, the
+  //     drop reason was duplication, the posted body said anchoring
+  //     failed). Its own paragraph: entries are a list, not verdict prose.
+  if (suggestionsDroppedAsDuplicates.length > 0) {
+    const pr = prIdentityFromPlan(input.planPath);
+    clauses.push({
+      en:
+        `${suggestionsDroppedAsDuplicates.length} Suggestion-level ` +
+        `finding(s) this review confirmed are already reported on this PR ` +
+        `and are not repeated:\n\n` +
+        suggestionsDroppedAsDuplicates
+          .map((entry) => `- ${asListLine(entry, pr)}`)
+          .join('\n'),
+      zh:
+        `本轮确认的 ${suggestionsDroppedAsDuplicates.length} 条建议级发现已在 PR ` +
+        `上报告过，不再重复发布（列表见上方英文部分）。`,
+    });
+  }
 
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
