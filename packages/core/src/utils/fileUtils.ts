@@ -831,8 +831,7 @@ async function classifyImageContent(
     let result: FileType;
     if (sniffed.magicMatched) {
       result =
-        sniffed.extension === extensionForMimeType(mimeType) ||
-        ['png', 'jpg', 'gif', 'webp'].includes(sniffed.extension)
+        sniffed.extension === extensionForMimeType(mimeType)
           ? 'image'
           : 'binary';
     } else {
@@ -1048,6 +1047,8 @@ export interface ProcessSingleFileContentOptions {
   textFileHandle?: FileHandle;
   textFileStats?: import('node:fs').Stats;
   textFileMaxScanBytes?: number;
+  /** Reuse a classification already performed by a validated caller. */
+  fileType?: FileType;
 }
 
 /**
