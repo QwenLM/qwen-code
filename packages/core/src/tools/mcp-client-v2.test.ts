@@ -22,6 +22,8 @@ import {
   invokeMcpPrompt,
   listMcpPrompts,
   listMcpResources,
+  MCP_DEFAULT_TIMEOUT_MSEC,
+  MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS,
 } from './mcp-client.js';
 
 type RequestMessage = JSONRPCRequest;
@@ -41,6 +43,13 @@ function workspaceContext(): WorkspaceContext {
 }
 
 describe('configured MCP SDK v2 negotiation', () => {
+  it('bounds the auto-negotiation probe below the inherited request timeout', () => {
+    expect(MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS).toBe(5_000);
+    expect(MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS).toBeLessThan(
+      MCP_DEFAULT_TIMEOUT_MSEC,
+    );
+  });
+
   it('connects to a modern-only server and reuses cache-hinted tool lists', async () => {
     const requests: RequestMessage[] = [];
     const send = vi.fn(async (_serverName: string, message: JSONRPCMessage) => {

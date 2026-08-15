@@ -31,10 +31,11 @@ The following remain separate follow-ups:
 
 ## Design
 
-Each configured MCP client uses SDK v2 with `versionNegotiation.mode = 'auto'`.
-The SDK sends `server/discover` first. Definitive modern evidence selects the
-stateless `2026-07-28` protocol; legacy evidence falls back to the unchanged
-`initialize` flow.
+Each configured MCP client uses SDK v2 with `versionNegotiation.mode = 'auto'`
+and a 5s `server/discover` probe timeout. The SDK sends `server/discover`
+first. Definitive modern evidence selects the stateless `2026-07-28`
+protocol; legacy evidence — including a silent stdio server that never
+answers the probe — falls back to the unchanged `initialize` flow.
 
 Modern sessions use the typed v2 list/read methods so the SDK can aggregate
 pagination and honor `ttlMs` and `cacheScope`. Legacy sessions keep Qwen Code's

@@ -82,6 +82,11 @@ export type SendSdkMcpMessage = (
 ) => Promise<JSONRPCMessage>;
 
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
+// Auto-negotiation `server/discover` otherwise inherits connect()'s
+// timeout (10 minutes here, 60s SDK default). Silent legacy stdio
+// servers never answer that probe; cap it so fallback fits inside
+// the 30s discovery window.
+export const MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS = 5_000;
 export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
 export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 
@@ -356,7 +361,10 @@ function createMcpClient(name: string): Client {
   return new Client(
     { name, version: '0.0.1' },
     {
-      versionNegotiation: { mode: 'auto' },
+      versionNegotiation: {
+        mode: 'auto',
+        probe: { timeoutMs: MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS },
+      },
       // Default 64 throws ListPaginationExceeded and discoverTools
       // swallows that into []. 0 disables the cap; the SDK still
       // stops on a repeating cursor.
