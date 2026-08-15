@@ -753,6 +753,21 @@ const SETTINGS_SCHEMA = {
           'Treat every PR /review as if --comment was passed: findings are posted to the pull request without the flag. The post still binds to the PR named in the invocation. Enable only if you always want reviews published. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
       },
+      severityFloor: {
+        type: 'enum',
+        label: 'Posting floor: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 'auto',
+        description:
+          'The lowest severity a PR /review posts when --severity-floor is not given. "auto" keeps the round-adaptive default: Suggestions post through round 5, and from round 6 only Criticals post while otherwise-postable high-confidence Suggestions are recorded and deferred (low-confidence and Nice-to-have findings stay terminal-only as ever); under "auto", rounds 2-5 additionally defer new Suggestions on code unchanged since the previous round — the same discipline that stops review rounds from ballooning a PR. "critical" applies that posture from round 1; "suggestion" keeps Suggestions posting at every round. Non-PR targets have no rounds and ignore this. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
+        options: [
+          { value: 'auto', label: 'Auto (Critical-only from round 6)' },
+          { value: 'critical', label: 'Critical-only (every round)' },
+          { value: 'suggestion', label: 'Suggestions and Criticals' },
+        ],
+      },
     },
   },
   output: {
