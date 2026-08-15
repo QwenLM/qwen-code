@@ -11956,6 +11956,9 @@ describe('App session callbacks', () => {
       approveRetry?.();
       await Promise.resolve();
     });
+    // The gate resolved after the session switched away — the cancelled
+    // retry must NOT resubmit; only 'second' has been sent so far.
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
 
     act(() => {
       mockConnection.sessionId = 'session-1';
@@ -11986,7 +11989,13 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
       'first',
       expect.objectContaining({
-        files: [expect.objectContaining({ name: 'app.log' })],
+        files: [
+          expect.objectContaining({
+            name: 'app.log',
+            media_type: 'text/plain',
+            text: 'SECRET=1',
+          }),
+        ],
         optimisticUserMessage: false,
         retry: true,
       }),
@@ -17812,6 +17821,60 @@ describe('App prompt send failure retry', () => {
       expect.objectContaining({
         images,
         inputAnnotations,
+        optimisticUserMessage: false,
+      }),
+    );
+  });
+
+  it('retries a rejected failed prompt with its file attachment intact', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    const files = [
+      { name: 'app.log', media_type: 'text/plain', text: 'SECRET=1' },
+    ];
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        files,
+        editorCommit,
+      );
+    });
+    testState.messages = [{ id: 'u1', role: 'user', content: 'hello' }];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]')
+        ?.textContent,
+    ).toBe('u1');
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'hello',
+      expect.objectContaining({
+        files: [
+          expect.objectContaining({
+            name: 'app.log',
+            media_type: 'text/plain',
+            text: 'SECRET=1',
+          }),
+        ],
         optimisticUserMessage: false,
       }),
     );

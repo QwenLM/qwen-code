@@ -177,6 +177,36 @@ describe('text file ingestion', () => {
     expect(normalizeTextMediaType(type, name)).toBe(expected);
   });
 
+  it.each([
+    ['video/mp2t', 'foo.ts'],
+    ['video/mp2t', 'clip.mts'],
+    ['application/vnd.ms-excel', 'data.csv'],
+    ['application/vnd.ms-excel', 'data.tsv'],
+    ['application/octet-stream', 'notes.json'],
+  ])(
+    'extension allowlist wins over conflicting MIME %s for %s',
+    (type, name) => {
+      expect(normalizeTextMediaType(type, name)).toBe('text/plain');
+    },
+  );
+
+  it.each(['Dockerfile', 'Makefile', 'LICENSE', 'Gemfile', 'Procfile'])(
+    'accepts extensionless plain-text name %s',
+    (name) => {
+      expect(normalizeTextMediaType('', name)).toBe('text/plain');
+      expect(normalizeTextMediaType('application/octet-stream', name)).toBe(
+        'text/plain',
+      );
+    },
+  );
+
+  it('still rejects conflicting MIME for unlisted extensions', () => {
+    expect(
+      normalizeTextMediaType('application/pdf', 'doc.pdf'),
+    ).toBeUndefined();
+    expect(normalizeTextMediaType('image/gif', 'anim.gif')).toBeUndefined();
+  });
+
   it('classifies mixed drops into image and text candidates', () => {
     const image = new File(['png'], 'photo.png', { type: 'image/png' });
     const log = new File(['log'], 'app.log', { type: '' });

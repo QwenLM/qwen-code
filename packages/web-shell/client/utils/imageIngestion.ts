@@ -150,6 +150,16 @@ const TEXT_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
   'patch',
 ]);
 
+const TEXT_FILENAMES: ReadonlySet<string> = new Set([
+  'dockerfile',
+  'makefile',
+  'license',
+  'readme',
+  'gemfile',
+  'procfile',
+  'vagrantfile',
+]);
+
 export function normalizeTextMediaType(
   mediaType: string,
   fileName = '',
@@ -157,13 +167,13 @@ export function normalizeTextMediaType(
   const normalized = mediaType.trim().toLowerCase();
   if (normalized.startsWith('text/')) return normalized;
   if (TEXT_MIME_TYPES.has(normalized)) return normalized;
-  if (normalized && normalized !== 'application/octet-stream') {
-    return undefined;
-  }
+  // Extension and well-known-name fallbacks run even when the OS reports a
+  // conflicting MIME (`.ts`/`video/mp2t`, `.csv`/`vnd.ms-excel`); actually
+  // binary content is still rejected downstream by the NUL sniff in readText.
   const extension = fileName.split('.').pop()?.toLowerCase();
-  return extension && TEXT_FILE_EXTENSIONS.has(extension)
-    ? 'text/plain'
-    : undefined;
+  if (extension && TEXT_FILE_EXTENSIONS.has(extension)) return 'text/plain';
+  if (TEXT_FILENAMES.has(fileName.trim().toLowerCase())) return 'text/plain';
+  return undefined;
 }
 
 // The daemon derives a `@<uri>` token and a `File: <uri>` label from the
