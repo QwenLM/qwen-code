@@ -355,13 +355,19 @@ export function captureLocalDiff(opts: {
   }
 
   if (includeUntracked) {
-    // The review writes its own scratch files under `.qwen/tmp` — the args
-    // record, the parsed-args verdict, the diff, the plan — *before* this
-    // capture runs. In a repo that does not ignore `.qwen`, `ls-files --others`
-    // lists them as the user's untracked work, and the review would report on
-    // its own plumbing. They are never the change under review; drop them.
+    // The review writes its own plumbing before and after this capture runs:
+    // scratch files under `.qwen/tmp` (the args record, the diff, the plan),
+    // the persistent incremental cache under `.qwen/review-cache` (rewritten
+    // by Step 8 after every clean round), and per-round artifacts under
+    // `.qwen/reviews`. In a repo that does not ignore `.qwen`, `ls-files
+    // --others` lists all of them as the user's untracked work — and the
+    // cache is worse than noise: hashed into its own next-round candidate it
+    // changes every round by construction, so an incremental round could
+    // never again report "no changes". None of it is ever the change under
+    // review; drop it.
+    const SELF_DIRS = ['.qwen/tmp', '.qwen/review-cache', '.qwen/reviews'];
     const candidates = listUntracked(repoRoot, pathspec).filter(
-      (p) => !p.startsWith('.qwen/tmp/') && p !== '.qwen/tmp',
+      (p) => !SELF_DIRS.some((d) => p === d || p.startsWith(`${d}/`)),
     );
 
     if (candidates.length > MAX_UNTRACKED_FILES) {

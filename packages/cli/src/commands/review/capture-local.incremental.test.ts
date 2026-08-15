@@ -222,25 +222,31 @@ describe('capture-local — incremental local rounds', () => {
 });
 
 describe('capture-local — identity soundness and refusal contract', () => {
-  it('an exec-bit flip alone is a change — bytes equal, mode not', () => {
-    seedDirtyTree();
-    const cachePath = promoteCandidate(capture(), 'model-a');
-    execFileSync('chmod', ['+x', join(repo, CHANGED)]);
-    const plan = capture({ cache: cachePath, model: 'model-a' });
-    expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'an exec-bit flip alone is a change — bytes equal, mode not',
+    () => {
+      seedDirtyTree();
+      const cachePath = promoteCandidate(capture(), 'model-a');
+      execFileSync('chmod', ['+x', join(repo, CHANGED)]);
+      const plan = capture({ cache: cachePath, model: 'model-a' });
+      expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
+    },
+  );
 
-  it('a retargeted symlink whose new target holds equal bytes is a change', () => {
-    seedDirtyTree();
-    write('src/t1.txt', 'same\n');
-    write('src/t2.txt', 'same\n');
-    execFileSync('ln', ['-s', 't1.txt', join(repo, 'src/link')]);
-    const cachePath = promoteCandidate(capture(), 'model-a');
-    rmSync(join(repo, 'src/link'));
-    execFileSync('ln', ['-s', 't2.txt', join(repo, 'src/link')]);
-    const plan = capture({ cache: cachePath, model: 'model-a' });
-    expect(plan.incremental!.deltaFiles).toContain('src/link');
-  });
+  it.skipIf(process.platform === 'win32')(
+    'a retargeted symlink whose new target holds equal bytes is a change',
+    () => {
+      seedDirtyTree();
+      write('src/t1.txt', 'same\n');
+      write('src/t2.txt', 'same\n');
+      execFileSync('ln', ['-s', 't1.txt', join(repo, 'src/link')]);
+      const cachePath = promoteCandidate(capture(), 'model-a');
+      rmSync(join(repo, 'src/link'));
+      execFileSync('ln', ['-s', 't2.txt', join(repo, 'src/link')]);
+      const plan = capture({ cache: cachePath, model: 'model-a' });
+      expect(plan.incremental!.deltaFiles).toContain('src/link');
+    },
+  );
 
   it('a file named __proto__ is tracked like any other', () => {
     seedDirtyTree();
@@ -356,5 +362,51 @@ describe('capture-local — identity soundness and refusal contract', () => {
       CALLER,
       CHANGED,
     ]);
+  });
+});
+
+describe('capture-local — round-2 findings', () => {
+  it.skipIf(process.platform === 'win32')(
+    'a chmod off the USER class alone matches git: the identity moves with old/new mode',
+    () => {
+      seedDirtyTree();
+      // 0755 cached; 0655 keeps group/other bits but drops the user bit —
+      // git prints old/new mode for exactly this, so the identity must move.
+      execFileSync('chmod', ['0755', join(repo, CHANGED)]);
+      const cachePath = promoteCandidate(capture(), 'model-a');
+      execFileSync('chmod', ['0655', join(repo, CHANGED)]);
+      const plan = capture({ cache: cachePath, model: 'model-a' });
+      expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
+    },
+  );
+
+  it('an unborn-HEAD cache validates and scopes — null headSha is a supported state', () => {
+    // A brand-new repo: no commits, everything untracked.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write(CHANGED, 'export const v = 1;\n');
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    expect(
+      (JSON.parse(readFileSync(cachePath, 'utf8')) as { headSha: unknown })
+        .headSha,
+    ).toBeNull();
+    write(CHANGED, 'export const v = 2;\n');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental).toBeDefined();
+    expect(plan.incremental!.deltaFiles).toEqual([CHANGED]);
+  });
+
+  it('a hostile lastModelId reaches stderr escaped, never raw', () => {
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    cache['lastModelId'] = 'evil\nWARNING: forged line \u001b[31m';
+    writeFileSync(cachePath, JSON.stringify(cache));
+    capture({ cache: cachePath, model: 'model-b' });
+    const err = stderrLines.join('|');
+    expect(err).not.toContain('\u001b'); // no raw ESC byte at the terminal
+    expect(err).toContain('\\n'); // the newline arrives as an escape, quoted
   });
 });
