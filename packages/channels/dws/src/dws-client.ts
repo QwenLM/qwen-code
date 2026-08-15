@@ -215,27 +215,30 @@ function findScalar(
   value: unknown,
   keys: ReadonlySet<string>,
 ): string | number | boolean | undefined {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findScalar(item, keys);
-      if (found !== undefined) return found;
+  const pending = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (Array.isArray(current)) {
+      for (let index = current.length - 1; index >= 0; index--) {
+        pending.push(current[index]);
+      }
+      continue;
     }
-    return undefined;
-  }
-  if (!isRecord(value)) return undefined;
-  for (const [key, candidate] of Object.entries(value)) {
-    if (
-      keys.has(key) &&
-      (typeof candidate === 'string' ||
-        typeof candidate === 'number' ||
-        typeof candidate === 'boolean')
-    ) {
-      return candidate;
+    if (!isRecord(current)) continue;
+    for (const [key, candidate] of Object.entries(current)) {
+      if (
+        keys.has(key) &&
+        (typeof candidate === 'string' ||
+          typeof candidate === 'number' ||
+          typeof candidate === 'boolean')
+      ) {
+        return candidate;
+      }
     }
-  }
-  for (const candidate of Object.values(value)) {
-    const found = findScalar(candidate, keys);
-    if (found !== undefined) return found;
+    const values = Object.values(current);
+    for (let index = values.length - 1; index >= 0; index--) {
+      pending.push(values[index]);
+    }
   }
   return undefined;
 }
@@ -436,8 +439,9 @@ function unwrapEvent(value: unknown): Record<string, unknown> | undefined {
   return value;
 }
 
-function messageContent(value: unknown): string {
+function messageContent(value: unknown, structured = false): string {
   if (typeof value !== 'string') return '';
+  if (!structured) return value;
   const trimmed = value.trim();
   if (!trimmed.startsWith('{')) return value;
   try {
@@ -526,7 +530,10 @@ export function parseDwsImEvent(line: string): DwsImMessage {
     eventId: firstString(event, ['event_id', 'eventId', 'id']) ?? messageId,
     messageId,
     conversationId,
-    content: messageContent(event['content'] ?? body?.['content']),
+    content:
+      typeof event['content'] === 'string'
+        ? messageContent(event['content'])
+        : messageContent(body?.['content'], true),
     senderId,
     senderName:
       firstString(event, ['sender', 'sender_name', 'senderName']) ??

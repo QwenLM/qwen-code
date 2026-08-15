@@ -141,8 +141,7 @@ function parseDocumentMentionNotification(
   );
   for (const match of links) {
     try {
-      const rawUrl = match[0].replace(/[\p{P}\p{S}]+$/gu, '');
-      const url = new URL(rawUrl);
+      const url = new URL(match[0]);
       const documentId = url.pathname.match(/^\/i\/nodes\/([^/]+)$/u)?.[1];
       const iframeQuery = new URLSearchParams(
         url.searchParams.get('iframeQuery') ?? '',
@@ -151,6 +150,7 @@ function parseDocumentMentionNotification(
       if (
         !documentId ||
         !commentKey ||
+        !/^[\p{L}\p{N}_+~-]+={0,2}$/u.test(commentKey) ||
         iframeQuery.get('mention_source') !== '2'
       ) {
         continue;
@@ -159,8 +159,8 @@ function parseDocumentMentionNotification(
       let request = '';
       for (let index = 0; index < lines.length; index++) {
         const line = lines[index]!;
-        const mentionIndex = line.indexOf('@');
-        if (mentionIndex === -1) continue;
+        const mentionIndex = line.search(/(?<![\p{L}\p{N}_])@/u);
+        if (mentionIndex < 0) continue;
         const mentionText = line.slice(mentionIndex);
         const mention =
           mentionText.match(/^@[^()\r\n]*\([^)]*\)/u)?.[0] ??
@@ -174,16 +174,16 @@ function parseDocumentMentionNotification(
         const adjacent = after || before;
         if (adjacent) {
           request = adjacent;
-          continue;
+        } else {
+          const following = lines[index + 1];
+          if (
+            following &&
+            !following.includes('https://alidocs.dingtalk.com/i/nodes/')
+          ) {
+            request = following;
+          }
         }
-        const following = lines
-          .slice(index + 1)
-          .find(
-            (candidate) =>
-              Boolean(candidate) &&
-              !candidate.includes('https://alidocs.dingtalk.com/i/nodes/'),
-          );
-        if (following) request = following;
+        break;
       }
       return {
         documentId: decodeURIComponent(documentId),
@@ -607,6 +607,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.todoTasks = [];
       this.cursor.pendingDocumentNotifications = [];
       this.cursor.imTargets = [];
+      this.cursor.processedMessages = [];
+      this.cursor.notificationWatermark = undefined;
+      this.cursor.notificationCheckpoint = undefined;
     }
     this.cursor.selfSenderIds = [
       ...new Set(identity.selfSenderIds ?? []),

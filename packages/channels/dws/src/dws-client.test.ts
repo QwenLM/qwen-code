@@ -25,6 +25,18 @@ function subscription(): DwsEventSubscription {
 }
 
 describe('DwsClient', () => {
+  it('handles deeply nested command responses without overflowing the stack', async () => {
+    const depth = 20_000;
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: `${'{"nested":'.repeat(depth)}{"version":"1.0.57"}${'}'.repeat(depth)}`,
+      stderr: '',
+    });
+
+    await expect(
+      new DwsClient({ executable: '/opt/dws' }, runner).assertCompatible(),
+    ).resolves.toBeUndefined();
+  });
+
   it('requires a DWS release with all-message event streams', async () => {
     const compatibleRunner = vi.fn<DwsCommandRunner>().mockResolvedValue({
       stdout: json({ version: '1.0.57' }),
@@ -214,7 +226,7 @@ describe('DwsClient', () => {
         event_id: 'event-1',
         message_id: 'message-1',
         conversation_id: 'cid-1',
-        content: '{"content":"check this"}',
+        content: 'check this',
         sender_open_dingtalk_id: 'open-alice',
         sender: 'Alice',
         event_time: 1_725_000_000_000,
@@ -269,7 +281,7 @@ describe('DwsClient', () => {
         event_id: 'event-1',
         message_id: 'message-1',
         conversation_id: 'cid-1',
-        content: '{"content":"check this"}',
+        content: 'check this',
         sender_open_dingtalk_id: 'open-alice',
         sender: 'Alice',
       }),
@@ -347,6 +359,22 @@ describe('DwsClient', () => {
     });
   });
 
+  it('preserves literal JSON text in a normalized live event', () => {
+    const content = '{"content":"review this JSON"}';
+
+    expect(
+      parseDwsImEvent(
+        json({
+          type: 'user_im_message_receive_o2o_all',
+          message_id: 'message-1',
+          conversation_id: 'cid-1',
+          content,
+          sender_open_dingtalk_id: 'open-alice',
+        }),
+      ).content,
+    ).toBe(content);
+  });
+
   it('extracts message identity from the nested DWS payload body', () => {
     expect(
       parseDwsImEvent(
@@ -403,7 +431,7 @@ describe('DwsClient', () => {
         event_id: 'event-1',
         message_id: 'message-1',
         conversation_id: 'cid-1',
-        content: '{"content":"check this"}',
+        content: 'check this',
         sender_open_dingtalk_id: 'open-alice',
         sender: 'Alice',
       }),
@@ -608,6 +636,38 @@ describe('DwsClient', () => {
       ],
       expect.arrayContaining(['--cursor', 'page-2']),
     ]);
+  });
+
+  it('preserves literal JSON text in direct-message history', async () => {
+    const content = '{"text":"review this JSON"}';
+    const runner = vi.fn<DwsCommandRunner>().mockResolvedValue({
+      stdout: json({
+        result: {
+          conversationMessagesList: [
+            {
+              singleChat: true,
+              messages: [
+                {
+                  content,
+                  openConversationId: 'cid-1',
+                  openMessageId: 'message-1',
+                  senderOpenDingTalkId: 'open-alice',
+                },
+              ],
+            },
+          ],
+          hasMore: false,
+        },
+      }),
+      stderr: '',
+    });
+
+    const page = await new DwsClient(
+      { executable: '/opt/dws' },
+      runner,
+    ).listDirectMessages(1, 2);
+
+    expect(page.messages[0]?.content).toBe(content);
   });
 
   it('returns a continuation after a bounded history batch', async () => {

@@ -335,6 +335,31 @@ async function readyPolicyChannel(
 }
 
 describe('DwsChannel', () => {
+  it('reprocesses document notifications after a DWS profile switch', async () => {
+    const name = 'profile-scoped-notification-dws';
+    const card = documentMentionCard('doc-shared', 'comment-shared');
+    const firstClient = new FakeDwsClient();
+    firstClient.identity = { profile: 'corp-one' };
+    const first = await readyChannel(firstClient, makeConfig(), name);
+    firstClient.directMessages = [
+      message('user_im_message_receive_o2o_all', 'notification-one', card),
+    ];
+    await first.poll();
+    expect(first.inbound).toHaveLength(1);
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity = { profile: 'corp-two' };
+    const second = await readyChannel(secondClient, makeConfig(), name);
+    secondClient.directMessages = [
+      message('user_im_message_receive_o2o_all', 'notification-two', card),
+    ];
+
+    await second.poll();
+
+    expect(second.inbound).toHaveLength(1);
+  });
+
   it('starts @ and all direct messages while ignoring legacy source settings', async () => {
     const client = new FakeDwsClient();
 
@@ -770,6 +795,55 @@ describe('DwsChannel', () => {
     },
   );
 
+  it.each(['-', '_', '='])(
+    'preserves a trailing %s in a document comment key',
+    async (suffix) => {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const commentKey = `comment${suffix}`;
+      const url =
+        'https://alidocs.dingtalk.com/i/nodes/doc-1?' +
+        `iframeQuery=mention_source%3D2%26comment_key%3D${commentKey}`;
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `notification-${suffix}`,
+          `${url}\n@DataWorksAgent summarize this thread`,
+        ),
+      );
+
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({ threadId: commentKey }),
+      ]);
+    },
+  );
+
+  it.each([',', '.', '!', '?', '，', '…'])(
+    'does not route a document reply when trailing %s corrupts the final comment key',
+    async (punctuation) => {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const url =
+        'https://alidocs.dingtalk.com/i/nodes/doc-1?' +
+        'iframeQuery=mention_source%3D2%26comment_key%3Dcomment-1';
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `notification-${punctuation}`,
+          `${url}${punctuation} summarize this thread`,
+        ),
+      );
+
+      expect(channel.inbound).toHaveLength(1);
+      expect(channel.inbound[0]).toMatchObject({ chatId: 'cid-1' });
+      expect(channel.inbound[0]).not.toHaveProperty('threadId');
+    },
+  );
+
   it.each([
     ['@DataWorksAgent，请总结这个评论的上下文', '请总结这个评论的上下文'],
     ['please @DataWorksAgent summarize this thread', 'summarize this thread'],
@@ -797,6 +871,52 @@ describe('DwsChannel', () => {
 
     expect(channel.inbound).toEqual([
       expect.objectContaining({ text: request }),
+    ]);
+  });
+
+  it('does not parse an email address as a document request mention', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const url = documentMentionCard('doc-1', 'comment-1').match(
+      /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+    )?.[0];
+    expect(url).toBeDefined();
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-email',
+        `${url}\nContact alice@example.com for details`,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        text: 'Review the referenced DingTalk document comment and respond.',
+      }),
+    ]);
+  });
+
+  it('keeps the first document request when a later cc mention follows', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const url = documentMentionCard('doc-1', 'comment-1').match(
+      /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+    )?.[0];
+    expect(url).toBeDefined();
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-cc',
+        `${url}\n@DataWorksAgent summarize this thread\ncc @Alice for visibility`,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: 'summarize this thread' }),
     ]);
   });
 
