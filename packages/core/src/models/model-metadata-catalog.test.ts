@@ -895,6 +895,26 @@ describe('loadModelMetadataCatalog', () => {
     );
   });
 
+  it('does not resolve inherited provider ids from the built-in snapshot', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
+    tempDirs.push(dir);
+    const loaded = await loadModelMetadataCatalog({
+      cachePath: path.join(dir, 'models-dev.json'),
+      fetch: async () => {
+        throw new Error('offline');
+      },
+    });
+
+    expect(
+      getCatalogModalities(loaded, {
+        providerId: 'constructor',
+        authType: 'openai',
+        modelId: 'kimi-k2.5',
+        baseUrl: 'https://gw.example.com/v1',
+      }),
+    ).toBeUndefined();
+  });
+
   it('pins built-in modalities migrated from provider presets', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'models-dev-test-'));
     tempDirs.push(dir);

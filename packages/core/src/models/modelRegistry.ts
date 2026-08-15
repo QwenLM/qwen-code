@@ -91,6 +91,7 @@ export class ModelRegistry {
     ResolvedModelConfig,
     ModelModalitiesSource
   >();
+  private readonly providerIds = new WeakMap<ResolvedModelConfig, string>();
   private readonly defaultBaseUrls = new Map<AuthType, string>();
 
   /** providerId -> SDK protocol mapping; persists across reloads. */
@@ -296,6 +297,10 @@ export class ModelRegistry {
     return this.modalitiesSources.get(model) ?? 'heuristic';
   }
 
+  getProviderId(model: ResolvedModelConfig): string | undefined {
+    return this.providerIds.get(model);
+  }
+
   /**
    * Check if model exists for given authType.
    * When baseUrl is provided, checks the exact endpoint or matching default.
@@ -365,6 +370,7 @@ export class ModelRegistry {
       capabilities: config.capabilities || {},
     };
     this.modalitiesSources.set(resolved, modalitiesSource);
+    if (providerId) this.providerIds.set(resolved, providerId);
     return resolved;
   }
 

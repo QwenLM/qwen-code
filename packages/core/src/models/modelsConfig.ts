@@ -220,6 +220,10 @@ export class ModelsConfig {
           initialModelId,
           runtimeBaseUrl ?? initialModel?.registryBaseUrl,
           runtimeEnvKey ?? initialModel?.envKey,
+          false,
+          initialModel
+            ? this.modelRegistry.getProviderId(initialModel)
+            : undefined,
         );
       }
     }
@@ -248,10 +252,12 @@ export class ModelsConfig {
     baseUrl?: string,
     envKey?: string,
     replaceModelDerivedValue = false,
+    providerId?: string,
   ): boolean {
     if (!this.canApplyCatalogModalities(replaceModelDerivedValue)) return false;
 
     const modalities = getCatalogModalities(this.modelMetadataCatalog, {
+      providerId,
       authType: this.currentAuthType,
       modelId,
       baseUrl,
@@ -1238,6 +1244,8 @@ export class ModelsConfig {
           resolved.id,
           savedBaseUrl,
           resolved.envKey,
+          false,
+          this.modelRegistry.getProviderId(resolved),
         );
         const resolvedCatalogMatchesSessionEndpoint =
           this.modelRegistry.getModalitiesSource(resolved) === 'catalog' &&

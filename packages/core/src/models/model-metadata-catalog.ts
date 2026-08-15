@@ -72,7 +72,10 @@ interface CatalogState {
   lastSuccessfulRefreshAt?: number;
 }
 
-const builtInCatalog = builtInModelModalities as ModelMetadataCatalog;
+const builtInCatalog = Object.assign(
+  Object.create(null),
+  builtInModelModalities,
+) as ModelMetadataCatalog;
 const catalogStates = new Map<string, CatalogState>();
 
 function hasSameLoadOptions(
