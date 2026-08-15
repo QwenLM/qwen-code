@@ -2530,38 +2530,39 @@ describe('qwen pr review concurrency routing', () => {
   // same group — cancel-in-progress does not protect it. On PR #9091 a push
   // and three human review requests landed in the same minute: the
   // synchronize run cancelled the in-flight review but queued behind it while
-  // it terminated, and the review_requested runs — guaranteed no-ops, since
-  // review-pr only runs when the bot itself is the requested reviewer —
-  // superseded it while pending. The sole survivor skipped review-pr, so the
-  // push was never reviewed. The fix routes non-bot review_requested runs to
-  // a per-run group where they can supersede nothing, while lifecycle events
-  // and bot-directed requests keep sharing the PR group so an explicit bot
-  // ask still coalesces with the automatic run for the same head.
+  // it terminated, and the review_requested runs — no-ops, since review-pr
+  // only runs when the bot itself is the requested reviewer — superseded it
+  // while pending. The sole survivor skipped review-pr, so the push was never
+  // reviewed. Routing only the human-requested siblings to a per-run group
+  // leaves the race open: group membership is fixed here, before `authorize`
+  // runs, but whether a bot-directed request reviews anything is `authorize`'s
+  // call on the REQUESTER's write permission — a requester without write
+  // produces a guaranteed all-skipped run, and as a shared-group member that
+  // no-op can supersede the pending lifecycle run, losing the review the same
+  // way. Every review_requested run therefore gets a per-run group; an
+  // authorized bot request still reviews immediately, it just can no longer
+  // supersede the lifecycle run for the same head.
   const group = parse(workflow).concurrency.group;
 
-  it('keeps no-op review requests out of the shared PR group', () => {
+  it('keeps every review_requested run out of the shared PR group', () => {
     // Verbatim, like the cancel-in-progress pin in the resolve suite: the
     // shape IS the fix — `&&` binds tighter than `||`, so exactly the
-    // lifecycle actions and the bot-directed request reach the PR group, and
-    // every other review_requested (human or team reviewer) falls through to
-    // the per-run group. Moving the gate behind the fallback, or dropping the
-    // parentheses around the disjunction, silently re-ships the race.
+    // lifecycle actions reach the PR group and every review_requested (bot
+    // included) falls through to the per-run group. Any requested_reviewer
+    // clause here re-admits the unauthorized-requester no-op and silently
+    // re-ships the race.
     expect(group).toBe(
       "${{ github.event_name == 'pull_request_target' && " +
-        "(github.event.action != 'review_requested' || " +
-        "github.event.requested_reviewer.login == 'qwen-code-ci-bot') && " +
+        "github.event.action != 'review_requested' && " +
         "format('qwen-pr-review-pr-{0}', github.event.pull_request.number) || " +
         "format('qwen-pr-review-run-{0}', github.run_id) }}",
     );
   });
 
-  it('gates on the same bot login the workflow publishes', () => {
-    // The group expression cannot read review-config's bot_login output, so
-    // it carries the literal; pin it against the constant it mirrors so a
-    // rename of the bot cannot desync all three sites.
-    expect(group).toContain(
-      `github.event.requested_reviewer.login == '${botLogin}'`,
-    );
+  it('gates the review_requested jobs on the published bot login', () => {
+    // The group expression no longer names the requested reviewer; the
+    // job-level gates still must. Pin the surviving literal against the
+    // review-config constant so a bot rename cannot desync the sites.
     expect(parse(workflow).jobs['precheck-pr'].if).toContain(
       `github.event.requested_reviewer.login == '${botLogin}'`,
     );

@@ -50,21 +50,23 @@ on:
 
 concurrency:
   # PR lifecycle events share a PR-scoped group so new pushes restart the delay
-  # and closed PRs stop any in-flight lifecycle review. A bot-directed
-  # review_requested joins that group too: it is an explicit review ask and
-  # must coalesce with the lifecycle run for the same head. Any OTHER
-  # review_requested (a human or team reviewer) gets a per-run group: it no-ops
-  # at review-pr by design, but as a member of the shared group it can
-  # supersede a lifecycle run that sits PENDING behind a still-terminating
-  # review — a pending run is replaced by any newer run in the group,
-  # cancel-in-progress notwithstanding. That race lost the automatic review
-  # entirely on PR #9091: a push plus three human review requests in the same
-  # minute cancelled the in-flight review and left only the no-op request run.
-  # Comment/review events use per-run groups to avoid cancelling active reviews.
+  # and closed PRs stop any in-flight lifecycle review. Every review_requested
+  # run — the bot-directed one included — gets a per-run group: membership is
+  # decided here, before `authorize` runs, but whether a bot request reviews
+  # anything is `authorize`'s call on the REQUESTER's write permission. A
+  # requester without write produces a guaranteed all-skipped run, and as a
+  # shared-group member that no-op can supersede a lifecycle run sitting
+  # PENDING behind a still-terminating review — a pending run is replaced by
+  # any newer run in the group, cancel-in-progress notwithstanding. That is
+  # the exact race that lost the automatic review on PR #9091, left open for
+  # anyone who can request the bot without write permission. The per-run group
+  # costs only an occasional duplicate review when an authorized bot request
+  # lands while the lifecycle run for the same head still queues: compute,
+  # never a lost review. Comment/review events use per-run groups to avoid
+  # cancelling active reviews.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
-    (github.event.action != 'review_requested' ||
-    github.event.requested_reviewer.login == 'qwen-code-ci-bot') &&
+    github.event.action != 'review_requested' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
