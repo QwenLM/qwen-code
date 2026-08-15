@@ -59,15 +59,13 @@ describe('generatePromptSuggestion', () => {
       getModel: vi.fn(() => 'main-model'),
     } as unknown as Config;
 
-    await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    const signal = new AbortController().signal;
+    await generatePromptSuggestion(config, conversationHistory, signal, {
+      enableCacheSharing: true,
+    });
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ model: 'main-model' }),
+      expect.objectContaining({ model: 'main-model', abortSignal: signal }),
     );
   });
 
