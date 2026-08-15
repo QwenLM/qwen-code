@@ -340,6 +340,9 @@ describe('fetch-pr report assembly', () => {
     producerMocks.buildDiffPlan.mockImplementation((...a: unknown[]) =>
       producerMocks.actualBuildDiffPlan(...a),
     );
+    // Same reason as the rest: an implementation set by one test (the
+    // ENOSPC case) survives clearAllMocks and would fail every later one.
+    producerMocks.writeFileSync.mockImplementation(() => undefined);
     producerMocks.gh.mockReturnValue(
       JSON.stringify({
         headRefName: 'feat/x',
@@ -549,11 +552,10 @@ describe('fetch-pr report assembly', () => {
     // --is-ancestor operand pair would refuse every valid anchor while every
     // content-agnostic mock stayed green (measured by the review's mutant).
     const gitOptCalls = producerMocks.gitOpt.mock.calls;
-    expect(gitOptCalls).toContainEqual([
-      'cat-file',
-      '-e',
-      `${ANCHOR}^{commit}`,
-    ]);
+    // Bare sha, no `^{commit}` peel: with the peel real git answers an
+    // unknown-but-well-formed sha with 128 rather than 1, which made the
+    // definitive-absent branch unreachable.
+    expect(gitOptCalls).toContainEqual(['cat-file', '-e', ANCHOR]);
     expect(gitOptCalls).toContainEqual([
       'merge-base',
       '--is-ancestor',
@@ -599,7 +601,7 @@ describe('fetch-pr report assembly', () => {
     expect(producerMocks.gitOpt.mock.calls).toContainEqual([
       'cat-file',
       '-e',
-      'abc1234^{commit}',
+      'abc1234',
     ]);
   });
 
@@ -946,6 +948,71 @@ describe('fetch-pr report assembly', () => {
       since: ANCHOR,
       effective: false,
       reason: 'not-an-ancestor',
+    });
+  });
+
+  it('degrades when the diff FILE cannot be written, instead of dying', async () => {
+    // A full or read-only tmp volume used to yield a diff-less report the
+    // round continued from with disclosed partial coverage; letting the
+    // write throw killed the command after the worktree existed and before
+    // any report was written.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.writeFileSync.mockImplementation((path: unknown) => {
+      if (String(path).endsWith('diff.txt')) {
+        throw Object.assign(new Error('ENOSPC: no space left on device'), {
+          code: 'ENOSPC',
+        });
+      }
+    });
+    const report = await reportFor({ since: ANCHOR });
+    // The report exists — that is the whole point — and discloses the gap.
+    expect(report.diffPath).toBeNull();
+    expect(report.diffPathAbsolute).toBeNull();
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'capture-failed',
+    });
+  });
+
+  it('treats a value-less or negated --since as no anchor at all', async () => {
+    // yargs turns `--no-since` into boolean `false` even for a string
+    // option; reaching the hex test with it published `since: false` and
+    // then crashed on `since.slice(…)` after the worktree existed.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    for (const since of [false, 42, null]) {
+      const report = await reportFor({ since });
+      expect(report.incremental).toBeUndefined();
+      expect(report.diffPath).not.toBeNull();
+    }
+  });
+
+  it('calls a well-formed but unknown anchor unknown-commit, not transient', async () => {
+    // Real git answers `cat-file -e <sha>` for an absent object with exit 1
+    // (definitive). Peeling `^{commit}` made it 128, so every unknown
+    // anchor was reported as a transient failure the recovery flow retries
+    // forever — and `unknown-commit` became unreachable.
+    producerMocks.gitOpt.mockImplementation(() => null); // exit 1 in the mock
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: '0'.repeat(40) });
+    expect(report.incremental).toEqual({
+      since: '0'.repeat(40),
+      effective: false,
+      reason: 'unknown-commit',
     });
   });
 
@@ -1510,6 +1577,14 @@ describe('hunksContainedIn — the containment oracle', () => {
     expect(hunksContainedIn(sec('a.ts', [[1, 3]]), outer)).toBe(false);
     // starts inside, ends PAST it
     expect(hunksContainedIn(sec('a.ts', [[12, 50]]), outer)).toBe(false);
+    // …including by exactly one line: a delta hunk whose last line sits one
+    // past the covering hunk is a line GitHub's PR diff does not display,
+    // and an anchored comment there 422s the entire review. Shared
+    // deletions need no slack — both captures share the head tree, so an
+    // identical junction is covered at equality.
+    // (`sec` takes [start, COUNT]: 12+9-1 = 20 is one past the outer's 19.)
+    expect(hunksContainedIn(sec('a.ts', [[12, 9]]), outer)).toBe(false);
+    expect(hunksContainedIn(sec('a.ts', [[12, 8]]), outer)).toBe(true);
   });
 
   it('records EVERY hunk of a section, not just the first', () => {

@@ -411,11 +411,13 @@ function sectionsContained(
     const covering = outer.get(file);
     if (!covering) return false;
     for (const [start, end] of hunks) {
-      // A deletion junction is covered when it falls inside a covering hunk
-      // OR immediately after one: `parseDiff` reports the junction at the
-      // line the deleted text used to precede, and a merged outer hunk ends
-      // one line earlier.
-      if (!covering.some(([s, e]) => s <= start && end <= e + 1)) return false;
+      // Strict containment, no slack. Both captures share the head tree, so
+      // a deletion the PR's own diff performs yields an identical junction
+      // range and is covered at equality; slack for it bought nothing and
+      // accepted a delta hunk one line past the covering hunk — a line
+      // GitHub's PR diff does not display, where an anchored comment 422s
+      // the entire all-or-nothing Create Review call.
+      if (!covering.some(([s, e]) => s <= start && end <= e)) return false;
     }
   }
   return true;
@@ -564,10 +566,25 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       return null;
     }
   };
-  /** Publish a range as THE reviewed diff — the file write and both paths. */
-  const publish = (text: string): void => {
+  /**
+   * Publish a range as THE reviewed diff — the file write and both paths.
+   * False when the WRITE failed.
+   *
+   * The capture's try/catch used to cover the write too, so a full or
+   * read-only tmp volume produced a diff-less report the round continued
+   * from with disclosed partial coverage. Letting it throw instead killed
+   * the command after the worktree existed and before any report was
+   * written — the failure class the partition catch below calls out as one
+   * that must not take the whole review with it.
+   */
+  const publish = (text: string): boolean => {
+    try {
+      writeFileSync(diffRel, text);
+    } catch (err) {
+      writeStderrLine(`Failed to capture diff: ${(err as Error).message}`);
+      return false;
+    }
     diffText = text;
-    writeFileSync(diffRel, text);
     diffPath = diffRel;
     diffPathAbsolute = resolve(diffRel);
     // Digest of what was WRITTEN, not of what was captured. The capture is
@@ -575,6 +592,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // hashing at capture time would report a digest for bytes no reader ever
     // sees.
     diffSha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+    return true;
   };
 
   // The incremental anchor rules first: an effective anchor scopes the diff
@@ -594,9 +612,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // to `"shaA,shaB"`, the comma fails the hex allowlist, and a valid
   // in-history anchor is refused as `unknown-commit` with no git probe run
   // at all. The LAST value wins — a repeated flag means "use this one".
-  const sinceArg = Array.isArray(args.since)
+  const rawSince = Array.isArray(args.since)
     ? (args.since as string[])[args.since.length - 1]
     : args.since;
+  // yargs' boolean-negation turns `--no-since` into `false` even for an
+  // option declared `type: 'string'`. Anything that is not a string falls
+  // through to the no-anchor path rather than reaching the hex test and,
+  // later, `since.slice(…)` — which crashed the command after the worktree
+  // existed and before any report was written.
+  const sinceArg = typeof rawSince === 'string' ? rawSince : undefined;
   if (sinceArg !== undefined && sinceArg !== '') {
     try {
       anchor = resolveIncrementalAnchor(
@@ -608,7 +632,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // a verdict about the anchor, because the two lead to opposite
           // recovery flows (retry the transient one, never the deterministic).
           commitExists: (sha) => {
-            const { status } = gitExit('cat-file', '-e', `${sha}^{commit}`);
+            // No `^{commit}` peel: with it, real git answers a well-formed
+            // but unknown sha with exit 128, not 1, so the definitive-absent
+            // branch was unreachable and every unknown anchor was reported
+            // as a transient failure the recovery flow retries forever.
+            // Bare, the three exits mean present / absent / surface failure;
+            // the hex allowlist already keeps the value flag-safe, and "is
+            // it a commit" stays covered by `resolveCommit`, whose null maps
+            // to `unknown-commit`.
+            const { status } = gitExit('cat-file', '-e', sha);
             if (status === 0) return true;
             if (status === 1) return false;
             throw new GitUnavailable();
@@ -716,13 +748,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         ruling.unverified ? 'containment-unverified' : 'hunks-outside-pr-diff',
       );
     } else {
-      publish(delta);
-      scopedDelta = true;
-      // The scoped range's left side, full-sha, for downstream consumers
-      // that recompute their own diffs (Agent 7's test-efficacy probe welds
-      // --base into its brief) — without it they would probe the full
-      // merge-base range on a delta-scoped round.
-      anchor.incremental.diffBase = anchor.diffBase;
+      if (publish(delta)) {
+        scopedDelta = true;
+        // The scoped range's left side, full-sha, for downstream consumers
+        // that recompute their own diffs (Agent 7's test-efficacy probe
+        // welds --base into its brief) — without it they would probe the
+        // full merge-base range on a delta-scoped round.
+        anchor.incremental.diffBase = anchor.diffBase;
+      } else {
+        // The delta captured but could not be written: degrade like any
+        // other capture failure rather than scoping to a file nobody has.
+        demote('capture-failed');
+      }
     }
   }
   if (!scopedDelta) {
@@ -762,9 +799,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // the partitioner did not).
     if (scopedDelta && fullText !== null && fullText.trim() !== '') {
       try {
-        plan = buildDiffPlan(fullText, args.maxChunkLines);
-        publish(fullText);
-        scopedDelta = false;
+        const rescued = buildDiffPlan(fullText, args.maxChunkLines);
+        // A write failure here is degradation, not a tiling failure: the
+        // inner catch must not swallow it into "both ranges refuse to tile"
+        // and ship plan chunks beside a null `diffPath`.
+        if (publish(fullText)) {
+          plan = rescued;
+          scopedDelta = false;
+        }
         writeStderrLine(
           'Retried the partition over the full range, which tiled; the ' +
             'round is a full review.',
