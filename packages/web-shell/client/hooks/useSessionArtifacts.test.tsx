@@ -215,4 +215,47 @@ describe('useSessionArtifacts', () => {
       'replacement',
     ]);
   });
+
+  it('keeps the last-good artifacts and surfaces no error when a background refresh fails (#7427)', async () => {
+    // A transient `Failed to fetch` on an AUTOMATIC refresh (mount, prompt
+    // settling to idle, an artifactsVersion signal) is noise the user cannot
+    // act on. The panel must keep the last successfully loaded artifacts,
+    // clear `loading`, and expose no error state — before #7477's reshape the
+    // same hiccup surfaced an error-severity toast on every retry, spamming
+    // the panel for the whole outage.
+    sdkMock.actions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [artifact('current-artifact')] })
+      .mockRejectedValueOnce(new Error('Failed to fetch'))
+      .mockResolvedValueOnce({ artifacts: [artifact('recovered-artifact')] });
+
+    await renderHookHost();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'current-artifact',
+    ]);
+    expect(latestState?.loading).toBe(false);
+
+    // Background refresh #1 fails transiently.
+    sdkMock.artifactsVersion = 1;
+    await rerenderHookHost();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Last-good data survives, nothing is blanked out, no error surfaces.
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.error).toBeNull();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'current-artifact',
+    ]);
+
+    // The panel is not wedged: the next background refresh recovers.
+    sdkMock.artifactsVersion = 2;
+    await rerenderHookHost();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'recovered-artifact',
+    ]);
+  });
 });
