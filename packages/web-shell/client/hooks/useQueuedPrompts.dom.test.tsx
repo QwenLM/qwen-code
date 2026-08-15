@@ -268,6 +268,27 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(latest.queuedPrompts).toHaveLength(1);
   });
 
+  it('does not insert a held prompt with file attachments', async () => {
+    const { actions } = createActions();
+    mount('responding', actions, true, false, false, true);
+
+    act(() =>
+      latest.enqueuePrompt('inspect this file', undefined, [
+        {
+          name: 'a.ts',
+          media_type: 'text/typescript',
+          text: 'export {};',
+        },
+      ]),
+    );
+    await act(async () => latest.insertQueuedPrompt(1));
+
+    expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'inspect this file', files: [{ name: 'a.ts' }] },
+    ]);
+  });
+
   it('preserves an accepted explicit insert across a session switch', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
@@ -340,7 +361,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(signal?.aborted).toBe(false);
   });
 
-  it('does not resubmit an explicit insert accepted as the turn becomes idle', async () => {
+  it('resubmits a legacy explicit insert accepted as the turn becomes idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
@@ -365,8 +386,13 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     });
 
     expect(reportError).not.toHaveBeenCalled();
-    expect(actions.submitPrompt).not.toHaveBeenCalled();
-    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'submit after settle',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'submit after settle', serverState: 'submitting' },
+    ]);
   });
 
   it('silently holds an explicit insert rejected while a Goal remains active', async () => {
@@ -480,7 +506,14 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       await insertion;
     });
     expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
-    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      {
+        text: 'insert exactly once',
+        isInserting: false,
+      },
+    ]);
+    expect(latest.queuedPrompts[0]).not.toHaveProperty('midTurnState');
   });
 
   it('submits locally held Goal follow-ups after the Goal stops', () => {
@@ -1232,7 +1265,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
-  it('does not resubmit a legacy explicit insert accepted after idle', async () => {
+  it('resubmits a legacy explicit insert accepted after idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
@@ -1249,14 +1282,22 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       await insertion;
     });
 
-    expect(latest.queuedPrompts).toEqual([]);
+    expect(latest.queuedPrompts).toMatchObject([{ text: 'do not lose me' }]);
+    expect(latest.queuedPrompts[0]).not.toHaveProperty('midTurnState');
     expect(actions.submitPrompt).not.toHaveBeenCalled();
 
     render('idle', 'session-1', false, false, false);
-    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'do not lose me', serverState: 'submitting' },
+    ]);
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'do not lose me',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
 
-  it('does not resubmit a legacy insert accepted before Goal hold', async () => {
+  it('holds a legacy insert accepted before Goal hold for later submission', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -1271,10 +1312,15 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ]);
 
     render('idle', 'session-1', false, false, true);
-    expect(latest.queuedPrompts).toEqual([]);
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: 'already accepted', midTurnState: undefined },
+    ]);
     render('idle', 'session-1', false, false, false);
 
-    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      'already accepted',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
   });
 
   it('freezes mid-turn fallback while a session switch is preparing', async () => {
@@ -1297,7 +1343,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
 
-  it('does not resubmit an accepted message when the running turn ends', async () => {
+  it('resubmits an accepted legacy message when the running turn ends', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -1312,11 +1358,16 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('idle');
     await act(async () => {});
 
-    expect(actions.submitPrompt).not.toHaveBeenCalled();
-    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      '继续处理',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: '继续处理', serverState: 'submitting' },
+    ]);
   });
 
-  it('does not resubmit an unresolved legacy admission at idle', async () => {
+  it('resubmits a late accepted legacy admission at idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean }>();
     let signal: AbortSignal | undefined;
@@ -1337,8 +1388,13 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       admission.resolve({ accepted: true, messageId: 'mid-late' }),
     );
 
-    expect(actions.submitPrompt).not.toHaveBeenCalled();
-    expect(latest.queuedPrompts).toEqual([]);
+    expect(actions.submitPrompt).toHaveBeenCalledWith(
+      '不要重复',
+      expect.objectContaining({ sessionId: 'session-1' }),
+    );
+    expect(latest.queuedPrompts).toMatchObject([
+      { text: '不要重复', serverState: 'submitting' },
+    ]);
   });
 
   it('deletes an accepted message from the daemon queue', async () => {

@@ -1,8 +1,10 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
+  assistantTextEvent,
   installMockDaemon,
   replayCompleteEvent,
+  turnCompleteEvent,
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
@@ -37,7 +39,7 @@ test('creates a Goal directly from a new task before any chat', async ({
   );
 });
 
-test('runs the canonical Goal and explicit queue interaction chain', async ({
+test('runs the canonical Goal and explicit queue interaction chain @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -94,6 +96,12 @@ test('runs the canonical Goal and explicit queue interaction chain', async ({
   expect(Math.abs(queueWidth - goalWidth)).toBeLessThan(1);
   await capture(page, testInfo, '02-goal-with-local-queue.png');
 
+  await daemon.sendEvent(
+    assistantTextEvent('Goal turn running', {
+      id: 2,
+      sessionId: scenario.sessionId,
+    }),
+  );
   await queue.getByRole('button', { name: 'Insert' }).click();
   await expect.poll(() => midTurnRequests(daemon).length).toBe(1);
   expect(midTurnRequests(daemon)[0]?.body).toMatchObject({
@@ -102,6 +110,12 @@ test('runs the canonical Goal and explicit queue interaction chain', async ({
   await expect(queue).toContainText('Queued...');
   expect(daemon.promptRequests()).toHaveLength(0);
   await capture(page, testInfo, '03-explicitly-inserted.png');
+  await daemon.sendEvent(
+    turnCompleteEvent('goal-turn-1', {
+      id: 3,
+      sessionId: scenario.sessionId,
+    }),
+  );
 
   await submitComposer(page, 'run only after the goal pauses');
   await expect(queue).toContainText('run only after the goal pauses');

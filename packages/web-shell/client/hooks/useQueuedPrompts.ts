@@ -1355,6 +1355,10 @@ export function useQueuedPrompts({
             return;
           }
           if (latestStreamingStateRef.current === 'idle') {
+            if (!canQueryMidTurn) {
+              fallbackToPendingPrompt(prompt.id);
+              return;
+            }
             const next = current.filter((item) => item.id !== prompt.id);
             queuedPromptsRef.current = next;
             setQueuedPrompts(next);
@@ -1438,23 +1442,17 @@ export function useQueuedPrompts({
   useEffect(() => {
     if (streamingState !== 'idle' || writeBlocked) return;
     if (!canQueryMidTurn) {
-      const acceptedIds = new Set(
-        queuedPromptsRef.current
-          .filter(
-            (prompt) =>
-              prompt.midTurnState === 'queued' &&
-              !prompt.midTurnFailedAction &&
-              !prompt.isEditing &&
-              !prompt.isRemoving,
-          )
-          .map((prompt) => prompt.id),
-      );
-      if (acceptedIds.size > 0) {
-        const next = queuedPromptsRef.current.filter(
-          (prompt) => !acceptedIds.has(prompt.id),
-        );
-        queuedPromptsRef.current = next;
-        setQueuedPrompts(next);
+      const acceptedIds = queuedPromptsRef.current
+        .filter(
+          (prompt) =>
+            prompt.midTurnState === 'queued' &&
+            !prompt.midTurnFailedAction &&
+            !prompt.isEditing &&
+            !prompt.isRemoving,
+        )
+        .map((prompt) => prompt.id);
+      for (const id of acceptedIds) {
+        fallbackToPendingPrompt(id);
       }
     }
     if (holdQueuedPromptsLocally) return;
@@ -1808,6 +1806,7 @@ export function useQueuedPrompts({
         prompt.isRemoving ||
         prompt.isInserting ||
         (prompt.images?.length ?? 0) > 0 ||
+        (prompt.files?.length ?? 0) > 0 ||
         (prompt.inputAnnotations?.length ?? 0) > 0 ||
         isCommandPrompt(prompt.text)
       ) {
@@ -2007,7 +2006,16 @@ export function useQueuedPrompts({
             heldPromptsByOwnerRef.current.set(
               promptOwnerKey,
               deliveredAtIdle
-                ? stashed.filter((item) => item.id !== prompt.id)
+                ? stashed.map((item) =>
+                    item.id === prompt.id
+                      ? {
+                          ...item,
+                          midTurnState: undefined,
+                          midTurnMessageId: undefined,
+                          isInserting: false,
+                        }
+                      : item,
+                  )
                 : stashed.map((item) =>
                     item.id === prompt.id
                       ? {
@@ -2031,11 +2039,12 @@ export function useQueuedPrompts({
         return;
       }
       if (deliveredAtIdle) {
-        const next = current.filter((item) => item.id !== prompt.id);
-        queuedPromptsRef.current = next;
-        setQueuedPrompts(next);
-        finishInsertion();
-        prompt.onAdmitted?.();
+        recoverAfterSettledInsert({
+          isInserting: false,
+          midTurnMessageId: undefined,
+          admissionOutcome: undefined,
+          payloadAvailable: undefined,
+        });
         return;
       }
       if (!current[index]!.isInserting) {

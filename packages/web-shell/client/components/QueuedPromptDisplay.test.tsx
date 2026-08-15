@@ -148,6 +148,27 @@ describe('QueuedPromptDisplay', () => {
     ).toBeNull();
   });
 
+  it('hides insert for prompts with file attachments', () => {
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text: 'inspect this file',
+          files: [
+            {
+              name: 'a.ts',
+              media_type: 'text/typescript',
+              text: 'export {};',
+            },
+          ],
+        },
+      ],
+    });
+    expect(
+      container.querySelector(`[aria-label="${t('queue.insert')}"]`),
+    ).toBeNull();
+  });
+
   it('allows deleting but not editing a summary-only server row', () => {
     const { container } = setup({
       prompts: [

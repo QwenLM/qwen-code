@@ -19740,6 +19740,39 @@ describe('App /goal command', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('drops a lazy /goal create when another session wins allocation', async () => {
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-created',
+    });
+    const attach = deferred<void>();
+    mockSessionActions.attachSession.mockReturnValueOnce(attach.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal first objective';
+    void clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.attachSession).toHaveBeenCalledOnce();
+    });
+
+    act(() => {
+      testState.ownerVersion += 1;
+      mockConnection.sessionId = 'other-session';
+      rerender({});
+    });
+    await act(async () => {
+      attach.resolve();
+      await attach.promise;
+    });
+    await flush();
+
+    expect(mockWorkspaceActions.controlGoal).not.toHaveBeenCalled();
+    expect(mockStore.appendLocalUserMessage).not.toHaveBeenCalledWith(
+      '/goal first objective',
+    );
+  });
+
   it('refuses non-set Goal controls without allocating a session', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     mockConnection.sessionId = undefined;
@@ -19974,6 +20007,52 @@ describe('App /goal command', () => {
       action: 'create',
       objective: 'all tests pass',
     });
+  });
+
+  it('forgets a rejected goal session after leaving the Goals page', async () => {
+    const pendingCreate = deferred<{
+      snapshot: ReturnType<typeof activeGoalSnapshot>;
+    }>();
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.controlGoal.mockReturnValueOnce(pendingCreate.promise);
+
+    let firstCreate!: Promise<void>;
+    act(() => {
+      firstCreate = onCreateGoal('all tests pass');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.controlGoal).toHaveBeenCalledOnce();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="goals-page"] button')
+        ?.click();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+    pendingCreate.reject(new Error('daemon says no'));
+    await act(async () => {
+      await expect(firstCreate).rejects.toThrow('daemon says no');
+    });
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const retryCreate = testState.latestGoalsProps?.onCreateGoal;
+    if (!retryCreate) throw new Error('onCreateGoal was not recaptured');
+    await act(async () => {
+      await retryCreate('all tests pass');
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
   });
 
   it('does not reuse a session selected while goal creation is in flight', async () => {
@@ -20238,6 +20317,11 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
   async function openRunHandler(
     container: HTMLElement,
   ): Promise<(prompt: string, sessionId: string | null) => Promise<void>> {
+    mockConnection.goalState ??= {
+      v: 2,
+      activity: 'idle',
+      goal: null,
+    };
     testState.prompt = '/schedule';
     await clickSubmit(container);
     await flush();
@@ -20287,6 +20371,48 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     await act(async () => {
       await expect(run('do the thing', null)).rejects.toThrow('daemon boom');
     });
+  });
+
+  it('rejects an unbound run before admission while Goal is active', async () => {
+    mockConnection.goalState = activeGoalSnapshot('keep working');
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+
+    await act(async () => {
+      await expect(run('do the thing', null)).rejects.toThrow(/Goal is active/);
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('waits for bound-session Goal hydration before admitting a run', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    act(() => {
+      mockConnection.goalState = undefined;
+      rerender({});
+    });
+
+    let runError: unknown;
+    act(() => {
+      void run('do the thing', 'session-1').catch((error) => {
+        runError = error;
+      });
+    });
+    await flush();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    act(() => {
+      mockConnection.goalState = activeGoalSnapshot('keep working');
+      rerender({});
+    });
+    await vi.waitFor(() => {
+      expect((runError as Error | undefined)?.message).toMatch(
+        /Goal is active/,
+      );
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('fires a bound run immediately when its session is already active', async () => {

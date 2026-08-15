@@ -402,7 +402,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('never queries when the daemon lacks the capability (degraded)', async () => {
+  it('falls back without querying when the daemon lacks the capability', async () => {
     const harness = createHarness();
     try {
       await harness.render({
@@ -416,17 +416,18 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         streamingState: 'idle',
         canQueryMidTurn: false,
       });
-      // The accepted legacy admission remains daemon-owned even without a
-      // reconciliation capability.
       expect(sdkMock.actions.getMidTurnMessages).not.toHaveBeenCalled();
-      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'note',
+        expect.objectContaining({ sessionId: 'session-a' }),
+      );
       expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }
   });
 
-  it('does not resubmit when a legacy admission is accepted at idle', async () => {
+  it('resubmits when a legacy admission is accepted at idle', async () => {
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)
       | undefined;
@@ -452,7 +453,10 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         resolveAdmission?.({ accepted: true, messageId: 'legacy-late' });
       });
 
-      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'legacy late response',
+        expect.objectContaining({ sessionId: 'session-a' }),
+      );
       expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
@@ -1641,7 +1645,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('keeps a pending legacy enqueue owned by the daemon at idle', async () => {
+  it('falls back after a pending legacy enqueue is accepted at idle', async () => {
     let admissionSignal: AbortSignal | undefined;
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)
@@ -1679,8 +1683,11 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         resolveAdmission?.({ accepted: true, messageId: 'mid-late' });
       });
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'still in flight',
+        expect.objectContaining({ sessionId: 'session-a' }),
+      );
       expect(harness.result().queuedPrompts).toEqual([]);
-      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }

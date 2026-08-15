@@ -794,10 +794,7 @@ describe('ScheduledTasksDialog run now', () => {
     expect(actions.runScheduledTask).not.toHaveBeenCalled();
   });
 
-  it('consumes a bound ONE-SHOT before enqueuing (record → enqueue)', async () => {
-    // /run deletes a one-shot (its single fire). Consuming it BEFORE the run
-    // means a failed enqueue leaves a recoverable "recorded but never ran", not
-    // a silent double execution at the task's own slot.
+  it('admits a bound ONE-SHOT before consuming it (enqueue → record)', async () => {
     const order: string[] = [];
     const onRunPrompt = vi.fn(() => {
       order.push('enqueue');
@@ -812,13 +809,10 @@ describe('ScheduledTasksDialog run now', () => {
     });
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(order).toEqual(['record', 'enqueue']);
+    expect(order).toEqual(['enqueue', 'record']);
   });
 
-  it('surfaces a consumed-but-failed error when a ONE-SHOT delivery fails', async () => {
-    // The one-shot was deleted before the run; if delivery then rejects it is
-    // gone AND un-run, so the error must say so — not the generic "run failed",
-    // which would hide that the task no longer exists.
+  it('preserves a ONE-SHOT when delivery fails before admission', async () => {
     const onRunPrompt = vi.fn().mockRejectedValue(new Error('switch timeout'));
     const onError = vi.fn();
     await mount(
@@ -834,11 +828,11 @@ describe('ScheduledTasksDialog run now', () => {
     );
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
-      expect.stringContaining('never ran'),
+      expect.stringContaining('run'),
     );
   });
 

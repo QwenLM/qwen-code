@@ -1054,20 +1054,11 @@ export function ScheduledTasksDialog({
             onError(err, t('scheduledTasks.error.runFailed'));
           }
         } else {
-          // One-shot: /run IS its single fire — it deletes the task. Consume it
-          // BEFORE enqueuing so it can't ALSO fire at its own scheduled slot (a
-          // silent double execution). The trade-off is that a failed delivery
-          // leaves the task gone AND un-run — and reload() has already dropped it
-          // from the list — so surface THAT explicitly rather than the generic
-          // "run failed", which would hide the deletion.
+          // Preserve the one-shot until its prompt is admitted. A failed
+          // preflight or session switch must not delete work that never ran.
+          await onRunPrompt(fresh.prompt, fresh.sessionId);
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
-          try {
-            await onRunPrompt(fresh.prompt, fresh.sessionId);
-          } catch (err) {
-            onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
-            return;
-          }
         }
       } catch (err) {
         onError(err, t('scheduledTasks.error.runFailed'));

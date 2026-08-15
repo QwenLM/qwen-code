@@ -223,6 +223,7 @@ export function QueuedPromptDisplay({
           prompt.serverPromptId === undefined &&
           !isMidTurnPending &&
           imageCount === 0 &&
+          fileCount === 0 &&
           (prompt.inputAnnotations?.length ?? 0) === 0;
         const hasStateSpinner =
           isSubmitting ||

@@ -8246,7 +8246,7 @@ export function App({
   const enqueueManualRun = useCallback(
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
-        if (goalSnapshotRef.current?.goal?.status === 'active') {
+        if (connectionRef.current.goalState?.goal?.status === 'active') {
           reject(
             new Error('Cannot start a scheduled task while Goal is active'),
           );
@@ -8283,7 +8283,8 @@ export function App({
     if (
       !pending ||
       conn.sessionId !== pending.sessionId ||
-      conn.loadingTranscript
+      conn.loadingTranscript ||
+      conn.goalState === undefined
     ) {
       return;
     }
@@ -8366,6 +8367,7 @@ export function App({
     connection.sessionId,
     connection.loadingTranscript,
     connection.catchingUp,
+    connection.goalState,
     tryFireBoundRun,
   ]);
 
@@ -8531,12 +8533,29 @@ export function App({
       }
 
       void (async () => {
+        const sourceOwner = sessionOwnerGuard.capture();
+        const sourceSessionId = connectionRef.current.sessionId;
         let allocatedSessionId: string | undefined;
         if (!connectionRef.current.sessionId) {
           if (operation.kind !== 'set') {
             throw new Error(t('localCommand.noSession'));
           }
           allocatedSessionId = await ensureSessionForPrompt();
+        }
+        const currentSessionId = connectionRef.current.sessionId;
+        const ownAllocationSucceeded =
+          sourceSessionId === undefined &&
+          allocatedSessionId !== undefined &&
+          (currentSessionId === undefined ||
+            currentSessionId === allocatedSessionId);
+        if (
+          (!sourceOwner.isCurrent() && !ownAllocationSucceeded) ||
+          (sourceSessionId !== undefined
+            ? currentSessionId !== sourceSessionId
+            : currentSessionId !== undefined &&
+              currentSessionId !== allocatedSessionId)
+        ) {
+          return;
         }
         if (!connectionRef.current.sessionId && !allocatedSessionId) {
           throw new Error(t('localCommand.noSession'));
@@ -8566,6 +8585,7 @@ export function App({
       ensureSessionForPrompt,
       openGoals,
       reportError,
+      sessionOwnerGuard,
       store,
       t,
     ],
@@ -11908,8 +11928,28 @@ export function App({
                           });
                           if (!created) return false;
                         }
+                        const allocationOwner = sessionOwnerGuard.capture();
+                        const sourceSessionId =
+                          connectionRef.current.sessionId;
                         const allocatedSessionId =
                           await ensureSessionForPrompt();
+                        const currentSessionId =
+                          connectionRef.current.sessionId;
+                        const ownAllocationSucceeded =
+                          sourceSessionId === undefined &&
+                          allocatedSessionId !== undefined &&
+                          (currentSessionId === undefined ||
+                            currentSessionId === allocatedSessionId);
+                        if (
+                          (!allocationOwner.isCurrent() &&
+                            !ownAllocationSucceeded) ||
+                          (sourceSessionId !== undefined
+                            ? currentSessionId !== sourceSessionId
+                            : currentSessionId !== undefined &&
+                              currentSessionId !== allocatedSessionId)
+                        ) {
+                          return false;
+                        }
                         if (
                           !connectionRef.current.sessionId &&
                           !allocatedSessionId
@@ -11927,7 +11967,10 @@ export function App({
                             await controlCurrentGoal('create', condition);
                           }
                         } catch (error) {
-                          if (owner.isCurrent()) {
+                          if (
+                            owner.isCurrent() &&
+                            mainViewRef.current === 'goals'
+                          ) {
                             strandedGoalSessionRef.current =
                               allocatedSessionId ??
                               connectionRef.current.sessionId;
