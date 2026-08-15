@@ -4881,7 +4881,7 @@ jobs:
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or (.state // "") == "CHANGES_REQUESTED"
                   or ((.body // "") | contains("**[Critical]**")))
-              | "- [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [rv:\(.id)] [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
@@ -4925,7 +4925,7 @@ jobs:
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or ((.body // "") | contains("**[Critical]**")))
-              | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [ic:\(.id)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
             if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
               echo
@@ -5330,8 +5330,29 @@ jobs:
             "${WORKDIR}/agent-api-error-kind" \
             "${WORKDIR}/agent-timeout" \
             "${WORKDIR}/resolved-comments.txt" \
-            "${WORKDIR}/deferred-findings.json" \
             "${WORKDIR}/comment-replies.json"
+          # NOT deleted with its siblings: run 2 writes its own
+          # deferred-findings.json, and a deferral dropped here is gone for
+          # good (the eval watermark filters this round's feedback out of
+          # every later round). Carry run 1's into a sidecar the upsert
+          # unions in; merge if a previous repair already left one.
+          if [[ -s "${WORKDIR}/deferred-findings.json" ]]; then
+            if [[ -s "${WORKDIR}/deferred-findings.carry.json" ]]; then
+              if jq -s 'add' "${WORKDIR}/deferred-findings.carry.json" \
+                "${WORKDIR}/deferred-findings.json" \
+                > "${WORKDIR}/deferred-findings.carry.next" 2> /dev/null; then
+                mv "${WORKDIR}/deferred-findings.carry.next" \
+                  "${WORKDIR}/deferred-findings.carry.json"
+              else
+                echo '::warning::could not merge carried deferrals across the repair; keeping the earlier set'
+                rm -f "${WORKDIR}/deferred-findings.carry.next"
+              fi
+              rm -f "${WORKDIR}/deferred-findings.json"
+            else
+              mv "${WORKDIR}/deferred-findings.json" \
+                "${WORKDIR}/deferred-findings.carry.json"
+            fi
+          fi
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
@@ -5425,7 +5446,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -5703,6 +5724,7 @@ jobs:
             # mode, exec failure, a missing interpreter — is reported instead of
             # passing silently for a successful persistence.
             UPSERT_OUT="$(LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
               /usr/bin/env -i \
               PATH="${TRUSTED_PATH}" \
               GITHUB_TOKEN="${GITHUB_TOKEN}" \
@@ -6694,6 +6716,7 @@ jobs:
               # is VERIFIED via a sentinel rather than assumed — same shape as
               # run_deferred_upsert in 'Push and report'.
               UPSERT_OUT="$(LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+              LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
                 /usr/bin/env -i \
                 PATH="${TRUSTED_PATH}" \
                 GITHUB_TOKEN="${GITHUB_TOKEN}" \

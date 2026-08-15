@@ -378,11 +378,19 @@ silently overriding or silently complying.
   the PR's footprint or its mainline purpose. Do not implement it in this PR
   (that is scope drift) and do not decline it (the finding is real): record
   it in `<workdir>/deferred-findings.json` — a JSON array of
-  `{"id": <inline comment id>, "path": "<file>", "reason": "<verified
-finding + why it is out of scope, one or two sentences>"}` — and reply on
-  its thread via `comment-replies.json` that it is deferred to the
-  follow-up queue, leaving the thread open. The workflow upserts these into
-  a per-PR "Deferred review findings" issue that survives the merge; a
+  `{"id": <id>, "source": "<source>", "path": "<file>", "reason": "<verified
+finding + why it is out of scope, one or two sentences>"}`. This applies to
+  a finding from ANY of the three feedback sources, each of which carries its
+  id in the feedback: an inline comment (`[rc:<id>]`, `"source":
+"review_comment"`, the default when omitted), a review body (`[rv:<id>]`,
+  `"source": "review"`), or an issue-level PR comment (`[ic:<id>]`,
+  `"source": "issue_comment"`). A verified out-of-footprint finding from a
+  review body or an issue-level comment is deferred exactly like an inline
+  one — leaving it out means it is lost at merge. For an inline finding also
+  reply on its thread via `comment-replies.json` that it is deferred to the
+  follow-up queue, leaving the thread open; the other two sources have no
+  thread, so say it in the round summary instead. The workflow upserts these
+  into a per-PR "Deferred review findings" issue that survives the merge; a
   maintainer schedules them from there. Distinguish from Decline: you
   decline what is not worth doing anywhere; you defer what is worth doing
   elsewhere.

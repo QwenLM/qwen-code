@@ -24,6 +24,50 @@ set -uo pipefail
 set +C
 
 FINDINGS="${WORKDIR}/deferred-findings.json"
+# Both temp files are released by ONE EXIT trap: a later `trap ... EXIT`
+# would replace an earlier one and leak the first file.
+MERGED=''
+KNOWN_FILE=''
+trap 'rm -f "${MERGED}" "${KNOWN_FILE}"' EXIT
+# A repair re-run rebuilds the workspace: 'Repair deterministic rejection'
+# moves run 1's deferrals to this sidecar so they are not lost when run 2
+# writes its own file. Both are unioned below (the line builder dedupes).
+CARRY="${WORKDIR}/deferred-findings.carry.json"
+
+# Every abort below is PERMANENT for these findings: the eval watermark
+# filters this round's feedback out of every later round, and the next run's
+# workspace reset deletes the file — nothing re-derives them. So each abort
+# says so and dumps what it had, for manual recovery from the run log.
+# `::` is neutralized in the dump: the content is agent-influenced and a
+# raw `::` at line start would be parsed as a workflow command (same reason
+# `<!--` is neutralized at every publish site).
+lost() {
+  echo "::warning::$1 — these findings are LOST (watermark-gated — no later round re-derives them). Raw deferrals follow for manual recovery:"
+  for f in "${FINDINGS}" "${CARRY}"; do
+    [[ -s "${f}" ]] || continue
+    echo "--- ${f}"
+    head -c 4000 "${f}" | sed 's/::/;;/g'
+    echo
+  done
+}
+
+if [[ -s "${CARRY}" ]]; then
+  if [[ -s "${FINDINGS}" ]]; then
+    if ! MERGED="$(mktemp)"; then
+      lost 'could not create a temp file to merge the carried deferrals'
+      exit 0
+    fi
+    if jq -s 'add' "${FINDINGS}" "${CARRY}" > "${MERGED}" 2> /dev/null; then
+      FINDINGS="${MERGED}"
+    else
+      echo "::warning::could not merge the carried deferrals; persisting only this round's (the carried ones are dumped below)"
+      head -c 4000 "${CARRY}" | sed 's/::/;;/g'
+      echo
+    fi
+  else
+    FINDINGS="${CARRY}"
+  fi
+fi
 [[ -s "${FINDINGS}" ]] || exit 0
 
 # An empty array is the contract-valid "nothing to defer" rendering (SKILL
@@ -44,8 +88,14 @@ if ! jq -e 'type == "array" and length > 0 and all(.[];
     (.id | type == "number" and . == floor and . > 0 and . < 9007199254740992
       and (tostring | test("^[0-9]+$")))
     and (.reason | type == "string")
-    and ((.path // "?") | type == "string"))' "${FINDINGS}" > /dev/null 2>&1; then
-  echo "::warning::deferred-findings.json is malformed; skipping the follow-up upsert"
+    and ((.source | type) as $t | $t == "null"
+      or ($t == "string"
+        and (.source | IN("review_comment", "review", "issue_comment"))))
+    and (.path | type | . == "null" or . == "string"))' "${FINDINGS}" > /dev/null 2>&1; then
+  # `.path | type` (not `.path // "?"`): `//` treats false as absent, so a
+  # present-but-non-string `false` would otherwise be coerced to "?" against
+  # this gate's own "fail loudly" contract.
+  lost 'deferred findings are malformed (this round and/or the carried sidecar)'
   exit 0
 fi
 
@@ -60,7 +110,7 @@ if ! ISSUE_NUM="$(gh api "repos/${REPO}/issues?state=all&creator=${AUTOFIX_BOT}&
   jq -rs --arg m "${MARKER}" '
     add // [] | map(select((.pull_request | not)
       and ((.body // "") | contains($m)))) | (.[0].number // "") | tostring')"; then
-  echo "::warning::deferred-findings lookup failed; skipping the follow-up upsert this round"
+  lost 'the tracking-issue lookup failed'
   exit 0
 fi
 
@@ -68,16 +118,15 @@ if ! KNOWN_FILE="$(mktemp)"; then
   # A silent exit here would violate the header contract (every failure
   # warns) and is exactly when visibility matters — /tmp exhaustion is a
   # known CI state.
-  echo "::warning::could not create a temp file for the deferred-findings corpus; skipping this round"
+  lost 'could not create a temp file for the dedupe corpus'
   exit 0
 fi
-trap 'rm -f "${KNOWN_FILE}"' EXIT
 if [[ -n "${ISSUE_NUM}" && "${ISSUE_NUM}" != 'null' ]]; then
   # Known-id corpus = issue body + every comment. Any fetch failure skips
   # the round: treating it as empty would re-append history (or, under
   # the old PATCH design, erase it).
   if ! BODY_TEXT="$(gh api "repos/${REPO}/issues/${ISSUE_NUM}" --jq '.body // ""' 2> /dev/null)"; then
-    echo "::warning::could not read deferred-findings issue #${ISSUE_NUM}; skipping this round"
+    lost "could not read deferred-findings issue #${ISSUE_NUM}"
     exit 0
   fi
   # Bot-authored comments only: the tracking issue is public, and an
@@ -86,7 +135,7 @@ if [[ -n "${ISSUE_NUM}" && "${ISSUE_NUM}" != 'null' ]]; then
   if ! COMMENT_TEXT="$(gh api "repos/${REPO}/issues/${ISSUE_NUM}/comments?per_page=100" \
     --paginate 2> /dev/null | jq -rs --arg bot "${AUTOFIX_BOT}" \
       'add // [] | map(select((.user.login // "") == $bot) | .body // "") | join("\n")')"; then
-    echo "::warning::could not read deferred-findings comments on #${ISSUE_NUM}; skipping this round"
+    lost "could not read the deferred-findings comments on #${ISSUE_NUM}"
     exit 0
   fi
   printf '%s\n%s' "${BODY_TEXT}" "${COMMENT_TEXT}" > "${KNOWN_FILE}"
@@ -114,11 +163,15 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLV
     | map(sub("^rc:"; "") | sub("\r$"; "")
       | select(test("^[0-9]+$")) | tonumber)) as $done
   | ($known | split("\n")) as $klines
-  | unique_by(.id)
+  | unique_by([(.source // "review_comment"), .id])
   | map(.id as $id
-    | select(($done | index($id)) | not)
-    | select(($klines | any(test("^- rc:" + ($id | tostring) + " "))) | not)
-    | "- rc:\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
+    | ((.source // "review_comment")) as $src
+    | (if $src == "review" then "rv"
+       elif $src == "issue_comment" then "ic"
+       else "rc" end) as $pfx
+    | select(($src != "review_comment") or (($done | index($id)) | not))
+    | select(($klines | any(test("^- " + $pfx + ":" + ($id | tostring) + " "))) | not)
+    | "- \($pfx):\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
         | gsub("[\r\n]+"; " ")
         | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
         | gsub("@"; "@\u200b")
@@ -127,7 +180,7 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLV
   sed 's/<!--/<!\\-\\-/g')"; then
   # The only remaining silent-exit path: a jq/sed failure here would leave
   # NEW_LINES empty and read as "nothing new". Warn, per the header contract.
-  echo "::warning::could not build the deferred-findings lines; skipping this round"
+  lost 'could not build the deferred-findings lines'
   exit 0
 fi
 [[ -n "${NEW_LINES}" ]] || exit 0
