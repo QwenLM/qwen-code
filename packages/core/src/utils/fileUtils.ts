@@ -815,6 +815,7 @@ async function classifyImageContent(
     handle = await fs.promises.open(filePath, 'r');
     // Above the image source limit the read is rejected as an oversized image;
     // sniffing anyway would reclassify zero-filled/text payloads and route them
+    // past the 100 MB gate.
     handle = await fs.promises.open(
       filePath,
       fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
