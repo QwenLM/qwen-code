@@ -3945,8 +3945,13 @@ export class Session implements SessionContext {
           conversationHistory,
           ac.signal,
           {
+            // On by default: the schema declares `default: true`, but
+            // `mergeSettings` doesn't apply schema defaults, so an unset value
+            // is `undefined` and a `=== true` gate left the cache-aware fork
+            // as dead code unless the flag was explicitly set (#9230). Mirrors
+            // AppContainer — only an explicit `false` opts out.
             enableCacheSharing:
-              this.settings.merged.ui?.enableCacheSharing === true,
+              this.settings.merged.ui?.enableCacheSharing !== false,
           },
         );
         if (ac.signal.aborted) return;
