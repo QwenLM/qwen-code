@@ -246,9 +246,13 @@ export function createDaemonSessionActions({
   }> {
     const supportsMediaUpload =
       getConnection().capabilities?.features.includes('session_media') === true;
+    // The media route matches concrete image types only; a literal image/*
+    // Content-Type 400s, so untyped images stay inline as before the upload
+    // path existed.
     if (
       images.length === 0 ||
       !supportsMediaUpload ||
+      images.some((image) => image.mimeType === 'image/*') ||
       typeof session.uploadMedia !== 'function'
     ) {
       return { content: toDaemonPromptContent(text, images), references: [] };

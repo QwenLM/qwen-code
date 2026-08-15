@@ -1010,6 +1010,38 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('keeps images without a concrete mime type inline instead of uploading', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_media'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('look', {
+      images: [{ data: 'AQID', mimeType: 'image/*' }],
+    });
+
+    // The media route matches concrete image types only; uploading a literal
+    // image/* Content-Type 400s, so such images must stay inline (untyped,
+    // matching the legacy shape).
+    expect(session.uploadMedia).not.toHaveBeenCalled();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text: 'look' },
+        { type: 'image', data: 'AQID' },
+      ],
+    });
+  });
+
   it('does not mark admission started when media upload fails', async () => {
     const onAdmissionStarted = vi.fn();
     const session = createMockSession('session-a');

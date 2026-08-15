@@ -281,6 +281,34 @@ function getMidTurnInjectedImages(
   return images.length > 0 ? images : undefined;
 }
 
+/**
+ * Collect text content blocks from mid-turn injected message items. The
+ * degraded-media drain echo ships an empty `messages` array whose items carry
+ * only the unavailability notice, so the echo text can be empty while the
+ * items still hold renderable text.
+ */
+function getMidTurnInjectedItemText(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+
+  const texts: string[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if ((block as { type?: unknown }).type !== 'text') continue;
+      const text = (block as { text?: unknown }).text;
+      if (typeof text === 'string' && text.length > 0) texts.push(text);
+    }
+  }
+
+  return texts.length > 0 ? texts.join('\n') : undefined;
+}
+
 function isBackgroundNotificationBlock(
   block: DaemonTextTranscriptBlock,
 ): boolean {
@@ -784,7 +812,11 @@ export function transcriptBlocksToDaemonMessages(
           messages.push({
             id: block.id,
             role: 'system',
-            content: statusBlock.text,
+            content:
+              statusBlock.text.length > 0
+                ? statusBlock.text
+                : (getMidTurnInjectedItemText(statusBlock.data) ??
+                  statusBlock.text),
             variant: 'info',
             timestamp: blockTime,
             source: statusBlock.source,

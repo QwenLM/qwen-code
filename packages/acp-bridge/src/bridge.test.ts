@@ -26708,6 +26708,60 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it('acks a same-id retry after the queued media is removed', async () => {
+    const { factory, release } = hangingPromptFactory();
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptPromise = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const reference = await bridge.storeSessionMedia(
+      session.sessionId,
+      Uint8Array.of(1, 2, 3),
+      'image/png',
+      { clientId: session.clientId },
+    );
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'look at this',
+        { clientId: session.clientId },
+        'retry-after-media-gone',
+        { content: [reference] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'retry-after-media-gone' });
+    expect(
+      bridge.removeMidTurnMessage(session.sessionId, 'retry-after-media-gone', {
+        clientId: session.clientId,
+      }),
+    ).toEqual({ removed: true });
+
+    // The removal deleted the bytes and settled the id; a same-id retry must
+    // hit the settled ring and ack, not throw session_media_gone (410).
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'look at this',
+        { clientId: session.clientId },
+        'retry-after-media-gone',
+        { content: [reference] },
+      ),
+    ).toEqual({ accepted: true, messageId: 'retry-after-media-gone' });
+
+    release();
+    await promptPromise;
+    await bridge.shutdown();
+  });
+
   it('does not recreate a deleted stable id when its admission is retried', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });

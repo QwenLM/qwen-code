@@ -10255,7 +10255,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const mediaBlocks = (options?.content ?? []).filter(
         (block): block is BridgePromptContentBlock => block.type === 'image',
       );
-      entry.media.assertReferences(mediaBlocks);
       if (trimmed.length === 0 && mediaBlocks.length === 0) {
         writeStderrLine(
           `[mid-turn] session=${entry.sessionId} rejected: empty`,
@@ -10318,6 +10317,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
         return { accepted: false };
       }
+      // Validate only genuinely new admissions, AFTER the retry-ack rings:
+      // a same-id retry whose media was already removed (delete racing an
+      // in-flight POST, or a refresh re-enqueueing from the snapshot) must
+      // settle idempotently instead of failing with session_media_gone.
+      entry.media.assertReferences(mediaBlocks);
       const messageId = requestedMessageId ?? randomUUID();
       // If the turn settled while the POST was in flight, start it through the
       // normal prompt path. A client-supplied id keeps retries idempotent.

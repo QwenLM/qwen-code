@@ -494,6 +494,40 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('shows the degraded-media notice when the echo text is empty', () => {
+    // When the stored media is gone at drain, the daemon echoes an empty
+    // messages array whose items carry only the placeholder text block; the
+    // notice must be surfaced instead of rendering an empty bubble.
+    const messages = transcriptBlocksToDaemonMessages([
+      statusBlock('mid-1', '', 1, {
+        source: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's1',
+          messages: [''],
+          messageIds: ['mid-gone'],
+          items: [
+            {
+              content: [
+                {
+                  type: 'text',
+                  text: '[Attached media is no longer available]',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: '[Attached media is no longer available]',
+        source: 'mid_turn_message_injected',
+      }),
+    ]);
+  });
+
   it('keeps mid-turn injected echoes that look like status noise', () => {
     // User content that merely starts like a filtered status line must not be
     // dropped by the noise filter.
