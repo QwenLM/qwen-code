@@ -3367,7 +3367,7 @@ export class GeminiChat {
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
                 nextInvalidStreamRetryCount;
               debugLogger.warn(
-                `Invalid stream [${(error as InvalidStreamError).type}] ` +
+                `Invalid stream [${budgetError.type}] ` +
                   `(retry ${nextInvalidStreamRetryCount}/${maxInvalidStreamRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
@@ -3375,7 +3375,7 @@ export class GeminiChat {
                 self.config,
                 new ContentRetryEvent(
                   nextInvalidStreamRetryCount - 1,
-                  (error as InvalidStreamError).type,
+                  budgetError.type,
                   delayMs,
                   model,
                 ),
