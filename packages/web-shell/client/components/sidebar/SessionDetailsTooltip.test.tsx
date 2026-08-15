@@ -75,6 +75,7 @@ describe('SessionDetailsTooltip', () => {
     expect(details?.querySelector('[title="/work/qwen-code"]')).not.toBeNull();
     expect(details?.textContent).toContain('codex/sidebar');
     expect(details?.textContent).toContain('2 client(s)');
+    expect(details?.querySelector('svg path.fill-popover')).not.toBeNull();
 
     act(() => root.unmount());
   });

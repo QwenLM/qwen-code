@@ -100,6 +100,7 @@ import {
   readCollapsedSessionSectionIds,
   replaceOwnedCollapsedSessionSectionIds,
 } from './collapsedSessionSections';
+import { measureSessionTitleScroll } from './sessionTitleScroll';
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
@@ -3328,6 +3329,9 @@ export function WebShellSidebar({
               styles.archivedRow,
               busy && styles.busySession,
             )}
+            onMouseEnter={(event) =>
+              measureSessionTitleScroll(event.currentTarget)
+            }
           >
             {isEditing ? (
               <form
@@ -3341,6 +3345,7 @@ export function WebShellSidebar({
               >
                 <input
                   autoFocus
+                  aria-label={`${t('sidebar.rename')}: ${label}`}
                   className={styles.renameInput}
                   maxLength={256}
                   value={editingName}
@@ -3352,24 +3357,7 @@ export function WebShellSidebar({
                 />
               </form>
             ) : (
-              <span
-                className={styles.sessionText}
-                onMouseEnter={(event) => {
-                  const title = event.currentTarget.firstElementChild;
-                  const distance = Math.max(
-                    0,
-                    (title?.scrollWidth ?? 0) - event.currentTarget.clientWidth,
-                  );
-                  event.currentTarget.style.setProperty(
-                    '--session-title-scroll-distance',
-                    `${distance}px`,
-                  );
-                  event.currentTarget.style.setProperty(
-                    '--session-title-scroll-duration',
-                    `${distance / 38}s`,
-                  );
-                }}
-              >
+              <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
             )}
@@ -3483,6 +3471,9 @@ export function WebShellSidebar({
             session.hasActivePrompt && styles.runningSession,
             busy && styles.busySession,
           )}
+          onMouseEnter={(event) =>
+            measureSessionTitleScroll(event.currentTarget)
+          }
           role="button"
           tabIndex={0}
           aria-current={isCurrent ? 'page' : undefined}
@@ -3521,6 +3512,7 @@ export function WebShellSidebar({
                 >
                   <input
                     autoFocus
+                    aria-label={`${t('sidebar.rename')}: ${label}`}
                     className={styles.renameInput}
                     maxLength={256}
                     value={editingName}
@@ -3538,22 +3530,7 @@ export function WebShellSidebar({
                 <>
                   <span
                     className={styles.sessionText}
-                    onMouseEnter={(event) => {
-                      const title = event.currentTarget.firstElementChild;
-                      const distance = Math.max(
-                        0,
-                        (title?.scrollWidth ?? 0) -
-                          event.currentTarget.clientWidth,
-                      );
-                      event.currentTarget.style.setProperty(
-                        '--session-title-scroll-distance',
-                        `${distance}px`,
-                      );
-                      event.currentTarget.style.setProperty(
-                        '--session-title-scroll-duration',
-                        `${distance / 38}s`,
-                      );
-                    }}
+                    data-web-shell-session-title
                   >
                     <span className={styles.sessionTextInner}>{label}</span>
                   </span>

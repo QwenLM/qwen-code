@@ -4049,6 +4049,27 @@ export function registerSessionRoutes(
       if (sessionId === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
+      // A session live in another runtime keeps its title from that bridge;
+      // renaming the addressed workspace's file here would answer 200 while
+      // the live session never changes, so reject like the restore path does.
+      const liveOwner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
+      if (liveOwner.kind === 'ambiguous') {
+        sendAmbiguousSessionOwner(res, route, sessionId, liveOwner.runtimes);
+        return;
+      }
+      if (
+        liveOwner.kind === 'found' &&
+        liveOwner.runtime.workspaceCwd !== runtime.workspaceCwd
+      ) {
+        sendSessionWorkspaceConflict(
+          res,
+          route,
+          sessionId,
+          runtime,
+          liveOwner.runtime,
+        );
+        return;
+      }
       const rawDisplayName = safeBody(req)['displayName'];
       if (typeof rawDisplayName !== 'string') {
         res.status(400).json({

@@ -828,6 +828,11 @@
   color: currentColor;
   font-size: 14px;
   line-height: 22px;
+}
+
+/* The fade hints at a clipped tail; only overflowing titles clip, and the
+   hover measurement marks them via the overflow attribute. */
+.sessionText[data-web-shell-title-overflow] {
   mask-image: linear-gradient(to right, #000 calc(100% - 10px), transparent);
   -webkit-mask-image: linear-gradient(
     to right,

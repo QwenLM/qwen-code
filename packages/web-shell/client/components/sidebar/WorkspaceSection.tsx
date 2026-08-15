@@ -36,6 +36,7 @@ import {
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
 import { useSessionCatalogQuery } from '../../session-catalog/session-catalog-hooks';
@@ -559,7 +560,7 @@ export function WorkspaceSection({
                 {groupedSessions.sections.map(({ group, sessions }) => (
                   <SessionGroupSection
                     id={`group:${group.id}`}
-                    key={group.id}
+                    key={`${group.id}:${sourceType ?? ''}`}
                     label={group.name}
                     count={sessions.length}
                     limitSessions={!searchActive}
@@ -592,6 +593,7 @@ export function WorkspaceSection({
                 ))}
                 {groupedSessions.ungrouped.length > 0 && (
                   <SessionGroupSection
+                    key={`ungrouped:${sourceType ?? ''}`}
                     id="ungrouped"
                     label={ungroupedLabel}
                     count={groupedSessions.ungrouped.length}
@@ -624,25 +626,13 @@ export function WorkspaceSection({
                       className={styles.sessionItemReadOnly}
                       role="note"
                       aria-label={`${label}. ${trustToOpenLabel}`}
+                      onMouseEnter={(event) =>
+                        measureSessionTitleScroll(event.currentTarget)
+                      }
                     >
                       <span
                         className={styles.sessionName}
-                        onMouseEnter={(event) => {
-                          const title = event.currentTarget.firstElementChild;
-                          const distance = Math.max(
-                            0,
-                            (title?.scrollWidth ?? 0) -
-                              event.currentTarget.clientWidth,
-                          );
-                          event.currentTarget.style.setProperty(
-                            '--session-title-scroll-distance',
-                            `${distance}px`,
-                          );
-                          event.currentTarget.style.setProperty(
-                            '--session-title-scroll-duration',
-                            `${distance / 38}s`,
-                          );
-                        }}
+                        data-web-shell-session-title
                       >
                         <span className={styles.sessionNameInner}>{label}</span>
                       </span>

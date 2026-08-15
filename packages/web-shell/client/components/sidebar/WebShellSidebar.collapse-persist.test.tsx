@@ -214,7 +214,10 @@ const namedGroup = {
 let root: Root;
 let container: HTMLDivElement;
 
-function renderSidebar(collapsed = false) {
+function renderSidebar(
+  collapsed = false,
+  props: { onSelectCurrentSession?: () => void } = {},
+) {
   act(() => {
     root.render(
       <I18nProvider language="en">
@@ -229,6 +232,7 @@ function renderSidebar(collapsed = false) {
           onOpenSplitView={() => {}}
           onNewSession={() => false}
           onLoadSession={loadSession}
+          onSelectCurrentSession={props.onSelectCurrentSession}
           onError={() => {}}
         />
       </I18nProvider>,
@@ -368,6 +372,42 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     await flushSidebar();
 
     expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project');
+    const closingSwitcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(closingSwitcher?.dataset.state ?? 'closed').toBe('closed');
+  });
+
+  it('closes the switcher without reloading the current session', async () => {
+    connection.sessionId = 'session-a';
+    const onSelectCurrentSession = vi.fn();
+    renderSidebar(true, { onSelectCurrentSession });
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger?.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const session = Array.from(
+      switcher?.querySelectorAll<HTMLElement>('[role="button"]') ?? [],
+    ).find((row) => row.textContent?.includes('API review'));
+    expect(session).not.toBeNull();
+
+    act(() => click(session!));
+    await flushSidebar();
+
+    expect(onSelectCurrentSession).toHaveBeenCalledTimes(1);
+    expect(loadSession).not.toHaveBeenCalled();
     const closingSwitcher = document.querySelector<HTMLElement>(
       '[data-web-shell-collapsed-session-switcher]',
     );
