@@ -12,7 +12,11 @@ import {
   outputSchema,
   renderResult,
 } from './profile.js';
-import { searchProvider } from './provider.js';
+import {
+  ProviderConfigurationError,
+  searchProvider,
+  validateProviderConfiguration,
+} from './provider.js';
 
 const server = new McpServer({
   name: 'provider-context-local-example',
@@ -63,8 +67,13 @@ function errorResult(text: string) {
 }
 
 try {
+  validateProviderConfiguration();
   await server.connect(new StdioServerTransport());
-} catch {
-  process.stderr.write('Provider context extension failed to start.\n');
+} catch (error) {
+  process.stderr.write(
+    error instanceof ProviderConfigurationError
+      ? `${error.message}\n`
+      : 'Provider context extension failed to start.\n',
+  );
   process.exitCode = 1;
 }

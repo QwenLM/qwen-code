@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -37,6 +38,8 @@ describe('local provider extension example', () => {
     expect(() => normalizeQuery('x'.repeat(2001))).toThrow(
       'Search query is too long.',
     );
+    expect(normalizeQuery('x'.repeat(2000)).length).toBe(2000);
+    expect(Array.from(normalizeQuery('🙂'.repeat(2000)))).toHaveLength(2000);
   });
 
   it('renders bounded contract-valid output with matching representations', () => {
@@ -93,12 +96,34 @@ describe('local provider extension example', () => {
     ).toBe(true);
   });
 
-  it('uses one guarded request and accepts only valid provider items', async () => {
+  it.each([
+    'http://127.0.0.1:3000',
+    'http://localhost:3000',
+    'http://[::1]:3000',
+  ])('uses one guarded request through loopback origin %s', async (baseUrl) => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
           items: [
-            { id: 'one', content: 'context', score: 0.9 },
+            {
+              id: 'one',
+              content: 'context',
+              title: 'Policy',
+              uri: 'https://context.example.com/policies/1',
+              score: 0.9,
+              updated_at: '2026-08-13T00:00:00Z',
+            },
+            {
+              id: 'camel',
+              content: 'context',
+              updatedAt: '2026-08-14T00:00:00Z',
+            },
+            {
+              id: 'wrong-metadata',
+              content: 'context',
+              title: 42,
+              uri: false,
+            },
             { id: 'blank', content: '' },
             { id: 'non-finite', content: 'context', score: 'Infinity' },
           ],
@@ -107,18 +132,32 @@ describe('local provider extension example', () => {
       ),
     );
     vi.stubGlobal('fetch', fetchMock);
-    vi.stubEnv('PROVIDER_CONTEXT_BASE_URL', 'http://127.0.0.1:3000');
+    vi.stubEnv('PROVIDER_CONTEXT_BASE_URL', baseUrl);
     vi.stubEnv('PROVIDER_CONTEXT_TOKEN', 'secret');
 
     const signal = AbortSignal.timeout(1000);
     await expect(searchProvider({ query: 'policy', signal })).resolves.toEqual([
-      { id: 'one', content: 'context', score: 0.9 },
+      {
+        id: 'one',
+        content: 'context',
+        title: 'Policy',
+        uri: 'https://context.example.com/policies/1',
+        score: 0.9,
+        updatedAt: '2026-08-13T00:00:00Z',
+      },
+      {
+        id: 'camel',
+        content: 'context',
+        updatedAt: '2026-08-14T00:00:00Z',
+      },
+      { id: 'wrong-metadata', content: 'context' },
       { id: 'non-finite', content: 'context' },
     ]);
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledWith(
-      new URL('http://127.0.0.1:3000/v1/context/search'),
+      new URL('/v1/context/search', baseUrl),
       expect.objectContaining({
+        method: 'POST',
         body: JSON.stringify({ query: 'policy', limit: 5 }),
         headers: expect.objectContaining({
           authorization: 'Bearer secret',
@@ -175,6 +214,34 @@ describe('local provider extension example', () => {
     ).rejects.toThrow('Provider response is invalid.');
   });
 
+  it('accepts streamed provider responses at exactly 1 MiB', async () => {
+    const body = new TextEncoder().encode(
+      JSON.stringify({ items: [] }).padEnd(1024 * 1024, ' '),
+    );
+    const midpoint = body.byteLength / 2;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(body.slice(0, midpoint));
+              controller.enqueue(body.slice(midpoint));
+              controller.close();
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    vi.stubEnv('PROVIDER_CONTEXT_BASE_URL', 'https://provider.example');
+    vi.stubEnv('PROVIDER_CONTEXT_TOKEN', 'secret');
+
+    await expect(
+      searchProvider({ query: 'policy', signal: AbortSignal.timeout(1000) }),
+    ).resolves.toEqual([]);
+  });
+
   it('rejects redirects without exposing provider details', async () => {
     vi.stubGlobal(
       'fetch',
@@ -194,11 +261,33 @@ describe('local provider extension example', () => {
   });
 
   it.skipIf(!npmCli)(
-    'packs the executable referenced by the example manifest',
+    'packs an executable that fails fast without provider configuration',
     async () => {
       await execFileAsync(process.execPath, [npmCli, 'run', 'build'], {
         cwd: exampleRoot,
       });
+      const executable = fileURLToPath(
+        new URL(
+          '../examples/provider-extension-local/dist/main.js',
+          import.meta.url,
+        ),
+      );
+      for (const [baseUrl, token, stderr] of [
+        ['', '', 'Provider configuration is unavailable.\n'],
+        ['not-a-url', 'secret', 'Provider configuration is invalid.\n'],
+      ] as const) {
+        await expect(
+          execFileAsync(process.execPath, [executable], {
+            cwd: exampleRoot,
+            env: {
+              ...process.env,
+              PROVIDER_CONTEXT_BASE_URL: baseUrl,
+              PROVIDER_CONTEXT_TOKEN: token,
+            },
+            timeout: 5000,
+          }),
+        ).rejects.toMatchObject({ stderr });
+      }
       const { stdout } = await execFileAsync(
         process.execPath,
         [npmCli, 'pack', '--dry-run', '--json', '--ignore-scripts'],

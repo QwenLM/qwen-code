@@ -8,12 +8,17 @@ import type { ContextItem } from './profile.js';
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
+export class ProviderConfigurationError extends Error {}
+
+export function validateProviderConfiguration(): void {
+  readProviderConfiguration();
+}
+
 export async function searchProvider(input: {
   query: string;
   signal: AbortSignal;
 }): Promise<readonly ContextItem[]> {
-  const baseUrl = readBaseUrl();
-  const token = readRequiredEnvironment('PROVIDER_CONTEXT_TOKEN');
+  const { baseUrl, token } = readProviderConfiguration();
   const response = await fetch(new URL('/v1/context/search', baseUrl), {
     method: 'POST',
     headers: {
@@ -41,20 +46,33 @@ export async function searchProvider(input: {
     .slice(0, 5);
 }
 
+function readProviderConfiguration(): { baseUrl: URL; token: string } {
+  return {
+    baseUrl: readBaseUrl(),
+    token: readRequiredEnvironment('PROVIDER_CONTEXT_TOKEN'),
+  };
+}
+
 function readBaseUrl(): URL {
-  const url = new URL(readRequiredEnvironment('PROVIDER_CONTEXT_BASE_URL'));
+  const value = readRequiredEnvironment('PROVIDER_CONTEXT_BASE_URL');
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ProviderConfigurationError('Provider configuration is invalid.');
+  }
   if (url.username || url.password || url.search || url.hash) {
-    throw new Error('Provider configuration is invalid.');
+    throw new ProviderConfigurationError('Provider configuration is invalid.');
   }
   if (url.pathname !== '/' && url.pathname !== '') {
-    throw new Error('Provider configuration is invalid.');
+    throw new ProviderConfigurationError('Provider configuration is invalid.');
   }
   const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
   if (
     url.protocol !== 'https:' &&
     !(url.protocol === 'http:' && loopback.has(url.hostname))
   ) {
-    throw new Error('Provider configuration is invalid.');
+    throw new ProviderConfigurationError('Provider configuration is invalid.');
   }
   return url;
 }
@@ -62,7 +80,9 @@ function readBaseUrl(): URL {
 function readRequiredEnvironment(name: string): string {
   const value = process.env[name];
   if (!value || value === '${' + name + '}') {
-    throw new Error('Provider configuration is unavailable.');
+    throw new ProviderConfigurationError(
+      'Provider configuration is unavailable.',
+    );
   }
   return value;
 }

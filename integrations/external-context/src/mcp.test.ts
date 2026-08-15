@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { readFile } from 'node:fs/promises';
-import Ajv from 'ajv';
+import { Ajv } from 'ajv';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigurationError } from './config.js';
 import { createExternalContextMcpServer, runMcp } from './mcp.js';
@@ -79,10 +79,10 @@ describe('external context MCP server', () => {
         'utf8',
       ),
     ) as ProfileTestVectors;
-    expect(vectors.validInputs).toHaveLength(2);
-    expect(vectors.invalidInputs).toHaveLength(3);
-    expect(vectors.validOutputs).toHaveLength(2);
-    expect(vectors.invalidOutputs).toHaveLength(16);
+    expect(vectors.validInputs).toHaveLength(3);
+    expect(vectors.invalidInputs).toHaveLength(4);
+    expect(vectors.validOutputs).toHaveLength(4);
+    expect(vectors.invalidOutputs).toHaveLength(17);
     for (const vector of vectors.validInputs) {
       expect({ name: vector.name, valid: validateInput(vector.value) }).toEqual(
         { name: vector.name, valid: true },

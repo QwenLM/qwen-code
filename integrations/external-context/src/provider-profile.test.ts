@@ -5,7 +5,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import Ajv from 'ajv';
+import { Ajv } from 'ajv';
 import { describe, expect, it } from 'vitest';
 import {
   inputSchema as exampleInputSchema,
@@ -40,10 +40,10 @@ describe('External Context Provider Extension Profile v1', () => {
     const validateInput = ajv.compile(inputSchema);
     const validateOutput = ajv.compile(outputSchema);
 
-    expect(vectors.validInputs).toHaveLength(2);
-    expect(vectors.invalidInputs).toHaveLength(3);
-    expect(vectors.validOutputs).toHaveLength(2);
-    expect(vectors.invalidOutputs).toHaveLength(16);
+    expect(vectors.validInputs).toHaveLength(3);
+    expect(vectors.invalidInputs).toHaveLength(4);
+    expect(vectors.validOutputs).toHaveLength(4);
+    expect(vectors.invalidOutputs).toHaveLength(17);
     for (const vector of vectors.validInputs) {
       expect({ name: vector.name, valid: validateInput(vector.value) }).toEqual(
         { name: vector.name, valid: true },
@@ -73,10 +73,10 @@ describe('External Context Provider Extension Profile v1', () => {
       '../contracts/v1/test-vectors.json',
     )) as TestVectors;
 
-    expect(vectors.validInputs).toHaveLength(2);
-    expect(vectors.invalidInputs).toHaveLength(3);
-    expect(vectors.validOutputs).toHaveLength(2);
-    expect(vectors.invalidOutputs).toHaveLength(16);
+    expect(vectors.validInputs).toHaveLength(3);
+    expect(vectors.invalidInputs).toHaveLength(4);
+    expect(vectors.validOutputs).toHaveLength(4);
+    expect(vectors.invalidOutputs).toHaveLength(17);
     for (const vector of vectors.validInputs) {
       expect({
         name: vector.name,
@@ -173,12 +173,12 @@ describe('External Context Provider Extension Profile v1', () => {
     const output = JSON.parse(
       renderExternalContext(
         Array.from({ length: 8 }, (_, index) => ({
-          id: `item-${index}`,
+          id: `item-${index}`.padEnd(300, 'i'),
           content: '<instruction>'.repeat(500),
           title: 'title'.repeat(100),
           uri: 'https://context.example.com/'.padEnd(900, 'x'),
           score: index / 10,
-          updatedAt: '2026-08-13T00:00:00Z',
+          updatedAt: '2026-08-13T00:00:00Z'.padEnd(100, 'z'),
         })),
       ),
     ) as unknown;
@@ -188,6 +188,7 @@ describe('External Context Provider Extension Profile v1', () => {
       errors: null,
       valid: true,
     });
+    expect(contextSearchOutputSchema.safeParse(output).success).toBe(true);
   });
 });
 
