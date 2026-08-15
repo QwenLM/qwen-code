@@ -390,21 +390,33 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       plan.files.map((f) => f.path),
     );
     if (pairs !== null) {
-      cacheCandidatePath = tmpFile(`pr-${prNumber}`, 'cache-candidate.json');
-      writeFileSync(
-        cacheCandidatePath,
-        JSON.stringify(
-          {
-            v: 1,
-            target: `pr-${prNumber}`,
-            lastCommitSha: fetchedSha,
-            mergeBaseSha,
-            fileVerdicts: pairs,
-          },
-          null,
-          2,
-        ),
-      );
+      // Guarded for the reason the plan-partition step above is: this runs
+      // after the worktree exists and before the report is written, and a
+      // convenience artifact must never take the whole fetch with it.
+      try {
+        cacheCandidatePath = tmpFile(`pr-${prNumber}`, 'cache-candidate.json');
+        writeFileSync(
+          cacheCandidatePath,
+          JSON.stringify(
+            {
+              v: 1,
+              target: `pr-${prNumber}`,
+              lastCommitSha: fetchedSha,
+              mergeBaseSha,
+              fileVerdicts: pairs,
+            },
+            null,
+            2,
+          ),
+        );
+      } catch (err) {
+        cacheCandidatePath = undefined;
+        writeStderrLine(
+          `WARNING: could not write the cache candidate ` +
+            `(${(err as Error).message}); this round cannot anchor the next ` +
+            `one's rebase survival, but the review itself is unaffected.`,
+        );
+      }
     }
   }
 

@@ -17,7 +17,7 @@
 // new file reported "no changes to review".
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
@@ -70,8 +70,12 @@ type CaptureLocalResult = PlanReport & {
   skippedFiles: SkippedFile[];
   /** Present only when `--cache` scoped this capture incrementally. */
   incremental?: IncrementalScope;
-  /** Where this round's content anchor landed — Step 8 promotes it on a clean run. */
-  cacheCandidatePath: string;
+  /**
+   * Where this round's content anchor landed — Step 8 promotes it on a clean
+   * run. ABSENT when the capture withheld the candidate (a mid-capture tree
+   * change), because Step 8 branches on this field's presence.
+   */
+  cacheCandidatePath?: string;
 };
 
 /**
@@ -188,10 +192,21 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     files: hashes,
     stateId: stateIdOf(headSha, hashes),
   };
-  const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
+  const candidatePath = tmpFile(target, 'cache-candidate.json');
+  // The field rides the plan ONLY when a candidate exists to promote: Step 8
+  // keys its cache-commit-vs-hand-write branch on the field's presence, and
+  // announcing a path to a file this run deliberately withheld would send it
+  // promoting a stale candidate from an earlier round.
+  let cacheCandidatePath: string | undefined;
   if (treeHeldStill) {
-    writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
+    writeFileSync(candidatePath, JSON.stringify(candidate, null, 2));
+    cacheCandidatePath = candidatePath;
   } else {
+    try {
+      rmSync(candidatePath, { force: true });
+    } catch {
+      // The absent field above is the load-bearing half.
+    }
     writeStderrLine(
       'The working tree changed while the capture was being hashed — the ' +
         'cache candidate is withheld, so the next round cannot anchor on ' +
@@ -308,7 +323,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...(incremental ? { incremental } : {}),
-    cacheCandidatePath,
+    ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
     ...planEffortField(args.effort),
   };
 

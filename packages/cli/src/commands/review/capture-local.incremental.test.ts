@@ -410,3 +410,87 @@ describe('capture-local — round-2 findings', () => {
     expect(err).toContain('\\n'); // the newline arrives as an escape, quoted
   });
 });
+
+describe('capture-local — round-3 findings', () => {
+  it("excludes the review's own plumbing even from a SUBDIRECTORY cwd", () => {
+    // ls-files returns repo-root-relative paths; the plumbing is written
+    // relative to the invocation cwd. A root-anchored filter matched nothing
+    // from a subdirectory, and the cache — rewritten every clean round —
+    // then changed the state every round by construction.
+    write('.gitignore', 'nothing-ignored\n'); // .qwen deliberately NOT ignored
+    write(CHANGED, 'export const v = 1;\n');
+    write('sub/keep.ts', 'export const k = 1;\n');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    const prev = process.cwd();
+    process.chdir(join(repo, 'sub'));
+    try {
+      const out = join(repo, 'sub/plan.json');
+      (captureLocalCommand.handler as (argv: unknown) => void)({
+        out,
+        target: 'local',
+        untracked: true,
+      });
+      const plan = JSON.parse(readFileSync(out, 'utf8')) as Plan;
+      const paths = plan.files.map((f) => f.path);
+      expect(paths.some((p) => p.includes('.qwen/'))).toBe(false);
+      expect(paths).toContain('sub/keep.ts');
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
+  it('excludes .qwen/review-cache and .qwen/reviews, not just .qwen/tmp', () => {
+    write('.gitignore', 'nothing-ignored\n');
+    write(CHANGED, 'export const v = 1;\n');
+    write('.qwen/review-cache/local.json', '{}\n');
+    write('.qwen/reviews/2026-01-01-local.md', '# report\n');
+    const out = join(repo, 'plan.json');
+    (captureLocalCommand.handler as (argv: unknown) => void)({
+      out,
+      target: 'local',
+      untracked: true,
+    });
+    const plan = JSON.parse(readFileSync(out, 'utf8')) as Plan;
+    expect(
+      plan.files.map((f) => f.path).some((p) => p.startsWith('.qwen/')),
+    ).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'a symlink retargeted to non-UTF-8 bytes is a change — the raw-bytes identity',
+    () => {
+      seedDirtyTree();
+      // Two targets that differ only in invalid-UTF-8 bytes: a lossy decode
+      // collapses both to U+FFFD and the identity would hold still.
+      const linkPath = join(repo, 'src/link');
+      execFileSync('ln', [
+        '-sfn',
+        Buffer.from([0xff, 0x2e, 0x74]).toString('latin1'),
+        linkPath,
+      ]);
+      const cachePath = promoteCandidate(capture(), 'model-a');
+      rmSync(linkPath);
+      execFileSync('ln', [
+        '-sfn',
+        Buffer.from([0xfe, 0x2e, 0x74]).toString('latin1'),
+        linkPath,
+      ]);
+      const plan = capture({ cache: cachePath, model: 'model-a' });
+      expect(plan.incremental!.deltaFiles).toContain('src/link');
+    },
+  );
+
+  it('a null→string HEAD transition refuses like any other moved HEAD', () => {
+    // Unborn HEAD at round 1 (cache records null), first commit before
+    // round 2: the same worktree bytes now describe a different change.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write(CHANGED, 'export const v = 1;\n');
+    const cachePath = promoteCandidate(capture(), 'model-a');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'first commit');
+    write(CHANGED, 'export const v = 2;\n');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.incremental).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('HEAD moved');
+  });
+});

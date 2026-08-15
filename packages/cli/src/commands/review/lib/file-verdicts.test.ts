@@ -152,14 +152,19 @@ describe('blobsAt / blobPairs', () => {
 });
 
 describe('blobsAt — pathspec magic', () => {
-  it('a colon-prefixed filename lists literally under --literal-pathspecs', () => {
-    write(':weird.ts', 'W\n');
-    git('add', '-A');
-    git('commit', '-q', '--no-verify', '-m', 'colon');
-    const sha = git('rev-parse', 'HEAD');
-    const blobs = blobsAt(repo, sha, [':weird.ts'])!;
-    expect(blobs[':weird.ts']).toMatch(/^100644 [0-9a-f]{40,64}$/);
-  });
+  // ':' is a reserved NTFS character (drive / ADS separator): the write
+  // itself throws on Windows, where the merge-queue leg runs this suite.
+  it.skipIf(process.platform === 'win32')(
+    'a colon-prefixed filename lists literally under --literal-pathspecs',
+    () => {
+      write(':weird.ts', 'W\n');
+      git('add', '-A');
+      git('commit', '-q', '--no-verify', '-m', 'colon');
+      const sha = git('rev-parse', 'HEAD');
+      const blobs = blobsAt(repo, sha, [':weird.ts'])!;
+      expect(blobs[':weird.ts']).toMatch(/^100644 [0-9a-f]{40,64}$/);
+    },
+  );
 });
 
 describe('readFileVerdicts', () => {

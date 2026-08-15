@@ -33,6 +33,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { inertText } from './lib/inert-text.js';
 
 interface CacheCommitArgs {
   candidate: string;
@@ -46,7 +47,11 @@ function readJsonObject(path: string, what: string): Record<string, unknown> {
     raw = JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
     throw new Error(
-      `cache-commit: cannot read ${what} at ${path}: ${(err as Error).message}`,
+      `cache-commit: cannot read ${what} at ${inertText(path)}: ` +
+        // A JSON.parse failure embeds a snippet of the offending bytes,
+        // control characters included, and this error reaches the terminal
+        // through the CLI's raw stderr write.
+        inertText((err as Error).message),
     );
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -77,10 +82,22 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // The two fields every incremental check reads are non-negotiable: a cache
   // without a model has no same-model contract to enforce, and Step 1 would
   // fail-open it into a full review forever; better to refuse loudly now.
-  if (typeof ledger['lastModelId'] !== 'string' || !ledger['lastModelId']) {
+  const ledgerModel = ledger['lastModelId'];
+  if (typeof ledgerModel !== 'string' || ledgerModel === '') {
     throw new Error(
       'cache-commit: the ledger must carry a non-empty `lastModelId` — the ' +
         'incremental anchor is a same-model contract.',
+    );
+  }
+  // The promoted cache is read back by two commands that print this value on
+  // a refusal; a control-charactered id would make the cache the intake for
+  // a forged terminal line. Refuse at the writing end, where a human is
+  // present, rather than escaping it at every reader.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(ledgerModel)) {
+    throw new Error(
+      'cache-commit: `lastModelId` carries control characters — refusing to ' +
+        'persist a value that forges terminal output when read back.',
     );
   }
 
@@ -98,8 +115,8 @@ function runCacheCommit(args: CacheCommitArgs): void {
         : '';
     throw new Error(
       `cache-commit: the candidate belongs to target ` +
-        `${JSON.stringify(candidate['target'])}, but --out names ` +
-        `${JSON.stringify(outTarget)} — refusing to promote across targets.` +
+        `${inertText(String(candidate['target']), 80)}, but --out names ` +
+        `${inertText(outTarget, 80)} — refusing to promote across targets.` +
         hint,
     );
   }

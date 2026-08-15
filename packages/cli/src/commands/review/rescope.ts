@@ -28,12 +28,14 @@
 // Failure is directional ON PURPOSE. Exit 2 means "could not scope" — the
 // caller falls back to the FULL diff, never to a skip: the plan file is left
 // untouched, so the fetched full-range plan simply remains the plan of record.
-// Exit 3 means "the interdiff is empty" — the anchor state and the head state
-// are identical trees, the same outcome as the same-SHA shortcut. Only exit 0
-// rewrites the plan, atomically.
+// Exit 3 means "nothing new to review": the interdiff is empty (the anchor's
+// tree and the head's are identical, the same outcome as the same-SHA
+// shortcut), or every file it named turned out to be restored to its
+// merge-base state and so carries no section of the PR's own diff. Only
+// exit 0 rewrites the plan, atomically.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -58,6 +60,7 @@ import {
   discoverWorkspacePackages,
 } from './lib/import-graph.js';
 import type { IncrementalScope } from './lib/report.js';
+import { inertText } from './lib/inert-text.js';
 import {
   blobPairs,
   changedPairs,
@@ -102,13 +105,17 @@ function verdictsDelta(
   try {
     parsed = JSON.parse(readFileSync(args.cache, 'utf8'));
   } catch {
-    return { refusal: `the cache at ${args.cache} is missing or unreadable` };
+    return {
+      refusal: `the cache at ${inertText(args.cache)} is missing or unreadable`,
+    };
   }
   // `JSON.parse('null')` succeeds; dereferencing it does not. A corrupted or
   // truncated promotion must land on the descriptive refusal, never on a
   // TypeError with an exit code the skill has no branch for.
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return { refusal: `the cache at ${args.cache} is not a JSON object` };
+    return {
+      refusal: `the cache at ${inertText(args.cache)} is not a JSON object`,
+    };
   }
   const cache = parsed as {
     lastModelId?: unknown;
@@ -118,11 +125,12 @@ function verdictsDelta(
   if (cache.lastModelId !== args.model) {
     // The same-model contract, on the same terms as every other anchor gate.
     return {
-      refusal: `the previous round was reviewed by ${
+      refusal: `the previous round was reviewed by ${inertText(
         typeof cache.lastModelId === 'string'
           ? cache.lastModelId
-          : 'an unrecorded model'
-      }, not ${args.model}`,
+          : 'an unrecorded model',
+        64,
+      )}, not ${inertText(args.model, 64)}`,
     };
   }
   const recorded = readFileVerdicts(cache.fileVerdicts);
@@ -136,7 +144,11 @@ function verdictsDelta(
   return {
     delta: changedPairs(recorded, current, allPaths),
     label:
-      typeof cache.lastCommitSha === 'string' && cache.lastCommitSha !== ''
+      // Shape-checked, not merely non-empty: the label rides into the
+      // summary line AND `plan.incremental.anchor`, which every brief
+      // renders. A cache-written non-sha string has no business there.
+      typeof cache.lastCommitSha === 'string' &&
+      /^[0-9a-f]{7,64}$/i.test(cache.lastCommitSha)
         ? cache.lastCommitSha
         : 'content-verdicts',
   };
@@ -163,14 +175,16 @@ interface FetchedPlan {
  * certify pairs for files nobody read — most sharply when the merge base
  * moved under a scoped-out file while the verdicts that would have caught it
  * were unavailable (the fresh-environment case). The rewrite keeps: current
- * pairs for every scoped file (reviewed this round), and current pairs for a
- * context file ONLY when the previous cache — under the same model — already
+ * pairs for every DELTA file (reviewed in full this round), and current
+ * pairs for any other file ONLY when the previous cache — under the same model — already
  * certified that exact pair. Everything else is dropped, which downstream
  * reads as "changed" and re-reviews: the safe direction.
  *
- * Best-effort by design, but never fail-open: if the rewrite cannot complete,
- * the candidate's `fileVerdicts` is stripped rather than left stale, and the
- * failure is said out loud.
+ * Never fail-open: the return value is what the caller writes into the plan
+ * (`false` strips `cacheCandidatePath`, so Step 8 finds nothing to promote
+ * and falls back to the hand-written template), and an unusable candidate
+ * file is removed outright. A warning alone was not enough — nothing in
+ * Step 8 reads warnings.
  */
 function rewriteCandidateForScope(
   plan: FetchedPlan & { cacheCandidatePath?: unknown },
@@ -179,10 +193,10 @@ function rewriteCandidateForScope(
   mergeBaseSha: string,
   fetchedSha: string,
   allPaths: readonly string[],
-  scoped: ReadonlySet<string>,
-): void {
+  delta: ReadonlySet<string>,
+): boolean {
   const candidatePath = plan.cacheCandidatePath;
-  if (typeof candidatePath !== 'string' || candidatePath === '') return;
+  if (typeof candidatePath !== 'string' || candidatePath === '') return false;
   let candidate: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(readFileSync(candidatePath, 'utf8'));
@@ -192,9 +206,11 @@ function rewriteCandidateForScope(
   } catch (err) {
     writeStderrLine(
       `rescope: could not read the cache candidate to narrow it ` +
-        `(${(err as Error).message}) — do NOT promote fileVerdicts from it.`,
+        `(${inertText((err as Error).message)}) — it is removed so nothing ` +
+        `can promote pairs from it.`,
     );
-    return;
+    dropCandidate(candidatePath);
+    return false;
   }
   const current = blobPairs(worktreePath, mergeBaseSha, fetchedSha, allPaths);
   // Recorded pairs carry forward only under the same-model contract that
@@ -227,7 +243,8 @@ function rewriteCandidateForScope(
     const next: FileVerdicts = Object.create(null) as FileVerdicts;
     let carried = 0;
     for (const p of allPaths) {
-      if (scoped.has(p)) {
+      if (delta.has(p)) {
+        // Reviewed in FULL this round: its pair is certified.
         next[p] = current[p];
       } else if (
         recorded !== null &&
@@ -246,7 +263,7 @@ function rewriteCandidateForScope(
     if (dropped > 0 || carried > 0) {
       writeStderrLine(
         `rescope: cache candidate narrowed to this round's scope — ` +
-          `${[...scoped].filter((p) => allPaths.includes(p)).length} ` +
+          `${[...delta].filter((p) => allPaths.includes(p)).length} ` +
           `reviewed pair(s) kept, ${carried} carried from the previous ` +
           `clean round, ${dropped} dropped as certified by no one.`,
       );
@@ -257,8 +274,22 @@ function rewriteCandidateForScope(
   } catch (err) {
     writeStderrLine(
       `rescope: could not rewrite the cache candidate ` +
-        `(${(err as Error).message}) — do NOT promote fileVerdicts from it.`,
+        `(${inertText((err as Error).message)}) — it is removed so nothing ` +
+        `can promote the un-narrowed pairs.`,
     );
+    dropCandidate(candidatePath);
+    return false;
+  }
+  return true;
+}
+
+/** Remove a candidate nothing may promote from. Best-effort; the caller
+ *  additionally strips `cacheCandidatePath` from the plan it writes. */
+function dropCandidate(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // The plan-side strip below is the load-bearing half.
   }
 }
 
@@ -553,6 +584,45 @@ function runRescope(args: RescopeArgs): void {
   const sections = parseDiff(origDiff.toString('utf8')).files.filter((f) =>
     scoped.has(f.path),
   );
+  const composite = sliceDiffByLines(
+    origDiff,
+    sections.map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
+  );
+  // Reconcile the reported delta with what the composite actually holds: a
+  // file restored to its merge-base state is in the interdiff but has no
+  // hunks here, and a plan naming delta files with zero hunks sends agents
+  // hunting for scope that does not exist. (The WIDENING above still used
+  // the full changed set — a restoration still moves its importers' seams.)
+  const sectionPaths = new Set(sections.map((f) => f.path));
+  const unmatched = deltaFiles.filter((p) => !sectionPaths.has(p));
+  // A delta file with no section of the PR's own diff is one of two things,
+  // and only one of them is safe to drop. A RESTORATION (the fix round put
+  // the file back to its merge-base content) genuinely has nothing left to
+  // review. A LINEAGE MISMATCH does not: a file renamed before the anchor
+  // and deleted in the fix round is `new.ts` in the interdiff but `old.ts`
+  // in the PR diff (parseDiff labels a deletion with its left-side path),
+  // so the section carrying its unreviewed hunks is scoped out under a name
+  // nothing matched. Distinguishing them is one cheap probe per unmatched
+  // file: identical blobs on both sides of the PR range means restored.
+  const restored = (p: string): boolean => {
+    const at = (ref: string) =>
+      gitOpt('-C', worktreePath, 'rev-parse', `${ref}:${p}`);
+    const b = at(mergeBaseSha);
+    const h = at(fetchedSha);
+    return b !== null && h !== null && b === h;
+  };
+  const lineageLost = unmatched.filter((p) => !restored(p));
+  if (lineageLost.length > 0) {
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      `rescope: ${lineageLost.length} file(s) changed since ${args.anchor} ` +
+        `carry no section of the PR's own diff under that name ` +
+        `(${lineageLost.slice(0, 3).join(', ')}${lineageLost.length > 3 ? ', …' : ''}) ` +
+        `— a rename or lineage change the scoped slice cannot follow. ` +
+        `Continue with the full-range plan.`,
+    );
+    return;
+  }
   if (sections.length === 0) {
     // Changed since the anchor, but present in no section of the PR's own
     // diff — every delta file was restored to its merge-base state. There
@@ -565,16 +635,6 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
-  const composite = sliceDiffByLines(
-    origDiff,
-    sections.map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
-  );
-  // Reconcile the reported delta with what the composite actually holds: a
-  // file restored to its merge-base state is in the interdiff but has no
-  // hunks here, and a plan naming delta files with zero hunks sends agents
-  // hunting for scope that does not exist. (The WIDENING above still used
-  // the full changed set — a restoration still moves its importers' seams.)
-  const sectionPaths = new Set(sections.map((f) => f.path));
   const deltaReported = deltaFiles.filter((p) => sectionPaths.has(p));
   let diffPlan;
   try {
@@ -601,7 +661,9 @@ function runRescope(args: RescopeArgs): void {
       importsChanged,
     })),
     contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
-    fullDiffPath: typeof plan.diffPath === 'string' ? plan.diffPath : null,
+    // Absolute: the field's whole job is to let a later step reach the
+    // superseded diff, and that step need not share this command's cwd.
+    fullDiffPath: origDiffPath,
   };
 
   // The rescoped plan is the fetched plan with its diff swapped: identity and
@@ -612,13 +674,26 @@ function runRescope(args: RescopeArgs): void {
   // SAME builders `fetch-pr` used, post-image line counts included, so the
   // heaviness classification and the roster it drives cannot drift from what
   // a full-range plan of this diff would have said.
+  // Narrow the fetched candidate BEFORE the plan is written: the plan must
+  // carry `cacheCandidatePath` only when a candidate Step 8 may promote
+  // actually survives on disk.
+  const candidateUsable = rewriteCandidateForScope(
+    plan,
+    args,
+    worktreePath,
+    mergeBaseSha,
+    fetchedSha,
+    allPaths,
+    delta,
+  );
   const result = {
     ...(plan as Record<string, unknown>),
     diffPath: diffRel,
     diffPathAbsolute: resolve(diffRel),
     ...buildPlanReport(diffPlan, (path) => fileLineCount(fetchedSha, path)),
     incremental,
-  };
+  } as Record<string, unknown>;
+  if (!candidateUsable) delete result['cacheCandidatePath'];
 
   const out = args.out ?? args.plan;
   try {
@@ -635,15 +710,6 @@ function runRescope(args: RescopeArgs): void {
     return;
   }
   writeStdoutLine(`Wrote incremental plan to ${out}`);
-  rewriteCandidateForScope(
-    plan,
-    args,
-    worktreePath,
-    mergeBaseSha,
-    fetchedSha,
-    allPaths,
-    scoped,
-  );
   writeStderrLine(
     `Incremental scope since ${displayAnchor(anchorLabel)}: ` +
       `${deltaReported.length} changed file(s), ${interaction.size} ` +
