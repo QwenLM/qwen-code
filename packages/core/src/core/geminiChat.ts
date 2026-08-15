@@ -1974,7 +1974,27 @@ export class GeminiChat {
       }
       return requestHistory;
     }
-    return curatedHistory.map(copyContentContainer);
+    const requestHistory = curatedHistory.map(copyContentContainer);
+    // A previous pass may have evicted durable image payloads IN PLACE,
+    // leaving `Image #<id>` markers without pixels. Below the eviction
+    // threshold this pass would not reattach anything, so a fallback or
+    // recovery rebuild would carry marker text alone. Resolve any present
+    // references from the store regardless of the threshold.
+    const reattachParts = buildReattachParts(
+      [],
+      maxRecentImages,
+      requestHistory,
+      this.imagePayloadStore,
+    );
+    if (reattachParts.length > 0) {
+      const last = requestHistory.at(-1);
+      if (last?.role === 'user') {
+        last.parts = [...(last.parts ?? []), ...reattachParts];
+      } else {
+        requestHistory.push({ role: 'user', parts: reattachParts });
+      }
+    }
+    return requestHistory;
   }
 
   private getRequestHistoryForRoute(
@@ -3077,6 +3097,21 @@ export class GeminiChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
+            if (
+              isRetryableStreamTransportError &&
+              transportContinuationText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER
+            ) {
+              // The delivered text completed the fail-fast placeholder
+              // across attempts (prefix before the cut, remainder after).
+              // Continuing from it would persist gateway garbage into
+              // history/JSONL and replay it into every later request;
+              // route it through the invalid-stream budget instead, which
+              // retries fresh with the continuation reset.
+              throw new InvalidStreamError(
+                'Model response is an upstream fail-fast placeholder.',
+                'UPSTREAM_DEGRADED_RESPONSE',
+              );
+            }
             const canContinueAfterTransportCut =
               isRetryableStreamTransportError &&
               !streamYieldedFunctionCall &&
@@ -4799,8 +4834,11 @@ export class GeminiChat {
             } else {
               yieldedAnyChunk = true;
               // Arrival order: everything pending predates this chunk.
+              // Yield detached copies: post-stream consolidation merges
+              // adjacent text parts IN PLACE and would otherwise rewrite
+              // the part objects these already-delivered chunks carry.
               for (const pendingChunk of pendingPreValidationChunks) {
-                yield pendingChunk;
+                yield detachChunkParts(pendingChunk);
               }
               pendingPreValidationChunks = [];
               yield chunk;
@@ -4828,8 +4866,18 @@ export class GeminiChat {
       // let a diverged continuation persist an invisible prefix into
       // history/JSONL, and a stale stage could leak into a later turn.)
       const accumulatedText = nonThoughtText(allModelParts);
+      // Cross-attempt: a placeholder can complete ACROSS a transport cut
+      // (prefix delivered and folded before the cut, remainder delivered
+      // then errored in the continuation attempt). Compare the merged text
+      // too, or the completed placeholder escapes the discard.
       const completedPlaceholder =
-        !hasToolCall && accumulatedText === UPSTREAM_DEGRADED_PLACEHOLDER;
+        !hasToolCall &&
+        (accumulatedText === UPSTREAM_DEGRADED_PLACEHOLDER ||
+          (transportContinuationPrefix !== undefined &&
+            mergeDeliveredPrefix(
+              transportContinuationPrefix,
+              accumulatedText,
+            ).trim() === UPSTREAM_DEGRADED_PLACEHOLDER));
       if (completedPlaceholder) {
         // Trace the deliberate discard: without it, a benign transport-cut
         // recovery is indistinguishable from lost output after the fact.
@@ -4963,6 +5011,38 @@ export class GeminiChat {
           .join('')
           .trim();
         contentParts = consolidatedHistoryParts;
+        // Align the withheld pre-validation chunks with the rewritten turn:
+        // they were snapshotted before this recovery stripped the XML
+        // markup, so their text still carries the raw `<invoke>` content
+        // while history persists the recovered shape. Rewrite their plain
+        // text to the stripped remainder so delivery matches history.
+        let remainingForPending = recovery.remainingText;
+        pendingPreValidationChunks = pendingPreValidationChunks.map(
+          (chunk) => {
+            const aligned = detachChunkParts(chunk);
+            for (const candidate of aligned.candidates ?? []) {
+              const parts = candidate.content?.parts;
+              if (!parts) continue;
+              const rewritten: Part[] = [];
+              let inserted = false;
+              for (const part of parts) {
+                if (part.text !== undefined && !part.thought) {
+                  if (!inserted) {
+                    if (remainingForPending) {
+                      rewritten.push({ text: remainingForPending });
+                    }
+                    remainingForPending = '';
+                    inserted = true;
+                  }
+                  continue;
+                }
+                rewritten.push(part);
+              }
+              candidate.content!.parts = rewritten;
+            }
+            return aligned;
+          },
+        );
         // Build a synthetic chunk so the agent loop (turn.ts) actually
         // executes the recovered tool calls; yielded after the throw sites.
         const syntheticChunk = {
