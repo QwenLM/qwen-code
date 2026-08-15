@@ -79,8 +79,12 @@ export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
   /**
-   * Curated conversation history with copied Content and parts containers.
-   * Part objects are shared by reference; consumers must not mutate them.
+   * Curated conversation history. Content containers, parts arrays, and the
+   * nested functionResponse.parts elements are shallow-cloned per snapshot,
+   * so consumers MAY rewrite the part objects in place (image eviction
+   * does). Deeper payload objects — part.inlineData and
+   * functionResponse.response — remain shared with the main conversation
+   * and MUST NOT be mutated.
    */
   history: Content[];
   /** Model identifier */

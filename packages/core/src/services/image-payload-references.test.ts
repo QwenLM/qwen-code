@@ -430,4 +430,53 @@ describe('buildReattachParts', () => {
     const reattached = buildReattachParts([], 3, markerOnly, store);
     expect(JSON.stringify(reattached)).toContain('"data":"dup-bytes"');
   });
+
+  it('does not reattach a marker-referenced image whose inline twin is nested in functionResponse.parts', () => {
+    // The inline-dedupe scan must walk nested functionResponse.parts too:
+    // an inline twin carried inside a tool turn (toolImageTurn shape)
+    // still suppresses a second reattach (#8938 review).
+    const store = new InMemoryImagePayloadStore();
+    const stored = store.put({
+      inlineData: { mimeType: 'image/png', data: 'dup-bytes' },
+    });
+    const contents: Content[] = [
+      {
+        role: 'model',
+        parts: [{ text: `earlier screenshot Image #${stored.id} here` }],
+      },
+      toolImageTurn('dup-bytes'),
+    ];
+    expect(buildReattachParts([], 3, contents, store)).toEqual([]);
+  });
+
+  it('reattaches an explicitly-referenced older image even under the recency cap', () => {
+    // An image the user is actively asking about must never lose a cap
+    // slot to a stale, never-requested eviction marker: ids referenced in
+    // the LAST content are exempt from the cap (#8938 review). Without the
+    // exemption, 4 evicted markers under a cap of 3 keep only the 3 newest
+    // and silently drop the referenced oldest image.
+    const store = new InMemoryImagePayloadStore();
+    const datas = ['img-a', 'img-b', 'img-c', 'img-d'];
+    const ids = datas.map(
+      (data) =>
+        store.put({ inlineData: { mimeType: 'image/png', data } }).id,
+    );
+    const contents: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            text: `screenshots Image #${ids[0]}, Image #${ids[1]}, Image #${ids[2]}, Image #${ids[3]}`,
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: `what was in Image #${ids[0]}?` }] },
+    ];
+    const parts = buildReattachParts([], 3, contents, store);
+    const reattachedData = parts
+      .filter((p) => p.inlineData)
+      .map((p) => p.inlineData?.data);
+    expect(reattachedData).toContain('img-a');
+    expect(reattachedData).toHaveLength(4);
+  });
 });

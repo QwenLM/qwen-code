@@ -144,12 +144,25 @@ export function buildReattachParts(
   const inlineIds = referencedContents
     ? collectInlineImageIds(referencedContents)
     : new Set<string>();
+  // Ids referenced in the LAST content (the user's current message) are
+  // reattached unconditionally, exempt from the recency cap: an image the
+  // user is actively asking about must never lose a cap slot to a stale,
+  // never-requested eviction marker whose marker happens to be newer
+  // (#8938 review). Mirrors prepareImagePayloadsForRequest, which
+  // reattaches its last-content referenced ids outside the recent cap.
+  const lastContent = referencedContents?.at(-1);
+  const lastReferencedIds = collectReferencedImageIds(
+    lastContent ? [lastContent] : [],
+  );
   const candidates = replaced
-    .filter((stored) => !inlineIds.has(stored.id))
+    .filter(
+      (stored) => !inlineIds.has(stored.id) && !lastReferencedIds.has(stored.id),
+    )
     .map((stored) => ({ stored }));
   if (referencedContents && store) {
     for (const id of collectReferencedImageIds(referencedContents)) {
       if (inlineIds.has(id)) continue;
+      if (lastReferencedIds.has(id)) continue; // reattached below the cap
       const stored = store.get(id);
       if (stored) {
         candidates.push({ stored });
@@ -159,6 +172,15 @@ export function buildReattachParts(
   const recent = recentUniqueImages(candidates, maxRecentImages).map(
     (image) => image.stored,
   );
+  if (store) {
+    for (const id of lastReferencedIds) {
+      if (inlineIds.has(id)) continue;
+      const stored = store.get(id);
+      if (stored && !recent.some((image) => image.id === stored.id)) {
+        recent.push(stored);
+      }
+    }
+  }
   if (recent.length === 0) return [];
   return [
     {
