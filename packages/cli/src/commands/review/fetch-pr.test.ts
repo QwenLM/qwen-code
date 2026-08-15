@@ -406,6 +406,23 @@ describe('fetch-pr report assembly', () => {
 
       expect(vi.mocked(createReviewWorktreeLease)).toHaveBeenCalledTimes(1);
     });
+
+    it('writes the lease before the stale-clean and the first git call', async () => {
+      // The ordering IS the lock's window: session B starting while session A
+      // sits inside the network-bound fetch must still see A's lease. Moving
+      // the write after any destructive or network step (#9205's interleave)
+      // keeps every other test green while widening that window.
+      await reportFor({});
+
+      const leaseOrder = vi.mocked(createReviewWorktreeLease).mock
+        .invocationCallOrder[0]!;
+      expect(leaseOrder).toBeLessThan(
+        producerMocks.releaseWorktree.mock.invocationCallOrder[0]!,
+      );
+      expect(leaseOrder).toBeLessThan(
+        producerMocks.git.mock.invocationCallOrder[0]!,
+      );
+    });
   });
 
   // A handled failure after the lease write must roll the lease back with the
@@ -455,6 +472,22 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         'Failed to create worktree at',
       );
+      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+      );
+    });
+
+    it('clears the lease when a post-worktree step fails (the report write)', async () => {
+      // The rollback must reach EVERY throwing path after the lease write,
+      // not only the wrapped catches: a run that dies on the final report
+      // write exits non-zero while the lease persists, refusing every later
+      // review of this PR until the file is deleted by hand.
+      producerMocks.writeFileSync.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      });
+
+      await expect(reportFor({})).rejects.toThrow('ENOSPC');
       expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',

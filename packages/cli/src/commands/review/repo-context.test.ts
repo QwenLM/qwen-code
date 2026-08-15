@@ -208,6 +208,27 @@ describe('repo-context providers and trust boundary', () => {
     ).toThrow('worktree is not a directory');
   });
 
+  it('rethrows ENOTDIR when a regular file is an intermediate path component', () => {
+    // `--worktree <file>/subdir` is a malformed argument, not a missing
+    // worktree: the "re-run fetch-pr" remedy cannot fix it, and absorbing
+    // ENOTDIR into the missing-worktree message would lose the diagnosis
+    // that names the real cause.
+    const root = temp();
+    const planPath = planAt(root, { files: [] });
+    const blocker = join(root, 'blocker');
+    write(blocker, 'not a directory\n');
+    expect(() =>
+      runRepoContext(
+        {
+          plan: planPath,
+          worktree: join(blocker, 'wt'),
+          out: join(root, 'context.json'),
+        },
+        [],
+      ),
+    ).toThrow('ENOTDIR');
+  });
+
   it('passes sorted unique changed paths and local identity to a provider', () => {
     const root = temp();
     const worktree = join(root, 'worktree');

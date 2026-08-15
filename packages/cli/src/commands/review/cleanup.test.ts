@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
-  readdirSync: vi.fn(() => []),
+  readdirSync: vi.fn((): string[] => []),
   readFileSync: vi.fn((_path: string): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
@@ -87,6 +88,7 @@ vi.mock('./lib/paths.js', () => ({
   probeWorktreePath: (path: string) => `${path}-probe`,
   baseWorktreePath: (path: string) => `${path}-base`,
   reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
+  LEASE_PREFIX: 'qwen-review-lease-',
   REVIEW_TMP_DIR: '/repo/.qwen/tmp',
   tmpFile: (target: string, suffix: string) =>
     `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
@@ -178,6 +180,11 @@ describe('runCleanup', () => {
     expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining('session-a'),
     );
+    // The note must name the lease file itself — the operator cannot act on
+    // "delete the lease file" without knowing which file that is.
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('qwen-review-lease-pr-123.json'),
+    );
   });
 
   it('proceeds when the lease belongs to this session', () => {
@@ -231,6 +238,46 @@ describe('runCleanup', () => {
     expect(mocks.rmSync).toHaveBeenCalledWith(
       '/repo/.qwen/tmp/review-pr-123-base.lock',
       { recursive: true, force: true },
+    );
+  });
+
+  it('never sweeps lease files, even for a target whose name collides with the lease prefix (#9205)', () => {
+    // `safeTarget` flattens `lease` (and `./lease`) to `lease`, so a
+    // file-review target with that name sweeps with a prefix that IS the
+    // lease prefix: unguarded, the rmSync below deletes every live PR lease
+    // — including another session's — and defeats the lock this PR adds.
+    // Lease removal belongs to `clearReviewWorktreeLease` alone.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-lease-pr-123.json']);
+
+    runCleanup('lease');
+
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      join('/repo/.qwen/tmp', 'qwen-review-lease-pr-123.json'),
+      expect.anything(),
+    );
+    expect(
+      mocks.writeStdoutLine.mock.calls.map((c) => String(c[0])).join('\n'),
+    ).not.toContain('qwen-review-lease-pr-123.json');
+  });
+
+  it('still sweeps side files that match the target prefix', () => {
+    // The positive control for the lease guard: the skip keys on the lease
+    // prefix, not on the sweep itself.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue(['qwen-review-local-diff.txt']);
+
+    runCleanup('local');
+
+    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-local-diff.txt');
+    expect(mocks.rmSync).toHaveBeenCalledWith(sideFile, {
+      recursive: true,
+      force: true,
+    });
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      `Removed temp file: ${sideFile}`,
     );
   });
 });

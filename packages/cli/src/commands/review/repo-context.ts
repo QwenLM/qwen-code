@@ -374,7 +374,12 @@ export function runRepoContext(
       throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
     }
   } catch (err) {
-    if (isAbsentError(err)) {
+    // Only ENOENT is a missing worktree. ENOTDIR — a regular file as a path
+    // COMPONENT — is a malformed --worktree argument; re-running fetch-pr
+    // cannot fix it, and absorbing it here would lose the precise
+    // diagnosis, so it rethrows below. (`isAbsentError` treats both as
+    // absent, which is right for the identity-file lookups, not here.)
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       // fetch-pr only recreates a PR target's worktree; repo-context also
       // runs for local and file-path reviews, so scope the remedy.
       throw new Error(

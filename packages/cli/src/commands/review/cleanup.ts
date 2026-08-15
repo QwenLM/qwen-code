@@ -31,6 +31,7 @@ import {
   probeWorktreePath,
   baseWorktreePath,
   reviewBranch,
+  LEASE_PREFIX,
   REVIEW_TMP_DIR,
   tmpFile,
   tmpPrefix,
@@ -487,6 +488,12 @@ export function runCleanup(target: string): void {
   }
 
   for (const file of tmpEntries) {
+    // The lease doubles as the review's lock (#9205), and a file-review
+    // target named `lease` (or `./lease`, `lease-pr`) flattens to exactly
+    // this prefix — unguarded, the sweep rmSyncs every live PR lease,
+    // including another session's. Lease removal belongs to
+    // `clearReviewWorktreeLease` below, which runs for this run's target.
+    if (file.startsWith(LEASE_PREFIX)) continue;
     if (!file.startsWith(prefix)) continue;
     const full = join(REVIEW_TMP_DIR, file);
     try {
