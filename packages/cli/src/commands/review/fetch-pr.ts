@@ -42,6 +42,7 @@ import {
   releaseWorktree,
 } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
+import { blobPairs } from './lib/file-verdicts.js';
 import {
   REVIEW_TMP_DIR,
   reviewBranch,
@@ -144,6 +145,14 @@ type FetchPrResult = PlanReport & {
    * local review's plan has no such field: nothing is posted there.
    */
   prDescriptionHasHan: boolean;
+  /**
+   * Where this round's content-verdict candidate landed — the per-file
+   * `(base, head)` blob pairs of everything the plan covers, plus the commit
+   * anchor. Step 8 promotes it into the review cache on a clean high-effort
+   * end (via `cache-commit`); `rescope --cache` reads the promoted copy to
+   * survive a rebase. Absent when the capture had no diff to describe.
+   */
+  cacheCandidatePath?: string;
 };
 
 /** The real git surface `resolveMergeBase` runs against. */
@@ -363,6 +372,42 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
   }
+  // The content-verdict candidate: what a clean end of THIS round would let a
+  // post-rebase round transfer. Computed here because this is the moment the
+  // reviewed pairs are defined — plan files at `mergeBaseSha..fetchedSha` —
+  // and written beside the plan unconditionally: promotion into the cache is
+  // Step 8's clean-high-effort decision, not the capture's.
+  let cacheCandidatePath: string | undefined;
+  if (diffPath !== null && mergeBaseSha) {
+    // Pinned to the repo root: the pathspec-scoped ls-tree inside resolves
+    // paths against git's cwd, and a fetch started from a subdirectory would
+    // otherwise record every pair as (absent, absent) — a candidate that
+    // later transfers clean verdicts over anything.
+    const pairs = blobPairs(
+      gitOpt('rev-parse', '--show-toplevel') ?? '.',
+      mergeBaseSha,
+      fetchedSha,
+      plan.files.map((f) => f.path),
+    );
+    if (pairs !== null) {
+      cacheCandidatePath = tmpFile(`pr-${prNumber}`, 'cache-candidate.json');
+      writeFileSync(
+        cacheCandidatePath,
+        JSON.stringify(
+          {
+            v: 1,
+            target: `pr-${prNumber}`,
+            lastCommitSha: fetchedSha,
+            mergeBaseSha,
+            fileVerdicts: pairs,
+          },
+          null,
+          2,
+        ),
+      );
+    }
+  }
+
   const result: FetchPrResult = {
     prNumber,
     ownerRepo,
@@ -419,6 +464,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+    ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
     ...planEffortField(args.effort),
   };

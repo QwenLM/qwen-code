@@ -60,6 +60,11 @@ import {
   discoverWorkspacePackages,
 } from './lib/import-graph.js';
 import type { IncrementalScope } from './lib/report.js';
+import {
+  blobPairs,
+  changedPairs,
+  readFileVerdicts,
+} from './lib/file-verdicts.js';
 
 export type { IncrementalScope } from './lib/report.js';
 
@@ -72,6 +77,70 @@ interface RescopeArgs {
   anchor: string;
   out?: string;
   maxChunkLines: number;
+  cache?: string;
+  model?: string;
+}
+
+/**
+ * The verdict-transfer fallback: which files' `(base, head)` pairs moved
+ * since the last clean round, judged from the promoted cache. Returns the
+ * delta or the refusal reason — a refusal with an empty string means the
+ * caller was never asked to try (`--cache` absent), so the message stays the
+ * commit anchor's own.
+ */
+function verdictsDelta(
+  args: RescopeArgs,
+  worktreePath: string,
+  mergeBaseSha: string,
+  fetchedSha: string,
+  allPaths: readonly string[],
+): { delta: string[]; label: string } | { refusal: string } {
+  if (!args.cache) return { refusal: '' };
+  if (!args.model) {
+    return { refusal: '--cache was given without --model' };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(args.cache, 'utf8'));
+  } catch {
+    return { refusal: `the cache at ${args.cache} is missing or unreadable` };
+  }
+  // `JSON.parse('null')` succeeds; dereferencing it does not. A corrupted or
+  // truncated promotion must land on the descriptive refusal, never on a
+  // TypeError with an exit code the skill has no branch for.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { refusal: `the cache at ${args.cache} is not a JSON object` };
+  }
+  const cache = parsed as {
+    lastModelId?: unknown;
+    lastCommitSha?: unknown;
+    fileVerdicts?: unknown;
+  };
+  if (cache.lastModelId !== args.model) {
+    // The same-model contract, on the same terms as every other anchor gate.
+    return {
+      refusal: `the previous round was reviewed by ${
+        typeof cache.lastModelId === 'string'
+          ? cache.lastModelId
+          : 'an unrecorded model'
+      }, not ${args.model}`,
+    };
+  }
+  const recorded = readFileVerdicts(cache.fileVerdicts);
+  if (recorded === null) {
+    return { refusal: 'the cache carries no usable fileVerdicts map' };
+  }
+  const current = blobPairs(worktreePath, mergeBaseSha, fetchedSha, allPaths);
+  if (current === null) {
+    return { refusal: 'the current blob pairs could not be listed' };
+  }
+  return {
+    delta: changedPairs(recorded, current, allPaths),
+    label:
+      typeof cache.lastCommitSha === 'string' && cache.lastCommitSha !== ''
+        ? cache.lastCommitSha
+        : 'content-verdicts',
+  };
 }
 
 /** The fields rescope reads off the fetched plan. Parsed off disk — guard everything. */
@@ -83,6 +152,12 @@ interface FetchedPlan {
   diffPath?: unknown;
   files?: unknown;
   incremental?: unknown;
+}
+
+/** Truncate only sha-shaped anchors: slicing `content-verdicts` to twelve
+ *  characters printed `content-verd` in the summary and every brief. */
+function displayAnchor(label: string): string {
+  return /^[0-9a-f]{40,64}$/i.test(label) ? label.slice(0, 12) : label;
 }
 
 function fail(code: number, message: string): void {
@@ -146,6 +221,14 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
+  const planFiles = planFilesRaw as Array<{
+    path?: unknown;
+    kind?: unknown;
+    binary?: unknown;
+  }>;
+  const allPaths = planFiles
+    .filter((f): f is { path: string } => !!f && typeof f?.path === 'string')
+    .map((f) => f.path);
 
   // Anchor validation is re-done HERE, not trusted from the caller: a sha that
   // is not in this history would hand `git diff` a range that reviews the
@@ -159,24 +242,8 @@ function runRescope(args: RescopeArgs): void {
     'rev-parse',
     `${args.anchor}^{commit}`,
   );
-  if (anchorFull === null) {
-    fail(
-      RESCOPE_EXIT_FULL_RANGE,
-      `rescope: anchor ${args.anchor} is not a commit in this repository ` +
-        `(rebased away, or from another history). Continue with the ` +
-        `full-range plan.`,
-    );
-    return;
-  }
-  if (anchorFull === fetchedSha) {
-    fail(
-      RESCOPE_EXIT_NOTHING_NEW,
-      `rescope: anchor ${args.anchor} IS the fetched head — no new commits ` +
-        `since the last clean round.`,
-    );
-    return;
-  }
-  if (
+  const anchorUsable =
+    anchorFull !== null &&
     gitOpt(
       '-C',
       worktreePath,
@@ -184,60 +251,125 @@ function runRescope(args: RescopeArgs): void {
       '--is-ancestor',
       anchorFull,
       fetchedSha,
-    ) === null
-  ) {
-    fail(
-      RESCOPE_EXIT_FULL_RANGE,
-      `rescope: anchor ${args.anchor} is not an ancestor of the fetched head ` +
-        `${fetchedSha} (force-push or rebase). Continue with the full-range ` +
-        `plan.`,
-    );
-    return;
+    ) !== null;
+
+  // Interdiff names: which files changed since the anchor. `null` means the
+  // anchor path is unavailable (rebase, force-push, unknown sha) — see
+  // `IncrementalScope.deltaFiles` for why these are NAMES only, never hunks.
+  let interdiffNames: string[] | null = null;
+  if (anchorUsable) {
+    if (anchorFull === fetchedSha) {
+      interdiffNames = [];
+    } else {
+      let interdiff: Buffer;
+      try {
+        interdiff = gitRaw(
+          '-C',
+          worktreePath,
+          ...PINNED_DIFF_CONFIG,
+          'diff',
+          ...PINNED_DIFF_FLAGS,
+          `${anchorFull}..${fetchedSha}`,
+        );
+      } catch (err) {
+        fail(
+          RESCOPE_EXIT_FULL_RANGE,
+          `rescope: could not capture ${args.anchor}..head: ` +
+            `${(err as Error).message}. Continue with the full-range plan.`,
+        );
+        return;
+      }
+      interdiffNames = parseDiff(interdiff.toString('utf8')).files.map(
+        (f) => f.path,
+      );
+    }
   }
 
-  // The interdiff decides only WHICH files changed since the anchor — see
-  // `IncrementalScope.deltaFiles` for why their hunks are captured full-range
-  // instead of from this diff.
-  let interdiff: Buffer;
-  try {
-    interdiff = gitRaw(
-      '-C',
-      worktreePath,
-      ...PINNED_DIFF_CONFIG,
-      'diff',
-      ...PINNED_DIFF_FLAGS,
-      `${anchorFull}..${fetchedSha}`,
-    );
-  } catch (err) {
-    fail(
-      RESCOPE_EXIT_FULL_RANGE,
-      `rescope: could not capture ${args.anchor}..head: ` +
-        `${(err as Error).message}. Continue with the full-range plan.`,
-    );
-    return;
-  }
-  const deltaFiles = parseDiff(interdiff.toString('utf8')).files.map(
-    (f) => f.path,
+  // Content verdicts are consulted on BOTH paths when the caller brought
+  // them. On a live anchor they catch what the interdiff cannot see: an
+  // upstream-moved merge base changes a file's diff-under-review without a
+  // single new commit past the anchor, so "empty interdiff" alone must not
+  // certify "nothing new". On a dead anchor they ARE the scope.
+  const verdicts = verdictsDelta(
+    args,
+    worktreePath,
+    mergeBaseSha,
+    fetchedSha,
+    allPaths,
   );
-  if (deltaFiles.length === 0) {
-    fail(
-      RESCOPE_EXIT_NOTHING_NEW,
-      `rescope: ${args.anchor}..head is an empty diff — the tree is ` +
-        `identical to the last clean round's.`,
+
+  let deltaFiles: string[];
+  let anchorLabel: string;
+  if (interdiffNames !== null) {
+    const union = new Set(interdiffNames);
+    if ('delta' in verdicts) for (const p of verdicts.delta) union.add(p);
+    deltaFiles = [...union];
+    anchorLabel = anchorFull as string;
+    if (deltaFiles.length === 0) {
+      fail(
+        RESCOPE_EXIT_NOTHING_NEW,
+        `rescope: ${args.anchor}..head is an empty diff` +
+          ('delta' in verdicts
+            ? ` and every (base, head) blob pair matches the last clean round` +
+              ` — nothing new to review.`
+            : ` — the tree is identical to the last clean round's.` +
+              ('refusal' in verdicts && verdicts.refusal
+                ? ` (content verdicts were not consulted: ${verdicts.refusal})`
+                : '')),
+      );
+      return;
+    }
+  } else {
+    const why =
+      anchorFull === null
+        ? `anchor ${args.anchor} is not a commit in this repository ` +
+          `(rebased away, or from another history)`
+        : `anchor ${args.anchor} is not an ancestor of the fetched head ` +
+          `${fetchedSha} (force-push or rebase)`;
+    if ('refusal' in verdicts) {
+      fail(
+        RESCOPE_EXIT_FULL_RANGE,
+        `rescope: ${why}${
+          verdicts.refusal
+            ? `, and content verdicts cannot substitute — ${verdicts.refusal}`
+            : ''
+        }. Continue with the full-range plan.`,
+      );
+      return;
+    }
+    if (verdicts.delta.length === 0) {
+      fail(
+        RESCOPE_EXIT_NOTHING_NEW,
+        `rescope: ${why}, but every file's (base, head) blob pair is ` +
+          `identical to the pairs the last clean round certified — the ` +
+          `change under review is unchanged despite the rewritten history.`,
+      );
+      return;
+    }
+    writeStderrLine(
+      `rescope: ${why}; transferring content verdicts instead — ` +
+        `${allPaths.length - verdicts.delta.length} of ${allPaths.length} ` +
+        `file(s) carry an unchanged (base, head) pair from the last clean round.`,
     );
-    return;
+    deltaFiles = verdicts.delta;
+    anchorLabel = verdicts.label;
   }
   const delta = new Set(deltaFiles);
+  if (allPaths.every((p) => delta.has(p))) {
+    // Nothing transfers; an "incremental" plan covering every file would be
+    // a full review wearing the wrong label — let the full-range path own it.
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      `rescope: every file in the plan changed since the anchor — there is ` +
+        `nothing to scope out. Continue with the full-range plan.`,
+    );
+    return;
+  }
 
   // One import hop over the plan's still-clean SOURCE files. Test and docs
   // dependents stay out: re-running tests is `build-test`'s job, and prose
   // does not call functions. Reads come from the worktree — the post-change
   // state is the state whose interactions are in question.
-  const planFiles = planFilesRaw as Array<{
-    path?: unknown;
-    kind?: unknown;
-    binary?: unknown;
-  }>;
   const candidates = planFiles
     .filter(
       (f): f is { path: string; kind: string; binary?: boolean } =>
@@ -309,7 +441,7 @@ function runRescope(args: RescopeArgs): void {
       : 'rescope';
   const diffRel = tmpFile(target, 'diff-incremental.txt');
   const incremental: IncrementalScope = {
-    anchor: anchorFull,
+    anchor: anchorLabel,
     deltaFiles,
     interaction: [...interaction.entries()].map(([path, importsChanged]) => ({
       path,
@@ -341,7 +473,7 @@ function runRescope(args: RescopeArgs): void {
   atomicWriteFileSync(out, stringifyPlanReport(result));
   writeStdoutLine(`Wrote incremental plan to ${out}`);
   writeStderrLine(
-    `Incremental scope since ${anchorFull.slice(0, 12)}: ` +
+    `Incremental scope since ${displayAnchor(anchorLabel)}: ` +
       `${deltaFiles.length} changed file(s), ${interaction.size} ` +
       `interaction file(s) (one import hop), ` +
       `${incremental.contextFileCount} clean file(s) left out of scope; ` +
@@ -375,6 +507,20 @@ export const rescopeCommand: CommandModule = {
         type: 'number',
         default: DEFAULT_MAX_CHUNK_LINES,
         describe: 'Target chunk size in diff lines',
+      })
+      .option('cache', {
+        type: 'string',
+        describe:
+          'The promoted review cache (.qwen/review-cache/pr-<n>.json). When ' +
+          'the commit anchor is unusable (rebase), its fileVerdicts transfer ' +
+          'per-file: files with an unchanged (base, head) blob pair stay out ' +
+          'of scope.',
+      })
+      .option('model', {
+        type: 'string',
+        describe:
+          'The model running this review. Required for --cache to take ' +
+          'effect: verdicts transfer only under the model that certified them.',
       })
       .strict(),
   handler: (argv) => runRescope(argv as unknown as RescopeArgs),

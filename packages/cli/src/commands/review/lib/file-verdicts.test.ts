@@ -1,0 +1,208 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Real git for the blob listings — content addressing IS git's behaviour, and
+// the property under test (a rebase that preserves a file's pair preserves
+// its verdict) only means anything against real object ids. The parsing half
+// is the usual untrusted-boundary posture: the map lives in a model-promoted
+// cache, so malformed → null, never a throw.
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+  realpathSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  NO_BLOB,
+  blobsAt,
+  blobPairs,
+  changedPairs,
+  readFileVerdicts,
+} from './file-verdicts.js';
+import { isolateHostGitConfig } from './test-utils.js';
+
+let repo: string;
+let cwd: string;
+let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+function git(...args: string[]): string {
+  return execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+}
+
+function write(rel: string, content: string): void {
+  const abs = join(repo, rel);
+  mkdirSync(join(abs, '..'), { recursive: true });
+  writeFileSync(abs, content);
+}
+
+beforeEach(() => {
+  repo = realpathSync(mkdtempSync(join(tmpdir(), 'review-fv-')));
+  cwd = process.cwd();
+  process.chdir(repo);
+  gitIsolation = isolateHostGitConfig();
+  git('init', '-q', '--template=', '.');
+  git('config', 'user.email', 'a@b');
+  git('config', 'user.name', 'a');
+  git('config', 'commit.gpgsign', 'false');
+});
+
+afterEach(() => {
+  process.chdir(cwd);
+  rmSync(repo, { recursive: true, force: true });
+  gitIsolation.dispose();
+});
+
+describe('blobsAt / blobPairs', () => {
+  it('lists mode+oid identities at a ref, absent paths as NO_BLOB', () => {
+    write('a.ts', 'A\n');
+    write('dir/b.ts', 'B\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'one');
+    const sha = git('rev-parse', 'HEAD');
+    const blobs = blobsAt(repo, sha, ['a.ts', 'dir/b.ts', 'missing.ts'])!;
+    expect(blobs['a.ts']).toMatch(/^100644 [0-9a-f]{40,64}$/);
+    expect(blobs['dir/b.ts']).toMatch(/^100644 [0-9a-f]{40,64}$/);
+    expect(blobs['missing.ts']).toBe(NO_BLOB);
+    // Content-addressed: the oid half equals what hash-object computes.
+    expect(blobs['a.ts']).toBe(`100644 ${git('hash-object', '--', 'a.ts')}`);
+  });
+
+  it('the identity carries the MODE: an exec-bit flip alone changes the pair', () => {
+    write('run.sh', 'echo hi\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    git('update-index', '--chmod=+x', 'run.sh');
+    git('commit', '-q', '--no-verify', '-m', 'chmod only');
+    const head = git('rev-parse', 'HEAD');
+    const recorded = blobPairs(repo, base, base, ['run.sh'])!;
+    const current = blobPairs(repo, base, head, ['run.sh'])!;
+    // Same bytes both sides — git diff still prints old/new mode lines, and
+    // the pair must move with them.
+    expect(changedPairs(recorded, current, ['run.sh'])).toEqual(['run.sh']);
+  });
+
+  it('is cwd-independent: identical listings from the root and a subdirectory', () => {
+    write('pkg/deep/a.ts', 'A\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'one');
+    const sha = git('rev-parse', 'HEAD');
+    const fromRoot = blobsAt(repo, sha, ['pkg/deep/a.ts']);
+    const prev = process.cwd();
+    process.chdir(join(repo, 'pkg'));
+    try {
+      // Unpinned, the pathspec would miss from here and read NO_BLOB — the
+      // silent everything-absent shape that converts a fallback into a skip.
+      expect(blobsAt(repo, sha, ['pkg/deep/a.ts'])).toEqual(fromRoot);
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
+  it('returns null — unusable, not "everything absent" — on a bad ref, and on ONE bad side of a pair', () => {
+    write('a.ts', 'A\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'one');
+    const sha = git('rev-parse', 'HEAD');
+    expect(blobsAt(repo, 'deadbeef', ['a.ts'])).toBeNull();
+    expect(blobPairs(repo, 'deadbeef', sha, ['a.ts'])).toBeNull();
+    expect(blobPairs(repo, sha, 'deadbeef', ['a.ts'])).toBeNull();
+  });
+
+  it('pairs survive a history rewrite that preserves content', () => {
+    write('a.ts', 'A\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const base1 = git('rev-parse', 'HEAD');
+    write('a.ts', 'A2\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'change');
+    const head1 = git('rev-parse', 'HEAD');
+    // Rewrite history: same tree contents, brand-new shas.
+    git('commit', '--amend', '-q', '--no-verify', '-m', 'change (amended)');
+    const head2 = git('rev-parse', 'HEAD');
+    expect(head2).not.toBe(head1);
+    expect(blobPairs(repo, base1, head1, ['a.ts'])).toEqual(
+      blobPairs(repo, base1, head2, ['a.ts']),
+    );
+  });
+
+  it('a batch past 200 paths still maps every file', () => {
+    const many: string[] = [];
+    for (let i = 0; i < 201; i++) {
+      const p = `many/f${String(i).padStart(3, '0')}.txt`;
+      write(p, String(i));
+      many.push(p);
+    }
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'many');
+    const sha = git('rev-parse', 'HEAD');
+    const blobs = blobsAt(repo, sha, many)!;
+    for (const p of many) expect(blobs[p]).toMatch(/^100644 [0-9a-f]{40,64}$/);
+  });
+});
+
+describe('readFileVerdicts', () => {
+  it('round-trips a valid map and rejects every malformation', () => {
+    const good = { 'a.ts': { base: 'b1', head: 'h1' } };
+    expect(readFileVerdicts(good)).toEqual(good);
+    for (const bad of [
+      null,
+      'nope',
+      { 'a.ts': { base: 'b1' } },
+      { 'a.ts': { base: 1, head: 'h' } },
+      { 'a.ts': null },
+    ]) {
+      expect(readFileVerdicts(bad)).toBeNull();
+    }
+  });
+});
+
+describe('changedPairs', () => {
+  const recorded = {
+    'same.ts': { base: 'b1', head: 'h1' },
+    'moved-base.ts': { base: 'b2', head: 'h2' },
+    'moved-head.ts': { base: 'b3', head: 'h3' },
+  };
+  it('flags a moved base, a moved head, and an unrecorded path; keeps identical pairs', () => {
+    const current = {
+      'same.ts': { base: 'b1', head: 'h1' },
+      'moved-base.ts': { base: 'bX', head: 'h2' },
+      'moved-head.ts': { base: 'b3', head: 'hX' },
+      'new.ts': { base: NO_BLOB, head: 'h4' },
+    };
+    expect(
+      changedPairs(recorded, current, [
+        'same.ts',
+        'moved-base.ts',
+        'moved-head.ts',
+        'new.ts',
+      ]),
+    ).toEqual(['moved-base.ts', 'moved-head.ts', 'new.ts']);
+  });
+
+  it('an ABSENT-BASE pair never transfers, identical or not', () => {
+    // The rename hole: a pure rename records (absent, blob) for its
+    // destination, and a keep-both restructure reproduces the same pair
+    // while the file became an all-new addition no round ever read.
+    const rec = { 'added.ts': { base: NO_BLOB, head: 'h1' } };
+    const cur = { 'added.ts': { base: NO_BLOB, head: 'h1' } };
+    expect(changedPairs(rec, cur, ['added.ts'])).toEqual(['added.ts']);
+  });
+
+  it('a path named __proto__ compares as an ordinary key', () => {
+    const rec = JSON.parse(
+      '{"__proto__": {"base": "b1", "head": "h1"}}',
+    ) as Record<string, { base: string; head: string }>;
+    expect(changedPairs(rec, {}, ['__proto__'])).toEqual(['__proto__']);
+  });
+});

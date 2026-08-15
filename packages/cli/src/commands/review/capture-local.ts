@@ -25,12 +25,13 @@ import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import { buildDiffPlan, READ_FILE_CHAR_CAP } from './lib/diff-plan.js';
-import type {
- IncrementalScope ,
+import {
+  type IncrementalScope,
   buildPlanReport,
   warnOnReportSize,
   stringifyPlanReport,
-  type PlanReport } from './lib/report.js';
+  type PlanReport,
+} from './lib/report.js';
 import { gitOpt } from './lib/git.js';
 import {
   changedSince,

@@ -157,6 +157,12 @@ interface IncrementalScope {
  * frame. Capped per class: past the cap the tail is counted, not listed —
  * the plan's own `incremental` block remains the complete record.
  */
+/** Truncate only sha-shaped anchors: a content-verdicts label sliced to
+ *  twelve characters read `content-verd` in every brief. */
+function displayAnchor(label: string): string {
+  return /^[0-9a-f]{40,64}$/i.test(label) ? label.slice(0, 12) : label;
+}
+
 const SCOPE_LIST_CAP = 30;
 function scopeFileLists(incremental: IncrementalScope): string[] {
   const cap = <T>(items: T[], render: (item: T) => string): string => {
@@ -627,7 +633,7 @@ export function buildChunkAgentPrompt(
     const lines = [
       '',
       `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
-        `previous clean review round (anchor \`${incremental.anchor.slice(0, 12)}\`), ` +
+        `previous clean review round (anchor \`${displayAnchor(incremental.anchor)}\`), ` +
         `plus still-clean files one import hop from a change. Your files' scopes:`,
     ];
     if (deltaHere.length > 0) {
@@ -982,7 +988,7 @@ function diffReadingBlock(
     ...(incremental
       ? [
           `**Incremental round.** This diff is scoped to what changed since the previous ` +
-            `clean review round (anchor \`${incremental.anchor.slice(0, 12)}\`), plus ` +
+            `clean review round (anchor \`${displayAnchor(incremental.anchor)}\`), plus ` +
             `still-clean files one import hop from a change — each of those is in scope ` +
             `only for its interaction with what it imports. The rest of the PR was ` +
             `reviewed clean last round and is deliberately absent; do not go find it. ` +

@@ -369,7 +369,10 @@ describe('rescope — contract pins from review findings', () => {
   it('preserves post-image line counts and heaviness in the rescoped plan', () => {
     seedHistory();
     // A large file whose round-1 change rewrites most of it: heavy by the
-    // rewrite-ratio branch. The fix touches it again so it is delta.
+    // rewrite-ratio branch (it must EXIST at the merge base — a creation is
+    // not a rewrite). The fix touches it again so it is delta, and the PR
+    // also touches the bystander so the delta stays a strict subset of the
+    // plan (an all-changed plan is refused as a mislabeled full review).
     const bigV1 =
       Array.from({ length: 600 }, (_, i) => `export const a${i} = 1;`).join(
         '\n',
@@ -383,6 +386,7 @@ describe('rescope — contract pins from review findings', () => {
         '\n',
       ) + '\n';
     write('packages/app/src/big.ts', bigV2);
+    write(BYSTANDER, 'export const b = 99;\n');
     git('add', '-A');
     git('commit', '-q', '--no-verify', '-m', 'round 1 rewrites big');
     const anchor2 = git('rev-parse', 'HEAD');
@@ -438,5 +442,219 @@ describe('rescope — contract pins from review findings', () => {
     seedHistory();
     run(join(repo, 'no-such-plan.json'), 'HEAD');
     expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+  });
+});
+
+describe('rescope — verdict transfer after a rebase', () => {
+  // The commit anchor dies with its history; the content verdicts must not.
+  // History A: base1 → anchor (the PR touches all three files) is reviewed
+  // clean, and its (base, head) blob pairs are promoted into the cache.
+  // History B rewrites everything — new base (upstream moved the bystander's
+  // baseline), the PR re-applied, plus a fix to changed.ts — so every commit
+  // sha is new and the anchor gate refuses. The pairs then decide: the caller
+  // keeps its verdict (pair unchanged, pulled back only as an interaction
+  // file), the fixed file and the base-shifted file re-enter as delta.
+  function seedRebase(): {
+    planPath: string;
+    anchor: string;
+    cachePath: string;
+  } {
+    const { base, anchor, head } = seedHistory();
+    // Round 1 (pre-rebase) promoted its verdicts: pairs of base..anchor.
+    const pairs: Record<string, { base: string; head: string }> = {};
+    for (const p of [CHANGED, CALLER, BYSTANDER, 'packages/app/package.json']) {
+      const at = (ref: string): string => {
+        try {
+          return `100644 ${git('rev-parse', `${ref}:${p}`)}`;
+        } catch {
+          return 'absent';
+        }
+      };
+      pairs[p] = { base: at(base), head: at(anchor) };
+    }
+    const cachePath = join(repo, 'cache.json');
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        lastModelId: 'model-a',
+        lastCommitSha: anchor,
+        fileVerdicts: pairs,
+      }),
+    );
+    void head;
+
+    // History B: a new root whose bystander baseline moved, then the PR's
+    // changes re-applied, then the fix. All shas are new.
+    git('checkout', '-q', '--orphan', 'rebased');
+    write(BYSTANDER, 'export const b = 0; // upstream moved this\n');
+    write(CHANGED, 'export const v = 0;\n');
+    write(CALLER, "import { v } from './changed.js';\nexport const c = v;\n");
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base2');
+    const base2 = git('rev-parse', 'HEAD');
+    write(CHANGED, 'export const v = 2;\n'); // PR change + fix, squashed
+    write(
+      CALLER,
+      "import { v } from './changed.js';\nexport const c = v + 1;\n",
+    );
+    write(BYSTANDER, 'export const b = 1; // upstream moved this\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'pr + fix, rebased');
+    const head2 = git('rev-parse', 'HEAD');
+    return { planPath: writeFetchedPlan(base2, head2), anchor, cachePath };
+  }
+
+  it('transfers unchanged pairs and re-reviews moved ones', () => {
+    const { planPath, anchor, cachePath } = seedRebase();
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      cache: cachePath,
+      model: 'model-a',
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    // changed.ts: its BASE blob moved (base2 differs from base1) while its
+    // head blob equals the recorded head. bystander.ts: both sides moved
+    // (upstream shifted the baseline AND the head content differs).
+    // caller.ts: identical pair — the clean verdict transfers, and it is
+    // back in scope only as the changed file's importer.
+    expect(plan.incremental.deltaFiles.sort()).toEqual([BYSTANDER, CHANGED]);
+    expect(plan.incremental.interaction).toEqual([
+      { path: CALLER, importsChanged: [CHANGED] },
+    ]);
+    expect(plan.incremental.anchor).toBe(anchor);
+    const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
+    expect(diff).toContain('changed.ts');
+    expect(diff).toContain('bystander.ts');
+    expect(diff).toContain('caller.ts');
+    // The hunks must be the CURRENT range's — a wrong-range regression
+    // (e.g. mergeBase..old-anchor) resolves cleanly in this fixture and
+    // shows dead-history content instead of the PR's head.
+    expect(diff).toContain('+export const b = 1; // upstream moved this');
+  });
+
+  it('refusal branches: null cache, missing verdicts, missing file — all exit 2, no throw', () => {
+    const { planPath, anchor } = seedRebase();
+    const runWith = (cachePath: string) => {
+      process.exitCode = undefined;
+      (rescopeCommand.handler as (argv: unknown) => void)({
+        plan: planPath,
+        anchor,
+        cache: cachePath,
+        model: 'model-a',
+        maxChunkLines: 400,
+      });
+      expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    };
+    const nullCache = join(repo, 'null-cache.json');
+    writeFileSync(nullCache, 'null'); // JSON.parse succeeds; deref must not
+    runWith(nullCache);
+    const noVerdicts = join(repo, 'no-verdicts.json');
+    writeFileSync(noVerdicts, JSON.stringify({ lastModelId: 'model-a' }));
+    runWith(noVerdicts);
+    runWith(join(repo, 'no-such-cache.json'));
+  });
+
+  it('a live anchor still unions in pair-moved files — an upstream-moved base is not "nothing new"', () => {
+    // R1-5: the anchor survives (ancestor), anchor..head is EMPTY, but the
+    // merge base slid under a file — its diff-under-review changed with no
+    // new commit past the anchor. The pair sees it; the interdiff cannot.
+    const { base, anchor } = seedHistory();
+    // Round 1's verdicts at (base, anchor).
+    const pairs: Record<string, { base: string; head: string }> = {};
+    for (const p of [CHANGED, CALLER, BYSTANDER, 'packages/app/package.json']) {
+      const at = (ref: string): string => {
+        try {
+          return `100644 ${git('rev-parse', `${ref}:${p}`)}`;
+        } catch {
+          return 'absent';
+        }
+      };
+      pairs[p] = { base: at(base), head: at(anchor) };
+    }
+    // Merge-base movement, honestly constructed: base2 derives from base1
+    // and moves ONLY the bystander's baseline, so every other file's
+    // (base, head) pair stays byte-identical to the recorded one. The
+    // fetched head stays the anchor itself — an empty interdiff over a
+    // non-empty shift in the diff-under-review.
+    git('checkout', '-q', base);
+    write(BYSTANDER, 'export const b = 0; // upstream moved this\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'moved base');
+    const base2 = git('rev-parse', 'HEAD');
+    git('checkout', '-q', anchor);
+    // Written AFTER the `git add -A` above: earlier, the cache file was
+    // swept into the base2 commit and the checkout removed it.
+    const cachePath = join(repo, 'cache.json');
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        lastModelId: 'model-a',
+        lastCommitSha: anchor,
+        fileVerdicts: pairs,
+      }),
+    );
+    const planPath = writeFetchedPlan(base2, anchor);
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      cache: cachePath,
+      model: 'model-a',
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    // anchor == fetchedSha (empty interdiff), yet the bystander's base blob
+    // moved: it must be the delta instead of an exit-3 "nothing new".
+    expect(plan.incremental.deltaFiles).toEqual([BYSTANDER]);
+  });
+
+  it('refuses the transfer across models — full range instead', () => {
+    const { planPath, anchor, cachePath } = seedRebase();
+    const before = readFileSync(planPath, 'utf8');
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      cache: cachePath,
+      model: 'model-b',
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+
+  it('exit 3 when every pair is identical — the rebase changed nothing under review', () => {
+    const { base, anchor } = seedHistory();
+    const pairs: Record<string, { base: string; head: string }> = {};
+    for (const p of [CHANGED, CALLER, BYSTANDER, 'packages/app/package.json']) {
+      const at = (ref: string): string => {
+        try {
+          return `100644 ${git('rev-parse', `${ref}:${p}`)}`;
+        } catch {
+          return 'absent';
+        }
+      };
+      pairs[p] = { base: at(base), head: at(anchor) };
+    }
+    const cachePath = join(repo, 'cache.json');
+    writeFileSync(
+      cachePath,
+      JSON.stringify({ lastModelId: 'model-a', fileVerdicts: pairs }),
+    );
+    // Amend the anchor commit: same tree, new sha — the pure-rebase case.
+    git('checkout', '-q', anchor);
+    git('commit', '--amend', '-q', '--no-verify', '-m', 'anchor, amended');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      cache: cachePath,
+      model: 'model-a',
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode).toBe(RESCOPE_EXIT_NOTHING_NEW);
   });
 });
