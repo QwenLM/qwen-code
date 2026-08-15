@@ -461,13 +461,18 @@ function previousReport(out: string | undefined): BuildTestReport {
   // (or a scope whose lists are not lists) has to be refused here rather than
   // becoming a `.filter of undefined` inside the merge.
   const scope = shape.testScope;
+  // Element shapes too, not only the lists: `notRun` entries become shell
+  // commands (`npm test --workspace=<dir>`), so a `[null]` that cleared an
+  // arrays-only check crashed in the escaper instead of refusing here.
+  const strings = (v: unknown): boolean =>
+    Array.isArray(v) && v.every((e) => typeof e === 'string');
   const scopeOk =
     scope === undefined ||
     (typeof scope === 'object' &&
       scope !== null &&
       !Array.isArray(scope) &&
-      Array.isArray(scope.workspaces) &&
-      (scope.notRun === undefined || Array.isArray(scope.notRun)));
+      strings(scope.workspaces) &&
+      (scope.notRun === undefined || strings(scope.notRun)));
   if (
     !commandsOk(shape.test) ||
     !commandsOk(shape.build) ||

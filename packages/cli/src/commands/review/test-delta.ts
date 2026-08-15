@@ -280,8 +280,19 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // re-parsing the bounded report only for a report written before that field
     // existed. Same precedence the base side uses below, and for the same
     // reason: the trim is lossy and the capture site is not.
+    //
+    // Shape-checked here because this is the one consumer and the report is a
+    // file anything may have edited: a `failingFiles` that is not a string
+    // array reached `.filter` as-is and threw where the honest reading is
+    // "this seam supplied no measurement" — the same fallback an absent field
+    // has always taken.
+    const measured =
+      Array.isArray(t.failingFiles) &&
+      t.failingFiles.every((f) => typeof f === 'string')
+        ? t.failingFiles
+        : undefined;
     const prFailingFiles =
-      t.failingFiles ?? failingFilesOf(t.output ?? '', args.prWorktree ?? '');
+      measured ?? failingFilesOf(t.output ?? '', args.prWorktree ?? '');
     // A clamped deadline is not the same fact as a slow command: if the
     // budget cut this rerun short, "timed out — infrastructure" would send the
     // reader hunting a hang that is really an exhausted budget. Record which.
@@ -309,7 +320,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // `netNew` when only the PR side does — the direction that loses a failure
     // the PR caused. Hence the capture-time field; this is the legacy seam.
     const prTruncated =
-      t.failingFiles === undefined && TRIM_MARKER_RE.test(t.output ?? '');
+      measured === undefined && TRIM_MARKER_RE.test(t.output ?? '');
     // A base run that never finished attributes NOTHING: with its failing set
     // unknowable, promoting the PR side's failures to net-new would
     // manufacture the strongest evidence this command produces out of an

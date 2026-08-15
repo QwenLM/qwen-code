@@ -3492,6 +3492,23 @@ describe('runBuildTest', () => {
           timedOut: [],
           testScope: { workspaces: 'not a list' },
         }),
+        // Element shapes, not only the lists: notRun entries become shell
+        // commands, so a [null] that cleared an arrays-only check crashed in
+        // the escaper instead of refusing here.
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          testScope: { workspaces: ['packages/core'], notRun: [null] },
+        }),
+        JSON.stringify({
+          toolchain: 'npm',
+          test: [],
+          build: [],
+          timedOut: [],
+          testScope: { workspaces: [42] },
+        }),
       ]) {
         writeFileSync(outPath, corrupt);
         expect(() =>

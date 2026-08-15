@@ -423,6 +423,26 @@ describe('runTestDelta', () => {
     expect(r.note ?? '').not.toContain('may be partial');
   });
 
+  it('treats a malformed failingFiles as no measurement, not a crash', () => {
+    // The report is a file anything may have edited. A field that is not a
+    // string array must read as "this seam supplied no measurement" — the
+    // fallback an absent field has always taken — never reach `.filter` as-is.
+    for (const bad of ['a string', [null], [{ file: 'x' }], 42]) {
+      const r = runWith(
+        [
+          cmd({
+            output: 'FAIL src/a.test.ts',
+            failingFiles: bad as unknown as string[],
+          }),
+        ],
+        'FAIL src/a.test.ts',
+      );
+      // The reparse fallback still measures off the stored output.
+      expect(r.shared).toEqual(['src/a.test.ts']);
+      expect(r.netNew).toEqual([]);
+    }
+  });
+
   it('discloses a PR-side output that was already trimmed', () => {
     // build-test trimmed it before this command ran, so the PR failing set may
     // be short. That understates `shared`; it cannot invent a netNew. Say so.
