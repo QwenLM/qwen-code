@@ -150,9 +150,9 @@ function idOfPath(path: string): {
 // the system temp dir — so asserting that path is absent proves nothing.
 // This is the assertion that still has teeth: nothing of ours outlives the
 // run where the sentinel really is.
-function leakedSentinels(): string[] {
+function leakedSentinels(pid: number = process.pid): string[] {
   return readdirSync(tmpdir()).filter((f) =>
-    f.startsWith(`qwen-capture-ready-${process.pid}-`),
+    f.startsWith(`qwen-capture-ready-${pid}-`),
   );
 }
 
@@ -588,27 +588,57 @@ describe('capture-tui without tmux (probe seam)', () => {
   // can plausibly hold; ownership has to be proved by the full signature a
   // previous run of THIS command wrote, every rung of it.
   for (const [label, manifest] of [
-    ['only the evidence rung', '{"evidence":"png"}'],
+    ['only the evidence rung', '{"evidence":"png","artifacts":"ARTIFACTS"}'],
     [
       'a manifest naming a DIFFERENT capture',
       JSON.stringify({
         evidence: 'png',
         ansPath: '/somewhere/else/other.ans',
         settledBy: 'timeout',
+        artifacts: 'ARTIFACTS',
+      }),
+    ],
+    [
+      // Everything valid EXCEPT the evidence rung: without this fixture no
+      // case isolated it — the others are caught by ansPath first, so the
+      // rung could be deleted and the suite stayed green.
+      'a manifest whose evidence is not a rung this tool writes',
+      JSON.stringify({
+        evidence: 'text',
+        ansPath: 'PLACEHOLDER',
+        settledBy: 'timeout',
+        artifacts: 'ARTIFACTS',
       }),
     ],
     [
       'a manifest with no settledBy',
-      JSON.stringify({ evidence: 'png', ansPath: 'PLACEHOLDER' }),
+      JSON.stringify({
+        evidence: 'png',
+        ansPath: 'PLACEHOLDER',
+        artifacts: 'ARTIFACTS',
+      }),
     ],
   ] as const) {
     it(`refuses instead of clearing a foreign manifest — ${label}`, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-foreignjson-'));
       try {
-        const json = manifest.replace('PLACEHOLDER', join(dir, 'cap.ans'));
-        writeFileSync(join(dir, 'cap.json'), json);
         writeFileSync(join(dir, 'cap.ans'), 'user file');
         writeFileSync(join(dir, 'cap.png'), 'user file');
+        // The identity rung is filled in with the REAL identities, so it
+        // cannot mask the rung each fixture is actually about: left out,
+        // sameFile(undefined, …) is false and the clear refuses no matter
+        // which earlier rung a mutant restores — the pin would pass for
+        // the wrong reason.
+        const json = manifest
+          .replace('PLACEHOLDER', join(dir, 'cap.ans'))
+          .replace(
+            '"ARTIFACTS"',
+            JSON.stringify({
+              ans: idOfPath(join(dir, 'cap.ans')),
+              png: idOfPath(join(dir, 'cap.png')),
+            }),
+          );
+        writeFileSync(join(dir, 'cap.json'), json);
         const { stderr } = await withStdio(() =>
           runCaptureTui({
             command: 'printf hi',
@@ -912,14 +942,21 @@ describe('capture-tui without tmux (probe seam)', () => {
     probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
     const dir = mkdtempSync(join(tmpdir(), 'capture-tui-relansp-'));
     try {
+      writeFileSync(join(dir, 'cap.ans'), 'user file');
+      writeFileSync(join(dir, 'cap.png'), 'user file');
       const json = JSON.stringify({
         evidence: 'png',
         ansPath: relative(process.cwd(), join(dir, 'cap.ans')),
         settledBy: 'timeout',
+        // Real identities, so this fixture pins the ansPath rung rather
+        // than being refused by a missing artifacts rung — which would
+        // pass for the wrong reason against exactly the mutant it names.
+        artifacts: {
+          ans: idOfPath(join(dir, 'cap.ans')),
+          png: idOfPath(join(dir, 'cap.png')),
+        },
       });
       writeFileSync(join(dir, 'cap.json'), json);
-      writeFileSync(join(dir, 'cap.ans'), 'user file');
-      writeFileSync(join(dir, 'cap.png'), 'user file');
       const { stderr } = await withStdio(() =>
         runCaptureTui({
           command: 'printf hi',
@@ -942,6 +979,67 @@ describe('capture-tui without tmux (probe seam)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // Both of these need NO tmux: the size cap and the bounded read run in
+  // the clear phase, and the collision gate refuses before probes.tmux()
+  // is ever called. Sitting in the real-tmux describe, they were skipped on
+  // every tmux-less lane — which is every Windows lane by definition — so
+  // the heap guard was unpinned exactly where an unattended runner would
+  // meet it.
+  for (const [label, makeJson] of [
+    ['a bare oversize file', (): string => 'x'.repeat(1024 * 1024 + 10)],
+    [
+      // VALID JSON, shaped like a manifest, so the CAP is what decides:
+      // without it the file parses, `shaped` is true, and the clear phase
+      // deletes the sibling artifacts. A garbage payload would not
+      // discriminate — JSON.parse rejects it either way.
+      'valid manifest-shaped JSON past the cap',
+      (base: string): string =>
+        JSON.stringify({
+          evidence: 'png',
+          pngPath: `${base}.png`,
+          pad: 'x'.repeat(2 * 1024 * 1024),
+        }),
+    ],
+  ] as const) {
+    it(`REFUSES an oversized <out>.json rather than read it into the heap — ${label}`, async () => {
+      // Measured at ~479MB: the clear phase used to readFileSync +
+      // JSON.parse whatever regular file sat there, and the process died on
+      // the heap limit before any refusal could print. Past the cap the
+      // file is simply not ours, which the collision gate refuses by name.
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-hugejson-'));
+      try {
+        const json = makeJson(join(dir, 'cap'));
+        writeFileSync(join(dir, 'cap.json'), json);
+        writeFileSync(join(dir, 'cap.ans'), 'previous run text');
+        writeFileSync(join(dir, 'cap.png'), 'user file');
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: undefined,
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 1000,
+          } as never),
+        );
+        expect(process.exitCode).toBe(3);
+        expect(stderr).toContain('collides with a file this capture did not');
+        // Nothing touched: a manifest this run could not verify is not
+        // authority to delete anything beside it.
+        expect(statSync(join(dir, 'cap.json')).size).toBe(json.length);
+        expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
+          'previous run text',
+        );
+        expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 
   it('clears stale artifacts for the SHAPE-BOUNDS gate family too', async () => {
     // Seven refusal gates have seeded-artifact ordering pins; the family
@@ -1610,23 +1708,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     } as never);
   }
 
-  it('refuses an OVERSIZE <out>.json without reading it into memory', async () => {
-    // The cap exists because a 479MB dense JSON at this path killed the
-    // process on the heap limit before any refusal could print. fstat
-    // measured the file, but the read then went to the LIVE end of the
-    // pinned inode; the read is bounded now, so a file that is already
-    // over the cap — the same shape without a racing appender — is
-    // unverifiable, and unverifiable is never permission to delete.
-    writeFileSync(join(dir, 'cap.ans'), 'user file');
-    writeFileSync(join(dir, 'cap.png'), 'user file');
-    writeFileSync(join(dir, 'cap.json'), 'x'.repeat(1024 * 1024 + 10));
-    const { stderr } = await withStdio(() => run());
-    expect(process.exitCode).toBe(3);
-    expect(stderr).toContain('collides with a file this capture did not');
-    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe('user file');
-    expect(readFileSync(join(dir, 'cap.png'), 'utf8')).toBe('user file');
-  });
-
   it('a GENUINE manifest does not authorize clearing a REPLACED artifact', async () => {
     // The signature authenticates the manifest, not the files beside it: a
     // real previous run's manifest was enough to unlink whatever now holds
@@ -1660,6 +1741,41 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(existsSync(join(dir, 'cap.json'))).toBe(true);
   });
 
+  it('refuses when the --out DIRECTORY is swapped mid-window', async () => {
+    // The reported reproduction: every artifact path resolves by name, so
+    // a captured command running as the same uid could move the directory
+    // aside and put a symlink in its place — all three artifacts landed
+    // under the victim while the manifest went on attesting the original
+    // paths. Node has no *at() syscalls, so the directory is pinned by
+    // identity (dev+ino) and re-checked before each artifact operation.
+    const base = mkdtempSync(join(tmpdir(), 'capture-tui-swap-'));
+    const capdir = join(base, 'capdir');
+    const victim = join(base, 'victim');
+    mkdirSync(capdir);
+    mkdirSync(victim);
+    try {
+      const { stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: `cd ..; mv capdir capdir.stolen; ln -s victim capdir; printf 'SWAP-MARK\\n'; sleep 20`,
+          cwd: capdir,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: 'SWAP-MARK',
+          keys: undefined,
+          out: join(capdir, 'cap'),
+          timeoutMs: 20_000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('directory holding --out was replaced');
+      // Nothing of this run's landed anywhere.
+      expect(readdirSync(victim)).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a FIFO at <out>.json instead of hanging on it', async () => {
     // The manifest checks and the read used to resolve the path twice, so a
     // racer could swap a verified regular file for a FIFO and hang the
@@ -1667,7 +1783,11 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // interrupt it. One descriptor decides both now, opened non-blocking.
     // A FIFO standing there from the start is the same shape without the
     // race, and it must not stall the run.
-    const started = performance.now();
+    // No wall-clock assertion here: it would only run once the call had
+    // already returned, and under the regression it names — a blocking
+    // synchronous FIFO read — the event loop never gets there. The bound
+    // that actually bites is this test's own budget below, which fails the
+    // test by name instead of letting a hang masquerade as a slow run.
     const { stderr } = await withStdio(() =>
       run({
         command: `mkfifo cap.json 2>/dev/null || mknod cap.json p; printf 'MARK\\n'; sleep 20`,
@@ -1675,11 +1795,10 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       }),
     );
     expect(process.exitCode).toBe(3);
-    expect(performance.now() - started).toBeLessThan(30_000);
     expect(stderr).toContain('claimed during the capture window');
     // Not ours, so still there.
     expect(existsSync(join(dir, 'cap.json'))).toBe(true);
-  });
+  }, 45_000);
 
   it('refuses when the CAPTURED COMMAND claims an artifact path mid-window', async () => {
     // The collision gate runs before the window; the window then lasts up
@@ -1722,6 +1841,20 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     // The link itself is not ours to remove either.
     expect(lstatSync(join(dir, 'cap.ans')).isSymbolicLink()).toBe(true);
   });
+
+  it.skipIf(tmuxPadsWithCaptureN(tmuxVersionProbe.stdout ?? '') !== true)(
+    'names the padding tmux ONCE in the degradation, not twice',
+    async () => {
+      // tmuxVersion is already the `tmux -V` line, so the prefix produced
+      // "tmux tmux 3.2a" in the manifest of every capture on a padding
+      // host. Nothing pinned the string — the only `pads` reference in
+      // this file was a skipIf guard.
+      await run();
+      const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
+      expect(manifest.degradedBecause).toContain('pads capture-pane -N');
+      expect(manifest.degradedBecause).not.toContain('tmux tmux');
+    },
+  );
 
   it('never credits a png written THROUGH a mid-window symlink', async () => {
     // The png stamp was taken before the capture window, so a symlink the
@@ -2488,8 +2621,17 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
   });
 
   it('captures anyway on --until timeout and records the degraded settle', async () => {
+    const started = performance.now();
     await run({ until: 'NEVER-APPEARS', timeoutMs: 1500, settleMs: 0 });
+    const elapsed = performance.now() - started;
     expect(process.exitCode).toBeUndefined();
+    // The poll SPENT its budget. Everything else here is satisfied by a
+    // mutant that bails on the first miss and records `settledBy:
+    // 'timeout'` anyway — the marker would then be declared absent after
+    // one look, and a UI that renders it 200ms later is reported as never
+    // having rendered it. A floor at 80% of the deadline tolerates timer
+    // coarseness without tolerating a curtailed poll.
+    expect(elapsed).toBeGreaterThan(1500 * 0.8);
     const manifest = JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8'));
     expect(manifest.settledBy).toBe('timeout');
     // timeoutMs recorded on an UNTIL-ONLY run too: every other timeoutMs
@@ -2924,37 +3066,6 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     expect(manifest.evidence).toBe('ans-only');
     expect(manifest.degradedBecause).toContain('signal');
     expect(existsSync(join(dir, 'cap.ans'))).toBe(true);
-  });
-
-  it('REFUSES an oversized <out>.json instead of reading it into the heap', async () => {
-    // A capture manifest is a few hundred bytes. The clear phase used to
-    // readFileSync + JSON.parse whatever regular file sat there, so a huge
-    // one killed the process with a heap OOM before any refusal could
-    // print (measured at ~479MB). lstat already holds the size, so the cap
-    // costs nothing — and past it the file is simply not ours, which the
-    // collision gate then refuses by name.
-    // VALID JSON, and shaped like a manifest, so the cap is what decides:
-    // without it the file parses, `shaped` is true, and the clear phase
-    // deletes the sibling artifacts. With it the file is simply too big to
-    // be ours, nothing is cleared, and the collision gate refuses by name.
-    // (A garbage payload would not discriminate — JSON.parse rejects it
-    // either way.)
-    const huge = JSON.stringify({
-      evidence: 'png',
-      pngPath: join(dir, 'cap.png'),
-      pad: 'x'.repeat(2 * 1024 * 1024),
-    });
-    writeFileSync(join(dir, 'cap.json'), huge);
-    writeFileSync(join(dir, 'cap.ans'), 'previous run text');
-    const { stderr } = await withStdio(() => run({ settleMs: 0 }));
-    expect(process.exitCode).toBe(3);
-    expect(stderr).toContain('collides with a file this capture did not');
-    // Neither the oversized file nor its siblings were touched: a manifest
-    // this run could not verify is not authority to delete anything.
-    expect(statSync(join(dir, 'cap.json')).size).toBe(huge.length);
-    expect(readFileSync(join(dir, 'cap.ans'), 'utf8')).toBe(
-      'previous run text',
-    );
   });
 
   it('stays exit 0 when STDIO fails after the evidence is on disk', async () => {
@@ -3537,8 +3648,12 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
     await (captureTuiCommand.handler as (argv: unknown) => Promise<void>)({
       command: `bash -c 'sleep 0.3; printf "MAPPED\\n"; cat'`,
       cwd: dir,
-      cols: 80,
-      rows: 24,
+      // NON-default geometry, deliberately: both handler call sites used to
+      // pass 80x24 — byte-equal to the yargs defaults — so a handler
+      // hardcoding DEFAULT_COLS/DEFAULT_ROWS shipped green while
+      // `--cols 120` silently captured at 80 and the manifest recorded 80.
+      cols: 120,
+      rows: 30,
       'settle-ms': 0,
       ready: 'MAPPED',
       until: 'typed-by-map',
@@ -3565,8 +3680,8 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       `bash -c 'sleep 0.3; printf "MAPPED\\n"; cat'`,
     );
     expect(manifest.ansPath).toBe(join(dir, 'mapped.ans'));
-    expect(manifest.cols).toBe(80);
-    expect(manifest.rows).toBe(24);
+    expect(manifest.cols).toBe(120);
+    expect(manifest.rows).toBe(30);
   });
 
   it('maps settle-ms where it is OBSERVABLE — the fixed-delay shape', async () => {
@@ -3826,6 +3941,13 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
           }
           expect(gone).toBe(true);
           expect(guardFired).toBe(false);
+          // The sentinel cleanup on the signal path runs in the CHILD, so
+          // the child's pid is the only one that can prove it ran —
+          // leakedSentinels() defaulted to this worker's pid, which no
+          // child sentinel ever carries, so the sole cleanup for the
+          // signal-death path (the finally never runs: the re-raise
+          // terminates without unwinding) was pinned by nothing.
+          expect(leakedSentinels(childPid)).toEqual([]);
         } catch (e) {
           // SIGTERM for the same reason as the guard above: the child's own
           // handler is the only thing that reaps its private server.
@@ -3919,6 +4041,9 @@ describe.skipIf(!hasTmux)('capture-tui (real tmux)', () => {
       // Death BY the signal — not a swallowed exit 0 with success JSON.
       expect(signal ?? `code:${code}`).toBe('SIGTERM');
       expect(guardFired).toBe(false);
+      // Same as the mid-poll sibling: the child's own pid is what proves
+      // the signal path cleaned up after itself.
+      expect(leakedSentinels(child.pid as number)).toEqual([]);
     } catch (e) {
       child.kill('SIGTERM');
       throw e;

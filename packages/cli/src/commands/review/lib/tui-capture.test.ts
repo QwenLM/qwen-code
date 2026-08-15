@@ -24,6 +24,10 @@ describe('kill-server stderr classification', () => {
   const nothingToKill = [
     'no server running on /tmp/tmux-501/qwen-review-capture-1-a',
     'error connecting to /tmp/x (No such file or directory)',
+    // The bare wording, matched by its own regex branch: the entry above
+    // satisfies the `error connecting` branch AND this one, so deleting
+    // either shipped green.
+    'no such file or directory',
     "can't create directory /tmp/tmux-501: Permission denied",
     "couldn't create directory /tmp/tmux-501 (Permission denied)",
     'error connecting to /very/long/... (File name too long)',
@@ -291,6 +295,13 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     expect(tmuxPlan(opts).capture).toContain('-N');
     expect(tmuxPadsWithCaptureN('tmux 3.2a')).toBe(true);
     expect(tmuxPadsWithCaptureN('tmux 3.1')).toBe(true);
+    // The lettered 3.1 line — Debian 11 ships 3.1c — on the TRUE side,
+    // which is the dangerous one: it drops -N and adds the degradation
+    // caveat. The false side already pins letters, and this predicate's
+    // own history includes a lettered-minor regression.
+    for (const v of ['tmux 3.1a', 'tmux 3.1b', 'tmux 3.1c', 'tmux 3.2']) {
+      expect(tmuxPadsWithCaptureN(v)).toBe(true);
+    }
     // The documented range is exactly 3.1-3.2.x. 3.0.x answered true,
     // contradicting the sibling predicate (there is no `capture-pane -N`
     // before 3.1) and the version gate that refuses those hosts first.
@@ -419,12 +430,15 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     );
   });
 
-  it('quote-escapes a user-derived readyFile in the holder script', () => {
-    // --out is user-derived (verify briefs build it from target/branch
-    // names; git refs may carry an apostrophe), and the holder shell
-    // re-parses the sentinel line — so the path needs its OWN esc():
-    // unescaped, an apostrophe broke the quoting and burned the full
-    // sentinel deadline blaming tmux (measured: exit 3 at ~10s).
+  it('quote-escapes the readyFile in the holder script', () => {
+    // The holder shell re-parses the sentinel line, so the path needs its
+    // OWN esc() — an unescaped apostrophe broke the quoting and burned the
+    // full sentinel deadline blaming tmux (measured: exit 3 at ~10s, back
+    // when the caller built this path from the user's --out). It is minted
+    // under the system temp dir now, which is not a reason to drop the
+    // escaping: this function takes the path from its caller, mkdtemp-style
+    // parents are not guaranteed apostrophe-free, and the plan is pure —
+    // it cannot know where the next caller's path comes from.
     const readyFile = "/evidence/ca'p/ready";
     const p = tmuxPlan({
       server: 'srv',

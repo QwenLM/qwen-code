@@ -406,6 +406,44 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
+  // Everything above resolves BY NAME. The final component is guarded
+  // (O_NOFOLLOW, O_EXCL, the stamps, the collision gates) — the DIRECTORY
+  // holding it was not, and the captured command runs as the same uid: a
+  // `mv dir dir.stolen && ln -s /victim dir` mid-window redirected all
+  // three artifacts out of the --out base while the manifest went on
+  // attesting the original paths (probe-reproduced on live tmux).
+  //
+  // Node exposes no *at() syscalls, so this cannot be made airtight from
+  // here: openat/unlinkat against a directory fd is the only construction
+  // that resolves a name against a pinned directory, and fs has no such
+  // binding. What IS available is identity — dev+ino of the directory, the
+  // same thing every artifact check uses for files. Sampled once up front
+  // and re-checked immediately before each artifact operation, it turns the
+  // reproduced attack (a swap anywhere in the capture window, up to 70
+  // minutes) into a refusal, and leaves only the window between the check
+  // and the syscall on its heels. That residue is stated here rather than
+  // papered over: a racer fast enough to land inside it is not excluded.
+  const outDir = dirname(outBase);
+  const dirIdOf = (): string => {
+    try {
+      const st = lstatSync(outDir);
+      return `${st.dev}:${st.ino}`;
+    } catch {
+      return 'gone';
+    }
+  };
+  const outDirId = dirIdOf();
+  /** Throws the collision error when the directory holding the artifacts is
+   * no longer the one this run measured. */
+  const assertSameOutDir = (): void => {
+    if (dirIdOf() !== outDirId) {
+      throw new ArtifactCollision(
+        `the directory holding --out was replaced during the capture: ` +
+          `${outDir} is no longer the one this run started with — refusing ` +
+          `to write evidence through it`,
+      );
+    }
+  };
   // NOT beside --out: the sentinel is this tool's plumbing, and putting it
   // in the user's chosen namespace meant unlinking a path we cannot verify
   // is ours — a `report.holder-ready` holding user data was removed before
@@ -488,7 +526,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // the window. So occupancy is decided AGAIN at write time, and the open
   // itself refuses to follow a link (O_NOFOLLOW closes the residual race
   // between that check and the write).
-  const writeArtifact = (path: string, stamp: Stamp, data: string): void => {
+  const writeArtifact = (
+    path: string,
+    stamp: Stamp,
+    data: string,
+  ): ArtifactId => {
+    assertSameOutDir();
     if (changed(path, stamp)) {
       throw new ArtifactCollision(
         `${path} was claimed during the capture window by something this ` +
@@ -526,6 +569,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
     try {
       writeFileSync(fd, data, 'utf8');
+      // Stamped through the SAME descriptor that wrote it: this is the
+      // identity of the file this run created, not of whatever holds the
+      // name later. The manifest records it, and the check before the
+      // manifest write proves the two are still the same file.
+      const st = fstatSync(fd);
+      return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
     } finally {
       closeSync(fd);
     }
@@ -1267,6 +1316,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   for (const s of REAP_SIGNALS) process.on(s, onSignal);
 
   let ansText = '';
+  // What the .ans write actually produced, by identity — see the manifest
+  // block, which refuses to describe a file that is no longer that one.
+  let ansWritten: ArtifactId | undefined;
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
   let readyFailed = false;
   let keysSent: boolean | undefined;
@@ -1411,7 +1463,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   }
 
   try {
-    writeArtifact(ansPath, ansStamp, ansText);
+    ansWritten = writeArtifact(ansPath, ansStamp, ansText);
   } catch (e) {
     // The disk can fill (or the target turn hostile) during a long capture
     // window; the same principle as the mkdir guard — refusal contract, not
@@ -1496,7 +1548,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   }
   if (capturePads) {
     degradations.push(
-      `tmux ${tmuxVersion} pads capture-pane -N to the grid allocation and ` +
+      // No `tmux ` prefix: tmuxVersion IS the `tmux -V` line ("tmux 3.2a"),
+      // so prefixing produced "tmux tmux 3.2a" in the manifest of every
+      // capture on a padding host — 3.1-3.2.x, which is what Ubuntu 22.04
+      // ships.
+      `${tmuxVersion} pads capture-pane -N to the grid allocation and ` +
         `has no -T — trailing spaces were TRIMMED rather than fabricated; ` +
         `a trailing-space or right-edge claim needs tmux 3.3+`,
     );
@@ -1573,8 +1629,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     } catch {
       // Gone or unstattable mid-check — the degradation branch below says so.
     }
+    // lstat, not stat: freeze writes this path by name during the render,
+    // so a symlink planted between the re-stamp and that write is followed
+    // by freeze and would otherwise be credited — `changed()` sees the
+    // symlink's own identity differ from "absent" and answers true. Only a
+    // regular file is a rendering this run produced.
+    let pngIsFile = false;
+    try {
+      pngIsFile = lstatSync(pngPath).isFile();
+    } catch {
+      // Gone or unstattable — not a png rung, same as size 0 below.
+    }
     if (
       r.status === 0 &&
+      pngIsFile &&
       pngSize > 0 &&
       // ...and THIS run is what put those bytes there. Existence alone
       // credited a file the clear phase deliberately spared — an unrelated
@@ -1670,13 +1738,26 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // Stamped AFTER the writes: this is what a later run compares against
     // before it dares unlink anything at these names.
     artifacts: {
-      ans: idOf(stampOf(ansPath)),
+      // From the write, not from a fresh stat of the name: between the
+      // write and here sit the render and its probes, and re-stating the
+      // path would have the manifest describe whatever occupies it now.
+      ans: ansWritten as ArtifactId,
       png: png ? idOf(stampOf(pngPath)) : null,
     },
     ...(degradedBecause ? { degradedBecause } : {}),
     settledBy,
   };
   try {
+    // The .ans this manifest is about to describe must still BE the file
+    // this run wrote — the render window sits between the two, and a
+    // manifest attesting bytes it never produced is the wrong-evidence
+    // outcome this whole command exists to prevent.
+    if (!sameFile(ansWritten, ansPath)) {
+      throw new ArtifactCollision(
+        `${ansPath} was replaced after this capture wrote it — refusing to ` +
+          `describe a file this run did not produce`,
+      );
+    }
     writeArtifact(
       manifestPath,
       manifestStamp,

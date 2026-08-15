@@ -379,6 +379,62 @@ describe('runCleanup', () => {
         );
       });
 
+      it('unlinks EVERY reaped socket, not just the first', () => {
+        // Positive rmSync assertions covered only the first matching
+        // socket; the second orphan was pinned by its kill argv and its
+        // "Reaped" line, so a mutant unlinking one socket per sweep left
+        // dead sockets littering the base and shipped this suite green.
+        const o1 = captureServerName(717171, 'aaa');
+        const o2 = captureServerName(727272, 'bbb');
+        mocks.existsSync.mockImplementation((p: string) => p === dir);
+        mocks.readdirSync.mockImplementation((p: string) =>
+          p === dir ? [o1, o2] : [],
+        );
+        runCleanup('local');
+        for (const name of [o1, o2]) {
+          expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+            `Reaped orphaned capture server: ${name}`,
+          );
+          expect(mocks.rmSync).toHaveBeenCalledWith(`${dir}/${name}`, {
+            force: true,
+          });
+        }
+      });
+
+      it('never unlinks on a CLIENT-side refusal — and says which it was', () => {
+        // `directory … has unsafe permissions` and `… is not a directory`
+        // are refusals tmux makes before looking at the server, so a live
+        // orphan can be sitting behind that socket. Neither wording
+        // appeared in any fixture, so the whole isSocketDirUnusable wiring
+        // — the note's parenthetical included — was unexercised.
+        for (const wording of [
+          'directory /tmp/tmux-501 has unsafe permissions',
+          '/tmp/tmux-501 is not a directory',
+        ]) {
+          vi.clearAllMocks();
+          const orphan = captureServerName(838383, 'ccc');
+          mocks.existsSync.mockImplementation((p: string) => p === dir);
+          mocks.readdirSync.mockImplementation((p: string) =>
+            p === dir ? [orphan] : [],
+          );
+          mocks.execFileSync.mockImplementation(() => {
+            throw Object.assign(new Error('kill failed'), { stderr: wording });
+          });
+          runCleanup('local');
+          expect(mocks.writeStdoutLine).not.toHaveBeenCalledWith(
+            expect.stringContaining('Reaped orphaned capture server'),
+          );
+          expect(mocks.rmSync).not.toHaveBeenCalledWith(
+            `${dir}/${orphan}`,
+            expect.anything(),
+          );
+          expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+            expect.stringContaining('before reaching the socket directory'),
+          );
+        }
+        mocks.execFileSync.mockReset();
+      });
+
       it('treats a NON-EPERM probe error as alive too — only ESRCH reaps', () => {
         // The invariant is "reap only a pid positively known dead". Pinning
         // EPERM alone left `alive = code === 'EPERM'` shipping green, and a
