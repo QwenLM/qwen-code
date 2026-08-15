@@ -328,7 +328,14 @@ async function runDirectBrowserOperation<T>(
         reject(error);
       }, DIRECT_OPERATION_TIMEOUT_MS);
     });
-    return await Promise.race([operation(), timedOut]);
+    const operationPromise = operation();
+    // The timeout teardown cancels pending CDP commands, which rejects the
+    // operation promise AFTER the race has settled on the timeout error;
+    // without a handler that late rejection becomes unhandled. The guard
+    // catch only marks it handled — the race still observes a rejection
+    // that lands before the timeout.
+    operationPromise.catch(() => {});
+    return await Promise.race([operationPromise, timedOut]);
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     directOperationActive = false;
@@ -558,7 +565,13 @@ async function detachDirectOperationTabs(error: Error): Promise<void> {
     attachedTabIds.has(tabId),
   );
   for (const pending of pendingDirectCommands) pending.expire();
-  if (tabIds.length === 0) return;
+  if (tabIds.length === 0) {
+    // Nothing left to detach (the tab may already be gone), but pending
+    // commands must still be cancelled so their promises settle instead
+    // of hanging forever.
+    for (const pending of [...pendingDirectCommands]) pending.cancel(error);
+    return;
+  }
   for (const tabId of tabIds) {
     for (const listener of directDetachListeners) listener(tabId);
   }

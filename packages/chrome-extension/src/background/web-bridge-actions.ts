@@ -65,6 +65,13 @@ interface SessionRefs {
    */
   loaderId?: string;
   refs: Map<string, ElementRef>;
+  /**
+   * Highest ref number ever issued for this session (high-water mark across
+   * ALL snapshots, not the previous snapshot's count): numbering must never
+   * re-issue a number the agent may still hold from an earlier snapshot of
+   * the same document, where the loaderId guard cannot fire.
+   */
+  nextRef: number;
 }
 
 const refsByTab = new Map<number, Map<string, SessionRefs>>();
@@ -402,17 +409,21 @@ async function snapshot(args: Args): Promise<unknown> {
     const result = record(await send('Accessibility.getFullAXTree'));
     const nodes = Array.isArray(result['nodes']) ? result['nodes'] : [];
     const refsBySession = refsByTab.get(tab.id) ?? new Map();
-    // Continue numbering where the previous snapshot left off so a ref
-    // remembered from an earlier snapshot of the same session can never
-    // collide with a freshly issued one.
-    const startRef = refsBySession.get(sessionKey(args))?.refs.size ?? 0;
+    // Continue numbering from the highest number EVER issued for this
+    // session so a ref remembered from any earlier snapshot can never
+    // collide with a freshly issued one (the previous snapshot's count
+    // alone would re-issue numbers from two snapshots back).
+    const startRef = refsBySession.get(sessionKey(args))?.nextRef ?? 0;
     const refs = new Map<string, ElementRef>();
-    refsBySession.set(sessionKey(args), { loaderId, refs });
+    const entry: SessionRefs = { loaderId, refs, nextRef: startRef };
+    refsBySession.set(sessionKey(args), entry);
     refsByTab.set(tab.id, refsBySession);
+    const tree = formatAccessibilityTree(nodes, refs, startRef);
+    entry.nextRef = startRef + refs.size;
     return {
       url: tab.url,
       title: tab.title,
-      tree: formatAccessibilityTree(nodes, refs, startRef),
+      tree,
     };
   });
 }

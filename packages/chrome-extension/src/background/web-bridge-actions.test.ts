@@ -734,6 +734,61 @@ describe('WebBridge actions', () => {
     ).rejects.toThrow('unknown ref');
   });
 
+  it('never re-issues ref numbers from earlier snapshots (high-water numbering)', async () => {
+    // snap1 issues @e1..@e5, snap2 issues @e6; snap3 must continue from the
+    // highest number EVER issued (@e7..@e9). Continuing from only the
+    // previous snapshot's COUNT would re-issue @e2..@e4 — colliding with
+    // snap1 refs the agent may still hold inside the same document, where
+    // the loaderId guard cannot fire.
+    let buttons = 5;
+    cdp.send.mockImplementation(async (method: string) => {
+      if (method === 'Page.getFrameTree') return FRAME_TREE_LOADER_1;
+      if (method === 'Accessibility.getFullAXTree') {
+        const nodes: Array<Record<string, unknown>> = [
+          {
+            nodeId: 'root',
+            childIds: Array.from({ length: buttons }, (_, i) => `button-${i}`),
+          },
+        ];
+        for (let i = 0; i < buttons; i++) {
+          nodes.push({
+            nodeId: `button-${i}`,
+            role: { value: 'button' },
+            name: { value: `Button ${i}` },
+            backendDOMNodeId: 100 + i,
+          });
+        }
+        return { nodes };
+      }
+      return {};
+    });
+    const { executeWebBridgeAction } = await loadActions();
+
+    const first = (await executeWebBridgeAction('snapshot', {
+      _tabId: 17,
+      _session: 'research',
+    })) as { tree: Array<{ ref?: string }> };
+    expect(first.tree).toHaveLength(5);
+
+    buttons = 1;
+    const second = await executeWebBridgeAction('snapshot', {
+      _tabId: 17,
+      _session: 'research',
+    });
+    expect(second).toMatchObject({ tree: [{ ref: '@e6' }] });
+
+    buttons = 3;
+    const third = (await executeWebBridgeAction('snapshot', {
+      _tabId: 17,
+      _session: 'research',
+    })) as { tree: Array<{ ref?: string }> };
+    expect(third.tree.map((node) => node.ref)).toEqual([
+      '@e7',
+      '@e8',
+      '@e9',
+    ]);
+  });
+
   it('fails ref resolution closed when the page navigated after the snapshot', async () => {
     let loaderId = 'loader-1';
     cdp.send.mockImplementation(async (method: string) => {
