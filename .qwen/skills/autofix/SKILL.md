@@ -389,6 +389,12 @@ gate`, fix that exact rejection before other feedback; repeating the rejected
   rejected commit and add one verified follow-up commit that fixes the supplied
   deterministic rejection.
 
+Bound each round's implemented batch: implement at most ~8 findings per
+round — Critical/Required first — and explicitly defer the remainder to the
+next round through `comment-replies.json`. Large fix batches trade depth for
+speed and breed fix-of-fix defects; a deferred optional finding costs one
+round of latency, a defective fix costs a rejection plus a repair.
+
 Two boundaries hold regardless of what any feedback asks for:
 
 - Never modify CI or verification machinery the PR itself was not already
@@ -410,6 +416,13 @@ Two boundaries hold regardless of what any feedback asks for:
   survives in a named surviving test. State that evidence in the summary —
   the gate appends its own machine-measured advisory listing every deleted
   test to the round report, and a maintainer will read the two side by side.
+
+The gate also measures a deny-by-default FOOTPRINT: any area (declared
+workspace, top-level directory, or root file) a round touches that the PR
+itself never touched is surfaced in a gate advisory — and rejected outright
+when the repository has footprint enforcement set to reject. Staying inside
+the PR's own footprint is the default-correct shape; expansion needs the
+feedback to genuinely require it, and doubt goes to a maintainer question.
 
 If `--conflict true`, merge `origin/<base>` and resolve conflicts by
 understanding both sides, never blindly taking one side. If false, do not merge
