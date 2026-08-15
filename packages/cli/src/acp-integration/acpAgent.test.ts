@@ -430,7 +430,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (
       provider: {
         baseUrl?:
-          string | Array<{ url: string; models?: Array<{ id: string }> }>;
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
         models?: Array<{ id: string }>;
       },
       baseUrl?: string,
@@ -447,7 +448,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     (
       provider: {
         baseUrl?:
-          string | Array<{ url: string; models?: Array<{ id: string }> }>;
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
         models?: Array<{ id: string }>;
       },
       baseUrl?: string,
@@ -581,7 +583,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     async (config: {
       refreshHierarchicalMemory?: () => Promise<void>;
       getGeminiClient?: () =>
-        { refreshSystemInstruction?: () => Promise<void> } | undefined;
+        | { refreshSystemInstruction?: () => Promise<void> }
+        | undefined;
     }) => {
       try {
         await config.refreshHierarchicalMemory?.();
@@ -1114,7 +1117,8 @@ describe('runAcpAgent shutdown cleanup', () => {
     let agent: PreloadTestAgent | undefined;
     if (instantiateAgent) {
       const createAgent = vi.mocked(AgentSideConnection).mock.calls[0]?.[0] as
-        ((connection: AgentSideConnection) => unknown) | undefined;
+        | ((connection: AgentSideConnection) => unknown)
+        | undefined;
       if (!createAgent) throw new Error('Expected ACP agent factory');
       agent = createAgent({} as AgentSideConnection) as PreloadTestAgent;
     }
@@ -2025,7 +2029,8 @@ describe('toHttpServer', () => {
 describe('QwenAgent MCP SSE/HTTP support', () => {
   // We need to capture the agent factory from AgentSideConnection constructor
   let capturedAgentFactory:
-    ((conn: AgentSideConnectionLike) => AgentLike) | undefined;
+    | ((conn: AgentSideConnectionLike) => AgentLike)
+    | undefined;
 
   type AgentSideConnectionLike = {
     closed: Promise<void>;
@@ -4325,7 +4330,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
     const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
-      AbortSignal | undefined;
+      | AbortSignal
+      | undefined;
 
     let cancellationSettled = false;
     const cancellation = agent
@@ -12167,6 +12173,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/connect preserves rich same-endpoint custom models when modelIds is explicit', async () => {
+    const baseSettings = makeSessionSettings();
+    const savedCustom = {
+      id: 'my-kimi-custom',
+      name: '[Kimi API] my-kimi-custom',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [savedCustom] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+        modelIds: ['kimi-k3', 'my-kimi-custom'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        modelIds: ['kimi-k3', 'my-kimi-custom'],
+        preserveModels: [savedCustom],
+      }),
+    );
+
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+        modelIds: ['kimi-k3'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers/connect preserves a same-id proxy model for a non-merge provider', async () => {
     const baseSettings = makeSessionSettings();
     const proxyModel = {
@@ -14388,7 +14454,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // captures the callback at the Config boundary and verifies the
     // ordering vs `initialize()`.
     let capturedCallback:
-      ((event: Record<string, unknown>) => void) | undefined;
+      | ((event: Record<string, unknown>) => void)
+      | undefined;
     const callOrder: string[] = [];
     (innerConfig as unknown as Record<string, unknown>)[
       'setMcpBudgetEventCallback'
@@ -14627,7 +14694,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
   };
 
   let capturedAgentFactory:
-    ((conn: AgentSideConnectionLike) => AgentLike) | undefined;
+    | ((conn: AgentSideConnectionLike) => AgentLike)
+    | undefined;
   let mockConfig: Config;
   let liveCancelPendingPrompt: ReturnType<typeof vi.fn>;
   let liveWaitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;

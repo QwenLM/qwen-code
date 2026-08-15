@@ -198,6 +198,63 @@ function buildModelConfigs(
   return applyProviderCustomHeaders(models, config);
 }
 
+function mergePreservedGenerationConfig(
+  preserved: ProviderModelConfig['generationConfig'],
+  generated: ProviderModelConfig['generationConfig'],
+  advancedConfig: ProviderSetupInputs['advancedConfig'],
+): ProviderModelConfig['generationConfig'] {
+  const merged = { ...preserved, ...generated };
+  if (preserved?.extra_body || generated?.extra_body) {
+    merged.extra_body = {
+      ...preserved?.extra_body,
+      ...generated?.extra_body,
+    };
+  }
+  if (preserved?.samplingParams || generated?.samplingParams) {
+    merged.samplingParams = {
+      ...preserved?.samplingParams,
+      ...generated?.samplingParams,
+    };
+  }
+  if (preserved?.customHeaders || generated?.customHeaders) {
+    merged.customHeaders = {
+      ...generated?.customHeaders,
+      ...preserved?.customHeaders,
+    };
+  }
+  if (advancedConfig?.enableThinking === false && merged.extra_body) {
+    const extraBody = { ...merged.extra_body };
+    delete extraBody['enable_thinking'];
+    if (Object.keys(extraBody).length > 0) merged.extra_body = extraBody;
+    else delete merged.extra_body;
+  }
+  if (
+    advancedConfig?.multimodal !== undefined &&
+    !Object.values(advancedConfig.multimodal).some(Boolean)
+  ) {
+    delete merged.modalities;
+  }
+  if (
+    advancedConfig?.contextWindowSize !== undefined &&
+    advancedConfig.contextWindowSize <= 0
+  ) {
+    delete merged.contextWindowSize;
+  }
+  if (
+    advancedConfig?.maxTokens !== undefined &&
+    advancedConfig.maxTokens <= 0
+  ) {
+    const samplingParams = { ...merged.samplingParams };
+    delete samplingParams['max_tokens'];
+    if (Object.keys(samplingParams).length > 0) {
+      merged.samplingParams = samplingParams;
+    } else {
+      delete merged.samplingParams;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Version tracking — auto-derived for providers with static model lists
 // ---------------------------------------------------------------------------
@@ -285,16 +342,42 @@ export function buildInstallPlan(
   const envKey = resolveEnvKey(config, resolvedInputs);
   const generatedModels =
     inputs.prebuiltModels ?? buildModelConfigs(config, resolvedInputs);
+  const configuredModelIds = new Set(
+    (resolveProviderModels(config, baseUrl) ?? []).map((model) => model.id),
+  );
+  const sameModelIdentity = (
+    left: ProviderModelConfig,
+    right: ProviderModelConfig,
+  ) =>
+    left.id === right.id &&
+    normalizeBaseUrlForMatching(left.baseUrl) ===
+      normalizeBaseUrlForMatching(right.baseUrl);
   const models = inputs.preserveModels?.length
     ? [
-        ...generatedModels,
+        ...generatedModels.map((generated) => {
+          const preserved = inputs.preserveModels?.find((model) =>
+            sameModelIdentity(generated, model),
+          );
+          if (!preserved) return generated;
+          const generationConfig = mergePreservedGenerationConfig(
+            preserved.generationConfig,
+            generated.generationConfig,
+            inputs.prebuiltModels || configuredModelIds.has(generated.id)
+              ? undefined
+              : inputs.advancedConfig,
+          );
+          const mergedModel = {
+            ...preserved,
+            ...generated,
+          };
+          if (generationConfig) mergedModel.generationConfig = generationConfig;
+          else delete mergedModel.generationConfig;
+          return mergedModel;
+        }),
         ...inputs.preserveModels.filter(
           (model) =>
-            !generatedModels.some(
-              (generated) =>
-                generated.id === model.id &&
-                normalizeBaseUrlForMatching(generated.baseUrl) ===
-                  normalizeBaseUrlForMatching(model.baseUrl),
+            !generatedModels.some((generated) =>
+              sameModelIdentity(generated, model),
             ),
         ),
       ]

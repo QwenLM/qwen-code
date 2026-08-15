@@ -344,6 +344,19 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     const kimi = findProviderById('kimi');
     expect(kimi).toBeDefined();
 
+    const codeCustom = {
+      id: 'custom-code-model',
+      name: '[Kimi Code] custom-code-model',
+      baseUrl: 'https://api.kimi.com/coding/v1',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const apiCustom = {
+      id: 'custom-kimi-model',
+      name: '[Kimi API] custom-kimi-model',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+    };
     const setup = getExistingProviderSetup(kimi!, {
       [AuthType.USE_OPENAI]: [
         {
@@ -352,24 +365,14 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           baseUrl: 'https://api.kimi.com/coding/v1',
           envKey: 'KIMI_CODE_API_KEY',
         },
-        {
-          id: 'custom-code-model',
-          name: '[Kimi Code] custom-code-model',
-          baseUrl: 'https://api.kimi.com/coding/v1',
-          envKey: 'KIMI_CODE_API_KEY',
-        },
+        codeCustom,
         {
           id: 'kimi-k3',
           name: '[Kimi API] kimi-k3',
           baseUrl: 'https://api.moonshot.ai/v1',
           envKey: 'MOONSHOT_API_KEY',
         },
-        {
-          id: 'custom-kimi-model',
-          name: '[Kimi API] custom-kimi-model',
-          baseUrl: 'https://api.moonshot.ai/v1',
-          envKey: 'MOONSHOT_API_KEY',
-        },
+        apiCustom,
       ],
     });
 
@@ -386,6 +389,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         ['https://api.kimi.com/coding/v1', ['k3-256k', 'custom-code-model']],
         ['https://api.moonshot.ai/v1', ['kimi-k3', 'custom-kimi-model']],
       ]),
+      preserveModels: [codeCustom, apiCustom],
     });
   });
 
@@ -434,6 +438,12 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     const kimi = findProviderById('kimi');
     expect(kimi).toBeDefined();
 
+    const collidingCustom = {
+      id: 'kimi-k3',
+      name: '[Kimi Code] kimi-k3',
+      baseUrl: 'https://api.kimi.com/coding/v1',
+      envKey: 'KIMI_CODE_API_KEY',
+    };
     const setup = getExistingProviderSetup(kimi!, {
       [AuthType.USE_OPENAI]: [
         {
@@ -442,12 +452,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           baseUrl: 'https://api.kimi.com/coding/v1',
           envKey: 'KIMI_CODE_API_KEY',
         },
-        {
-          id: 'kimi-k3',
-          name: '[Kimi Code] kimi-k3',
-          baseUrl: 'https://api.kimi.com/coding/v1',
-          envKey: 'KIMI_CODE_API_KEY',
-        },
+        collidingCustom,
       ],
     });
 
@@ -467,6 +472,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       modelIdsByBaseUrl: new Map([
         ['https://api.kimi.com/coding/v1', ['k3-256k', 'kimi-k3']],
       ]),
+      preserveModels: [collidingCustom],
     });
   });
 
@@ -594,6 +600,28 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         ['https://y.example/v1', ['gpt-oss', 'y-alias']],
         ['https://x.example/v1', ['llama', 'x-shared-env']],
       ]),
+      preserveModels: [
+        {
+          id: 'gpt-oss',
+          baseUrl: 'https://y.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'llama',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
+        },
+        {
+          id: 'x-shared-env',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'y-alias',
+          baseUrl: 'https://y.example/v1/',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+      ],
     });
   });
 

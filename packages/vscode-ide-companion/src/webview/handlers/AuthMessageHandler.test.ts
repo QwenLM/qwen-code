@@ -267,6 +267,13 @@ describe('AuthMessageHandler', () => {
       'kimi-for-coding-highspeed',
     ];
     const seeded = [...defaults, 'my-custom'];
+    const savedCustom = {
+      id: 'my-custom',
+      name: '[Kimi Code] my-custom',
+      baseUrl: codingUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'kimi' })
       .mockResolvedValueOnce({ value: codingUrl });
@@ -288,12 +295,7 @@ describe('AuthMessageHandler', () => {
             baseUrl: codingUrl,
             envKey: 'KIMI_CODE_API_KEY',
           },
-          {
-            id: 'my-custom',
-            name: '[Kimi Code] my-custom',
-            baseUrl: codingUrl,
-            envKey: 'KIMI_CODE_API_KEY',
-          },
+          savedCustom,
           {
             id: 'legacy-custom',
             name: '[Kimi Code] legacy-custom',
@@ -321,6 +323,7 @@ describe('AuthMessageHandler', () => {
       expect.objectContaining({
         baseUrl: codingUrl,
         modelIds: seeded,
+        preserveModels: [savedCustom],
       }),
     );
   });

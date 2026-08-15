@@ -43,7 +43,8 @@ export class AuthMessageHandler extends BaseMessageHandler {
     currentConversationId: string | null,
     sendToWebView: (message: unknown) => void,
     private readonly getModelProviders: () =>
-      Record<string, unknown> | undefined = () => undefined,
+      | Record<string, unknown>
+      | undefined = () => undefined,
   ) {
     super(
       agentManager,
@@ -374,33 +375,25 @@ export class AuthMessageHandler extends BaseMessageHandler {
     let preserveModels: ProviderModelConfig[] | undefined;
     if (shouldShowStep(provider, 'models')) {
       const defaults = getDefaultModelIds(provider, baseUrl);
+      const defaultIdSet = new Set(defaults);
       const existing = findExistingProviderModels(
         provider,
         this.getModelProviders(),
         protocol,
       );
       const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
-      preserveModels = provider.mergeModelsByIdentity
-        ? undefined
-        : existing?.models.filter(
-            (model) =>
-              model.baseUrl !== undefined &&
-              normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint,
-          );
-      const restoredIds =
-        existing?.models
-          .filter((model) => {
-            const endpointScoped =
-              provider.mergeModelsByIdentity && Array.isArray(provider.baseUrl);
-            return endpointScoped
-              ? model.baseUrl !== undefined &&
-                  normalizeBaseUrlForMatching(model.baseUrl) ===
-                    selectedEndpoint
-              : model.baseUrl === undefined ||
-                  normalizeBaseUrlForMatching(model.baseUrl) ===
-                    selectedEndpoint;
-          })
-          .map((model) => model.id) ?? [];
+      const isSelectedEndpointModel = (model: ProviderModelConfig) => {
+        const endpointScoped =
+          provider.mergeModelsByIdentity && Array.isArray(provider.baseUrl);
+        return endpointScoped
+          ? model.baseUrl !== undefined &&
+              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint
+          : model.baseUrl === undefined ||
+              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
+      };
+      const restoredModels =
+        existing?.models.filter(isSelectedEndpointModel) ?? [];
+      const restoredIds = restoredModels.map((model) => model.id);
       const seededModelIds = [
         ...defaults,
         ...restoredIds.filter((id) => !defaults.includes(id)),
@@ -426,6 +419,16 @@ export class AuthMessageHandler extends BaseMessageHandler {
         });
         return;
       }
+      const selectedIdSet = new Set(modelIds);
+      preserveModels = provider.mergeModelsByIdentity
+        ? restoredModels.filter(
+            (model) =>
+              !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
+          )
+        : existing?.models.filter((model) => {
+            if (!isSelectedEndpointModel(model)) return true;
+            return !defaultIdSet.has(model.id) && selectedIdSet.has(model.id);
+          });
     } else {
       modelIds = getDefaultModelIds(provider, baseUrl);
     }

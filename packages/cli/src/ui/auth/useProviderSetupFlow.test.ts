@@ -1060,6 +1060,63 @@ describe('useProviderSetupFlow', () => {
     );
   });
 
+  it('preserves selected rich merge customs without reviving removed ids', async () => {
+    const baseUrl = 'https://api.kimi.com/coding/v1';
+    const richCustom = {
+      id: 'my-custom',
+      name: '[Kimi Code] my-custom',
+      baseUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const provider: ProviderConfig = {
+      id: 'merge-provider',
+      label: 'Merge Provider',
+      description: 'Identity-merged provider',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'coding',
+          label: 'Coding',
+          url: baseUrl,
+          models: [{ id: 'default-model' }],
+        },
+      ],
+      envKey: 'KIMI_CODE_API_KEY',
+      models: [{ id: 'default-model' }],
+      modelsEditable: true,
+      modelNamePrefix: 'Kimi Code',
+      mergeModelsByIdentity: true,
+    };
+    const onSubmit = vi.fn(async () => undefined);
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        provider,
+        undefined,
+        { KIMI_CODE_API_KEY: 'sk-test' },
+        ['my-custom'],
+        baseUrl,
+        undefined,
+        undefined,
+        [richCustom],
+      );
+    });
+    await act(async () => result.current.submit());
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      provider,
+      expect.objectContaining({ preserveModels: [richCustom] }),
+    );
+
+    act(() => result.current.changeModelIds('default-model'));
+    await act(async () => result.current.submit());
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      provider,
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+  });
+
   it('keeps a promoted protocol default endpoint in its protocol draft', () => {
     const provider: ProviderConfig = {
       id: 'fresh-custom-provider',

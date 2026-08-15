@@ -1044,4 +1044,130 @@ describe('headless custom-model preservation', () => {
 
     expect(plan.modelProviders?.[0]?.models).toContainEqual(savedCustom);
   });
+
+  it('keeps one rich model on normalized identity collisions without new advanced config', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'saved-custom'],
+      preserveModels: [
+        {
+          id: 'saved-custom',
+          name: 'Saved Custom',
+          baseUrl: 'https://api.test.com/v1/',
+          envKey: 'TEST_API_KEY',
+          generationConfig: { contextWindowSize: 12345 },
+        },
+      ],
+    });
+    const savedModels = plan.modelProviders?.[0]?.models.filter(
+      (model) => model.id === 'saved-custom',
+    );
+
+    expect(savedModels).toHaveLength(1);
+    expect(savedModels?.[0]).toMatchObject({
+      baseUrl: 'https://api.test.com/v1',
+      generationConfig: { contextWindowSize: 12345 },
+    });
+  });
+
+  it('merges saved rich config with newly submitted advanced config on identity collisions', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const savedCustom = {
+      id: 'saved-custom',
+      name: 'Saved Custom',
+      baseUrl: 'https://api.test.com/v1',
+      envKey: 'TEST_API_KEY',
+      generationConfig: {
+        contextWindowSize: 12345,
+        samplingParams: { max_tokens: 4096, temperature: 0.5 },
+      },
+    };
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'saved-custom'],
+      preserveModels: [savedCustom],
+      advancedConfig: { contextWindowSize: 8192, maxTokens: 8192 },
+    });
+
+    expect(plan.modelProviders?.[0]?.models).toContainEqual(
+      expect.objectContaining({
+        id: 'saved-custom',
+        name: '[Test] saved-custom',
+        generationConfig: expect.objectContaining({
+          contextWindowSize: 8192,
+          samplingParams: { max_tokens: 8192, temperature: 0.5 },
+        }),
+      }),
+    );
+  });
+
+  it('clears explicitly disabled advanced fields without dropping unrelated saved config', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'saved-custom'],
+      preserveModels: [
+        {
+          id: 'saved-custom',
+          baseUrl: 'https://api.test.com/v1',
+          envKey: 'TEST_API_KEY',
+          generationConfig: {
+            extra_body: { enable_thinking: true, keep: true },
+            modalities: { image: true },
+            contextWindowSize: 12345,
+            samplingParams: { max_tokens: 4096, temperature: 0.5 },
+          },
+        },
+      ],
+      advancedConfig: {
+        enableThinking: false,
+        multimodal: { image: false },
+        contextWindowSize: 0,
+        maxTokens: 0,
+      },
+    });
+    const generationConfig = plan.modelProviders?.[0]?.models.find(
+      (model) => model.id === 'saved-custom',
+    )?.generationConfig;
+
+    expect(generationConfig).toEqual({
+      extra_body: { keep: true },
+      samplingParams: { temperature: 0.5 },
+    });
+  });
+
+  it('removes generationConfig when an explicit disable clears its last field', () => {
+    const config = makeConfig({ modelsEditable: true, models: [] });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['saved-custom'],
+      preserveModels: [
+        {
+          id: 'saved-custom',
+          baseUrl: 'https://api.test.com/v1',
+          envKey: 'TEST_API_KEY',
+          generationConfig: { extra_body: { enable_thinking: true } },
+        },
+      ],
+      advancedConfig: { enableThinking: false },
+    });
+
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig,
+    ).toBeUndefined();
+  });
 });

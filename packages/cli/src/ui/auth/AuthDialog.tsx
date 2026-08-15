@@ -37,10 +37,15 @@ import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
-  'main' | 'alibaba-select' | 'thirdparty-select' | 'provider-setup';
+  | 'main'
+  | 'alibaba-select'
+  | 'thirdparty-select'
+  | 'provider-setup';
 
 type MainOption =
-  'ALIBABA_MODELSTUDIO' | 'THIRD_PARTY_PROVIDERS' | 'CUSTOM_PROVIDER';
+  | 'ALIBABA_MODELSTUDIO'
+  | 'THIRD_PARTY_PROVIDERS'
+  | 'CUSTOM_PROVIDER';
 
 // ---------------------------------------------------------------------------
 // Static data
@@ -190,13 +195,20 @@ export function getExistingProviderSetup(
       )
       .map((model) => model.id) ?? [];
   const restoredEndpoint = normalizeBaseUrlForMatching(initialBaseUrl);
-  const preserveModels = providerConfig.mergeModelsByIdentity
-    ? []
-    : (saved?.models ?? []).filter(
-        (model) =>
-          model.baseUrl !== undefined &&
-          normalizeBaseUrlForMatching(model.baseUrl) !== restoredEndpoint,
-      );
+  const preserveModels = (saved?.models ?? []).filter((model) => {
+    if (model.baseUrl === undefined) return false;
+    const modelEndpoint = model.baseUrl ?? initialBaseUrl;
+    const belongsToAnotherEndpoint =
+      model.baseUrl !== undefined &&
+      normalizeBaseUrlForMatching(model.baseUrl) !== restoredEndpoint;
+    const endpointDefaults = new Set(
+      getDefaultModelIds(providerConfig, modelEndpoint),
+    );
+    return (
+      (!providerConfig.mergeModelsByIdentity && belongsToAnotherEndpoint) ||
+      !endpointDefaults.has(model.id)
+    );
+  });
   const restoredModelIdSet = new Set(restoredModelIds);
   return {
     initialProtocol: saved?.protocol,

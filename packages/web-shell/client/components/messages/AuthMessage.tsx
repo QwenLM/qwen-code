@@ -643,9 +643,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={documentationUrl}
               target="_blank"
               rel="noreferrer"
-              onClick={(event) =>
-                openExternalLink(event, provider.documentationUrl)
-              }
+              onClick={(event) => openExternalLink(event, documentationUrl)}
             >
               {t('auth.documentation')}
             </a>
@@ -666,9 +664,7 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               href={documentationUrl}
               target="_blank"
               rel="noreferrer"
-              onClick={(event) =>
-                openExternalLink(event, provider.documentationUrl)
-              }
+              onClick={(event) => openExternalLink(event, documentationUrl)}
             >
               {t('auth.documentation')}: {documentationUrl}
             </a>

@@ -466,16 +466,42 @@ export function useProviderSetupFlow(
 
   // Shared helper: assemble ProviderSetupInputs from current form state
   const buildCurrentInputs = useCallback(
-    (overrides?: Partial<ProviderSetupInputs>): ProviderSetupInputs => ({
-      protocol: provider?.protocolOptions ? protocol : undefined,
-      baseUrl: baseUrl.trim(),
-      apiKey: apiKey.trim(),
-      modelIds: normalizeModelIds(modelIds),
-      ...(preserveModelsRef.current.length > 0
-        ? { preserveModels: preserveModelsRef.current }
-        : {}),
-      ...overrides,
-    }),
+    (overrides?: Partial<ProviderSetupInputs>): ProviderSetupInputs => {
+      const resolvedBaseUrl = (overrides?.baseUrl ?? baseUrl).trim();
+      const resolvedModelIds =
+        overrides?.modelIds ?? normalizeModelIds(modelIds);
+      const selectedModelIdSet = new Set(resolvedModelIds);
+      const selectedEndpoint = normalizeBaseUrlForMatching(resolvedBaseUrl);
+      const defaultModelIdSet = new Set(
+        provider ? getDefaultModelIds(provider, resolvedBaseUrl) : [],
+      );
+      const preserveModels = preserveModelsRef.current.filter((model) => {
+        if (!provider) return true;
+        const belongsToAnotherEndpoint =
+          model.baseUrl !== undefined &&
+          normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint;
+        if (!provider.mergeModelsByIdentity && belongsToAnotherEndpoint) {
+          return true;
+        }
+        const belongsToSelectedMergeEndpoint =
+          !provider.mergeModelsByIdentity ||
+          !Array.isArray(provider.baseUrl) ||
+          (model.baseUrl !== undefined && !belongsToAnotherEndpoint);
+        return (
+          belongsToSelectedMergeEndpoint &&
+          !defaultModelIdSet.has(model.id) &&
+          selectedModelIdSet.has(model.id)
+        );
+      });
+      return {
+        protocol: provider?.protocolOptions ? protocol : undefined,
+        baseUrl: resolvedBaseUrl,
+        apiKey: apiKey.trim(),
+        modelIds: resolvedModelIds,
+        ...(preserveModels.length > 0 ? { preserveModels } : {}),
+        ...overrides,
+      };
+    },
     [provider, protocol, baseUrl, apiKey, modelIds],
   );
 

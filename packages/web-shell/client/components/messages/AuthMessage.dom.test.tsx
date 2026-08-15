@@ -140,6 +140,7 @@ afterEach(() => {
   }
   container?.remove();
   container = null;
+  delete (window as typeof window & { __TAURI__?: unknown }).__TAURI__;
   vi.clearAllMocks();
 });
 
@@ -563,6 +564,12 @@ describe('AuthMessage model field preservation', () => {
   });
 
   it('points the documentation link at the selected endpoint', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (
+      window as typeof window & {
+        __TAURI__?: { core?: { invoke?: typeof invoke } };
+      }
+    ).__TAURI__ = { core: { invoke } };
     const documented: DaemonAuthProviderDescriptor = {
       ...providerC,
       documentationUrl: 'https://docs.example/default',
@@ -599,12 +606,21 @@ describe('AuthMessage model field preservation', () => {
         .filter((href) => href.startsWith('https://docs.example/'));
     expect(docLinkHrefs()).toEqual(['https://docs.example/two']);
     expect(document.body.textContent).not.toContain('https://docs.example/one');
+    click(document.querySelector('a[href="https://docs.example/two"]'));
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://docs.example/two',
+    });
 
     // Switching endpoints must swap the link instead of keeping the stale one.
+    invoke.mockClear();
     click(findButtonContaining('previous'));
     click(findButtonContaining('Gamma One'));
     expect(docLinkHrefs()).toEqual(['https://docs.example/one']);
     expect(document.body.textContent).not.toContain('https://docs.example/two');
+    click(document.querySelector('a[href="https://docs.example/one"]'));
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://docs.example/one',
+    });
   });
 
   it('seeds the first endpoint defaults without an endpoint selection', async () => {
