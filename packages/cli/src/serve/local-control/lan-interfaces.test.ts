@@ -74,6 +74,14 @@ describe('listLanCandidates', () => {
         'Pulse Secure Adapter': [ipv4('10.8.4.2')],
         'FortiClient Virtual Adapter': [ipv4('10.8.5.2')],
         'Cloudflare WARP': [ipv4('10.8.6.2')],
+        // Post-rename successor products escape an enumerated vendor's old
+        // name: Ivanti Connect Secure is Pulse Secure renamed, Cisco Secure
+        // Client succeeds AnyConnect (#9106 round-7 review).
+        'Ivanti Connect Secure': [ipv4('10.8.7.2')],
+        'Ivanti Connect Secure Virtual Adapter': [ipv4('10.8.7.3')],
+        'Cisco Secure Client Virtual Adapter': [ipv4('10.8.8.2')],
+        'Citrix Gateway WFP Adapter': [ipv4('10.8.9.2')],
+        'SonicWall NetExtender Adapter': [ipv4('10.8.10.2')],
         'Ethernet 3': [ipv4('192.168.7.10')],
       }),
     ).toEqual([{ interfaceName: 'Ethernet 3', address: '192.168.7.10' }]);

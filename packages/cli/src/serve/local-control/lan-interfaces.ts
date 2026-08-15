@@ -54,9 +54,13 @@ function isSoftwareNetwork(interfaceName: string): boolean {
   // the bare token's digit boundary let escape. Corporate SSL-VPN adapters
   // (AnyConnect, GlobalProtect, Pulse Secure, FortiClient, Cloudflare WARP)
   // carry no `vpn` substring, so their vendor names are listed explicitly —
-  // the class fix (structural classification instead of name matching) is
-  // tracked in #9158.
-  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt[a-z0-9]*|hamachi|nordlynx|proton|wintun|docker|veth[0-9a-f]+|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br-[0-9a-f]+|bridge\d|anyconnect|globalprotect|pulse[\s-]secure|forticlient|fortinet|cloudflare)(\d|[\s_.-]|$)/i.test(
+  // including post-rename successor products (Ivanti Connect Secure is the
+  // 2021 rename of Pulse Secure; Cisco Secure Client succeeds AnyConnect),
+  // which escape under their new names otherwise. Each added token only
+  // defers the next corner of this unbounded entrance space; the class fix
+  // (structural classification instead of name matching) is tracked in
+  // #9158.
+  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt[a-z0-9]*|hamachi|nordlynx|proton|wintun|docker|veth[0-9a-f]+|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br-[0-9a-f]+|bridge\d|anyconnect|globalprotect|pulse[\s-]secure|forticlient|fortinet|ivanti|cisco[\s_-]secure|citrix|sonicwall|cloudflare)(\d|[\s_.-]|$)/i.test(
     interfaceName,
   );
 }

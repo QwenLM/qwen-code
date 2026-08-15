@@ -22,6 +22,7 @@ const CORS_KEY = 'local-control';
 const MAX_CONNECTIONS = 64;
 const HEADERS_TIMEOUT_MS = 10_000;
 const KEEP_ALIVE_TIMEOUT_MS = 5_000;
+const REQUEST_TIMEOUT_MS = 30 * 60_000;
 
 interface PairingToken {
   readonly id: string;
@@ -175,13 +176,16 @@ export class LocalControlService {
       : createServer(this.#deps.app);
     server.maxConnections = MAX_CONNECTIONS;
     server.headersTimeout = HEADERS_TIMEOUT_MS;
-    // Deliberately no whole-request budget: Node's `requestTimeout` is an
-    // elapsed limit that body chunks never reset, and this listener serves the
-    // same Express app as the primary one — upload routes included. A phone
-    // trickling a large workspace file over Wi-Fi would be destroyed mid-upload
-    // once the budget passed. Stalled headers and idle keep-alive sockets stay
-    // bounded by the timeouts around this line.
-    server.requestTimeout = 0;
+    // Whole-request budget. A trickling body holds its connection slot for as
+    // long as `requestTimeout` allows, and slots are consumed pre-auth: with
+    // no budget an unauthenticated LAN client could hold all
+    // `MAX_CONNECTIONS` slots open indefinitely and starve the listener
+    // (`headersTimeout` covers only the header phase, `keepAliveTimeout` only
+    // idle sockets — a slow body is neither). 30 minutes bounds that class
+    // while still covering a phone trickling a large workspace file over slow
+    // Wi-Fi (this listener serves the same Express app as the primary one,
+    // upload routes included).
+    server.requestTimeout = REQUEST_TIMEOUT_MS;
     server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
     // Tag before listening. Identity must be resolvable by the first request,
     // and a request can arrive between `listen()` resolving and the next line

@@ -71,9 +71,11 @@ describe('LocalControlService', () => {
     expect(attached).toHaveLength(1);
     expect(attached[0].maxConnections).toBe(64);
     expect(attached[0].headersTimeout).toBe(10_000);
-    // No whole-request budget: it would 408 a phone trickling a large upload
-    // over Wi-Fi (the LAN listener serves the upload routes too).
-    expect(attached[0].requestTimeout).toBe(0);
+    // A bounded whole-request budget: connection slots are consumed pre-auth,
+    // so an unlimited budget let an unauthenticated LAN client trickle bodies
+    // and hold every slot open indefinitely (round-7 review). 30 minutes
+    // still covers a phone trickling a large upload over slow Wi-Fi.
+    expect(attached[0].requestTimeout).toBe(30 * 60_000);
     expect(attached[0].keepAliveTimeout).toBe(5_000);
     // Exactly one: the persistent logging handler. The temporary `once('error')`
     // used while waiting for `listening` must be removed once listening

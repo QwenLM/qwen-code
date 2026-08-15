@@ -497,6 +497,17 @@ export interface MutationGateOptions {
    * that should never be reachable without explicit operator opt-in.
    * Defaults to false so existing routes can adopt the helper without
    * behavior change.
+   *
+   * Caveat (#9106 round-7 review, open design decision): on a no-token
+   * daemon the pairing credential itself can be minted by any loopback
+   * caller through the Local Control enable/status routes (non-strict and
+   * loopback-open by design), so once Local Control is active such a caller
+   * can present the credential on the LAN listener and pass this gate. The
+   * strict surface on a no-token daemon therefore inherits the loopback
+   * trust boundary while Local Control is active. Closing that requires a
+   * design decision: strict-gate the Local Control routes and give the
+   * Settings card an authenticated path, stop returning the pairing URL to
+   * unauthenticated callers, or require a token for LAN exposure.
    */
   strict?: boolean;
 }
