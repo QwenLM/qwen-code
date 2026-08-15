@@ -727,7 +727,7 @@ describe('DwsChannel', () => {
         threadId: commentKey,
         messageId: 'notification-1',
         senderId: 'open-alice',
-        text: 'reply with the document code',
+        text: expect.stringContaining('reply with the document code'),
         isMentioned: true,
       }),
     ]);
@@ -866,7 +866,7 @@ describe('DwsChannel', () => {
         expect.objectContaining({
           chatId: 'doc-1',
           threadId: 'comment-1',
-          text: 'summarize this thread',
+          text: expect.stringContaining('summarize this thread'),
         }),
       ]);
     },
@@ -899,8 +899,142 @@ describe('DwsChannel', () => {
     );
 
     expect(channel.inbound).toEqual([
-      expect.objectContaining({ text: request }),
+      expect.objectContaining({ text: expect.stringContaining(request) }),
     ]);
+  });
+
+  it.each([
+    [
+      'a non-ASCII account name without a separator',
+      '@数据助手请总结这个评论的上下文',
+    ],
+    [
+      'a parenthetical request',
+      '@DataWorksAgent summarize this doc (focus on section 2)',
+    ],
+    ['a dotted account handle', '@Qwen.Code summarize the doc'],
+  ])(
+    'preserves document request text for %s',
+    async (_description, mention) => {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const url = documentMentionCard('doc-1', 'comment-1').match(
+        /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+      )?.[0];
+      expect(url).toBeDefined();
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `notification-${_description}`,
+          `${url}\n${mention}`,
+        ),
+      );
+
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({
+          chatId: 'doc-1',
+          threadId: 'comment-1',
+          text: expect.stringContaining(mention),
+        }),
+      ]);
+    },
+  );
+
+  it('preserves a document request at the end of the comment budget', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const url = documentMentionCard('doc-1', 'comment-1').match(
+      /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+    )?.[0];
+    const request = '@DataWorksAgent summarize the tail';
+    expect(url).toBeDefined();
+
+    const padding = 'x'.repeat(4_000 - url!.length - request.length - 2);
+    const content = `${url}\n${padding}\n${request}`;
+    expect(content).toHaveLength(4_000);
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-comment-budget',
+        content,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-1',
+        threadId: 'comment-1',
+        text: expect.stringContaining(request),
+      }),
+    ]);
+  });
+
+  it.each([
+    '@王五 你确认下数据\n@DataWorksAgent 总结文档',
+    'CC @李四\n@DataWorksAgent 总结文档',
+    '说的对不对 @王五\n@DataWorksAgent 总结文档',
+    '@王五 CC @李四',
+  ])(
+    'does not guess an account request when document notification mentions are ambiguous',
+    async (mention) => {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const url = documentMentionCard('doc-1', 'comment-1').match(
+        /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+      )?.[0];
+      expect(url).toBeDefined();
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `notification-${mention}`,
+          `${url}\n${mention}`,
+        ),
+      );
+
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({
+          chatId: 'cid-1',
+          text: expect.stringContaining(mention),
+        }),
+      ]);
+      expect(channel.inbound[0]).not.toHaveProperty('threadId');
+    },
+  );
+
+  it('does not pair request text from another document link with a validated comment', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const firstUrl = documentMentionCard('doc-a', 'comment-a')
+      .match(/https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u)?.[0]
+      ?.replace('mention_source%3D2', 'mention_source%3D1');
+    const secondUrl = documentMentionCard('doc-b', 'comment-b').match(
+      /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+    )?.[0];
+    expect(firstUrl).toBeDefined();
+    expect(secondUrl).toBeDefined();
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-two-links',
+        `@DataWorksAgent summarize the first link\n${firstUrl}\n${secondUrl}`,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        text: expect.stringContaining('summarize the first link'),
+      }),
+    ]);
+    expect(channel.inbound[0]).not.toHaveProperty('threadId');
   });
 
   it('does not parse an email address as a document request mention', async () => {
@@ -927,7 +1061,7 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('keeps the first document request when a later cc mention follows', async () => {
+  it('does not guess a document request when a later cc mention follows', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
     const url = documentMentionCard('doc-1', 'comment-1').match(
@@ -945,8 +1079,12 @@ describe('DwsChannel', () => {
     );
 
     expect(channel.inbound).toEqual([
-      expect.objectContaining({ text: 'summarize this thread' }),
+      expect.objectContaining({
+        chatId: 'cid-1',
+        text: expect.stringContaining('summarize this thread'),
+      }),
     ]);
+    expect(channel.inbound[0]).not.toHaveProperty('threadId');
   });
 
   it('finds document mention notifications in direct-message history when the event stream misses them', async () => {
@@ -969,7 +1107,7 @@ describe('DwsChannel', () => {
       expect.objectContaining({
         chatId: 'doc-history',
         threadId: commentKey,
-        text: 'reply with the document code',
+        text: expect.stringContaining('reply with the document code'),
       }),
     ]);
   });
@@ -1877,6 +2015,102 @@ describe('DwsChannel', () => {
       'hello',
       'shared text',
     ]);
+  });
+
+  it('binds a response target before an untracked direct self echo arrives', async () => {
+    const client = new FakeDwsClient();
+    client.identity = { profile: 'corp-only' };
+    const channel = await readyChannel(client);
+    channel.responseMessageId = 'request-1';
+    channel.responseSenderId = 'open-alice';
+
+    await channel.respond('cid-1', 'hello there');
+    await client.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'own-echo', 'hello there', {
+        senderId: 'open-self',
+      }),
+    );
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'real-peer',
+        'real user message',
+      ),
+    );
+    await channel.sendMessage('cid-1', 'follow up');
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'second-own-echo',
+        'follow up',
+        { senderId: 'open-self' },
+      ),
+    );
+
+    expect(channel.inbound.map((item) => item.text)).toEqual([
+      'real user message',
+    ]);
+    expect(client.sendImMessage).toHaveBeenLastCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      'follow up',
+      expect.any(String),
+    );
+  });
+
+  it('keeps a direct peer binding across reconnect when self metadata is unavailable', async () => {
+    const name = 'persistent-direct-peer-dws';
+    const firstClient = new FakeDwsClient();
+    firstClient.identity = { profile: 'corp-only' };
+    const first = await readyChannel(firstClient, makeConfig(), name);
+    await firstClient.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'peer-before', 'initial peer'),
+    );
+    await first.sendMessage('cid-1', 'shared text');
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity = { profile: 'corp-only' };
+    const second = await readyChannel(secondClient, makeConfig(), name);
+    await secondClient.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'own-redelivery',
+        'shared text',
+        { senderId: 'open-self' },
+      ),
+    );
+    await secondClient.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'peer-after',
+        'real peer after reconnect',
+      ),
+    );
+    await second.sendMessage('cid-1', 'follow up');
+    await secondClient.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'second-own-echo',
+        'follow up',
+        { senderId: 'open-self' },
+      ),
+    );
+
+    expect(second.inbound.map((item) => item.text)).toEqual([
+      'real peer after reconnect',
+    ]);
+    expect(secondClient.sendImMessage).toHaveBeenLastCalledWith(
+      { kind: 'direct', openDingTalkId: 'open-alice' },
+      'follow up',
+      expect.any(String),
+    );
   });
 
   it('does not suppress matching peer text without an authoritative self sender', async () => {
