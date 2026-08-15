@@ -258,6 +258,45 @@ export function reverseAuditRoundTier(size: DiffSize): number {
 }
 
 /**
+ * The round cap to record, given the topology tier and what the operator asked
+ * for — **the operator may only lower it.**
+ *
+ * The asymmetry is the whole design of this knob, and it is not timidity about
+ * letting people configure things. Raising is refused because a single
+ * configurable number is precisely what tiering removed: a round is one agent
+ * on a small diff and ~90 minutes on a huge one, so one operator-chosen count
+ * is wrong for at least one topology, and the topology it is most wrong for is
+ * the one whose cap exists to stop six-hour reviews that post nothing.
+ * Lowering carries no such hazard — it can only end the loop sooner.
+ *
+ * The two ways an operator actually means "run it longer" both have direct
+ * expressions elsewhere, and neither is a round count: "I have more wall clock
+ * than the huge tier assumes" is a review deadline, which the admission gate
+ * already prices a round against; "keep going while it is still finding real
+ * defects" is a property of the findings, not of a number chosen in advance.
+ *
+ * Below `HUGE_REVERSE_AUDIT_ROUNDS` is refused too, for the reason
+ * `reverseAuditRoundCap` refuses it in a plan: a cap of one or two forces a
+ * non-converged stop where the two-consecutive-dry rule would have converged
+ * on its own, so it buys a capped verdict rather than a cheaper review.
+ */
+export function cappedRoundTier(
+  size: DiffSize,
+  operatorCap: number | undefined,
+): number {
+  const tier = reverseAuditRoundTier(size);
+  if (
+    typeof operatorCap !== 'number' ||
+    !Number.isInteger(operatorCap) ||
+    operatorCap < HUGE_REVERSE_AUDIT_ROUNDS ||
+    operatorCap >= tier
+  ) {
+    return tier;
+  }
+  return operatorCap;
+}
+
+/**
  * A line count this module is willing to size a plan from: a real, finite,
  * non-negative `number`. Everything else — absent, `null`, a numeric string, a
  * boolean, `NaN`, `Infinity`, a negative — is a plan whose size is not known,
@@ -314,8 +353,19 @@ const LINES_PER_TOOL_CALL = 20;
  * that lands on its floor costs one under-walked small diff. It fails toward the
  * cheap end on purpose — the floors are the *minimum* work, not the maximum, so
  * a garbled input still walks three angles and still verifies.
+ *
+ * `operatorRoundCap` is the standing `review.reverseAuditRounds` setting, read
+ * by the capture command and passed in rather than read here — this module has
+ * no imports, and a budget that loaded settings would make every caller's tests
+ * depend on the machine's own `~/.qwen`. It can only lower the round tier; see
+ * `cappedRoundTier`. Nothing else in the budget is operator-tunable, and that
+ * stays true: the rest of these fields size the work a review owes, and a
+ * caller who can shrink them is a caller who shrinks them.
  */
-export function reviewBudget(input: BudgetInput): ReviewBudget {
+export function reviewBudget(
+  input: BudgetInput,
+  operatorRoundCap?: number,
+): ReviewBudget {
   const src = sane(input.srcDiffLines);
   const total = sane(input.diffLines);
 
@@ -350,7 +400,7 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
     // tier from it would record the SMALL tier's ten rounds for a plan whose
     // size failed to arrive, where the flat cap recorded five. The tier does
     // its own usability check precisely so this call can hand it the truth.
-    reverseAuditRounds: reverseAuditRoundTier(input),
+    reverseAuditRounds: cappedRoundTier(input, operatorRoundCap),
   };
 }
 

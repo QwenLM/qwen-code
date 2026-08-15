@@ -767,6 +767,15 @@ const SETTINGS_SCHEMA = {
           { value: 'critical', label: 'Critical-only (every round)' },
           { value: 'suggestion', label: 'Suggestions and Criticals' },
         ],
+      reverseAuditRounds: {
+        type: 'number',
+        label: 'Reverse-audit round ceiling: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 0,
+        description:
+          'Lower the reverse-audit loop\'s round cap for every high-effort review. The cap is normally chosen from the diff topology (10 small / 5 chunked / 3 huge) because a round costs one agent on a small diff and ~90 minutes on a huge one; this setting can only LOWER whichever tier applies, never raise it — an unset or out-of-range value (below 3, or above the plan\'s own tier) leaves the tier alone. Understand what it buys before enabling: the loop ends on two consecutive dry rounds, so cutting the cap does not make reviews converge sooner, it makes them stop before converging more often — and every such stop is disclosed as unreviewed scope and caps the verdict at Comment, so a cheaper review is also one that can no longer Approve. To spend LESS on reviews generally, prefer "effort"; to let a productive loop run longer, set a review deadline rather than raising a round count. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
+        showInDialog: true,
       },
     },
   },

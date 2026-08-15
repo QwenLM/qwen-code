@@ -13,6 +13,7 @@ import {
   stripBudgetGapLines,
   launchToolBudget,
   reverseAuditRoundCap,
+  cappedRoundTier,
   reviewBudget,
 } from './budget.js';
 
@@ -800,5 +801,70 @@ describe('reviewBudget — the budget survives the trip through the plan', () =>
         'agentToolBudget'
       ],
     ).toBe(30);
+  });
+});
+
+describe('cappedRoundTier — the operator ceiling may only lower a tier', () => {
+  const SMALL = { srcDiffLines: 100, diffLines: 100 };
+  const LARGE = { srcDiffLines: 600, diffLines: 1000 };
+  const HUGE = { srcDiffLines: 5000, diffLines: 5000 };
+
+  it('lowers each tier to what the operator asked for', () => {
+    expect(cappedRoundTier(SMALL, 4)).toBe(4);
+    expect(cappedRoundTier(SMALL, 3)).toBe(3);
+    expect(cappedRoundTier(LARGE, 3)).toBe(3);
+    expect(cappedRoundTier(SMALL, 9)).toBe(9);
+  });
+
+  it('REFUSES to raise any tier — the asymmetry is the whole knob', () => {
+    // A single operator-chosen count is what tiering removed: it is wrong for
+    // at least one topology, and most wrong for the one whose cap exists to
+    // stop six-hour reviews that post nothing. 20 buys nothing anywhere.
+    expect(cappedRoundTier(HUGE, 5)).toBe(3);
+    expect(cappedRoundTier(HUGE, 20)).toBe(3);
+    expect(cappedRoundTier(LARGE, 10)).toBe(5);
+    expect(cappedRoundTier(SMALL, 20)).toBe(10);
+    // Equal to the tier is not a lowering either — it changes nothing, and
+    // reading it as "honoured" would make a later tier change silently pinned
+    // to a number the operator picked against a different tier.
+    expect(cappedRoundTier(SMALL, 10)).toBe(10);
+  });
+
+  it('refuses a ceiling below the convergence minimum', () => {
+    // One or two forces a non-converged stop where two-consecutive-dry would
+    // have converged on its own: a capped verdict, not a cheaper review.
+    for (const bad of [0, 1, 2, -3]) {
+      expect(cappedRoundTier(SMALL, bad)).toBe(10);
+      expect(cappedRoundTier(HUGE, bad)).toBe(3);
+    }
+  });
+
+  it('ignores a ceiling that is not a whole number', () => {
+    for (const bad of [3.5, Number.NaN, Number.POSITIVE_INFINITY] as number[]) {
+      expect(cappedRoundTier(SMALL, bad)).toBe(10);
+    }
+    expect(cappedRoundTier(SMALL, undefined)).toBe(10);
+  });
+
+  it('lowers what reviewBudget RECORDS, so every reader sees one number', () => {
+    // The setting has to reach the plan, not the gate: `reverseAuditRoundCap`
+    // clamps a stored value into the tier band, and a lowered value is inside
+    // it, so the reader honours it with no knowledge of the setting at all.
+    const b = reviewBudget({ srcDiffLines: 100, diffLines: 100 }, 4);
+    expect(b.reverseAuditRounds).toBe(4);
+    expect(reverseAuditRoundCap({ ...SMALL, budget: b })).toBe(4);
+    // …and an unset ceiling records the tier, exactly as before this setting.
+    expect(
+      reviewBudget({ srcDiffLines: 100, diffLines: 100 }).reverseAuditRounds,
+    ).toBe(10);
+  });
+
+  it('does not let the ceiling touch any other budget field', () => {
+    const plain = reviewBudget({ srcDiffLines: 900, diffLines: 900 });
+    const capped = reviewBudget({ srcDiffLines: 900, diffLines: 900 }, 3);
+    expect({ ...capped, reverseAuditRounds: 0 }).toEqual({
+      ...plain,
+      reverseAuditRounds: 0,
+    });
   });
 });

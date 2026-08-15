@@ -106,10 +106,20 @@ export interface PlanReport {
  * `postImageLines` resolves a path's line count in the post-change tree. It is
  * null when there is no tree to resolve against — a bare diff file — in which
  * case heaviness cannot be decided and no file is heavy.
+ *
+ * `operatorRoundCap` is the standing `review.reverseAuditRounds` setting, which
+ * may only lower the reverse-audit round tier. It is a **required** parameter,
+ * and deliberately not resolved in here: three capture commands build a plan,
+ * an optional parameter is one a call site can quietly omit, and a setting that
+ * silently applies to two of the three review entry points is worse than one
+ * that applies to none. Passing `undefined` is how a caller says "no operator
+ * ceiling" — visibly, at the call site. Reading the setting here instead would
+ * also make this builder's tests depend on the machine's own `~/.qwen`.
  */
 export function buildPlanReport(
   plan: DiffPlan,
   postImageLines: ((path: string) => number) | null,
+  operatorRoundCap: number | undefined,
 ): PlanReport {
   const files = plan.files.map((f): FileMetric => {
     const changedLines = f.addedLines + f.removedLines;
@@ -162,10 +172,13 @@ export function buildPlanReport(
     generatedDiffLines: plan.generatedDiffLines,
     chunks: plan.chunks,
     files,
-    budget: reviewBudget({
-      srcDiffLines: plan.srcDiffLines,
-      diffLines: plan.diffLines,
-    }),
+    budget: reviewBudget(
+      {
+        srcDiffLines: plan.srcDiffLines,
+        diffLines: plan.diffLines,
+      },
+      operatorRoundCap,
+    ),
   };
 }
 

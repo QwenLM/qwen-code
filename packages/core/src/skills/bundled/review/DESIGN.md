@@ -109,6 +109,18 @@ So the cap is read from the plan's topology tier (`reverseAuditRoundTier`): **10
 
 What this does **not** change: a cap stop is still a non-converged stop. It writes the marker, caps the verdict, and owes its `unreviewedDimensions` entry, at ten exactly as at five.
 
+### Why the operator ceiling can only lower a tier
+
+`review.reverseAuditRounds` lets an operator cut the round cap for every review they run. It cannot raise one, and the asymmetry is not timidity about configuration — it is the same argument tiering is built on, applied to a knob.
+
+A single operator-chosen count is exactly what tiering removed. A round is one agent on a 3A diff and ~90 minutes on a huge one, so one number is wrong for at least one topology, and the topology it is most wrong for is the one whose cap exists to stop six-hour reviews that post nothing. An operator who sets `8` has said something sensible about small diffs and something dangerous about large ones, and the setting cannot tell which they meant. Lowering carries no matching hazard: it can only end the loop sooner, and the floor at `HUGE_REVERSE_AUDIT_ROUNDS` keeps it above the point where a cap would pre-empt the two-consecutive-dry rule.
+
+The two things an operator means by "let it run longer" both have direct expressions that a round count only approximates. "My ceiling is not the six hours the huge tier assumes" is a **deadline**, and the admission gate already prices a round plus its reserve against one. "Keep going while it is still finding real defects" is a property of the **findings**, not of a number chosen before the review starts. Answering either with a bigger integer is answering a question about time or evidence with a question about counting.
+
+The setting is also deliberately not a flag. It resolves in the capture command and lands in `plan.budget.reverseAuditRounds`, so every reader — the admission gate, the cold-check note, `compose-review` — sees one number and none of them learns a setting was involved. That is the module's standing rule (a budget the caller passes is a budget the caller can inflate) satisfied rather than excepted: the operator sets a standing policy, the CLI resolves it once, and no per-invocation caller gets to name a budget. The reader needs no new code at all — a lowered value is inside the tier's `[3, tier]` band, which `reverseAuditRoundCap` already honours.
+
+One consequence belongs in the setting's own description, and is there: cutting the cap does not make reviews converge sooner, because the loop ends on two consecutive dry rounds. It makes them stop **before** converging more often — and every such stop is disclosed as unreviewed scope and caps the verdict at `COMMENT`. A cheaper review is also one that can no longer Approve.
+
 ### Why the reverse audit fans out per chunk
 
 The original design gave one agent the whole diff plus a growing cumulative finding list. On a 5 800-line diff that is the most context-starved agent in the pipeline — exactly on the PRs where reverse audit matters most. Under Step 3B each round runs one auditor per chunk, each with the full cumulative finding list but only its own territory to re-read.

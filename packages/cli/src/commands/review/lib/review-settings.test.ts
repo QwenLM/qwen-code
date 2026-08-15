@@ -7,6 +7,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loadSettingsMock = vi.hoisted(() => vi.fn());
+const stderr = vi.hoisted(() => vi.fn());
+vi.mock('../../../utils/stdioHelpers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../../utils/stdioHelpers.js')>();
+  return { ...actual, writeStderrLine: stderr };
+});
 vi.mock('../../../config/settings.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../../config/settings.js')>();
@@ -22,6 +28,7 @@ function setReview(review: unknown): void {
 describe('operatorReviewSettings', () => {
   beforeEach(() => {
     loadSettingsMock.mockReset();
+    stderr.mockReset();
   });
 
   it('resolves from operator scopes only — a repository must not set review policy', () => {
@@ -102,6 +109,59 @@ describe('operatorReviewSettings', () => {
       expect(operatorReviewSettings().comment).toBe(false);
     }
   });
+
+  it('degrades to the safe defaults when the settings cannot be loaded', () => {
+    // `loadSettings` throws a FatalConfigError when any settings file fails to
+    // read or parse, and this is now read while the plan is being captured —
+    // the review's first step. A stray comma must not end the review.
+    loadSettingsMock.mockImplementation(() => {
+      throw new Error('Error in /home/u/.qwen/settings.json: Unexpected token');
+    });
+    expect(operatorReviewSettings()).toEqual({
+      attribution: true,
+      comment: false,
+      effort: undefined,
+      reverseAuditRounds: undefined,
+    });
+    // Every default is the conservative side: a review that loses its operator
+    // policy loses it toward doing more work and writing nothing public.
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('review settings could not be loaded'),
+    );
+  });
+
+  it('passes a real reverse-audit ceiling through as a number', () => {
+    for (const rounds of [3, 4, 9, 100]) {
+      setReview({ reverseAuditRounds: rounds });
+      expect(operatorReviewSettings().reverseAuditRounds).toBe(rounds);
+    }
+    // Whether the number is USABLE is not this module's ruling — 100 is passed
+    // through here and refused by `cappedRoundTier`, which is the only place
+    // that knows the plan's tier.
+  });
+
+  it('reads a garbled or unset ceiling as absent, never as a request for zero', () => {
+    // The schema default is 0, meaning "not set". A 0 that reached the budget
+    // as a real request would be a request for a zero-round reverse audit —
+    // which is why "the operator chose nothing" must not be representable as
+    // a number at all.
+    for (const rounds of [
+      undefined,
+      0,
+      -1,
+      3.5,
+      '5',
+      true,
+      null,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      setReview({ reverseAuditRounds: rounds });
+      expect(operatorReviewSettings().reverseAuditRounds).toBeUndefined();
+    }
+    setReview({});
+    expect(operatorReviewSettings().reverseAuditRounds).toBeUndefined();
+  });
 });
 
 describe('review settings in the /settings dialog', () => {
@@ -114,5 +174,6 @@ describe('review settings in the /settings dialog', () => {
     expect(dialogKeys).toContain('review.effort');
     expect(dialogKeys).toContain('review.comment');
     expect(dialogKeys).toContain('review.severityFloor');
+    expect(dialogKeys).toContain('review.reverseAuditRounds');
   });
 });
