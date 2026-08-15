@@ -2561,3 +2561,78 @@ describe('review_requested burst coalescing (#8945)', () => {
     );
   });
 });
+
+describe('checkout self-heal', () => {
+  // The reused self-hosted pool fails checkout in two observed shapes: a
+  // transient network drop mid-fetch, and a corrupt persisted workspace
+  // whose refs claim objects missing from its object store — then EVERY
+  // later fetch dies in negotiation with "remote did not send all necessary
+  // objects" (ecs-qwen-runner-64c-23, 2026-08-13..15: seven review jobs
+  // dead on the same missing SHAs). The workspace cannot heal itself, so
+  // the workflow must: survive the first failure, wipe, and re-clone.
+  const steps = parse(workflow).jobs['review-pr'].steps;
+  const FIRST = 'Checkout base branch';
+  const WIPE = 'Reset workspace after failed checkout';
+  const RETRY = 'Checkout base branch (retry)';
+  const nameIndex = (name) => steps.findIndex((s) => s.name === name);
+  const first = steps[nameIndex(FIRST)];
+  const wipe = steps[nameIndex(WIPE)];
+  const retry = steps[nameIndex(RETRY)];
+
+  it('makes the first checkout failure survivable and addressable', () => {
+    // Without continue-on-error the job dies on the first failure and the
+    // heal chain never runs; without the id the chain cannot gate on the
+    // outcome at all.
+    expect(first.id).toBe('checkout');
+    expect(first['continue-on-error']).toBe(true);
+  });
+
+  it('wipes and retries exactly when the first checkout fails', () => {
+    expect(wipe).toBeDefined();
+    expect(retry).toBeDefined();
+    const gate = "steps.checkout.outcome == 'failure'";
+    expect(wipe.if).toBe(gate);
+    expect(retry.if).toBe(gate);
+    expect(nameIndex(FIRST)).toBeLessThan(nameIndex(WIPE));
+    expect(nameIndex(WIPE)).toBeLessThan(nameIndex(RETRY));
+  });
+
+  it('retries with the identical checkout', () => {
+    // A drift here silently changes what the review runs against — dropping
+    // fetch-depth on the retry would hand the review a shallow clone.
+    expect(retry.uses).toBe(first.uses);
+    expect(retry.with).toEqual(first.with);
+  });
+
+  it('wipes the whole workspace and recreates it', () => {
+    // Executes the REAL wipe script against a disposable workspace: it must
+    // remove the directory contents (not just .git — a hostile tree must not
+    // trip the re-clone) and leave the directory itself behind for the
+    // retry.
+    const dir = mkdtempSync(join(tmpdir(), 'checkout-heal-'));
+    try {
+      mkdirSync(join(dir, 'leftover-dir'));
+      writeFileSync(join(dir, 'leftover'), 'x');
+      execFileSync('bash', ['-c', wipe.run], {
+        encoding: 'utf8',
+        env: { ...process.env, GITHUB_WORKSPACE: dir },
+      });
+      expect(existsSync(dir)).toBe(true);
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to wipe when GITHUB_WORKSPACE is unset or empty', () => {
+    // The `:?` guard is what keeps this from ever running rm against a
+    // surprise expansion; a dropped GITHUB_WORKSPACE must fail loudly.
+    expect(() =>
+      execFileSync('bash', ['-c', wipe.run], {
+        encoding: 'utf8',
+        env: { ...process.env, GITHUB_WORKSPACE: '' },
+        stdio: 'pipe',
+      }),
+    ).toThrow();
+  });
+});

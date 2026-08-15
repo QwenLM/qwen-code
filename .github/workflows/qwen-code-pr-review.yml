@@ -462,7 +462,35 @@ jobs:
           echo "stale agent state cleaned"
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
+      # Self-heals on the reused self-hosted pool in two observed shapes: a
+      # transient network drop mid-fetch (curl 92 / early EOF), and a
+      # corrupted persisted workspace whose refs claim objects missing from
+      # its object store — every fetch then dies in negotiation with
+      # "remote did not send all necessary objects" until the repo is wiped
+      # (ecs-qwen-runner-64c-23, 2026-08-13..15: seven review jobs failed on
+      # the SAME missing SHAs). The heal below wipes the WHOLE workspace, not
+      # just .git, so a hostile tree can't trip the re-clone; everything in
+      # it is disposable (later steps reinstall deps and tools).
       - name: 'Checkout base branch'
+        id: 'checkout'
+        continue-on-error: true
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+
+      - name: 'Reset workspace after failed checkout'
+        if: "steps.checkout.outcome == 'failure'"
+        run: |-
+          set -uo pipefail
+          # The step shell starts in GITHUB_WORKSPACE; leave before deleting it.
+          cd /
+          rm -rf "${GITHUB_WORKSPACE:?}" 2>/dev/null || sudo -n rm -rf "${GITHUB_WORKSPACE:?}" || echo "::warning::could not wipe the workspace; the retry checkout may fail again"
+          mkdir -p "$GITHUB_WORKSPACE"
+          echo "::warning::first checkout failed; wiped the workspace for a clean retry"
+
+      - name: 'Checkout base branch (retry)'
+        if: "steps.checkout.outcome == 'failure'"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.repository.default_branch }}'
