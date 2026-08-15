@@ -191,7 +191,7 @@ describe('serve-ab.yml runner routing', () => {
   it('wipes only the reused A/B checkout dirs before checking out PR code', () => {
     const steps = serveAbDoc.jobs.ab.steps;
     const wipeIndex = steps.findIndex(
-      (s) => s.name === 'Wipe stale workspace before checkout',
+      (s) => s.name === 'Wipe stale A/B checkout dirs before checkout',
     );
     assert.ok(
       wipeIndex !== -1,
@@ -208,8 +208,13 @@ describe('serve-ab.yml runner routing', () => {
     // and it must precede the checkouts or it deletes the freshly
     // checked-out code instead of stale leftovers.
     const stepIndex = (name) => steps.findIndex((s) => s.name === name);
+    const ownershipIndex = stepIndex('Restore workspace ownership');
     assert.ok(
-      stepIndex('Restore workspace ownership') < wipeIndex,
+      ownershipIndex !== -1,
+      'the wipe depends on the ownership-restore step existing',
+    );
+    assert.ok(
+      ownershipIndex < wipeIndex,
       'the wipe depends on ownership-restore running first',
     );
     // Derive the wipe targets from the checkout steps so this pin cannot
@@ -236,9 +241,9 @@ describe('serve-ab.yml runner routing', () => {
     // next job on this runner to re-fetch the full history from
     // github.com — on the ECS pool's slow link that is the "hung runner"
     // pathology. Pin the wipe step's entire executed script: no extra
-    // removal may be added, and nothing may follow the rm — the script
-    // runs without `set -e`, so a trailing command would mask a failing
-    // rm.
+    // removal may be added, and nothing may follow the rm. The runner
+    // already invokes this step with -eo pipefail, but pin the executed
+    // script anyway so any change forces a deliberate test update.
     const executed = wipe.run
       .split('\n')
       .map((l) => l.trim())
@@ -257,5 +262,28 @@ describe('serve-ab.yml runner routing', () => {
       expectedTargets,
       'the rm must target exactly the checkout dirs',
     );
+    // The wipe covers only the checkout dirs, so any later step that
+    // materializes fresh workspace content must land inside them — a
+    // `git clone` into any other dir would survive into the next run on
+    // the persistent pool, the exact bleed this pin exists to prevent.
+    for (const step of steps.slice(wipeIndex + 1)) {
+      const run = String(step.run || '');
+      if (!run.includes('git clone')) continue;
+      const base = step['working-directory'] ?? '.';
+      for (const line of run.split('\n')) {
+        if (!line.includes('git clone')) continue;
+        const target = line
+          .trim()
+          .split(/\s+/)
+          .at(-1)
+          .replace(/^["']|["']$/g, '')
+          .replace(/^(\$\{GITHUB_WORKSPACE[^}]*\}|\$GITHUB_WORKSPACE)\//, '');
+        const dest = join(base, target);
+        assert.ok(
+          checkoutPaths.some((p) => dest === p || dest.startsWith(p + '/')),
+          `post-wipe git clone target ${dest} is not covered by the wipe`,
+        );
+      }
+    }
   });
 });

@@ -71,7 +71,7 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      - name: 'Wipe stale workspace before checkout'
+      - name: 'Wipe stale A/B checkout dirs before checkout'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           set -uo pipefail
@@ -85,6 +85,12 @@ jobs:
           # runner to re-fetch the full ~900 MB of history from github.com. On
           # the ECS pool's slow link that stalls checkouts for 20+ minutes and
           # the fetches drop mid-pack often enough to read as hung runners.
+          # Trade-off: keeping the root .git also keeps any git-level exec
+          # vectors (hooks, fsmonitor, filters) an earlier untrusted run
+          # planted in it, which the old whole-workspace wipe destroyed as a
+          # side effect. The plant-to-next-job path exists with or without
+          # this wipe (it runs at run start, never as post-run cleanup), so
+          # this removes one incidental scrub rather than opening a new hole.
           rm -rf "${GITHUB_WORKSPACE:?}/head" "${GITHUB_WORKSPACE:?}/base"
 
       - name: 'Checkout PR head'
