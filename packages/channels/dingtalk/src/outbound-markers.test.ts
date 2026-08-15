@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  findTrailingPartialOutboundMediaMarker,
   findOutboundMediaMarkers,
   stripPartialOutboundMediaMarker,
   truncateOutboundMediaText,
@@ -29,6 +30,29 @@ describe('outbound media markers', () => {
         'IMAGE',
       )[0]?.path,
     ).toBe('/tmp/chart.png');
+    expect(
+      findOutboundMediaMarkers(
+        '好的 [FILE: /workspace/报告.pdf]，请查收 [1]',
+        'FILE',
+      )[0]?.path,
+    ).toBe('/workspace/报告.pdf');
+  });
+
+  it('leaves partial marker syntax inside Markdown code untouched', () => {
+    const fenced = 'Log:\n```\n[FILE: /workspace/report.csv\n```';
+    const inline = 'Run `cat [FILE: /etc/hosts` to inspect';
+
+    expect(stripPartialOutboundMediaMarker(fenced, 'FILE', '')).toBe(fenced);
+    expect(stripPartialOutboundMediaMarker(inline, 'FILE', '')).toBe(inline);
+    expect(
+      findTrailingPartialOutboundMediaMarker('The format is `[IMAGE: '),
+    ).toBeUndefined();
+  });
+
+  it('parks a trailing bare bracket without assigning a marker type', () => {
+    expect(findTrailingPartialOutboundMediaMarker('行为字[')).toEqual({
+      start: 3,
+    });
   });
 
   it('walks past index zero and strips the earliest partial marker', () => {

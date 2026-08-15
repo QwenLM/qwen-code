@@ -66,6 +66,11 @@ export class BlockStreamer {
     this.buffer = '';
   }
 
+  /** Await sends that were queued before this call. */
+  drain(): Promise<void> {
+    return this.sending;
+  }
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------

@@ -784,6 +784,15 @@ function getResponseHook(
   return fn.bind(channel);
 }
 
+function getOneShotResponseHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, text: string, sessionId: string) => Promise<void> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'sendOneShotResponseMessage'
+  ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
+  return fn.bind(channel);
+}
+
 function getPromptBufferDropHook(
   channel: DingtalkChannelInstance,
 ): (chatId: string, sessionId: string, messageIds: string[]) => void {
@@ -4120,6 +4129,33 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('reassembles a file marker split immediately after its opening bracket', async () => {
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ blockStreaming: 'on', cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await getResponseHook(channel)('cid123', '行为字[', 'session-1');
+      await getResponseHook(channel)(
+        'cid123',
+        `FILE: ${file.path}] 已完成。`,
+        'session-1',
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      const markdown = markdownCalls()
+        .map((call) => JSON.parse(String((call[1] as RequestInit).body)))
+        .map((body) => String(body.markdown.text))
+        .join('\n');
+      expect(markdown).toContain('[File sent: report.txt] 已完成。');
+      expect(markdown).not.toContain(file.path);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports an incomplete file marker when block streaming ends', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
@@ -4153,6 +4189,88 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(body.markdown.text).toBe(
       '[File delivery failed: incomplete marker]',
     );
+  });
+
+  it('flushes a partial marker before resuming after an input request', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const { markdownCalls } = stubFileReplyFetch();
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    await getResponseHook(channel)(
+      'cid123',
+      'Answer follows. [FILE:',
+      'session-1',
+    );
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      segment,
+      'input_requested',
+    );
+    await getResponseHook(channel)(
+      'cid123',
+      'The result is 42.\nDone.',
+      'session-1',
+    );
+
+    const bodies = markdownCalls().map((call) =>
+      String(
+        (
+          JSON.parse(String((call[1] as RequestInit).body)) as {
+            markdown: { text: string };
+          }
+        ).markdown.text,
+      ),
+    );
+    expect(bodies).toEqual([
+      'Answer follows. ',
+      '[File delivery failed: incomplete marker]',
+      'The result is 42.\nDone.',
+    ]);
+  });
+
+  it('flushes each one-shot partial marker without poisoning the next response', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const { markdownCalls } = stubFileReplyFetch();
+
+    await getOneShotResponseHook(channel)(
+      'cid123',
+      'Report attached. [FILE: /tmp/report.pdf',
+      'session-1',
+    );
+    await getOneShotResponseHook(channel)(
+      'cid123',
+      'Next answer.',
+      'session-1',
+    );
+
+    const bodies = markdownCalls().map(
+      (call) =>
+        (
+          JSON.parse(String((call[1] as RequestInit).body)) as {
+            markdown: { text: string };
+          }
+        ).markdown.text,
+    );
+    expect(bodies).toEqual([
+      'Report attached. ',
+      '[File delivery failed: incomplete marker]',
+      'Next answer.',
+    ]);
   });
 
   it('does not upload a file when the reply webhook is unavailable', async () => {
@@ -4241,6 +4359,79 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(markdownBody.markdown.text).toContain('[File sent: report.txt]');
       expect(markdownBody.markdown.text).not.toContain('/tmp/private-chart');
       expect(markdownBody.markdown.text).not.toContain(file.path);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes an abandoned file marker before processing an inner image marker', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const { markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+    await channel.sendMessage('cid123', 'x [FILE: /a.pdf [IMAGE: /b.png');
+    await channel.sendMessage(
+      'cid123',
+      'See [FILE: draft and [IMAGE: /tmp/a.png] here',
+    );
+
+    expect(uploadCalls()).toHaveLength(0);
+    const markdown = markdownCalls()
+      .map((call) => JSON.parse(String((call[1] as RequestInit).body)))
+      .map((body) => String(body.markdown.text));
+    expect(markdown[0]).toBe('x [Image pending]');
+    expect(markdown[1]).not.toContain('[FILE:');
+    expect(markdown[1]).not.toContain('draft and');
+  });
+
+  it.each([
+    ['IMAGE', '[Image pending]'],
+    ['FILE', ''],
+  ] as const)(
+    'scrubs complete %s marker paths inside Markdown code',
+    async (markerName, replacement) => {
+      const channel = createChannel();
+      seedWebhook(channel, 'cid123');
+      const { markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `Log:\n\`\`\`\n[${markerName}: /Users/ben/private/leak.dat]\n\`\`\`\ndone`,
+      );
+
+      expect(uploadCalls()).toHaveLength(0);
+      const markdown = (
+        JSON.parse(String((markdownCalls()[0]![1] as RequestInit).body)) as {
+          markdown: { text: string };
+        }
+      ).markdown.text;
+      expect(markdown).toContain(`\`\`\`\n${replacement}\n\`\`\``);
+      expect(markdown).not.toContain('/Users/ben/private');
+    },
+  );
+
+  it('scrubs an outer file marker exposed by nested file replacement', async () => {
+    const file = createTempFile('inner.txt');
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `Report attached [FILE: /Users/ben/private/report [FILE: ${file.path}] notes.pdf] done`,
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      const markdown = (
+        JSON.parse(String((markdownCalls()[0]![1] as RequestInit).body)) as {
+          markdown: { text: string };
+        }
+      ).markdown.text;
+      expect(markdown).not.toContain('[FILE:');
+      expect(markdown).not.toContain('/Users/ben/private');
+      expect(markdown).not.toContain(file.path);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }

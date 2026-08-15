@@ -514,7 +514,7 @@ export abstract class ChannelBase {
       await this.pushProactive(target, text);
       return;
     }
-    await this.sendResponseMessage(target.chatId, text, sessionId);
+    await this.sendOneShotResponseMessage(target.chatId, text, sessionId);
   }
 
   async dispatchPermissionRequest(
@@ -2389,6 +2389,14 @@ export abstract class ChannelBase {
     const target = this.router.getTarget(sessionId);
     const threadId = active?.threadId ?? target?.threadId;
     await this.sendThreadMessage(chatId, threadId, text);
+  }
+
+  protected async sendOneShotResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    await this.sendResponseMessage(chatId, text, sessionId);
   }
 
   /**
@@ -5638,13 +5646,17 @@ export abstract class ChannelBase {
         heldChunks.length = 0;
         hasStreamedText = false;
         const segment = this.closeOutputSegment(sessionId, promptState);
-        void this.notifyOutputSegmentEnd(
-          envelope.chatId,
-          sessionId,
-          segment,
-          'response_boundary',
-        );
         streamer?.stop();
+        const pendingSends = streamer?.drain();
+        void (async () => {
+          await pendingSends;
+          await this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'response_boundary',
+          );
+        })();
       };
       // Queue wait and memory recall can outlive a bridge crash. Capture the
       // bridge only after the latest recovery has restored session routing.

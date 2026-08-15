@@ -23,6 +23,7 @@ import {
   findImageMarkers,
   readValidatedImage,
   replaceImageMarkers,
+  sanitizeStreamingImageMarkers,
   stripPartialImageMarker,
   type ImageMarker,
   uploadDingTalkImage,
@@ -32,12 +33,12 @@ import {
   findFileMarkers,
   readValidatedFile,
   safeFileName,
+  sanitizeStreamingFileMarkers,
   stripPartialFileMarker,
   type FileMarker,
   uploadDingTalkFile,
 } from './outbound-file.js';
 import {
-  findOutboundMediaMarkers,
   findTrailingPartialOutboundMediaMarker,
   replaceOutboundMediaMarkers,
 } from './outbound-markers.js';
@@ -250,7 +251,7 @@ export class DingtalkChannel extends ChannelBase {
   private sessionMentionTargets = new Map<string, string>();
   private blockStreamingMediaCarry = new Map<
     string,
-    { text: string; markerName: 'IMAGE' | 'FILE' }
+    { text: string; markerName?: 'IMAGE' | 'FILE' }
   >();
   private bufferedMentionTargets = new Set<string>();
   private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
@@ -760,7 +761,12 @@ export class DingtalkChannel extends ChannelBase {
   private async prepareOutgoingContent(
     text: string,
   ): Promise<PreparedDingTalkOutput> {
-    const markerText = stripPartialImageMarker(text);
+    let markerText = text;
+    while (true) {
+      const next = stripPartialImageMarker(stripPartialFileMarker(markerText));
+      if (next === markerText) break;
+      markerText = next;
+    }
     const imageMarkers = findImageMarkers(markerText);
     const fileMarkers = findFileMarkers(markerText);
     const imageReplacements = await this.prepareImageReplacements(imageMarkers);
@@ -782,48 +788,16 @@ export class DingtalkChannel extends ChannelBase {
       media.map(({ replacement }) => replacement),
     );
 
-    return {
-      text: stripPartialFileMarker(
-        this.sanitizeSyntheticImageMarkers(markerText, replaced),
-      ),
-      files,
-    };
-  }
-
-  private sanitizeSyntheticImageMarkers(
-    originalText: string,
-    preparedText: string,
-  ): string {
-    const deliverableStarts = new Set(
-      findImageMarkers(originalText).map(({ start }) => start),
-    );
-    const preserved = new Map<string, number>();
-    for (const marker of findOutboundMediaMarkers(
-      originalText,
-      'IMAGE',
-      true,
-    )) {
-      if (deliverableStarts.has(marker.start)) continue;
-      const source = originalText.slice(marker.start, marker.end);
-      preserved.set(source, (preserved.get(source) ?? 0) + 1);
-    }
-    let result = preparedText;
+    let result = replaced;
     while (true) {
-      const retained = new Map(preserved);
-      const markers = findOutboundMediaMarkers(result, 'IMAGE', true);
-      const replacements = markers.map((marker) => {
-        const source = result.slice(marker.start, marker.end);
-        const remaining = retained.get(source) ?? 0;
-        if (remaining === 0) return '[Image pending]';
-        retained.set(source, remaining - 1);
-        return source;
-      });
-      const next = stripPartialImageMarker(
-        replaceOutboundMediaMarkers(result, markers, replacements),
+      const next = sanitizeStreamingFileMarkers(
+        sanitizeStreamingImageMarkers(result),
       );
-      if (next === result) return result;
+      if (next === result) break;
       result = next;
     }
+
+    return { text: result, files };
   }
 
   private async sendPreparedReply(
@@ -1777,10 +1751,11 @@ export class DingtalkChannel extends ChannelBase {
     const pending = this.blockStreamingMediaCarry.get(sessionId);
     if (!pending) return undefined;
     this.blockStreamingMediaCarry.delete(sessionId);
-    const text =
-      pending.markerName === 'IMAGE'
+    const text = pending.markerName
+      ? pending.markerName === 'IMAGE'
         ? '[Image delivery failed: incomplete marker]'
-        : '[File delivery failed: incomplete marker]';
+        : '[File delivery failed: incomplete marker]'
+      : pending.text;
     return this.sendPreparedResponse(chatId, { text, files: [] }, sessionId);
   }
 
@@ -1794,6 +1769,31 @@ export class DingtalkChannel extends ChannelBase {
       if (ready === undefined) return;
       text = ready;
     }
+    await this.sendResponseText(chatId, text, sessionId);
+  }
+
+  protected override async sendOneShotResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (this.config.blockStreaming !== 'on') {
+      await this.sendResponseText(chatId, text, sessionId);
+      return;
+    }
+    await this.flushBlockStreamingMediaCarry(chatId, sessionId);
+    const ready = this.takeBlockStreamingText(sessionId, text);
+    if (ready !== undefined) {
+      await this.sendResponseText(chatId, ready, sessionId);
+    }
+    await this.flushBlockStreamingMediaCarry(chatId, sessionId);
+  }
+
+  private async sendResponseText(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
     if (!this.webhooks.has(chatId)) {
       await this.sendPreparedResponse(chatId, { text, files: [] }, sessionId);
       return;
@@ -1866,7 +1866,9 @@ export class DingtalkChannel extends ChannelBase {
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
     const carry =
-      reason === 'completed' || reason === 'response_boundary'
+      reason === 'completed' ||
+      reason === 'response_boundary' ||
+      reason === 'input_requested'
         ? this.flushBlockStreamingMediaCarry(chatId, sessionId)
         : undefined;
     if (reason === 'failed' || reason === 'cancelled') {

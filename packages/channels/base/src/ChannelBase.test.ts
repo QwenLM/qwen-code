@@ -13597,6 +13597,64 @@ describe('ChannelBase', () => {
       expect(ch.sent.map((message) => message.text)).toEqual(['final']);
     });
 
+    it('drains queued block sends before notifying a response boundary', async () => {
+      let releaseFirst!: () => void;
+      const firstSend = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const order: string[] = [];
+      class BoundaryDrainChannel extends TestChannel {
+        protected override async sendResponseMessage(
+          _chatId: string,
+          text: string,
+          _sessionId: string,
+        ): Promise<void> {
+          order.push(`send:${text}:start`);
+          if (text === 'first') await firstSend;
+          order.push(`send:${text}:end`);
+        }
+
+        protected override onResponseBoundary(): void {
+          order.push('boundary');
+        }
+      }
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first\n\n',
+          );
+          (bridge as unknown as EventEmitter).emit('responseBoundary', sid);
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'second');
+          return Promise.resolve('second');
+        },
+      );
+      const ch = new BoundaryDrainChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      const running = ch.handleInbound(envelope());
+      await vi.waitFor(() => expect(order).toContain('send:first:start'));
+      expect(order).not.toContain('boundary');
+      releaseFirst();
+      await running;
+
+      expect(order).toEqual([
+        'send:first:start',
+        'send:first:end',
+        'boundary',
+        'send:second:start',
+        'send:second:end',
+      ]);
+    });
+
     it('preserves held chunks when response boundary fires during cancel', async () => {
       let resolvePrompt!: (v: string) => void;
       let rejectCancel!: (e: Error) => void;

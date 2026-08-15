@@ -7,6 +7,8 @@ export interface OutboundMediaMarker {
 }
 
 const MEDIA_MARKER_PATTERN = /\[(IMAGE|FILE):\s*/giu;
+const PARTIAL_MEDIA_MARKER_OPENING_PATTERN =
+  /\[(?:(?:IMAGE|FILE):\s*|(?:I(?:M(?:A(?:G(?:E)?)?)?)?|F(?:I(?:L(?:E)?)?)?)?(?=[\r\n]|$))/giu;
 const CODE_TOKEN_TYPES = new Set(['code_block', 'code_inline', 'fence']);
 const markdown = new MarkdownIt();
 type MarkdownToken = ReturnType<typeof markdown.parse>[number];
@@ -50,6 +52,28 @@ function markerOpeningsInCode(
   return codeOpenings;
 }
 
+function bracketOpeningsInCode(text: string): Set<number> {
+  const openings = [...text.matchAll(PARTIAL_MEDIA_MARKER_OPENING_PATTERN)];
+  const codeOpenings = markerOpeningsInCode(text, openings);
+  for (const opening of openings) {
+    const lineStart = text.lastIndexOf('\n', opening.index! - 1) + 1;
+    const prefix = text.slice(lineStart, opening.index);
+    let delimiter = 0;
+    for (const match of prefix.matchAll(/`+/gu)) {
+      let escapes = 0;
+      for (let index = match.index! - 1; index >= 0; index--) {
+        if (prefix[index] !== '\\') break;
+        escapes++;
+      }
+      if (escapes % 2 === 1) continue;
+      if (delimiter === 0) delimiter = match[0].length;
+      else if (delimiter === match[0].length) delimiter = 0;
+    }
+    if (delimiter !== 0) codeOpenings.add(opening.index!);
+  }
+  return codeOpenings;
+}
+
 function previousOpenBracket(text: string, open: number): number {
   return open === 0 ? -1 : text.lastIndexOf('[', open - 1);
 }
@@ -60,7 +84,14 @@ function isMarkerCloseBoundary(
   boundary: number,
 ): boolean {
   let cursor = close + 1;
-  if (cursor >= boundary || /\s/u.test(text[cursor]!)) return true;
+  if (
+    cursor >= boundary ||
+    /[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(
+      text[cursor]!,
+    )
+  ) {
+    return true;
+  }
   while (
     cursor < boundary &&
     /[.,;:!?)}\]，。；：！？）】]/u.test(text[cursor]!)
@@ -68,7 +99,11 @@ function isMarkerCloseBoundary(
     cursor++;
   }
   return (
-    cursor > close + 1 && (cursor >= boundary || /\s/u.test(text[cursor]!))
+    cursor > close + 1 &&
+    (cursor >= boundary ||
+      /[\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(
+        text[cursor]!,
+      ))
   );
 }
 
@@ -203,12 +238,17 @@ export function stripPartialOutboundMediaMarker(
   pendingText: string,
 ): string {
   const prefix = `${markerName}:`;
+  const codeOpenings = bracketOpeningsInCode(text);
   let cursor = 0;
   let searchFrom = 0;
   let result = '';
   while (searchFrom < text.length) {
     const open = text.indexOf('[', searchFrom);
     if (open === -1) break;
+    if (codeOpenings.has(open)) {
+      searchFrom = open + 1;
+      continue;
+    }
     const lineEndMatch = text.slice(open + 1).search(/[\r\n]/u);
     const lineEnd = lineEndMatch === -1 ? text.length : open + 1 + lineEndMatch;
     const candidate = text.slice(open + 1, lineEnd);
@@ -278,17 +318,23 @@ export function sanitizeOutboundMediaMarkers(
 
 export interface TrailingPartialOutboundMediaMarker {
   start: number;
-  markerName: 'IMAGE' | 'FILE';
+  markerName?: 'IMAGE' | 'FILE';
 }
 
 export function findTrailingPartialOutboundMediaMarker(
   text: string,
 ): TrailingPartialOutboundMediaMarker | undefined {
+  const codeOpenings = bracketOpeningsInCode(text);
   let open = text.lastIndexOf('[');
   while (open !== -1) {
+    if (codeOpenings.has(open)) {
+      open = previousOpenBracket(text, open);
+      continue;
+    }
     const lineBreak = text.slice(open + 1).search(/[\r\n]/u);
     const lineEnd = lineBreak === -1 ? text.length : open + 1 + lineBreak;
     const candidate = text.slice(open + 1, lineEnd);
+    if (lineEnd === text.length && candidate === '') return { start: open };
     for (const markerName of ['IMAGE', 'FILE'] as const) {
       const prefix = `${markerName}:`;
       if (

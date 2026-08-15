@@ -13,7 +13,11 @@ import {
   stripPartialImageMarker,
 } from './outbound-image.js';
 import { sanitizeStreamingFileMarkers } from './outbound-file.js';
-import { truncateOutboundMediaText } from './outbound-markers.js';
+import {
+  findOutboundMediaMarkers,
+  replaceOutboundMediaMarkers,
+  truncateOutboundMediaText,
+} from './outbound-markers.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import {
   CONTENT_LIMIT,
@@ -49,32 +53,33 @@ export interface DingtalkInteractionPresenterOptions {
 }
 
 function sanitizeFallbackOutput(text: string): string {
-  const originalImages = new Map<string, number>();
-  for (const marker of findImageMarkers(text)) {
-    const source = text.slice(marker.start, marker.end);
-    originalImages.set(source, (originalImages.get(source) ?? 0) + 1);
-  }
-
-  let result = text;
+  const imageMarkers = findImageMarkers(text);
+  const sentinels = imageMarkers.map((_, index) => {
+    let sentinel = `\u{e000}QWEN_FALLBACK_IMAGE_${index}\u{e001}`;
+    while (text.includes(sentinel)) sentinel += '\u{e002}';
+    return sentinel;
+  });
+  const images = imageMarkers.map((marker) =>
+    text.slice(marker.start, marker.end),
+  );
+  let result = replaceImageMarkers(text, imageMarkers, sentinels);
   while (true) {
-    const withoutFiles = sanitizeStreamingFileMarkers(
-      stripPartialImageMarker(result),
-    );
-    const retainedImages = new Map(originalImages);
-    const markers = findImageMarkers(withoutFiles);
-    const replacements = markers.map((marker) => {
-      const source = withoutFiles.slice(marker.start, marker.end);
-      const remaining = retainedImages.get(source) ?? 0;
-      if (remaining === 0) return '[Image pending]';
-      retainedImages.set(source, remaining - 1);
-      return source;
-    });
+    const withoutFiles = sanitizeStreamingFileMarkers(result);
+    const markers = findOutboundMediaMarkers(withoutFiles, 'IMAGE', true);
     const next = stripPartialImageMarker(
-      replaceImageMarkers(withoutFiles, markers, replacements),
+      replaceOutboundMediaMarkers(
+        withoutFiles,
+        markers,
+        markers.map(() => '[Image pending]'),
+      ),
     );
-    if (next === result) return result;
+    if (next === result) break;
     result = next;
   }
+  for (const [index, sentinel] of sentinels.entries()) {
+    result = result.replace(sentinel, images[index]!);
+  }
+  return result;
 }
 
 export interface DingtalkCardSender {
