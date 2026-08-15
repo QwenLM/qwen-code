@@ -139,6 +139,7 @@ elif [[ "${execution_backend}" == "eas-smoke" ]]; then
 elif [[ "${execution_backend}" == "eas-harbor" ]]; then
   "${python_bin}" "${eas_agent_cache_prepare}" \
     --version "${qwen_version}" \
+    --tag "qwen-code-cache-${qwen_version}-nodegzip-v2" \
     --node-bin "${eas_node_bin}" \
     --docker-config "${eas_docker_config}" \
     --uploader "${eas_runtime_uploader}" \
