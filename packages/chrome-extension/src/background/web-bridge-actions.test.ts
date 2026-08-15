@@ -1222,14 +1222,162 @@ describe('WebBridge actions', () => {
 
     cdp.detachListeners[0](17);
 
+    // The lost capture must surface, not masquerade as an empty capture.
     await expect(
       executeWebBridgeAction('network', {
         cmd: 'list',
         _tabId: 17,
         _session: 'research',
       }),
-    ).resolves.toMatchObject({ count: 0 });
+    ).rejects.toThrow('capture was invalidated by a debugger detach');
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'stop',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).rejects.toThrow('capture was invalidated by a debugger detach');
     expect(cdp.unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('keeps recorded requests when network start is called twice', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    cdp.listeners[0](
+      'Network.requestWillBeSent',
+      {
+        requestId: 'captured-request',
+        request: { url: 'https://example.test/api', method: 'GET' },
+      },
+      17,
+    );
+
+    const secondStart = await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    expect(secondStart).toMatchObject({
+      success: true,
+      message: 'network capture already running',
+    });
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 17,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ count: 1 });
+  });
+
+  it('merges captures across the session tabs for list and detail', async () => {
+    cdp.send.mockResolvedValue({ body: '"ok"', base64Encoded: false });
+    (
+      chrome.tabs.get as unknown as ReturnType<typeof vi.fn>
+    ).mockImplementation(async (tabId: number) => ({
+      id: tabId,
+      url: `https://example.test/${tabId}`,
+      title: 'Example',
+      status: 'complete',
+      groupId: -1,
+    }));
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 18,
+      _session: 'research',
+    });
+    cdp.listeners[0](
+      'Network.requestWillBeSent',
+      {
+        requestId: 'req-A',
+        request: { url: 'https://a.example.test', method: 'GET' },
+      },
+      17,
+    );
+    cdp.listeners[0](
+      'Network.requestWillBeSent',
+      {
+        requestId: 'req-B',
+        request: { url: 'https://b.example.test', method: 'GET' },
+      },
+      18,
+    );
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 19,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ count: 2 });
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'detail',
+        requestId: 'req-B',
+        _tabId: 19,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ requestId: 'req-B', body: 'ok' });
+  });
+
+  it('stops remaining captures when one tab attach fails', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 17,
+      _session: 'research',
+    });
+    await executeWebBridgeAction('network', {
+      cmd: 'start',
+      _tabId: 18,
+      _session: 'research',
+    });
+
+    cdp.withTab.mockImplementation(
+      async (
+        tabId: number,
+        operation: (
+          send: (
+            method: string,
+            params?: Record<string, unknown>,
+          ) => unknown,
+        ) => Promise<unknown>,
+      ) => {
+        if (tabId === 17) {
+          throw new Error('debugger attach failed: tab gone');
+        }
+        return operation(cdp.send);
+      },
+    );
+
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'stop',
+        _tabId: 18,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ success: true });
+    // Both captures are gone: a follow-up list sees no capture at all.
+    await expect(
+      executeWebBridgeAction('network', {
+        cmd: 'list',
+        _tabId: 18,
+        _session: 'research',
+      }),
+    ).resolves.toMatchObject({ count: 0 });
   });
 
   it('rolls back capture state when Network.enable fails', async () => {

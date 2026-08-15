@@ -78,13 +78,21 @@ const refsByTab = new Map<number, Map<string, SessionRefs>>();
 const groupBySession = new Map<string, number>();
 const tabsBySession = new Map<string, Set<number>>();
 const networkCaptures = new Map<string, NetworkCapture>();
+// Sessions whose capture was destroyed by a debugger detach (banner cancel,
+// tab crash, action timeout). list/detail/stop surface the loss instead of
+// reporting an empty-but-"successful" capture; a fresh `network start`
+// clears the mark.
+const invalidatedCaptureSessions = new Set<string>();
 const MAX_NETWORK_CAPTURES = 32;
 const MAX_NETWORK_REQUESTS = 2_000;
 let removeNetworkListener: (() => void) | undefined;
 
 subscribeCdpDetaches((tabId) => {
   for (const [key, capture] of networkCaptures) {
-    if (capture.tabId === tabId) networkCaptures.delete(key);
+    if (capture.tabId === tabId) {
+      invalidatedCaptureSessions.add(capture.session);
+      networkCaptures.delete(key);
+    }
   }
   stopNetworkListenerIfIdle();
 });
@@ -666,10 +674,11 @@ async function network(args: Args): Promise<unknown> {
   rememberTab(args, tab.id);
   const key = JSON.stringify([session, tab.id]);
   if (command === 'start') {
-    if (
-      !networkCaptures.has(key) &&
-      networkCaptures.size >= MAX_NETWORK_CAPTURES
-    ) {
+    if (networkCaptures.has(key)) {
+      // A re-start must not wipe what is already being captured.
+      return { success: true, message: 'network capture already running' };
+    }
+    if (networkCaptures.size >= MAX_NETWORK_CAPTURES) {
       throw new Error('network: capture limit reached');
     }
     networkCaptures.set(key, {
@@ -685,9 +694,11 @@ async function network(args: Args): Promise<unknown> {
       stopNetworkListenerIfIdle();
       throw error;
     }
+    invalidatedCaptureSessions.delete(session);
     return { success: true, message: 'network capture started' };
   }
   if (command === 'stop') {
+    const hadInvalidatedCapture = invalidatedCaptureSessions.delete(session);
     const captures = [...networkCaptures.entries()].filter(
       ([, capture]) => capture.session === session,
     );
@@ -700,31 +711,42 @@ async function network(args: Args): Promise<unknown> {
       ) {
         continue;
       }
-      await withCdpTab(capture.tabId, async (send) => {
-        try {
-          await send('Network.disable');
-        } catch {
-          // The target may already be gone.
-        }
-      });
+      try {
+        await withCdpTab(capture.tabId, async (send) => {
+          try {
+            await send('Network.disable');
+          } catch {
+            // The target may already be gone.
+          }
+        });
+      } catch {
+        // The tab may already be gone; keep disabling the remaining
+        // captures instead of aborting the whole stop.
+      }
     }
     stopNetworkListenerIfIdle();
+    if (hadInvalidatedCapture) {
+      throw new Error(
+        'network: capture was invalidated by a debugger detach',
+      );
+    }
     return { success: true, message: 'network capture stopped' };
   }
+  if (invalidatedCaptureSessions.has(session)) {
+    throw new Error('network: capture was invalidated by a debugger detach');
+  }
   // The current tab may have changed since `start` (newTab navigation or
-  // stale-tab recovery), so fall back to the session's capture instead of
-  // reporting an empty list for a still-running capture.
-  const capture =
-    networkCaptures.get(key) ??
-    [...networkCaptures.values()].find(
-      (candidate) => candidate.session === session,
-    );
-  const requests = capture?.requests ?? new Map();
+  // stale-tab recovery), and one session may capture on several tabs —
+  // merge every capture owned by the session instead of reading only the
+  // first one.
+  const sessionCaptures = [...networkCaptures.values()].filter(
+    (candidate) => candidate.session === session,
+  );
   if (command === 'list') {
     const filter = string(args['filter']);
-    const values = [...requests.values()].filter(
-      (request) => !filter || request.url.includes(filter),
-    );
+    const values = sessionCaptures
+      .flatMap((capture) => [...capture.requests.values()])
+      .filter((request) => !filter || request.url.includes(filter));
     return {
       count: values.length,
       requests: values.map((request) => ({
@@ -735,10 +757,13 @@ async function network(args: Args): Promise<unknown> {
   }
   if (command === 'detail') {
     const requestId = requiredString(args, 'requestId', 'network');
-    const request = requests.get(requestId);
+    const owner = sessionCaptures.find((capture) =>
+      capture.requests.has(requestId),
+    );
+    const request = owner?.requests.get(requestId);
     if (!request) throw new Error(`network: request "${requestId}" not found`);
     if (request.failed) return request;
-    const captureTabId = capture?.tabId ?? tab.id;
+    const captureTabId = owner?.tabId ?? tab.id;
     const response = await withCdpTab(captureTabId, async (send) =>
       record(await send('Network.getResponseBody', { requestId })),
     );
