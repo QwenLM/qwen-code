@@ -34,7 +34,14 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import type { ReviewEffort } from './parse-args.js';
-import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
+import {
+  git,
+  gitOpt,
+  gitProbe as gitExit,
+  gitRaw,
+  refExists,
+  releaseWorktree,
+} from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
@@ -45,6 +52,7 @@ import {
 import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
+  parseDiff,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
 } from './lib/diff-plan.js';
@@ -59,7 +67,6 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { appendRunSession } from './lib/run-ledger.js';
 import { SHA_RE } from './lib/ledger.js';
-import { unquoteCStylePath } from '@qwen-code/qwen-code-core';
 
 interface PrMetadata {
   headRefName: string;
@@ -219,6 +226,9 @@ export interface IncrementalDecision {
   diffBase?: string;
 }
 
+/** Thrown when a probe could not answer — the git surface, not a verdict. */
+class GitUnavailable extends Error {}
+
 /** The git questions the anchor ruling asks, injectable for tests. */
 export interface AnchorProbe {
   /** `git cat-file -e <sha>^{commit}` — does this history hold the anchor? */
@@ -324,15 +334,22 @@ function fileLineCount(ref: string, path: string): number {
 /**
  * The containment ruling as the caller needs it: DISPROVED containment and an
  * oracle that could not rule are different facts, and only the first is what
- * `hunks-outside-pr-diff` asserts. A path this parser cannot name (a shape it
- * does not model) makes the oracle unavailable, not the delta guilty.
+ * `hunks-outside-pr-diff` asserts.
+ *
+ * The grammar is NOT re-implemented here. Three rounds of review found a new
+ * shape-tolerance defect in a hand-rolled parser every time — count-less
+ * headers, trailing function context, quoted rename headers, deletion
+ * junctions — so this reads the sections and hunks out of `parseDiff`, the
+ * parser the chunk planner already trusts on these exact captures (it
+ * unquotes paths, tracks hunk bodies, and knows the binary and rename
+ * shapes). A ruling is then set arithmetic over its output.
  */
 export function containmentRuling(
   inner: string,
   outer: string,
 ): { ok: boolean; unverified: boolean } {
-  const innerSections = diffSections(inner);
-  const outerSections = diffSections(outer);
+  const innerSections = sectionsOf(inner);
+  const outerSections = sectionsOf(outer);
   if (innerSections === null || outerSections === null) {
     return { ok: false, unverified: true };
   }
@@ -353,13 +370,36 @@ export function containmentRuling(
  * of the previous round's lines back to base content, so those lines are
  * changed in `anchor..head` and unchanged in `base..head`. A comment
  * anchored on such a hunk 422s the whole Create Review call.
- *
- * The string form is the one tests read; the handler goes through
- * `containmentRuling`, which needs the parse-failure fact as well — both
- * share `sectionsContained` so a ruling parses each diff exactly once.
  */
 export function hunksContainedIn(inner: string, outer: string): boolean {
   return containmentRuling(inner, outer).ok;
+}
+
+/** `path -> new-side ranges`, via the shared parser. Null if it found nothing
+ *  in a non-empty diff, which is the "could not rule" state. */
+function sectionsOf(
+  diffText: string,
+): Map<string, Array<[number, number]>> | null {
+  const { files } = parseDiff(diffText);
+  if (diffText.trim() !== '' && files.length === 0) return null;
+  const out = new Map<string, Array<[number, number]>>();
+  for (const f of files) {
+    // A section with no hunk at all — a mode change, a binary replacement, a
+    // pure rename — carries no range to compare, and a deletion carries none
+    // on the new side. They enter as an EMPTY list so the path check still
+    // runs: each used to pass vacuously, which is how a delta whose only
+    // content is a file the PR's own diff never mentions became the scope.
+    const ranges = out.get(f.path) ?? [];
+    for (const h of f.hunks) {
+      // A pure deletion (`newCount === 0`) sits BETWEEN two post-image lines;
+      // `parseDiff` already clamps its range to the junction, and comparing
+      // that junction against a covering hunk is what keeps a deletion the
+      // PR's own diff performs from being refused.
+      ranges.push([h.newStart, h.newEnd]);
+    }
+    out.set(f.path, ranges);
+  }
+  return out;
 }
 
 /** The containment loop over already-parsed sections. */
@@ -369,94 +409,16 @@ function sectionsContained(
 ): boolean {
   for (const [file, hunks] of inner) {
     const covering = outer.get(file);
-    // The PATH check, not just the hunk check: a section with no hunks at
-    // all — a mode change, a binary replacement, a pure rename — carries no
-    // range to compare, and a deletion carries none on the new side. Each
-    // used to pass vacuously, which is how a delta whose only content is a
-    // file the PR's own diff never mentions became the review's scope.
     if (!covering) return false;
     for (const [start, end] of hunks) {
-      if (!covering.some(([s, e]) => s <= start && end <= e)) return false;
+      // A deletion junction is covered when it falls inside a covering hunk
+      // OR immediately after one: `parseDiff` reports the junction at the
+      // line the deleted text used to precede, and a merged outer hunk ends
+      // one line earlier.
+      if (!covering.some(([s, e]) => s <= start && end <= e + 1)) return false;
     }
   }
   return true;
-}
-
-/**
- * `path -> post-image [start, end]` per hunk, one entry per file SECTION —
- * including sections that carry no hunk at all, which map to an empty list.
- *
- * Null when any section's path cannot be named unambiguously; the caller
- * fails closed on it.
- *
- * Structure is recognized only OUTSIDE hunk bodies. Inside a hunk, `+++ b/x`
- * and `@@ … @@` are ordinary added content — an embedded diff fixture is
- * exactly that — and reading them as structure silently re-attributes every
- * later hunk, corrupting the very oracle this check exists to be. Both
- * sibling parsers in this codebase already guard it (`countDiffChangedLines`
- * below tracks `inHunk`; `parseAddedLines` in `test-efficacy.ts` documents
- * the same hazard), and the first cut of this one did not.
- */
-function diffSections(
-  diffText: string,
-): Map<string, Array<[number, number]>> | null {
-  const out = new Map<string, Array<[number, number]>>();
-  let file: string | null = null;
-  // Body lines still owed to the current hunk, old side and new side.
-  let oldLeft = 0;
-  let newLeft = 0;
-  for (const line of diffText.split('\n')) {
-    if (oldLeft > 0 || newLeft > 0) {
-      // Inside a hunk body: consume, never interpret. `\` is the
-      // "no newline at end of file" marker and consumes nothing.
-      if (line.startsWith('\\')) continue;
-      if (line.startsWith('-')) oldLeft--;
-      else if (line.startsWith('+')) newLeft--;
-      else {
-        oldLeft--;
-        newLeft--;
-      }
-      continue;
-    }
-    if (line.startsWith('diff --git ')) {
-      // `diff --git a/X b/Y`. The b-path names the section for every shape
-      // that has one — a deletion still reads `diff --git a/F b/F` — so it
-      // keys mode-only, binary and rename sections too, which have no
-      // `+++` line at all. A path containing ` b/` cannot be split here;
-      // the whole diff is then unparsed rather than half-understood.
-      const rest = line.slice('diff --git '.length);
-      // git C-style-quotes a path with a quote, a backslash or a control
-      // character even under `core.quotePath=false` (and every non-ASCII
-      // path without it), so the oracle unquotes rather than trusting the
-      // capture's config — the same helper the chunk parser uses.
-      const quoted = /^("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")$/.exec(rest);
-      if (quoted) {
-        const b = unquoteCStylePath(quoted[2]);
-        if (!b.startsWith('b/')) return null;
-        file = b.slice(2);
-        if (!out.has(file)) out.set(file, []);
-        continue;
-      }
-      const halves = rest.split(' b/');
-      if (halves.length !== 2 || !rest.startsWith('a/')) return null;
-      file = halves[1];
-      if (!out.has(file)) out.set(file, []);
-      continue;
-    }
-    if (!line.startsWith('@@') || file === null) continue;
-    const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (!m) continue;
-    const oldCount = m[2] === undefined ? 1 : Number(m[2]);
-    const start = Number(m[3]);
-    const count = m[4] === undefined ? 1 : Number(m[4]);
-    oldLeft = oldCount;
-    newLeft = count;
-    // A pure deletion hunk has count 0 and sits BETWEEN two post-image
-    // lines; give it the zero-width range at its position so it can still
-    // be matched against a covering hunk.
-    out.get(file)!.push([start, start + Math.max(count, 1) - 1]);
-  }
-  return out;
 }
 
 /** The real git surface `resolveMergeBase` runs against. */
@@ -635,19 +597,51 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   const sinceArg = Array.isArray(args.since)
     ? (args.since as string[])[args.since.length - 1]
     : args.since;
-  if (sinceArg !== undefined) {
-    anchor = resolveIncrementalAnchor(
-      sinceArg,
-      fetchedSha,
-      {
-        commitExists: (sha) =>
-          gitOpt('cat-file', '-e', `${sha}^{commit}`) !== null,
-        isAncestor: (a, b) =>
-          gitOpt('merge-base', '--is-ancestor', a, b) !== null,
-        resolveCommit: (sha) => gitOpt('rev-parse', `${sha}^{commit}`),
-      },
-      { sha: mergeBaseSha, fetchFailed: baseFetchFailed },
-    );
+  if (sinceArg !== undefined && sinceArg !== '') {
+    try {
+      anchor = resolveIncrementalAnchor(
+        sinceArg,
+        fetchedSha,
+        {
+          // A predicate answers "no" with exit 1. Any other failure is the
+          // git surface being unavailable — reported as such rather than as
+          // a verdict about the anchor, because the two lead to opposite
+          // recovery flows (retry the transient one, never the deterministic).
+          commitExists: (sha) => {
+            const { status } = gitExit('cat-file', '-e', `${sha}^{commit}`);
+            if (status === 0) return true;
+            if (status === 1) return false;
+            throw new GitUnavailable();
+          },
+          isAncestor: (a, b) => {
+            const { status } = gitExit('merge-base', '--is-ancestor', a, b);
+            if (status === 0) return true;
+            if (status === 1) return false;
+            throw new GitUnavailable();
+          },
+          resolveCommit: (sha) => gitOpt('rev-parse', `${sha}^{commit}`),
+        },
+        { sha: mergeBaseSha, fetchFailed: baseFetchFailed },
+      );
+    } catch (err) {
+      if (!(err instanceof GitUnavailable)) throw err;
+      // The git surface, not the anchor: an error exit or a kill says
+      // nothing about whether the anchor is valid, and calling it
+      // `not-an-ancestor` would tell the recovery flow never to retry.
+      anchor = {
+        incremental: {
+          since: sinceArg,
+          effective: false,
+          reason: 'capture-failed',
+        },
+        diffBase: null,
+      };
+    }
+  } else if (sinceArg === '') {
+    // yargs parses a bare `--since` (and `--since ""`) to the empty string.
+    // Reporting it as `unknown-commit` would assert this history never held
+    // a sha nobody supplied.
+    writeStderrLine('Ignoring --since with no value; reviewing the full diff.');
   }
   /** Refuse the anchor, keeping every demotion one shape. */
   const demote = (reason: NonNullable<IncrementalDecision['reason']>): void => {

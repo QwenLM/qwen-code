@@ -14,6 +14,7 @@ import {
   isCollapsedFromUpstream,
   resolveIncrementalAnchor,
   hunksContainedIn,
+  containmentRuling,
   type AnchorProbe,
 } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
@@ -286,6 +287,13 @@ vi.mock('./lib/gh.js', () => ({
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
   gitOpt: producerMocks.gitOpt,
+  // The exit-code-aware probe, expressed in terms of the same mock: a null
+  // answer is the DEFINITIVE no (exit 1), which is what these fixtures mean.
+  // A test that wants the git-surface-unavailable shape overrides this.
+  gitProbe: (...args: string[]) => {
+    const out = producerMocks.gitOpt(...args);
+    return { out, status: out === null ? 1 : 0 };
+  },
   gitRaw: producerMocks.gitRaw,
   refExists: vi.fn(() => false),
   releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
@@ -707,14 +715,10 @@ describe('fetch-pr report assembly', () => {
       sha: BASE,
       baseFetchFailed: false,
     });
-    const UNPARSEABLE = [
-      'diff --git a/my b/file.ts b/my b/file.ts',
-      '--- a/my b/file.ts',
-      '+++ b/my b/file.ts',
-      '@@ -1,0 +1,1 @@',
-      '+x',
-      '',
-    ].join('\n');
+    // Not a diff at all — the state where the oracle genuinely cannot rule
+    // (a capture that returned an error stream, say). Path shapes that used
+    // to land here are handled by the shared parser now.
+    const UNPARSEABLE = 'fatal: bad revision\nnoise\n';
     servesBothRanges(FULL_DIFF, UNPARSEABLE);
     const report = await reportFor({ since: ANCHOR });
     expect(report.incremental).toEqual({
@@ -786,6 +790,10 @@ describe('fetch-pr report assembly', () => {
       upToDate: true,
     });
     expect(report.diffPath).toBeNull();
+    // The catch nulls BOTH halves — a stale absolute path beside a null
+    // relative one hands a degraded-flow consumer a file the report says
+    // does not exist.
+    expect(report.diffPathAbsolute).toBeNull();
   });
 
   it('rules upToDate from the anchor-at-head shape, not just the empty delta', async () => {
@@ -840,6 +848,105 @@ describe('fetch-pr report assembly', () => {
       c.some((a: unknown) => String(a).includes('..f00df00df00d')),
     );
     expect(ranges).toHaveLength(1);
+  });
+
+  it('calls a probe ERROR infrastructure, not a verdict about the anchor', async () => {
+    // gitOpt collapses every non-zero exit to null, so an error exit (128,
+    // a timeout kill) used to read as a definitive "not an ancestor" — a
+    // reason the recovery flow treats as deterministic, so the anchor was
+    // never retried and the round paid a full review for a transient fault.
+    producerMocks.gitOpt.mockImplementation(() => null);
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    // Override the probe to report an ERROR exit rather than a clean "no".
+    const mod = await import('./lib/git.js');
+    const spy = vi
+      .spyOn(mod, 'gitProbe')
+      .mockReturnValue({ out: null, status: 128 });
+    try {
+      const report = await reportFor({ since: ANCHOR });
+      expect(report.incremental).toEqual({
+        since: ANCHOR,
+        effective: false,
+        reason: 'capture-failed',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('ignores a value-less --since instead of blaming the anchor', async () => {
+    // yargs parses a bare `--since` (and `--since ""`) to the empty string;
+    // reporting `unknown-commit` would assert this history never held a sha
+    // nobody supplied, and route recovery on that lie.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: '' });
+    expect(report.incremental).toBeUndefined();
+    expect(writtenDiff()).toBe(FULL_DIFF);
+    expect(
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .some((l) => l.includes('Ignoring --since with no value')),
+    ).toBe(true);
+  });
+
+  it('keeps upToDate when the containment oracle is LOST and the delta is empty', async () => {
+    // Arm ORDER: the empty-delta upToDate arm must sit above the
+    // oracle-lost arm. Swapped, the flagship shape — a large PR whose
+    // full-range capture deterministically times out, with nothing landed
+    // since the anchor — demotes to capture-failed, which SKILL retries,
+    // re-running the same timeout every round.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    producerMocks.gitRaw.mockImplementation((...args: string[]) => {
+      if (args.includes(`${BASE}..f00df00df00d`)) throw new Error('timed out');
+      return Buffer.from('');
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      upToDate: true,
+    });
+    expect(report.diffPath).toBeNull();
+  });
+
+  it("keeps a REFUSED anchor's reason when the full range then fails to tile", async () => {
+    // The `effective` clause in the partition guard: without it a round
+    // whose anchor was refused for a deterministic reason gets relabelled
+    // `partition-failed`, which invites re-running a dead anchor.
+    producerMocks.gitOpt.mockImplementation(
+      (...args: string[]) =>
+        args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null, // not an ancestor
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
+      if (typeof text === 'string' && text.trim() !== '') {
+        throw new Error('chunks do not tile the diff');
+      }
+      return producerMocks.actualBuildDiffPlan(text, 400);
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'not-an-ancestor',
+    });
   });
 
   it('refuses a rebased-away anchor end to end, on a full-range plan', async () => {
@@ -969,6 +1076,7 @@ describe('fetch-pr report assembly', () => {
       effective: false,
       reason: 'partition-failed',
     });
+    expect(report.diffPathAbsolute).toBeNull();
     expect(report.collapsedFromUpstream).toBeUndefined();
   });
 
@@ -1561,16 +1669,30 @@ describe('hunksContainedIn — the containment oracle', () => {
     expect(hunksContainedIn(quoted, quoted)).toBe(true);
   });
 
-  it('fails closed on a path it cannot name unambiguously', () => {
+  it('names paths the shared parser can name — including a space and a quote', () => {
+    // The oracle reads sections out of `parseDiff`, which unquotes and knows
+    // the rename shapes, so paths that defeated a hand-rolled split are
+    // ordinary now: this is what moving off a private grammar buys.
     const spacey = [
       'diff --git a/my b/file.ts b/my b/file.ts',
       '--- a/my b/file.ts',
       '+++ b/my b/file.ts',
-      '@@ -1,1 +1,1 @@',
+      '@@ -1,0 +1,1 @@',
       '+x',
       '',
     ].join('\n');
-    expect(hunksContainedIn(spacey, spacey)).toBe(false);
+    expect(hunksContainedIn(spacey, spacey)).toBe(true);
+  });
+
+  it('fails closed on a payload that is not a diff at all', () => {
+    // The remaining "could not rule" state: a capture that returned
+    // something with no sections in it. Refusing is right — an oracle that
+    // cannot read its input must not vouch for a scope.
+    const notADiff = 'fatal: bad revision\nsome other noise\n';
+    expect(containmentRuling(notADiff, notADiff)).toEqual({
+      ok: false,
+      unverified: true,
+    });
   });
 });
 

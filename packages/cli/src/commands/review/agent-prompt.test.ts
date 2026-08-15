@@ -2464,6 +2464,18 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       { planPath },
     );
     expect(malformed).toContain('--base abc123');
+    // …and the empty string, which passes a type check but empties the
+    // welded flag — the emit gate's truthiness conjunct then drops Agent 7's
+    // whole probe block instead of falling back to the merge base.
+    const emptyBase = buildRoleBrief(
+      {
+        ...PR_PLAN,
+        incremental: { since: 'a'.repeat(40), effective: true, diffBase: '' },
+      },
+      '7',
+      { planPath },
+    );
+    expect(emptyBase).toContain('--base abc123');
   });
 
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
