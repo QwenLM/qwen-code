@@ -37,8 +37,9 @@ import type {
   ChatRecord,
 } from '../services/chatRecordingService.js';
 import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
-import type { SandboxConfig } from '../config/config.js';
+import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { Content } from '@google/genai';
 
@@ -324,6 +325,53 @@ export interface AttachJsonlOptions {
    * branch away from any dangling tail produced by an interrupted turn.
    */
   initialParentUuid?: string | null;
+  /**
+   * 1-based attempt number when this attach resumes a transcript after a
+   * failed attempt (2+). Seeds an `agent_retry` system marker at the seam so
+   * the retry is visible on disk. Not implied by `appendToExisting` —
+   * background resume also appends without being a retry.
+   */
+  retryAttempt?: number;
+}
+
+/** Path + options pair for {@link attachJsonlTranscriptWriter}. */
+export interface AgentTranscriptAttachTarget {
+  jsonlPath: string;
+  options: AttachJsonlOptions;
+}
+
+/**
+ * Single owner of the agent-transcript attach contract: the JSONL path plus
+ * the launch metadata shared by every attach site (AgentTool's foreground
+ * and background launches, workflow dispatch, background resume). Each site
+ * layers its extras on top, so a new launch-metadata field added here lands
+ * in every transcript instead of only the sites that happened to be updated.
+ *
+ * The path follows the merged `sessionId` — the live session by default;
+ * background resume overrides it with the persisted parent session.
+ */
+export function buildAgentTranscriptAttach(
+  config: Config,
+  agentId: string,
+  extras?: Partial<AttachJsonlOptions>,
+): AgentTranscriptAttachTarget {
+  const projectRoot = config.getProjectRoot();
+  const options: AttachJsonlOptions = {
+    agentId,
+    sessionId: config.getSessionId(),
+    cwd: projectRoot,
+    version: config.getCliVersion() || 'unknown',
+    gitBranch: getCachedGitBranch(projectRoot),
+    ...extras,
+  };
+  return {
+    jsonlPath: getAgentJsonlPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      options.agentId,
+    ),
+    options,
+  };
 }
 
 export interface AttachJsonlTranscriptResult {
@@ -550,6 +598,10 @@ export function attachJsonlTranscriptWriter(
     recordSystem('agent_launch_prompt', {
       displayText: options.launchTaskPrompt,
     });
+  }
+
+  if (options.retryAttempt !== undefined) {
+    recordSystem('agent_retry', { attempt: options.retryAttempt });
   }
 
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);

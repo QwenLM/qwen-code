@@ -23,6 +23,10 @@ export {
   type RestoreSessionRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
+export {
+  isSessionLevelNotFound,
+  isSubagentSessionNotFound,
+} from './DaemonHttpError.js';
 // Transport abstraction layer
 export { DaemonTransportClosedError } from './DaemonTransport.js';
 export type {
@@ -594,6 +598,8 @@ export type {
   DaemonWorkspaceFileBytes,
   DaemonWorkspaceFileEditRequest,
   DaemonWorkspaceFileEditResult,
+  DaemonWorkspaceFileUploadRequest,
+  DaemonWorkspaceFileUploadResult,
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,
@@ -689,6 +695,7 @@ export type {
   PromptResult,
   PromptTextContent,
   SetModelResult,
+  DaemonSessionConfigOptionResult,
   SetSessionLanguageResult,
   KnownDaemonSessionArtifactChangeAction,
   KnownDaemonSessionArtifactKind,

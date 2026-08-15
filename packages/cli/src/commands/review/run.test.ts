@@ -50,6 +50,9 @@ const {
   exitCodeFor,
   killProcessGroup,
   runCommand,
+  classifyRunTarget,
+  composedPatternFor,
+  reportPatternFor,
 } = await import('./run.js');
 const { REVIEW_TMP_DIR, REVIEWS_DIR } = await import('./lib/paths.js');
 // The real cleanup, not a mock: the regression test below must prove the parent
@@ -82,6 +85,36 @@ describe('buildReviewPrompt', () => {
     expect(() => buildReviewPrompt({ target: '--comment' })).toThrow(
       /Invalid review target/,
     );
+  });
+
+  it('rejects a separators-only or empty target', () => {
+    // `/` names no file: it survives basename extraction as the empty
+    // string, pinning the unmatchable `qwen-review--composed.json` — a whole
+    // child review burned before the parent reports "no composed verdict".
+    for (const target of ['/', '//', '\\']) {
+      expect(() => buildReviewPrompt({ target })).toThrow(
+        /Invalid review target/,
+      );
+    }
+    // An empty target is a target the caller named and got wrong (an unset
+    // `"$TARGET"`); read as "no target given" it silently becomes a full
+    // local review at the 120-minute default, not an error.
+    for (const target of ['', '   ']) {
+      expect(() => buildReviewPrompt({ target })).toThrow(
+        /Invalid review target/,
+      );
+    }
+  });
+
+  it('keeps accepting separator-bearing paths — the guard is not over-broad', () => {
+    // The rejection cases alone leave over-rejection mutants green: dropping
+    // the `$` from `/^[\\/]+$/` kills every absolute path, dropping the `^`
+    // kills every tab-completed trailing slash. Both shapes are valid
+    // targets and reach the child unchanged.
+    expect(buildReviewPrompt({ target: '/repo/src/foo.ts' })).toBe(
+      '/review /repo/src/foo.ts',
+    );
+    expect(buildReviewPrompt({ target: 'src/' })).toBe('/review src/');
   });
 
   it('rejects a target carrying quote characters', () => {
@@ -124,21 +157,119 @@ describe('newestArtifactSince', () => {
     ).toBeNull();
   });
 
-  it('returns the newest matching artifact from this run', () => {
+  it('returns the newest matching artifact from this run, mtime attached', () => {
     const start = Date.now() - 10_000;
     file('qwen-review-local-composed.json', start + 1_000);
     const newer = file('qwen-review-pr-9-composed.json', start + 5_000);
     file('unrelated.json', start + 9_000);
 
-    expect(
-      newestArtifactSince(dir, /^qwen-review-.*composed\.json$/, start),
-    ).toBe(newer);
+    const best = newestArtifactSince(
+      dir,
+      /^qwen-review-.*composed\.json$/,
+      start,
+    );
+    expect(best?.path).toBe(newer);
+    // The mtime rides along so the capture poll never re-stats the path —
+    // a second stat races the child's Step 9 sweep.
+    expect(Math.abs((best?.mtime ?? 0) - (start + 5_000))).toBeLessThan(1_000);
   });
 
   it('returns null when the directory does not exist', () => {
     expect(
       newestArtifactSince(join(dir, 'absent'), /composed/, Date.now()),
     ).toBeNull();
+  });
+});
+
+describe('target-pinned artifact patterns', () => {
+  it('classifies exactly as the child parser does — no second classifier', () => {
+    // The child names its artifacts after parse-args' verdict; a narrower
+    // local regex pinned patterns the child never writes and reported a
+    // completed (and posted) review as "no verdict was produced".
+    expect(classifyRunTarget('9014')).toEqual({ kind: 'pr', number: '9014' });
+    expect(classifyRunTarget('https://github.com/o/r/pull/9014')).toEqual({
+      kind: 'pr',
+      number: '9014',
+    });
+    // GitHub's Files-changed tab hands out /pull/<n>/files URLs:
+    expect(classifyRunTarget('https://github.com/o/r/pull/9014/files')).toEqual(
+      { kind: 'pr', number: '9014' },
+    );
+    // The parser normalizes pure integers via Number(), and the child writes
+    // `pr-42-…`, so the pin must be '42', never '0042':
+    expect(classifyRunTarget('0042')).toEqual({ kind: 'pr', number: '42' });
+    // The scheme and path are case-insensitive to the parser:
+    expect(classifyRunTarget('HTTPS://github.com/o/r/PULL/9014')).toEqual({
+      kind: 'pr',
+      number: '9014',
+    });
+    // A path that merely contains /pull/<n> is a FILE target to the parser,
+    // and the file identity is the basename (the skill's `{target}` token):
+    expect(classifyRunTarget('docs/pull/42')).toEqual({
+      kind: 'file',
+      base: '42',
+    });
+    expect(classifyRunTarget('src/foo.ts')).toEqual({
+      kind: 'file',
+      base: 'foo.ts',
+    });
+    // A tab-completed trailing separator must not produce an empty basename
+    // (an empty base pins `qwen-review--composed.json`, which no child
+    // artifact can carry — every such run would report "no verdict").
+    expect(classifyRunTarget('src/')).toEqual({ kind: 'file', base: 'src' });
+    expect(classifyRunTarget(undefined)).toEqual({ kind: 'local' });
+  });
+
+  it('pins each target class to its exact composed filename', () => {
+    // Two concurrent `review run`s share `.qwen/tmp`; the generic
+    // newest-composed scan republished the OTHER run's verdict on two of
+    // three live parallel reviews. Exact names, not shape heuristics.
+    const pr = composedPatternFor({ kind: 'pr', number: '9014' });
+    expect(pr.test('qwen-review-pr-9014-composed.json')).toBe(true);
+    expect(pr.test('qwen-review-pr-9013-composed.json')).toBe(false);
+    expect(pr.test('qwen-review-local-composed.json')).toBe(false);
+
+    const local = composedPatternFor({ kind: 'local' });
+    expect(local.test('qwen-review-local-composed.json')).toBe(true);
+    expect(local.test('qwen-review-pr-9013-composed.json')).toBe(false);
+    // A concurrent FILE run's artifact is not the local run's either:
+    expect(local.test('qwen-review-b.ts-composed.json')).toBe(false);
+
+    const file = composedPatternFor({ kind: 'file', base: 'b.ts' });
+    expect(file.test('qwen-review-b.ts-composed.json')).toBe(true);
+    expect(file.test('qwen-review-local-composed.json')).toBe(false);
+    // The dot is a literal, not a wildcard:
+    expect(file.test('qwen-review-bxts-composed.json')).toBe(false);
+  });
+
+  it('a pr-<digits>-named FILE target is not confused with a PR run', () => {
+    // A name-shape pin broke both directions here: the `(?!pr-\d+-)`
+    // lookahead rejected this file run's OWN artifact, and the PR branch's
+    // `.*` wildcard claimed it for `review run 42`.
+    const file = composedPatternFor({ kind: 'file', base: 'pr-42-notes.ts' });
+    expect(file.test('qwen-review-pr-42-notes.ts-composed.json')).toBe(true);
+
+    const pr = composedPatternFor({ kind: 'pr', number: '42' });
+    expect(pr.test('qwen-review-pr-42-notes.ts-composed.json')).toBe(false);
+    expect(pr.test('qwen-review-pr-42-composed.json')).toBe(true);
+  });
+
+  it('pins the saved report as far as its naming allows', () => {
+    const pr = reportPatternFor({ kind: 'pr', number: '9014' });
+    expect(pr.test('2026-08-13-071500-pr-9014.md')).toBe(true);
+    expect(pr.test('2026-08-13-162336-pr-9013.md')).toBe(false);
+    const local = reportPatternFor({ kind: 'local' });
+    expect(local.test('review.md')).toBe(true);
+    expect(local.test('2026-08-13-1622-pr-9045.md')).toBe(false);
+
+    // File reports carry the filename in the report stem's trailing slot.
+    const file = reportPatternFor({ kind: 'file', base: 'foo.ts' });
+    expect(file.test('2026-08-13-101010-foo.ts.md')).toBe(true);
+    expect(file.test('2026-08-13-101010-bar.ts.md')).toBe(false);
+    // A file literally named `pr-1234.md` claims its OWN report — the shape
+    // the local branch's PR exclusion would self-reject (`.md` not doubled).
+    const prNamed = reportPatternFor({ kind: 'file', base: 'pr-1234.md' });
+    expect(prNamed.test('2026-08-13-101010-pr-1234.md')).toBe(true);
   });
 });
 
@@ -351,6 +482,139 @@ describe('review run (handler)', () => {
     expect(result.event).toBe('APPROVE');
     expect(result.composedPath).toContain('qwen-review-local-composed.json');
     expect(process.exitCode).toBe(0);
+  });
+
+  it('ignores a concurrent run’s other-PR verdict and captures its own', async () => {
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(() => {
+      // A NEIGHBOUR review composes first — the shape that made two of three
+      // live parallel runs republish the wrong PR's verdict.
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      writeFileSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-pr-9013-composed.json'),
+        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
+        'utf8',
+      );
+      // Strictly NEWER than this run's own verdict, written below: with the
+      // neighbour older, an unpinned newest-composed scan would land on the
+      // right file anyway and the regression would pass this test.
+      utimesSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-pr-9013-composed.json'),
+        Date.now() / 1000 + 60,
+        Date.now() / 1000 + 60,
+      );
+      // The neighbour's saved report exists too — and is newer than this
+      // run's own by the time the scan runs.
+      mkdirSync(REVIEWS_DIR, { recursive: true });
+      writeFileSync(
+        join(REVIEWS_DIR, '2026-08-13-071500-pr-9014.md'),
+        '# own report',
+        'utf8',
+      );
+      writeFileSync(
+        join(REVIEWS_DIR, '2026-08-13-162336-pr-9013.md'),
+        '# neighbour report',
+        'utf8',
+      );
+      // Force the neighbour's report strictly newer, so an unpinned
+      // newest-.md scan would deterministically pick the wrong one.
+      utimesSync(
+        join(REVIEWS_DIR, '2026-08-13-162336-pr-9013.md'),
+        Date.now() / 1000 + 60,
+        Date.now() / 1000 + 60,
+      );
+      child = new FakeChild();
+      return child;
+    });
+
+    const done = runHandler({ target: '9014' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    // This run's own verdict lands later.
+    writeFileSync(
+      join(REVIEW_TMP_DIR, 'qwen-review-pr-9014-composed.json'),
+      JSON.stringify({
+        event: 'COMMENT',
+        verdictLine: 'Verdict: Comment',
+      }),
+      'utf8',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
+    expect(result.composedPath).toContain('qwen-review-pr-9014-composed.json');
+    // The report scan is pinned the same way — the neighbour's newer report
+    // must not become this run's reportPath.
+    expect(result.reportPath).toContain('pr-9014.md');
+  });
+
+  it('republishes the newest recompose, not the first snapshot', async () => {
+    // A coverage re-check can recompose the verdict minutes after the first
+    // write (measured live); the first snapshot would republish a superseded
+    // verdict.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(() => {
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
+      writeFileSync(
+        path,
+        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
+        'utf8',
+      );
+      utimesSync(path, Date.now() / 1000, Date.now() / 1000);
+      child = new FakeChild();
+      return child;
+    });
+
+    const done = runHandler({ target: '7' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        event: 'REQUEST_CHANGES',
+        verdictLine: 'Verdict: Request changes',
+      }),
+      'utf8',
+    );
+    // A strictly newer mtime, independent of filesystem clock granularity.
+    utimesSync(path, Date.now() / 1000 + 60, Date.now() / 1000 + 60);
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('names the artifact it waited for when no verdict appears', async () => {
+    // The pin is an exact-filename contract with the skill's naming
+    // template. When the two drift, Step 9 has already swept `.qwen/tmp` by
+    // the time anyone investigates — so the expectation has to be in the
+    // failure report itself, in both output modes.
+    armChild(0);
+    await runHandler({ target: '9014', json: false });
+
+    expect(outs.join('')).toContain(
+      'no composed verdict was produced (expected',
+    );
+    expect(outs.join('')).toContain('qwen-review-pr-9014-composed.json');
+    expect(process.exitCode).toBe(1);
+
+    outs.length = 0;
+    armChild(0);
+    await runHandler({ target: '9014' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.expectedComposedName).toBe(
+      'qwen-review-pr-9014-composed.json',
+    );
   });
 
   it('closes the child stdin so piped input cannot defeat slash detection', async () => {

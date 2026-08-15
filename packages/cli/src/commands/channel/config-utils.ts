@@ -472,6 +472,10 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
+  const configuredSessionScope =
+    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+    plugin.defaultSessionScope ||
+    'user';
 
   return {
     ...resolvedRawConfig,
@@ -483,10 +487,7 @@ export async function parseChannelConfig(
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
-    sessionScope:
-      (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
-      plugin?.defaultSessionScope ||
-      'user',
+    sessionScope: configuredSessionScope,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

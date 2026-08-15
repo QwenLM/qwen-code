@@ -2522,6 +2522,83 @@ describe('Server Config (config.ts)', () => {
       expect(replacement.getSnapshot().goal?.status).toBe('active');
     });
 
+    it('holds selective Goal readiness and autonomous work until finalization', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const started: string[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      let ready = false;
+      void config.getGoalRuntimeReady().then(() => {
+        ready = true;
+      });
+
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      expect(started).toEqual([]);
+
+      config.finalizeSessionRestore();
+
+      await expect(config.getGoalRuntimeReady()).resolves.toBe(
+        config.getGoalRuntime(),
+      );
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+    });
+
+    it('rejects selective Goal readiness when restore is abandoned', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const readiness = config.getGoalRuntimeReady();
+
+      config.startNewSession('replacement-session');
+
+      await expect(readiness).rejects.toThrow('Session restore was abandoned');
+    });
+
     it('owns one durable Goal runtime per canonical session', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const first = config.getGoalRuntime();
@@ -7732,6 +7809,17 @@ describe('Server Config (config.ts)', () => {
     it('should return the default threshold', () => {
       const config = new Config(baseParams);
       expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
+    });
+
+    it('treats a null runtime threshold as unset', () => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: null as unknown as number,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
     });
 
     it('should use a custom truncateToolOutputThreshold if provided', () => {
@@ -7752,6 +7840,21 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(
         Number.POSITIVE_INFINITY,
       );
+    });
+
+    it.each([
+      [25_000, 25_000],
+      [10_000, 10_000],
+      [100_000, 100_000],
+      [-1, Number.POSITIVE_INFINITY],
+    ])('tracks an explicit threshold of %s', (threshold, expectedThreshold) => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: threshold,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(expectedThreshold);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(true);
     });
   });
 
