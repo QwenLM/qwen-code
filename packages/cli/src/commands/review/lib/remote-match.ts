@@ -24,6 +24,17 @@ export function normalizeSegment(value: string): string {
   return v.endsWith('.git') ? v.slice(0, -4) : v;
 }
 
+// Aone's CR URLs use the WEB host while a clone's remote uses the GIT host —
+// the same platform under two names. Treat them as one equivalence class so a
+// `…/codereview/<id>` target (web host) matches its clone's remote (git host).
+const AONE_HOSTS = new Set(['code.alibaba-inc.com', 'gitlab.alibaba-inc.com']);
+
+/** Hosts compare equal when identical, or both are an Aone web/git alias. */
+export function hostsEquivalent(a: string, b: string): boolean {
+  if (a === b) return true;
+  return AONE_HOSTS.has(a) && AONE_HOSTS.has(b);
+}
+
 /**
  * Parse one remote URL into its host / owner / repo, or null when it is
  * neither of the two shapes `git remote -v` prints for a GitHub-style host —
@@ -70,13 +81,17 @@ export function parseRemoteUrl(raw: string): RemoteIdentity | null {
     .split('/')
     .map((s) => s.trim())
     .filter((s) => s !== '');
-  if (segments.length !== 2) return null;
+  if (segments.length < 2) return null;
   if (host === '') return null;
 
+  // Nested-group repos (e.g. Aone `group/subgroup/project`) collapse to the
+  // last two segments, mirroring aone.parseRemoteUrl — otherwise every
+  // nested-group clone fails to match and the worktree flow is unreachable.
+  // GitHub remotes are always exactly two segments, so this is a no-op there.
   return {
     host: host.toLowerCase(),
-    owner: normalizeSegment(segments[0]),
-    repo: normalizeSegment(segments[1]),
+    owner: normalizeSegment(segments[segments.length - 2]),
+    repo: normalizeSegment(segments[segments.length - 1]),
   };
 }
 
@@ -132,7 +147,7 @@ export function matchRemotes(
     const identity = parseRemoteUrl(nameMatch[2]);
     if (identity === null) continue;
     if (
-      identity.host === wantHost &&
+      hostsEquivalent(identity.host, wantHost) &&
       identity.owner === wantOwner &&
       identity.repo === wantRepo
     ) {

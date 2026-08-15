@@ -16,11 +16,15 @@ import { execFileSync } from 'node:child_process';
 const A1_BINARY = 'a1';
 const MAX_RETRIES = 2;
 const BASE_DELAY_MS = 3000;
+const A1_TIMEOUT_MS = 120_000;
 
-// Conservative: retry only on what reads as a transient server/network
-// fault. Auth and 4xx are deterministic and must surface immediately.
+// Anchor to `HTTP 5\d\d` (not bare `502|503|504`): Node embeds the full
+// command line in the error, so a deterministic `a1 repo mr view 1503 …`
+// would match a bare "503" and pay two pointless retries. ETIMEDOUT is
+// deliberately absent — with the deadline below, a stall must surface once,
+// not three times.
 const TRANSIENT_RE =
-  /(HTTP\s?5\d\d|502|503|504|temporarily unavailable|connection (reset|timed? ?out)|ECONNRESET|ETIMEDOUT|network is unreachable)/i;
+  /(HTTP\s?5\d\d|temporarily unavailable|connection (reset|timed? ?out)|ECONNRESET|network is unreachable)/i;
 
 function sleepSync(ms: number): void {
   const sab = new SharedArrayBuffer(4);
@@ -34,6 +38,7 @@ function execA1WithRetry(args: string[]): string {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
         maxBuffer: 64 * 1024 * 1024,
+        timeout: A1_TIMEOUT_MS,
       })
         .toString()
         .replace(/\r\n/g, '\n')
@@ -52,7 +57,13 @@ function execA1WithRetry(args: string[]): string {
         ].join('\n'),
       );
       if (attempt < MAX_RETRIES && TRANSIENT_RE.test(rebuilt.message)) {
-        sleepSync(BASE_DELAY_MS * (attempt + 1));
+        const delay = BASE_DELAY_MS * (attempt + 1);
+        // The sibling gh.ts prints one trace line per retry; a silent 3–9 s
+        // blocking sleep reads as a hang in CI logs.
+        process.stderr.write(
+          `a1 transient error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${delay}ms…\n`,
+        );
+        sleepSync(delay);
         continue;
       }
       throw err;
@@ -72,13 +83,17 @@ export function a1Json<T>(...args: string[]): T {
 }
 
 /**
- * Fail fast with an actionable message when `a1` has no auth. `a1 auth
- * whoami` exits non-zero when unauthenticated.
+ * Fail fast with an actionable message when `a1` cannot run. A missing
+ * binary (ENOENT — the dominant first-run state for this new dependency) is
+ * a different remedy than an unauthenticated one.
  */
 export function ensureAoneAuthenticated(): void {
   try {
     a1('auth', 'whoami');
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
+    }
     throw new Error(
       `a1 CLI is not authenticated — run \`a1 auth login\` first. ` +
         `(${(err as Error).message.split('\n')[0]})`,

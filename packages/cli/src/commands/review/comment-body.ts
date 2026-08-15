@@ -35,6 +35,8 @@ interface CommentBodyArgs {
   repo: string;
   prNumber?: number;
   out?: string;
+  /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
+  host?: string;
 }
 
 export function runCommentBody(args: CommentBodyArgs): {
@@ -61,7 +63,7 @@ export function runCommentBody(args: CommentBodyArgs): {
   if (args.out !== undefined) {
     assertWritableOutPath(args.out);
   }
-  const platform = getPlatformReader();
+  const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
   const body = platform.getCommentBody(
     args.kind,
@@ -99,7 +101,8 @@ export const commentBodyCommand: CommandModule = {
       })
       .option('pr', {
         type: 'number',
-        describe: 'The PR number — required with --kind review',
+        describe:
+          'The PR number — required with --kind review (GitHub), and with every kind on Aone (comment bodies are addressed per-MR)',
       })
       .option('repo', {
         type: 'string',
@@ -158,6 +161,7 @@ export const commentBodyCommand: CommandModule = {
         repo: String(argv['repo']),
         prNumber: pr,
         out: (argv as { out?: string }).out,
+        host,
       });
       if (result.outPath !== undefined) {
         writeStdoutLine(

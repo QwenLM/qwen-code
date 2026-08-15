@@ -39,10 +39,14 @@ findings), and `--comment` on an Aone target refuses cleanly.
    ref; a1 per-file diff only for lightweight mode), `getCommentBody` (read
    `note` from comment list).
 3. **Detection** in `registry.ts`: select the platform from (a) an explicit
-   `--platform` flag, (b) the clone's remote URL host (`gitlab.alibaba-inc.com`
-   / `code.alibaba-inc.com` → Aone), else GitHub. The four reader-backed
-   subcommands (meta/issue-context/fetch-diff/comment-body) become
-   platform-aware with no other changes.
+   `--host` whose host is an Aone host, (b) an explicit `--remote` URL on an
+   Aone host, else (c) the cwd clone's origin. An explicit NON-Aone
+   host/remote beats the cwd probe (so an explicitly-GitHub subcommand run
+   from an Aone clone is not hijacked). The four reader-backed subcommands
+   (meta/issue-context/fetch-diff/comment-body) thread `--host` into
+   detection; fetch-pr threads the remote URL. (An explicit `--platform`
+   override is deferred — an explicit `--host` already serves as the
+   practical override.)
 4. `fetch-pr.ts` — provider-aware refspec + metadata: Aone uses
    `refs/merge-requests/<global-id>/head` and mr-view metadata (no
    additions/deletions — compute from the fetched diff). This is the enabler
@@ -53,8 +57,9 @@ findings), and `--comment` on an Aone target refuses cleanly.
 - `pr-context.ts` discussion rendering (inline threads, review summaries,
   ledger): Aone has comments but no GitHub review-summary model. For v1, Aone
   runs enter the existing **context-unavailable** mode (verdict caps at
-  COMMENT; findings still generated). Issue fidelity still works via
-  `issue-context` (the reader).
+  COMMENT; findings still generated). Note Agent 0 (issue fidelity) is gated
+  on `pr-context` success, so it is SKIPPED on Aone too — `issue-context`
+  works standalone for the workitem evidence but is not wired to Agent 0.
 - `comment-status.ts` anchor-status and `presubmit.ts` CI checks: skip for
   Aone v1 (the skill already handles their absence).
 
@@ -69,8 +74,8 @@ findings), and `--comment` on an Aone target refuses cleanly.
   (move `isOwnerRepo`/`HOSTNAME_RE` into `lib/platform/` or a shared
   `lib/validate.ts`) — not the gh host state.
 - **Detection is cheap and explicit.** Remote-URL host is already parsed by
-  `match-remote`'s matcher; reuse it. A `--platform` override exists for
-  ambiguity (a github.com remote that is actually a mirror).
+  `match-remote`'s matcher; the reader threads `--host`/the remote URL into
+  detection. An explicit non-Aone signal beats the cwd probe.
 - **Diff is git-based.** Fetching the MR ref makes Aone diffs identical to
   GitHub's (merge-base + unified diff), so `plan-diff`/chunking need no
   Aone branch. `a1 mr diff` is only the lightweight fallback.

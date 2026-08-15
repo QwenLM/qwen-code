@@ -185,17 +185,27 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
+  // Validate before coercing: Number('1e3') is 1000, so an unvalidated token
+  // would fetch a DIFFERENT PR's head while the ref/worktree/report all carry
+  // the caller's label. The skill path is guarded by parse-args' digit grammar;
+  // this is the direct-CLI surface.
+  if (!/^\d+$/.test(prNumber)) {
+    throw new Error(
+      `pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
+    );
+  }
 
   // Select the platform from the remote under review (falling back to the
   // cwd clone's origin), so an Aone clone fetches the Aone ref via a1 while a
-  // GitHub clone keeps `pull/<n>/head` via gh.
+  // GitHub clone keeps `pull/<n>/head` via gh. Trim the host: isAoneHost does
+  // not trim, and a padded `--host` would silently drop to GitHub here.
   let remoteUrl: string | undefined;
   try {
     remoteUrl = git('remote', 'get-url', remote).trim();
   } catch {
     remoteUrl = undefined;
   }
-  const platform = getPlatformReader({ remoteUrl, host: args.host });
+  const platform = getPlatformReader({ remoteUrl, host: args.host?.trim() });
   platform.ensureAuthenticated();
 
   const ref = reviewBranch(prNumber);

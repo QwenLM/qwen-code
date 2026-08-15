@@ -101,12 +101,14 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
 const PR_URL_RE =
   /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)(?=$|[/?#])/i;
 
-// Aone Code CR URLs: `https://code.alibaba-inc.com/<group>/<project>/codereview/<global-id>`.
+// Aone Code CR URLs: `https://code.alibaba-inc.com/<group>[/subgroup…]/<project>/codereview/<global-id>`.
 // The trailing number is the global MR id (what the Aone refspec and `a1 mr
 // view` key on), carried as the target's `number` exactly like a GitHub PR
 // number; the platform itself is detected from the clone's remote, not the URL.
+// The group path may be nested (`group/subgroup/project`) — the repo identity
+// keeps the last two segments, mirroring aone.parseRemoteUrl.
 const AONE_CR_URL_RE =
-  /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
+  /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
 
 /**
  * Case-insensitive: `--effort High` has exactly one plausible meaning, and
@@ -193,8 +195,14 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   }
   const aoneMatch = AONE_CR_URL_RE.exec(token);
   if (aoneMatch) {
-    const [, scheme, host, owner, repo, num] = aoneMatch;
+    const [, scheme, host, groupPath, num] = aoneMatch;
     const lowerHost = host.toLowerCase();
+    // Nested-group repos collapse to the last two segments (mirroring
+    // aone.parseRemoteUrl), so `…/sub/maxcompute/odps_src/codereview/N`
+    // yields owner `maxcompute`, repo `odps_src`.
+    const segs = groupPath.split('/').filter(Boolean);
+    const owner = segs[segs.length - 2];
+    const repo = segs[segs.length - 1];
     return {
       type: 'pr-url',
       url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/codereview/${Number(num)}`,
@@ -363,7 +371,7 @@ export function parseReviewArgs(
     const classified = classifyToken(tok);
     if (classified === 'invalid-url') {
       warnings.push(
-        `Unrecognized URL ${JSON.stringify(tok)} — not a GitHub PR URL (expected …/pull/<number>); refusing to guess a target from it.`,
+        `Unrecognized URL ${JSON.stringify(tok)} — not a PR/CR URL (expected …/pull/<number> or …/codereview/<id>); refusing to guess a target from it.`,
       );
       extraTokens.push(tok);
       continue;

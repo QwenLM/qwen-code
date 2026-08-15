@@ -9,6 +9,7 @@ import {
   parseRemoteUrl,
   matchRemotes,
   normalizeSegment,
+  hostsEquivalent,
 } from './remote-match.js';
 
 describe('parseRemoteUrl', () => {
@@ -55,9 +56,18 @@ describe('parseRemoteUrl', () => {
       want: { host: 'github.com', owner: 'owner', repo: 'repo' },
     },
     {
-      name: 'extra path segment is not an owner/repo',
+      name: 'a nested-group path collapses to the last two segments',
       url: 'https://github.com/a/b/c.git',
-      want: null,
+      want: { host: 'github.com', owner: 'b', repo: 'c' },
+    },
+    {
+      name: 'an Aone nested-group clone collapses and is matchable',
+      url: 'git@gitlab.alibaba-inc.com:group/subgroup/odps_src.git',
+      want: {
+        host: 'gitlab.alibaba-inc.com',
+        owner: 'subgroup',
+        repo: 'odps_src',
+      },
     },
     {
       name: 'bare local path',
@@ -276,5 +286,35 @@ describe('matchRemotes', () => {
       repo: 'qwen-code',
     });
     expect(matched).toEqual([]);
+  });
+
+  it('matches an Aone CR-URL web host against a git-host remote', () => {
+    // A CR URL uses code.alibaba-inc.com (web); the clone's remote uses
+    // gitlab.alibaba-inc.com (git). They are the same platform.
+    const { matched } = matchRemotes(
+      'origin\tgit@gitlab.alibaba-inc.com:maxcompute/odps_src.git (fetch)\n',
+      { owner: 'maxcompute', repo: 'odps_src', host: 'code.alibaba-inc.com' },
+    );
+    expect(matched).toEqual(['origin']);
+  });
+});
+
+describe('hostsEquivalent', () => {
+  it('identical hosts are equivalent', () => {
+    expect(hostsEquivalent('github.com', 'github.com')).toBe(true);
+  });
+
+  it('Aone web and git hosts are one equivalence class', () => {
+    expect(
+      hostsEquivalent('code.alibaba-inc.com', 'gitlab.alibaba-inc.com'),
+    ).toBe(true);
+    expect(
+      hostsEquivalent('gitlab.alibaba-inc.com', 'code.alibaba-inc.com'),
+    ).toBe(true);
+  });
+
+  it('different non-Aone hosts are not equivalent', () => {
+    expect(hostsEquivalent('github.com', 'gitlab.alibaba-inc.com')).toBe(false);
+    expect(hostsEquivalent('a.com', 'b.com')).toBe(false);
   });
 });

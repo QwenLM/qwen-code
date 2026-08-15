@@ -50,7 +50,7 @@ export function runMeta(args: MetaArgs): MetaResult {
       `expected owner/repo, got ${JSON.stringify(args.repo)}`,
     );
   }
-  const platform = getPlatformReader();
+  const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
 
   let host: string;

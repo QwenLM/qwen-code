@@ -357,6 +357,18 @@ describe('parseReviewArgs', () => {
     expect(got.target).toMatchObject({ type: 'pr-url', number: 123 });
   });
 
+  it('an Aone codereview URL with a nested group keeps the last two segments', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/sub/maxcompute/odps_src/codereview/123',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+      number: 123,
+    });
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',
@@ -365,7 +377,7 @@ describe('parseReviewArgs', () => {
     expect(got.extraTokens).toEqual([
       'https://github.com/QwenLM/qwen-code/pull/42oops',
     ]);
-    expect(got.warnings[0]).toContain('not a GitHub PR URL');
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
   });
 
   it('last explicit effort wins when repeated', () => {

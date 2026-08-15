@@ -10,7 +10,7 @@
 // subcommands and the skill prose never name an endpoint. See
 // docs/design/2026-08-15-review-aone-provider.md.
 
-import { git } from '../git.js';
+import { git, gitRaw } from '../git.js';
 import { isOwnerRepo } from '../gh.js';
 import { a1Json, ensureAoneAuthenticated } from './aone-client.js';
 import type {
@@ -69,37 +69,43 @@ interface AoneWorkitem {
 }
 
 /**
- * Parse the clone's origin URL into host + group/project. Handles
- * `git@host:group/project.git`, `https://host/group/project(.git)`, and
- * `ssh://git@host/group/project.git`.
+ * Parse the clone's origin URL into host + group/project. Handles the URL
+ * form (`https://[user@]host/group[/subgroup]/project(.git)`), the scp-like
+ * form (`[user@]host:group[/subgroup]/project` — user@ optional for
+ * ssh-config/`insteadOf` setups), and nested groups (collapsed to the last
+ * two segments, mirroring remote-match). The URL form is tried first so the
+ * scheme is never swallowed by the scp branch.
  */
 export function parseRemoteUrl(url: string): RepoIdentity | null {
-  const cleaned = url.trim().replace(/\.git$/, '');
-  // scp-like: git@host:group/project
-  let m = /^[^@/]+@([^:/]+):(.+)$/.exec(cleaned);
-  if (m) {
-    const parts = m[2].split('/');
-    if (parts.length >= 2) {
-      return {
-        host: m[1].toLowerCase(),
-        owner: parts[parts.length - 2],
-        repo: parts[parts.length - 1],
-      };
-    }
-  }
-  // URL form: scheme://[user@]host/group/project
-  m = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)[:/](.+)$/.exec(cleaned);
-  if (m) {
-    const parts = m[2].split('/').filter(Boolean);
-    if (parts.length >= 2) {
-      return {
-        host: m[1].toLowerCase(),
-        owner: parts[parts.length - 2],
-        repo: parts[parts.length - 1],
-      };
-    }
-  }
+  // Strip an optional `.git` suffix AND any trailing slash (`…/project.git/`
+  // — a pasted browser URL keeps the slash and git accepts it; without this
+  // the repo coordinate becomes `project.git`).
+  const cleaned = url
+    .trim()
+    .replace(/\.git\/?$/, '')
+    .replace(/\/+$/, '');
+  const take = (host: string, path: string): RepoIdentity | null => {
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length < 2) return null;
+    return {
+      host: host.toLowerCase(),
+      owner: parts[parts.length - 2],
+      repo: parts[parts.length - 1],
+    };
+  };
+  // URL form first: scheme://[user@]host/group[/subgroup]/project
+  let m = /^[a-z+]+:\/\/(?:[^@/]+@)?([^:/]+)[:/](.+)$/i.exec(cleaned);
+  if (m) return take(m[1], m[2]);
+  // scp-like: [user@]host:group[/subgroup]/project. `(?!\/\/)` keeps a
+  // scheme URL out of this branch; user@ is optional.
+  m = /^(?:[^@/:]+@)?([^:/]+):(?!\/\/)(.+)$/.exec(cleaned);
+  if (m) return take(m[1], m[2]);
   return null;
+}
+
+/** Redact a `user:token@` userinfo prefix before putting a URL in a message. */
+function redactUrl(url: string): string {
+  return url.replace(/\/\/[^@/]+@/, '//<redacted>@');
 }
 
 function mrView(
@@ -142,8 +148,10 @@ export const aoneReader: ReviewPlatformReader = {
     }
     const identity = parseRemoteUrl(url);
     if (!identity) {
+      // Redact a `user:token@` prefix — token-bearing origins are common in
+      // CI and the raw URL must not reach stderr/logs/the transcript.
       throw new Error(
-        `cannot parse the origin remote ${JSON.stringify(url)} into group/project`,
+        `cannot parse the origin remote ${JSON.stringify(redactUrl(url))} into group/project`,
       );
     }
     return identity;
@@ -221,7 +229,11 @@ export const aoneReader: ReviewPlatformReader = {
         // against its first parent (single-commit AGit-Flow CRs).
         base = `${ref}~1`;
       }
-      return git('diff', `${base}..${ref}`);
+      // gitRaw, not git(): git() has no maxBuffer (1 MiB default → ENOBUFS on
+      // a routine monorepo diff), rewrites \r\n→\n (altering every CRLF-file
+      // hunk), and decodes utf8 while fetch-diff writes latin1 (dropping CJK
+      // bytes). gitRaw is 512 MiB, no CRLF rewrite; latin1 matches the write.
+      return gitRaw('diff', `${base}..${ref}`).toString('latin1');
     } finally {
       try {
         git('branch', '-D', ref);
@@ -239,7 +251,9 @@ export const aoneReader: ReviewPlatformReader = {
   ): string {
     checkOwnerRepo(ownerRepo);
     if (prNumber === undefined) {
-      throw new TypeError('aone comment bodies are addressed per-MR');
+      throw new TypeError(
+        'aone comment bodies are addressed per-MR — pass `--pr <mr id>`',
+      );
     }
     // Aone has one flat comment collection per MR; the text is in `note`.
     const comments = a1Json<
@@ -255,7 +269,15 @@ export const aoneReader: ReviewPlatformReader = {
       ownerRepo,
     );
     const found = (comments ?? []).find((c) => c.id === id);
-    return found?.note ?? found?.body ?? '';
+    // Throw on a miss — returning '' would be indistinguishable from a
+    // genuinely-empty body, and the orchestrator would proceed on corrupted
+    // evidence (the GitHub provider 404s on a bad id; keep the seam aligned).
+    if (!found) {
+      throw new Error(
+        `comment ${id} not found in MR ${prNumber} of ${ownerRepo}`,
+      );
+    }
+    return found.note ?? found.body ?? '';
   },
 
   fetchHeadRefSpec(prNumber: number): string {

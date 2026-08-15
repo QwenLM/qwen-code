@@ -17,8 +17,6 @@ import type { PlatformKind, ReviewPlatformReader } from './types.js';
 
 /** A hint the caller already has about which platform the target lives on. */
 export interface PlatformHint {
-  /** An explicit `--platform` selection; wins over every inference. */
-  platform?: PlatformKind;
   /** A `--host` flag or a host discovered elsewhere. */
   host?: string;
   /** A git remote URL (e.g. the `--remote` under review). */
@@ -61,9 +59,17 @@ function cwdOriginUrl(): string | undefined {
 }
 
 export function detectPlatformKind(hint?: PlatformHint): PlatformKind {
-  if (hint?.platform) return hint.platform;
-  if (isAoneHost(hint?.host)) return 'aone';
+  // Trim the hint host: isAoneHost lowercases and strips a port but does not
+  // trim, and padded hosts are a known-good input class (setGhHost trims).
+  const hintHost = hint?.host?.trim();
+  if (isAoneHost(hintHost)) return 'aone';
   if (isAoneHost(hostOfRemoteUrl(hint?.remoteUrl))) return 'aone';
+  // An explicit NON-Aone host/remote is a positive GitHub signal — it must
+  // win over the cwd probe, or an explicitly-GitHub-targeted subcommand run
+  // from an Aone clone would be hijacked to Aone. Before this seam existed
+  // these flows were cwd-independent (always GitHub).
+  if (hintHost || hint?.remoteUrl) return 'github';
+  // No explicit signal: fall back to the cwd clone's origin.
   if (isAoneHost(hostOfRemoteUrl(cwdOriginUrl()))) return 'aone';
   return 'github';
 }

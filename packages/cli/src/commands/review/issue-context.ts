@@ -45,6 +45,8 @@ interface IssueContextArgs {
   out: string;
   /** Additional issues to fetch beyond the closing set (from --issue). */
   extraIssues: RequestedIssue[];
+  /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
+  host?: string;
 }
 
 export interface IssueContextResult {
@@ -123,7 +125,7 @@ export function runIssueContext(args: IssueContextArgs): IssueContextResult {
   // An empty or directory --out resolves to the cwd or dies EISDIR AFTER the
   // fetches — classify it before fetching.
   assertWritableOutPath(args.out);
-  const platform = getPlatformReader();
+  const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
 
   const fetchOne = (n: number, ownerRepo: string): IssueOutcome => {
@@ -317,6 +319,7 @@ export const issueContextCommand: CommandModule = {
         repo,
         out: String(argv['out']),
         extraIssues: extras,
+        host,
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {

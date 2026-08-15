@@ -25,6 +25,8 @@ interface FetchDiffArgs {
   prNumber: number;
   repo: string;
   out: string;
+  /** The `--host` flag, fed to platform detection (an Aone host selects a1). */
+  host?: string;
 }
 
 export interface FetchDiffResult {
@@ -45,7 +47,7 @@ export function runFetchDiff(args: FetchDiffArgs): FetchDiffResult {
   // An empty or directory --out resolves to the cwd or dies EISDIR AFTER the
   // fetch — classify it before fetching.
   assertWritableOutPath(args.out);
-  const platform = getPlatformReader();
+  const platform = getPlatformReader({ host: args.host });
   platform.ensureAuthenticated();
 
   // ghRaw keeps the diff's trailing bytes; normalise exactly one trailing
@@ -113,6 +115,7 @@ export const fetchDiffCommand: CommandModule = {
         prNumber,
         repo: String(argv['repo']),
         out: String(argv['out']),
+        host,
       });
       writeStdoutLine(JSON.stringify(result));
     } catch (err) {

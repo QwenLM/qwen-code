@@ -406,7 +406,9 @@ export function runSubmit(
   // Review API does not exist — refuse before touching gh, clearly. The
   // findings are not lost: they are in the terminal output and the saved
   // report. Detected from the target host when present, else the cwd clone.
-  if (getPlatformReader({ host: args.host }).kind === 'aone') {
+  // Trim the host: isAoneHost does not trim, so a padded `--host` would
+  // detect as GitHub and this refusal would silently not fire.
+  if (getPlatformReader({ host: args.host?.trim() }).kind === 'aone') {
     throw new Error(
       'posting review comments to Aone Code is not supported yet ' +
         '(read-only phase) — the findings are in the terminal output and ' +
