@@ -852,6 +852,104 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(true);
     });
   });
+
+  describe('existing-comment classification — carried-id re-posts (#9208)', () => {
+    // The overlap gate used to be purely location-based: a Step 6 ledger
+    // re-post lands on the original thread's line by construction, collided
+    // with the very comment it re-posts, and was dropped — so the carried id
+    // never rode the round's ledger marker. A re-post is recognized by its
+    // `R<round>-<n>` id appearing in the existing comment at the same
+    // location; those comments are additionally bucketed as `repost` with the
+    // matched ids so the drop rule can exempt them.
+    async function presubmitWithComments(
+      comments: Array<Record<string, unknown>>,
+      newFindings: Array<{ path: string; line: number; id?: string }>,
+    ) {
+      ghApiAllMock.mockReturnValue(comments);
+      ghApiMock.mockReturnValue(null);
+      readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
+      const handler = presubmitCommand.handler;
+      if (!handler) throw new Error('presubmit handler missing');
+      await handler({
+        ...baseArgs,
+        'new-findings': '/tmp/findings.json',
+      } as unknown as Parameters<typeof handler>[0]);
+      const [, content] = writeFileSyncMock.mock.calls.find(
+        ([path]) => path === '/tmp/presubmit.json',
+      ) ?? [null, null];
+      return JSON.parse(String(content));
+    }
+
+    const CARRIED_COMMENT = {
+      id: 7,
+      body: '**[Critical]** R3-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+      path: 'src/parse-args.ts',
+      line: 44,
+      commit_id: 'abc123',
+      user: { login: 'qwen-code-ci-bot' },
+    };
+
+    it('marks an id-matched overlap comment as a re-post target', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].id).toBe(7);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+      // Still an overlap as far as the block gate goes: other findings at
+      // the same location without the carried id are still dropped.
+      expect(result.blockOnExistingComments).toBe(true);
+    });
+
+    it('reports only the matched ids when several findings share the location', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R3-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R4-1' },
+        ],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps a location overlap without a ledger id out of repost', async () => {
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** some claim without an id',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+      expect(result.existingComments.repost).toEqual([]);
+    });
+
+    it('does not match a different carried id', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-9' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('does not match an id carried at a different location', async () => {
+      const result = await presubmitWithComments(
+        [{ ...CARRIED_COMMENT, line: 45 }],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(0);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+      expect(result.existingComments.byBucket.noConflict).toBe(1);
+    });
+  });
 });
 
 // The PR advancing mid-review means commits exist that no agent read. An
@@ -1015,6 +1113,13 @@ describe('parseFindingsFile (via mocked fs)', () => {
     ['[{"line":5}]', null], // entry without a string path → reject WHOLE file
     ['[{"path":"a.ts","line":5}]', [{ path: 'a.ts', line: 5 }]],
     ['[{"path":"a.ts"}]', [{ path: 'a.ts', line: 0 }]], // missing line → 0
+    // Carried ledger id for the re-post exemption (#9208); a present-but-
+    // non-string id rejects the WHOLE file, same fail-safe as `path`.
+    [
+      '[{"path":"a.ts","line":5,"id":"R3-2"}]',
+      [{ path: 'a.ts', line: 5, id: 'R3-2' }],
+    ],
+    ['[{"path":"a.ts","line":5,"id":42}]', null],
     ['[]', []],
   ];
   it.each(cases)('rejects/normalizes %s', (raw, expected) => {

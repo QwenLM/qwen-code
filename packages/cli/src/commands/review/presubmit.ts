@@ -26,6 +26,13 @@ import { severityOf } from './lib/inline-counts.js';
 interface FindingAnchor {
   path: string;
   line: number;
+  /**
+   * Ledger id (`R<round>-<n>`) when the finding carries one. Carried-forward
+   * findings keep the id they already have; matching it against an existing
+   * comment at the same location is what marks that comment a re-post target
+   * instead of a duplicate (#9208).
+   */
+  id?: string;
 }
 
 interface CommentSummary {
@@ -34,6 +41,19 @@ interface CommentSummary {
   line: number;
   commit_id: string;
   body: string;
+  /**
+   * Set only on `repost` entries: the carried ledger ids in this comment's
+   * body that a new finding at the same location re-posts (#9208).
+   */
+  matchedIds?: string[];
+}
+
+/** Ledger ids look like `R3-2` — `R<round>-<n>`. */
+const CARRIED_ID_PATTERN = /\bR\d+-\d+\b/g;
+
+function extractCarriedIds(body: string): string[] {
+  const found = body.match(CARRIED_ID_PATTERN);
+  return found ? [...new Set(found)] : [];
 }
 
 interface RawComment {
@@ -133,8 +153,8 @@ interface PresubmitArgs {
  * treats an unknown finding set as at-risk, so a malformed file downgrades
  * the verdict rather than proving a false all-clear. A shorter-than-real list
  * would be the dangerous outcome (a dropped finding reads as disjoint), so
- * any entry lacking a string `path` rejects the WHOLE file rather than being
- * skipped.
+ * any entry lacking a string `path` — or carrying a non-string `id` — rejects
+ * the WHOLE file rather than being skipped.
  */
 export function parseFindingsFile(path: string): FindingAnchor[] | null {
   let parsed: unknown;
@@ -153,10 +173,15 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
     ) {
       return null;
     }
-    const e = entry as { path: string; line?: unknown };
+    const e = entry as { path: string; line?: unknown; id?: unknown };
+    // Same fail-safe as `path`: an `id` of the wrong type is a malformed file,
+    // and silently ignoring it would let a carried re-post read as a fresh
+    // duplicate at the very location it belongs.
+    if (e.id !== undefined && typeof e.id !== 'string') return null;
     out.push({
       path: e.path,
       line: typeof e.line === 'number' ? e.line : 0,
+      ...(typeof e.id === 'string' ? { id: e.id } : {}),
     });
   }
   return out;
@@ -391,13 +416,26 @@ export function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
 function classifyExistingComments(
   qwenComments: RawComment[],
   repliedToIds: Set<number>,
-  newFindingKeys: Set<string>,
+  newFindings: FindingAnchor[],
   commitSha: string,
 ) {
   const buckets: Record<
-    'stale' | 'resolved' | 'overlap' | 'noConflict',
+    'stale' | 'resolved' | 'overlap' | 'repost' | 'noConflict',
     CommentSummary[]
-  > = { stale: [], resolved: [], overlap: [], noConflict: [] };
+  > = { stale: [], resolved: [], overlap: [], repost: [], noConflict: [] };
+
+  const newFindingKeys = new Set(newFindings.map((f) => `${f.path}:${f.line}`));
+  // Location → carried ids of the findings anchored there. Only findings with
+  // an id participate: a fresh `R<this-round>-<n>` cannot appear in a comment
+  // posted before this round, so an id match is a genuine re-post signal.
+  const carriedIdsByLocation = new Map<string, Set<string>>();
+  for (const f of newFindings) {
+    if (f.id === undefined) continue;
+    const key = `${f.path}:${f.line}`;
+    const ids = carriedIdsByLocation.get(key) ?? new Set<string>();
+    ids.add(f.id);
+    carriedIdsByLocation.set(key, ids);
+  }
 
   for (const c of qwenComments) {
     const summary: CommentSummary = {
@@ -407,13 +445,28 @@ function classifyExistingComments(
       commit_id: c.commit_id ?? '',
       body: (c.body || '').slice(0, 80),
     };
-    // Priority: Stale > Resolved > Overlap > NoConflict.
+    // Priority: Stale > Resolved > Overlap (+ Repost) > NoConflict.
     if (c.commit_id !== commitSha) {
       buckets.stale.push(summary);
     } else if (repliedToIds.has(c.id)) {
       buckets.resolved.push(summary);
     } else if (newFindingKeys.has(`${c.path}:${c.line}`)) {
+      // Overlap stays location-based: a same-line finding with a DIFFERENT
+      // claim is still dropped (the drop log now names this comment so the
+      // false positive is visible — #9208). Repost is the additional, id-based
+      // bucket: a Step 6 ledger re-post lands on the original thread's line by
+      // construction and carries the original id in its prefix, so an id match
+      // marks the re-post target and exempts that finding from the drop.
       buckets.overlap.push(summary);
+      const wantedIds = carriedIdsByLocation.get(`${c.path}:${c.line}`);
+      if (wantedIds) {
+        const matchedIds = extractCarriedIds(c.body || '').filter((id) =>
+          wantedIds.has(id),
+        );
+        if (matchedIds.length > 0) {
+          buckets.repost.push({ ...summary, matchedIds });
+        }
+      }
     } else {
       buckets.noConflict.push(summary);
     }
@@ -509,7 +562,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     : null;
   // A path was given but did not parse into a usable list. The drift path
   // already fails safe (findingPaths=null → anchorsAtRisk true), but the SAME
-  // null silently empties `newFindingKeys` below, disabling the existing-
+  // null collapses to an empty finding list below, disabling the existing-
   // comment overlap check — a run then can't tell "no overlaps" from "the
   // dedup input was garbage", and may re-post comments a prior run already
   // made. Surface it (report flag + downgrade reason) instead of degrading in
@@ -575,14 +628,10 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     if (c.in_reply_to_id) repliedToIds.add(c.in_reply_to_id);
   }
 
-  const newFindingKeys = new Set(
-    (newFindings ?? []).map((f) => `${f.path}:${f.line}`),
-  );
-
   const buckets = classifyExistingComments(
     qwenComments,
     repliedToIds,
-    newFindingKeys,
+    newFindings ?? [],
     commitSha,
   );
 
@@ -630,9 +679,15 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
         stale: buckets.stale.length,
         resolved: buckets.resolved.length,
         overlap: buckets.overlap.length,
+        repost: buckets.repost.length,
         noConflict: buckets.noConflict.length,
       },
       overlap: buckets.overlap,
+      // Overlap comments whose body carries a carried ledger id that a new
+      // finding at the same location re-posts — the drop rule exempts those
+      // findings (#9208). A comment appears here IN ADDITION TO `overlap`; the
+      // double count is deliberate (one comment, two roles).
+      repost: buckets.repost,
       stale: buckets.stale,
       resolved: buckets.resolved,
       noConflict: buckets.noConflict,
