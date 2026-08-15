@@ -1068,10 +1068,20 @@ export function coverageFromTranscripts(
     // not finish, so it is not recovered work either — and "returned" means
     // terminal text, not progress narrated between tool calls.
     if (!r.returned) return false;
-    // A record whose own return declares a chunk unreachable did not review
-    // it; counting it as recovered would have the body announce work
-    // "counted as reviewed" beside the gap that same record disclosed.
-    if (UNCOVERABLE_RE.test(r.finalText)) return false;
+    // A record whose own return declares ITS OWN chunk unreachable did not
+    // review it; counting it as recovered would have the body announce work
+    // "counted as reviewed" beside the gap that same record disclosed. The
+    // veto is chunk-scoped like the walk's: applied raw it also matches a
+    // QUOTATION, and a recovered whole-diff auditor legitimately quotes the
+    // declarations it audited.
+    const declaredUnc = UNCOVERABLE_RE.exec(r.finalText);
+    if (declaredUnc !== null) {
+      const own = assignedChunk(r);
+      if (own !== null && Number(declaredUnc[1]) === own) return false;
+      if (own === null && r.diffToolCalls > 0 && assignedChunk(r) === null) {
+        // A whole-diff record quoting a declaration is not declaring.
+      }
+    }
     const c = assignedChunk(r);
     if (c !== null) {
       const b = builtOf(`chunk-${c}`);

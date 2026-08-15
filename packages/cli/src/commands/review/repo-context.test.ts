@@ -16,6 +16,7 @@ import {
   symlinkSync,
   utimesSync,
   writeFileSync,
+  renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1054,9 +1055,15 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       expect(Math.abs(statSync(planPath).mtimeMs - mtimeBefore)).toBeLessThan(
         1,
       );
-      // The rewrite itself still happened: the plan carries no context here,
-      // but the write path ran (content is re-serialized).
-      expect(() => JSON.parse(readFileSync(planPath, 'utf8'))).not.toThrow();
+      // The rewrite itself still happened — asserted on CONTENT, not just
+      // parseability: a regression that skips the write when content changed
+      // passes both mtime assertions.
+      expect(
+        (JSON.parse(readFileSync(planPath, 'utf8')) as Record<string, unknown>)[
+          'repositoryContext'
+        ],
+      ).toBeUndefined();
+      expect(readFileSync(planPath, 'utf8')).toContain('files');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1097,6 +1104,38 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
       // Same inode, same mtime: not restored — never rewritten.
       expect(statSync(planPath).ino).toBe(inoBefore);
       expect(statSync(planPath).mtimeMs).toBe(mtimeBefore);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('aborts on a rename-replacement even with the mtime restored', () => {
+    // The inode disjunct: an in-place rewrite fires the mtime clause, so a
+    // swap that RESTORES the mtime — the checkpoint-faking shape — is the
+    // only thing this half catches, and no test exercised it.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-ino-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      const before = statSync(planPath);
+      const racer: RepositoryContextProvider = {
+        provide() {
+          // Replace the FILE (new inode), then put the old mtime back.
+          const tmp = join(root, 'swap.json');
+          writeFileSync(tmp, readFileSync(planPath, 'utf8'));
+          rmSync(planPath);
+          renameSync(tmp, planPath);
+          utimesSync(planPath, before.atime, before.mtime);
+          return null;
+        },
+      };
+      expect(() =>
+        runRepoContext(
+          { plan: planPath, worktree, out: join(root, 'ctx.json') },
+          [racer],
+        ),
+      ).toThrow(/changed while repository context was being computed/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -157,6 +157,40 @@ describe('appendRunSession / priorSessionIds', () => {
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
+  it('drops a traversal id from the MARKER even with a valid fence', () => {
+    // The planted entry must fail ONLY the charset gate: with planMtimeMs
+    // valid, removing SESSION_ID_RE from readResumeMarker is what this pins.
+    recordResume(plan, envOf('S1'));
+    const raw = JSON.parse(readFileSync(resumeMarkerPath(plan), 'utf8')) as {
+      resumes: Array<Record<string, unknown>>;
+    };
+    raw.resumes.push({
+      sessionId: '../../etc',
+      atMs: Date.now(),
+      planMtimeMs: statSync(plan).mtimeMs,
+    });
+    writeFileSync(resumeMarkerPath(plan), JSON.stringify(raw));
+    expect(readResumeMarker(plan).resumes.map((r) => r.sessionId)).toEqual([
+      'S1',
+    ]);
+  });
+
+  it('does not write the marker at all for a charset-refused id', () => {
+    // The write-side gate, observed through the FILE: the read gate would
+    // mask its removal.
+    recordResume(plan, envOf('../evil'));
+    expect(existsSync(resumeMarkerPath(plan))).toBe(false);
+  });
+
+  it('authorizes a case-variant of the recorded resume session', () => {
+    // resumeAuthorized folds on the path key like every other comparison; a
+    // raw-string compare ships green on byte-identical fixtures and refuses
+    // the continuation on the first case-folding filesystem.
+    recordResume(plan, envOf('S2'));
+    appendRunSession(plan, envOf('S1'));
+    expect(priorSessionIds(plan, envOf('s2'))).toEqual(['S1']);
+  });
+
   it('drops a traversal-shaped id on READ even when the file carries it', () => {
     // The ledger file itself is inside the record dir the orchestrator can
     // reach; a hand-written entry must still fail the character-set gate.
@@ -409,9 +443,18 @@ describe('the properties the threat model rests on', () => {
       recursive: true,
     });
     const target = join(root, 'elsewhere.json');
+    // A fully VALID entry behind the link: without the fence fields, the
+    // mandatory planMtimeMs clause dropped it even through a FOLLOWING read,
+    // and the node-type refusal was deletable with the test green.
     writeFileSync(
       target,
-      JSON.stringify([{ sessionId: 'X', atMs: Date.now() }]),
+      JSON.stringify([
+        {
+          sessionId: 'X',
+          atMs: Date.now(),
+          planMtimeMs: statSync(plan).mtimeMs,
+        },
+      ]),
     );
     symlinkSync(target, runSessionsPath(plan));
     authorize('S2');
@@ -457,7 +500,20 @@ describe('the properties the threat model rests on', () => {
       recursive: true,
     });
     const pad = 'x'.repeat(256 * 1024 + 1);
-    writeFileSync(runSessionsPath(plan), JSON.stringify([{ pad }]));
+    // A VALID entry rides inside: with the byte guard deleted the parse
+    // succeeds and this entry survives — so only the guard can produce the
+    // empty read, and deleting it goes red instead of green.
+    writeFileSync(
+      runSessionsPath(plan),
+      JSON.stringify([
+        {
+          sessionId: 'S1',
+          atMs: Date.now(),
+          planMtimeMs: statSync(plan).mtimeMs,
+        },
+        { pad },
+      ]),
+    );
     authorize('S2');
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
     expect(sessionEntryCount(plan)).toBe(0);
@@ -534,8 +590,14 @@ describe('the properties the threat model rests on', () => {
     // Win32 trailing-dot stripping, the harness sanitizer's '.' → '_'), so
     // they are one session everywhere or an alias reads as a second session
     // wearing the first one's evidence.
+    // Backdate the plan so every offset sits inside BOTH halves of the
+    // window — at now-based stamps, base+3000 exceeded the now+2000 future
+    // ceiling and the S2_ entry was dropped by the fence before the dedup
+    // this test pins ever saw it.
+    const past = new Date(Date.now() - 300_000);
+    utimesSync(plan, past, past);
     const mtime = statSync(plan).mtimeMs;
-    const base = Date.now();
+    const base = Math.floor(mtime);
     mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
       recursive: true,
     });
@@ -620,10 +682,12 @@ describe('the properties the threat model rests on', () => {
     // at zero".
     recordResume(plan, envOf('S1'));
     expect(readResumeMarker(plan).resumes).toHaveLength(1);
-    // A fresh capture rewrites the plan (mtime moves — pushed past the
-    // tolerance explicitly, since two writes can land inside 1ms).
+    // A fresh capture rewrites the plan. Nudged 3s forward — outside the
+    // 1ms tolerance AND small enough that the entry's atMs stays inside the
+    // new epoch window (a +60s jump put the epoch past atMs, so the entry
+    // died on the window fence and the plan-mtime clause was deletable).
     writeFileSync(plan, JSON.stringify({ diffLines: 2, chunks: [] }));
-    const later = new Date(Date.now() + 60_000);
+    const later = new Date(Date.now() + 3_000);
     utimesSync(plan, later, later);
     expect(readResumeMarker(plan).resumes).toEqual([]);
   });

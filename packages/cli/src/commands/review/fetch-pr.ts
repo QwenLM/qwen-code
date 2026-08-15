@@ -136,10 +136,12 @@ type FetchPrResult = PlanReport & {
   /**
    * SHA-256 of the captured diff's raw bytes — the identity of WHAT this run
    * reviews, hashed from the same buffer the diff file was written from (the
-   * `diffHashOf` discipline: one read, no TOCTOU window). `--resume` compares
-   * it against the diff file on disk: a mismatch means the input changed, and
-   * changed input re-runs — the checkpoint key is content, never a path or a
-   * timestamp. Null when no diff was captured.
+   * `diffHashOf` discipline: one read, no TOCTOU window). Groundwork for the
+   * stack's `--resume` (the next PR): its ruling will compare this against
+   * the diff file on disk — a mismatch means the input changed, and changed
+   * input re-runs; the checkpoint key is content, never a path or a
+   * timestamp. No reader exists at THIS commit. Null when no diff was
+   * captured.
    */
   diffSha256: string | null;
   /**

@@ -326,10 +326,13 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
         },
       }),
     ];
-    writeFileSync(
-      join(dir, 'subagents', session, `agent-ra-${session}.jsonl`),
-      lines.join('\n') + '\n',
-    );
+    const f = join(dir, 'subagents', session, `agent-ra-${session}.jsonl`);
+    writeFileSync(f, lines.join('\n') + '\n');
+    // Backdated below the ledger's prior-window close (nowMs+1500): written
+    // AFTER ledger(), a >1.5s CI stall would otherwise fence prior-session
+    // fixtures out via the `until` clamp.
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
   }
 
   it('credits the prior attempt before this session has launched anything', () => {
@@ -390,9 +393,11 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
     // auditor — a fail-open on the gate's own withhold-only invariant.
     ledger('S1');
     auditorTranscript('S1', LAYERS);
-    // Backdate the record to before the plan's epoch (the suite pins the
-    // plan at 2020-01-01, so the dead attempt's leftovers predate it).
-    const past = new Date(2019, 0, 1);
+    // Backdate the record INSIDE the would-be slack window: one second
+    // before the plan's mtime. The strict fence excludes it; a slacked fence
+    // (runEpochMs = mtime − 2000) would re-admit it — the consolidation a
+    // refactor reaches for, which a year-apart fixture cannot see.
+    const past = new Date(new Date(2020, 0, 1).getTime() - 1000);
     const rec = join(
       promptRecordDir(plan),
       `${encodeURIComponent('reverse-audit')}.txt`,
@@ -535,6 +540,80 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
     auditorTranscript('S1', ['lexing', 'expansion']);
     const out = layerAuditGate(plan, ENV()).unreviewed;
     expect(out).toHaveLength(4);
+  });
+
+  it('refuses an identity MENTION that is not the identity line', () => {
+    // The anchor's strictness: a launch that merely CONTAINS the substring
+    // (a verifier told to coordinate with reverse-audit) must not match, or
+    // a bare-substring weakening of REVERSE_AUDIT_IDENTITY ships green.
+    ledger('S1');
+    const key = 'verify';
+    const brief = briefPath(plan, key);
+    const launch =
+      'You are review agent `verify` — after the reverse-audit pass, rule.\n' +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${diff}", offset=0, limit=100)`;
+    mkdirSync(promptRecordDir(plan), { recursive: true });
+    writeFileSync(brief, 'The verify brief.');
+    recordPrompt(plan, key, launch);
+    const base = {
+      agentId: 'vm',
+      agentName: 'general-purpose',
+      sessionId: 'S1',
+    };
+    const f = join(dir, 'subagents', 'S1', 'agent-vm.jsonl');
+    writeFileSync(
+      f,
+      [
+        JSON.stringify({
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                text: LAYERS.map((id) => `Layer walked: ${id} — done.`).join(
+                  '\n',
+                ),
+              },
+            ],
+          },
+        }),
+      ].join('\n') + '\n',
+    );
+    auditorTranscript('S1', ['lexing', 'expansion']);
+    expect(layerAuditGate(plan, ENV()).unreviewed).toHaveLength(4);
+  });
+
+  it('refuses a delivered auditor with ZERO diff reads', () => {
+    // The diffToolCalls clause on a fixture that passes delivery: the parrot
+    // fails delivered() first, so the clause was deletable with the suite
+    // green.
+    ledger('S1');
+    auditorTranscript('S1', LAYERS);
+    const f = join(dir, 'subagents', 'S1', 'agent-ra-S1.jsonl');
+    const needle = JSON.stringify(diff).slice(1, -1);
+    const lines = readFileSync(f, 'utf8')
+      .trim()
+      .split('\n')
+      // Drop only the diff CALL/RESPONSE pair — the launch line also names
+      // the path, and removing it would erase the identity instead.
+      .filter(
+        (l) =>
+          !(
+            l.includes(needle) &&
+            (l.includes('"functionCall"') || l.includes('"functionResponse"'))
+          ),
+      );
+    writeFileSync(f, lines.join('\n') + '\n');
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
+    expect(layerAuditGate(plan, ENV()).unreviewed).toHaveLength(6);
   });
 
   it('sees nothing from a prior session the ledger never recorded', () => {

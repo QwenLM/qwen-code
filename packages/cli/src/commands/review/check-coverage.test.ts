@@ -1864,6 +1864,21 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(r.unverifiedFindings).toBe(true);
   });
 
+  it('accepts a compliant CURRENT-digest verifier beside an older one', () => {
+    // The acceptance direction of the digest narrowing: a keep-only-newest
+    // or refuse-multi-generation mutant must go red somewhere.
+    const p = plan();
+    step45(p, 'reverse-audit');
+    step45(p, 'verify--old11111111', { findings: true });
+    const old = new Date(Date.now() - 600_000);
+    utimesSync(findingsFilePath(p, 'verify--old11111111'), old, old);
+    step45(p, 'verify--new22222222', { findings: true });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(true);
+    expect(r.unverifiedFindings).toBe(false);
+  });
+
   it('passes when both verify and reverse audit ran on a review with findings', () => {
     const p = plan();
     step45(p, 'reverse-audit');
@@ -2373,6 +2388,22 @@ describe('verificationGaps — a resumed run reads the prior attempt', () => {
     return id;
   }
 
+  it('owes only the step whose agent died, per record — not per session', () => {
+    // Both prior fixtures were symmetric (all returned or all died), so a
+    // session-granular refactor (drop the whole session when ANY agent died)
+    // shipped green. Mixed shapes are the discriminator.
+    const p = plan();
+    const okId = step45(p, 'reverse-audit');
+    const deadId = step45(p, 'verify', { returned: false });
+    moveToSession(okId, 'S0');
+    moveToSession(deadId, 'S0');
+    ledger(p, 'S0', 'S1');
+    rmSync(join(dir, 'subagents', 'S1'), { recursive: true, force: true });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.gaps.map((g) => g.subject)).toEqual(['verification']);
+  });
+
   it('accepts Step 4/5 evidence that exists only in a prior session', () => {
     // The zero-launch continuation, pinned at the verification floor rather
     // than inferred from its coverage sibling: a current-session-only reader
@@ -2527,10 +2558,8 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     // shape.
     const f = join(dir, 'subagents', 'S1', 'agent-a1prog.jsonl');
     const lines = readFileSync(f, 'utf8').trim().split('\n');
-    const textLine = lines.findIndex((l) => l.includes('Reading the diff'));
     const callLine = lines.findIndex((l) => l.includes('functionCall'));
     lines.push(lines[callLine], lines[callLine + 1]);
-    void textLine;
     writeFileSync(f, lines.join('\n') + '\n');
     moveToSession('a1prog', 'S0');
     transcript('a2', good(2), { calls: 2 });
@@ -2557,6 +2586,24 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(false);
     expect(r.uncoverableChunks).toEqual([1]);
     expect(r.coveredChunks).not.toContain(1);
+  });
+
+  it('does not count a prior agent that declared ITS OWN chunk unreachable', () => {
+    // The veto on the recovery count, pinned: the declaration is a disclosed
+    // gap, and counting the record beside the cap would announce work
+    // "counted as reviewed" next to the gap the same record disclosed.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1u', good(1), {
+      calls: 2,
+      text: 'Uncoverable: chunk 1 — a line exceeds the read limit',
+    });
+    moveToSession('a1u', 'S0');
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.recoveredAgents).toBe(0);
+    expect(r.uncoverableChunks).toEqual([1]);
   });
 
   it('counts two prior records that only supersede each other', () => {

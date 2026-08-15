@@ -1890,10 +1890,12 @@ describe('scheduleReverseAuditRound — a resumed run reads the prior attempt', 
         message: { role: 'model', parts: [{ text: DRY }] },
       }),
     ];
-    writeFileSync(
-      join(dir, 'subagents', session, `agent-${id}.jsonl`),
-      lines.join('\n') + '\n',
-    );
+    const f = join(dir, 'subagents', session, `agent-${id}.jsonl`);
+    writeFileSync(f, lines.join('\n') + '\n');
+    // Backdated below the ledger fixture's prior-window close: a CI stall
+    // after ledger() would otherwise fence these out via the until clamp.
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
   }
 
   function ledger(...ids: string[]): void {

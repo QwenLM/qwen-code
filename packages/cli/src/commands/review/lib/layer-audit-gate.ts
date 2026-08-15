@@ -122,6 +122,12 @@ function readReverseAuditReturns(
     const built = readRecordedPrompts(planPath, since);
     const delivered = (t: (typeof auditors)[number]): boolean => {
       for (const [key, prompt] of built) {
+        // Only reverse-audit records can deliver a reverse-audit receipt:
+        // `wasDeliveredVerbatim` allows additions, so a CONCATENATED launch
+        // (this role's block plus a sibling role's) verbatim-matches the
+        // sibling's record too — and the brief bar was then satisfiable by
+        // the sibling's brief, never this role's instructions.
+        if (!key.startsWith('reverse-audit')) continue;
         if (prompt.trim() === '') continue;
         if (!wasDeliveredVerbatim(t.launchPrompt, prompt)) continue;
         const needle = JSON.stringify(briefPath(planPath, key));

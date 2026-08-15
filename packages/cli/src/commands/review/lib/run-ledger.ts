@@ -412,8 +412,10 @@ function resumeAuthorized(
  * ledger clamps a prior session's chat usage to it: an interrupted session
  * whose CLI kept being used for unrelated turns afterwards would otherwise
  * bill that activity as review cost, the mirror of the omission the ledger
- * exists to prevent. `null` when nothing followed it (it is the newest prior
- * entry and the current session's own start is not recorded here).
+ * exists to prevent. `null` only when this session has no ledger entry of
+ * its own to close the last prior's window with — in the normal flow
+ * `fetch-pr` appends unconditionally, so the newest prior is clamped to
+ * THIS session's start.
  */
 export function priorSessionEntries(
   planPath: string,

@@ -737,8 +737,19 @@ describe('fetch-pr diff identity (diffSha256)', () => {
 });
 
 describe('fetch-pr run-session ledger wiring', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    // clearAllMocks resets call history, NOT implementations — re-assert the
+    // ones the preceding diff-identity describe reprogrammed, so this
+    // suite's "no diff captured" shape is an assertion rather than a
+    // coincidence of whatever final state leaked in.
+    const { resolveMergeBase } = await import('./lib/merge-base.js');
+    const { gitRaw } = await import('./lib/git.js');
+    vi.mocked(resolveMergeBase).mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
+    vi.mocked(gitRaw).mockImplementation(() => Buffer.from(''));
     producerMocks.readFileSync.mockImplementation(() => {
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });

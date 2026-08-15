@@ -302,7 +302,15 @@ describe('readRunTranscripts — the run across its sessions', () => {
 
   function priorFile(session: string, name: string, contents: string): void {
     mkdirSync(join(dir, 'subagents', session), { recursive: true });
-    writeFileSync(join(dir, 'subagents', session, name), contents);
+    const f = join(dir, 'subagents', session, name);
+    writeFileSync(f, contents);
+    // Backdated: the ledger fixture closes the prior window ~1.5s after its
+    // own `Date.now()`, and these files are written AFTERWARD — a CI stall
+    // between the two would fence them out via the `until` clamp and flake
+    // every positive test. Ten seconds back keeps them inside any window a
+    // stall can produce, and still after the backdated plan.
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
   }
 
   it('unions prior-session transcripts, marked fromPriorSession', () => {
@@ -439,6 +447,30 @@ describe('readRunTranscripts — the run across its sessions', () => {
     file('agent-a1.jsonl', transcript('a1'));
     const recs = readRunTranscripts(plan, undefined, ENV);
     expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+  });
+
+  it('finds a dotted PRIOR session under its sanitized directory', () => {
+    // The ledger charset admits dots; the harness writes `subagents/S_0dot`.
+    // Under a raw join the lookup ENOENTs and every reader silently sees
+    // nothing — the current-session side is pinned, this is the prior side.
+    const plan = planWithLedger('S.0dot', 'S1');
+    mkdirSync(join(dir, 'subagents', 'S_0dot'), { recursive: true });
+    const f = join(dir, 'subagents', 'S_0dot', 'agent-ap.jsonl');
+    writeFileSync(
+      f,
+      JSON.stringify({
+        agentId: 'ap',
+        agentName: 'general-purpose',
+        sessionId: 'S.0dot',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'launch ap' }] },
+      }) + '\n',
+    );
+    const past = new Date(Date.now() - 10_000);
+    utimesSync(f, past, past);
+    file('agent-a1.jsonl', transcript('a1'));
+    const recs = readRunTranscripts(plan, undefined, ENV);
+    expect(recs.map((r) => r.agentId).sort()).toEqual(['a1', 'ap']);
   });
 
   it('lists each prior session once, and only those that exist', () => {

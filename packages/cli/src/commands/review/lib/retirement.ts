@@ -413,16 +413,6 @@ function substantiveClause(clause: string): boolean {
  * this module lands on the audit side. `memo` keys on the pointer so the
  * pairing walk reads each round's list once, not once per record.
  */
-/**
- * Did this transcript's agent successfully `read_file` the findings pointer
- * its record's prompt names? True when the prompt names none.
- */
-function readTheFindingsPointer(rec: AgentRecord, lines: string[]): boolean {
-  const pointer = findingsPointerOf(lines.join('\n'));
-  if (pointer === null) return true;
-  const needle = JSON.stringify(pointer);
-  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
-}
 
 function findingsListFor(
   prompt: string,
@@ -477,6 +467,24 @@ function stripLayerReceiptLines(finalText: string): string {
     kept.push(line);
   }
   return kept.join('\n');
+}
+
+/**
+ * Did this transcript's agent successfully `read_file` the findings pointer
+ * its record's prompt names? True when the prompt names none.
+ *
+ * Takes the POINTER, extracted once from the RAW prompt by the same call
+ * `findingsListFor` uses: extracting again from trim-normalized lines asked
+ * the same question under a different normalization, and trimming defeats
+ * the `^…$` anchors that exist to reject indented quotations.
+ */
+function readTheFindingsPointer(
+  rec: AgentRecord,
+  pointer: string | null,
+): boolean {
+  if (pointer === null) return true;
+  const needle = JSON.stringify(pointer);
+  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
 }
 
 /**
@@ -696,6 +704,7 @@ export function scheduleReverseAuditRound(
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
+    pointer: string | null;
   }> = [];
   for (const [key, prompt] of built) {
     const m = RECORD_KEY_RE.exec(key);
@@ -711,6 +720,7 @@ export function scheduleReverseAuditRound(
       lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
       findings: findingsListFor(prompt, recordDir, findingsMemo),
+      pointer: findingsPointerOf(prompt),
     });
   }
 
@@ -772,9 +782,10 @@ export function scheduleReverseAuditRound(
     // skipped the read cannot have performed it, and two such receipts
     // would retire the chunk on a comparison nobody made. A prompt with no
     // pointer (the pre-#8597 shape, list folded in verbatim) has nothing
-    // to open and keeps the old bar.
+    // to open and keeps the old bar. The POINTER was extracted once from
+    // the RAW prompt by the same call `findingsListFor` uses.
     const readCompliant = unique.filter((t) =>
-      readTheFindingsPointer(t, records[i].lines),
+      readTheFindingsPointer(t, records[i].pointer),
     );
     const classifications = readCompliant.map((t) =>
       classifyReturn(t, records[i].territory, records[i].findings),
