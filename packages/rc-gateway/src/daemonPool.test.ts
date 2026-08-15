@@ -59,6 +59,9 @@ function fakeClient(
     async loadSession(id: string) {
       return { calledOn: tag, id };
     },
+    async resumeSession(id: string) {
+      return { sessionId: id, workspaceCwd: tag, attached: true };
+    },
     async health() {
       return { calledOn: tag };
     },
@@ -155,6 +158,81 @@ describe('DaemonPool', () => {
       calledOn: string;
     };
     expect(ctx.calledOn).toBe('/proj/a');
+  });
+
+  it('resumeSession routes to the workspace daemon and records ownership', async () => {
+    const pool = makePool([]); // fake spawn returns fakeClient(cwd) with resumeSession + sessionContext
+    const r = await pool.resumeSession('sess-old', { workspaceCwd: '/proj/a' });
+    expect(r.sessionId).toBe('sess-old');
+    expect(pool.size()).toBe(1); // spawned /proj/a
+    const ctx = (await pool.sessionContext('sess-old')) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('/proj/a'); // now routes to /proj/a
+  });
+
+  it('resumeSession on the default workspace cwd routes to the default daemon (no spawn)', async () => {
+    const log: string[] = [];
+    const pool = makePool(log);
+    const r = await pool.resumeSession('sess-old', {
+      workspaceCwd: '/home/evan/',
+    });
+    expect(r.sessionId).toBe('sess-old');
+    expect(log).toEqual([]); // never spawned
+    const ctx = (await pool.sessionContext('sess-old')) as unknown as {
+      calledOn: string;
+    };
+    expect(ctx.calledOn).toBe('default');
+  });
+
+  it('does not evict an entry mid-resumeSession; the pending reservation protects it from a concurrent cap eviction', async () => {
+    const t = 0;
+    const stopped: string[] = [];
+    let releaseResume: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    const pool = new DaemonPool({
+      now: () => t,
+      maxDaemons: 1,
+      idleReapMs: 999_999_999,
+      defaultDaemon: fakeClient('default'),
+      defaultWorkspaceCwd: '/home/evan',
+      spawn: async (cwd) => ({
+        client: {
+          ...fakeClient(cwd, `${cwd}-s`),
+          async resumeSession(id: string) {
+            if (cwd === '/proj/a') await gate;
+            return { sessionId: id, workspaceCwd: cwd, attached: true };
+          },
+        } as unknown as DaemonClient,
+        stop: async () => {
+          stopped.push(cwd);
+        },
+        workspaceCwd: cwd,
+      }),
+    });
+
+    await pool.getOrSpawn('/proj/a'); // spawns an idle entry (sessions.size === 0)
+    // Kick off a resume against /proj/a; its client.resumeSession hangs on
+    // `gate`, so this call is stuck mid-registration.
+    const resumePromise = pool.resumeSession('sess-old', {
+      workspaceCwd: '/proj/a',
+    });
+
+    // At cap (maxDaemons=1). /proj/a still LOOKS idle by session count
+    // alone, but it's mid-resume (pending > 0) -- must be treated as busy
+    // and NOT evicted to make room for a new workspace.
+    await expect(pool.getOrSpawn('/proj/b')).rejects.toBeInstanceOf(
+      WorkspacePoolFullError,
+    );
+    expect(stopped).toEqual([]); // never stopped
+    expect(pool.workspaces()).toEqual(['/proj/a']); // still present
+
+    releaseResume!();
+    const restored = await resumePromise;
+    expect(restored.sessionId).toBe('sess-old');
+    expect(pool.workspaces()).toEqual(['/proj/a']); // untouched throughout
   });
 
   it('routes every session-keyed method to the owning daemon', async () => {

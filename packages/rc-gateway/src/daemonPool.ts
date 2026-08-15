@@ -379,6 +379,48 @@ export class DaemonPool implements SessionDaemon {
     }
   }
 
+  /** Resolve (spawn if needed) the daemon for `req.workspaceCwd`, resume the
+   * session there, and record which daemon owns `sessionId` so later
+   * session-keyed calls route correctly. Unlike `createOrAttachSession`, the
+   * daemon does not mint a new id on resume -- it reuses `sessionId` as
+   * passed in, so that's what gets recorded in `ownerOf`, not anything read
+   * off the response.
+   *
+   * Workspace-keyed (like `createOrAttachSession`), not session-id-keyed
+   * (like `DaemonClient.resumeSession`): a resumed session's owning
+   * workspace was never in memory here (this pool didn't create it), so the
+   * caller must supply it. Mirrors `createOrAttachSession`'s
+   * `pendingCreates` reservation exactly -- marked SYNCHRONOUSLY, before the
+   * `getOrSpawn` await -- for the same reason: without it, a concurrent
+   * `getOrSpawn`'s cap eviction could reclaim this entry mid-registration. */
+  async resumeSession(
+    sessionId: string,
+    req: { workspaceCwd: string },
+  ): Promise<DaemonRestoredSession> {
+    const key = this.isDefault(req.workspaceCwd)
+      ? this.defaultWorkspaceCwd
+      : this.normalizeCwd(req.workspaceCwd);
+    const tracksPending = key !== this.defaultWorkspaceCwd;
+    if (tracksPending) {
+      this.pendingCreates.set(key, (this.pendingCreates.get(key) ?? 0) + 1);
+    }
+    try {
+      const client = await this.getOrSpawn(req.workspaceCwd);
+      const restored = await client.resumeSession(sessionId, {
+        workspaceCwd: key,
+      });
+      this.ownerOf.set(sessionId, key);
+      this.byWorkspace.get(key)?.sessions.add(sessionId);
+      return restored;
+    } finally {
+      if (tracksPending) {
+        const n = (this.pendingCreates.get(key) ?? 1) - 1;
+        if (n <= 0) this.pendingCreates.delete(key);
+        else this.pendingCreates.set(key, n);
+      }
+    }
+  }
+
   /**
    * `session_died` and `session_closed` are the SDK's own definition of a
    * session-lifecycle terminal — see `isSessionLifecycleTerminal` in
