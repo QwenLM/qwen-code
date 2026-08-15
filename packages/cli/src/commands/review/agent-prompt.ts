@@ -86,6 +86,7 @@ import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
+  isTerritoryFanOut,
   requiredAgents,
   reviewMode,
   type RequiredAgent,
@@ -139,6 +140,12 @@ interface PlanReport {
   host?: unknown;
   repositoryContext?: unknown;
   budget?: { agentToolBudget?: unknown };
+  // The two size fields the topology gate reads (#9242). Declared so the
+  // per-chunk build paths can notice a fan-out the plan's own numbers never
+  // asked for; `isTerritoryFanOut` already tolerates the `unknown` via the
+  // `RosterPlan` cast, same bridge `runRoster` uses.
+  srcDiffLines?: unknown;
+  diffLines?: unknown;
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -2057,6 +2064,41 @@ function refuseConverged(planPath: string): void {
   process.exitCode = 5;
 }
 
+/**
+ * Topology anomaly note (#9242): the plan's own size fields decide the
+ * topology (Step 3A whole-diff vs Step 3B territory fan-out), and the
+ * reverse-audit round-cap tier is priced against that decision — but the
+ * per-chunk build paths never consulted it, so a per-chunk fan-out can be
+ * built on a plan whose numbers say one whole-diff auditor per round (a
+ * hand-edited/corrupted plan, or an orchestrator that took the wrong fork).
+ * This is a note, not a refusal: legitimate per-chunk work exists (an
+ * honest 3A plan can carry up to ~8 chunks for read paging), so the CLI
+ * surfaces the mismatch and proceeds, and the orchestrator owes an
+ * explanation for a deliberate one. Both numbers must be declared:
+ * `isTerritoryFanOut` coerces an absent or null field to 0, and one
+ * declared number cannot establish a mismatch the other, unknown one may
+ * yet justify — partial knowledge is unknown topology, so silence. Called
+ * only AFTER the convergence/admission gates and with the round's actual
+ * width: a round that builds nothing notes nothing, and a round that
+ * builds two auditors must not claim three.
+ */
+function noteTopologyMismatch(report: PlanReport, subject: string): void {
+  if (
+    report.srcDiffLines == null ||
+    report.diffLines == null ||
+    isTerritoryFanOut(report as RosterPlan)
+  ) {
+    return;
+  }
+  writeStderrLine(
+    `agent-prompt: ${subject}, but the plan's own numbers ` +
+      `(srcDiffLines=${report.srcDiffLines}, diffLines=${report.diffLines}) ` +
+      'say Step 3A — one whole-diff auditor per round, which is what the ' +
+      'reverse-audit round cap is priced for. Proceeding; if this fan-out ' +
+      'is deliberate, say so in the round.',
+  );
+}
+
 function runAllChunks(
   report: PlanReport,
   planPath: string,
@@ -2134,6 +2176,10 @@ function runAllChunks(
   const dueSet = schedule === null ? null : new Set(schedule.due);
   const dueChunks =
     dueSet === null ? chunks : chunks.filter((c) => dueSet.has(c.id));
+  noteTopologyMismatch(
+    report,
+    `--all-chunks is fanning out ${dueChunks.length} chunk auditors`,
+  );
   const coldSet = new Set(schedule?.coldChecks ?? []);
   const skipped = schedule?.skipped ?? [];
 
@@ -2627,6 +2673,10 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       )
     )
       return;
+    noteTopologyMismatch(
+      report,
+      `--chunk ${args.chunk} is building a per-chunk auditor`,
+    );
   }
 
   if (args.allChunks && args.role && findingsContent !== undefined) {

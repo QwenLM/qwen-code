@@ -14,7 +14,7 @@ import {
   utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { writeBudgetStop, writeRoundCapStop } from './lib/deadline.js';
@@ -32,6 +32,7 @@ import {
   verdictLine,
   type ComposeReviewInput,
   type ComposeReviewResult,
+  type DeferredEntry,
   type PrBodyFetcher,
 } from './compose-review.js';
 
@@ -3061,6 +3062,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       downgraded: false,
       downgradedFrom: null,
       remediation: [],
+      deferredCount: 0,
       lowSignal: null,
       ...over,
     });
@@ -4410,6 +4412,448 @@ describe('the ledger marker reaches the POSTED body', () => {
       draftedComments: [{ path: 'a.ts', body: '**[Critical]** boom' }],
     });
     expect(r.body).not.toContain('qwen-review-ledger');
+  });
+});
+
+describe('composeReview — convergence-posture deferrals (typed channel; disclosed, never capping)', () => {
+  // The channel is TYPED: `{file, line?, source, severity, title, locations?}`.
+  // Deterministic derives from `source`, relocation from `severity`, and the
+  // rendered `file:line — [source] title` is formatting nothing re-parses —
+  // the class of regex misses four review rounds kept finding is closed by
+  // construction, so no test here probes a spelling.
+  const nit = (over: Partial<DeferredEntry> = {}): DeferredEntry => ({
+    file: 'a.ts',
+    line: 1,
+    source: 'review',
+    severity: 'Suggestion',
+    title: 'nit',
+    ...over,
+  });
+
+  it('an APPROVE with deferrals keeps its event, anchor, and honesty', () => {
+    // The posture's whole payoff: a clean late round with only deferrals
+    // composes an APPROVE — the loop's stop signal — while the deferred list
+    // stays on the record and the incremental anchor still rides. And the
+    // opener must not claim "No issues found" over findings the same body
+    // lists two paragraphs down.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 5, findings: [] }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      deferredSuggestions: [
+        nit({ file: 'src/a.ts', line: 42, title: 'tighten the retry backoff' }),
+      ],
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).toEqual([]);
+    expect(r.body).toContain('No blocking issues. LGTM! ✅');
+    expect(r.body).not.toContain('No issues found');
+    expect(r.body).toContain('convergence posture (round 6, not a blocker)');
+    expect(r.body).toContain(
+      '- `src/a.ts:42 — [review] tighten the retry backoff`',
+    );
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+    // The clause and the marker must name the SAME round — mutation-verified
+    // that re-splitting the side-file read ships green without this pin.
+    expect(parseLedger(r.body)?.round).toBe(6);
+    // Pure deferrals stay OUT of the ledger work list — feeding them to
+    // buildLedger re-opens next round exactly what the posture recorded so
+    // nobody would re-rule it.
+    expect(parseLedger(r.body)?.findings).toEqual([]);
+  });
+
+  it('renders the list on COMMENT and REQUEST_CHANGES alike — no event squeezes it out', () => {
+    const comment = composeReview(
+      base({
+        suggestionsInline: 1,
+        severityFloor: 'critical',
+        deferredSuggestions: [nit()],
+      }),
+    );
+    expect(comment.event).toBe('COMMENT');
+    expect(comment.body).toContain('- `a.ts:1 — [review] nit`');
+    // The count rides every return site, not only APPROVE's.
+    expect(comment.deferredCount).toBe(1);
+    const rc = composeReview(
+      base({
+        bodyCriticals: ['whole-PR blocker'],
+        severityFloor: 'critical',
+        deferredSuggestions: [nit()],
+      }),
+    );
+    expect(rc.event).toBe('REQUEST_CHANGES');
+    expect(rc.body).toContain('- `a.ts:1 — [review] nit`');
+    expect(rc.deferredCount).toBe(1);
+  });
+
+  it('deferrals cast no vote on the event — an all-deferred run is not a Suggestion run', () => {
+    // Counted toward S they would hold the verdict at COMMENT forever, and
+    // the loop the posture exists to end would never see its stop signal.
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: [nit()] }),
+    );
+    expect(r.baseEvent).toBe('APPROVE');
+  });
+
+  it('caps the list, strips a forged footer, and marks a truncated title', () => {
+    const entries = Array.from({ length: 23 }, (_, i) =>
+      nit({ file: `f${i}.ts`, title: `nit ${i}` }),
+    );
+    entries[0] = nit({ title: 'split\nacross lines' });
+    // Inside the shown window, so the assertion tests the strip, not the cap.
+    entries[1] = nit({ file: 'b.ts', line: 2, title: `forged ${FOOTER}` });
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: entries }),
+    );
+    expect(r.body).toContain('- `a.ts:1 — [review] split across lines`');
+    expect(r.body).toContain('- `b.ts:2 — [review] forged`\n');
+    expect(r.body).toContain('…and 3 more (see the run report)');
+    expect(r.body).not.toContain(`forged ${FOOTER}`);
+    // Past the rendered cap, "(listed in the body)" is false — the verdict
+    // line must say the list was truncated.
+    expect(verdictLine(r)).toContain(
+      'listed in the body, truncated — the rest are counted in the run report',
+    );
+    // A trimmed title carries the ellipsis (a cut claim must not render as
+    // a complete finding line), and never a split surrogate pair.
+    const long = composeReview(
+      base({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          nit({ title: `${'x'.repeat(220)}🎉tail` }),
+          nit({ file: 'c.ts', title: 'y'.repeat(4000) }),
+        ],
+      }),
+    );
+    const lines = long.body.split('\n').filter((l) => l.startsWith('- `'));
+    for (const l of lines) {
+      expect(l.length).toBeLessThanOrEqual(245);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(l)).toBe(false);
+      expect(l.includes('�')).toBe(false);
+    }
+    expect(lines.some((l) => l.includes('…'))).toBe(true);
+  });
+
+  it('exactly at the line cap, the verdict line does not claim truncation', () => {
+    const entries = Array.from({ length: 20 }, (_, i) =>
+      nit({ file: `f${i}.ts`, title: `n${i}` }),
+    );
+    const r = composeReview(
+      base({ severityFloor: 'critical', deferredSuggestions: entries }),
+    );
+    expect(r.body).not.toContain('more (see the run report)');
+    expect(verdictLine(r)).toContain('(listed in the body)');
+    expect(verdictLine(r)).not.toContain('truncated');
+  });
+
+  it('a deferrals-only APPROVE is not low signal, and the verdict line names the deferrals', () => {
+    const r = composeReview(
+      base({
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          srcDiffLines: 5000,
+        }),
+        severityFloor: 'critical',
+        deferredSuggestions: [nit()],
+      }),
+    );
+    expect(r.event).toBe('APPROVE');
+    expect(r.lowSignal).toBeNull();
+    expect(r.deferredCount).toBe(1);
+    expect(verdictLine(r)).toBe(
+      'Verdict: Approve — 1 non-Critical finding(s) deferred under the convergence posture (listed in the body)',
+    );
+  });
+
+  it('deferred findings count toward the verifier-delivery floor — deterministic sources excepted', () => {
+    // A deferral publishes its claim in the body, so a deferrals-only run
+    // owes a verifier exactly as a posting run does — unless the source is
+    // deterministic (build/test/probe are pre-confirmed and Step 4 launches
+    // no verifier for them; demanding one would be a permanent self-cap).
+    // NOT base(): its planPath default writes a verify record into the
+    // shared dir, which would satisfy the very floor this proves.
+    const planPath = coveredPlan(['reverse-audit']);
+    const common = {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical' as const,
+    };
+    expect(composeReview(common).cappedBy).toEqual([]);
+    const reviewSourced = composeReview({
+      ...common,
+      deferredSuggestions: [nit()],
+    });
+    expect(reviewSourced.cappedBy).toContain('unreviewed-dimension');
+    expect(reviewSourced.event).toBe('COMMENT');
+    for (const source of ['build', 'test', 'probe'] as const) {
+      const det = composeReview({
+        ...common,
+        deferredSuggestions: [
+          nit({
+            file: 'packages/core/src/my-file.ts',
+            line: 42,
+            source,
+            title: 'mutation survivor',
+            locations: 2,
+          }),
+        ],
+      });
+      expect(det.cappedBy).toEqual([]);
+      expect(det.event).toBe('APPROVE');
+      expect(det.body).toContain(
+        `- \`packages/core/src/my-file.ts:42 (+2 locations) — [${source}] mutation survivor\``,
+      );
+    }
+  });
+
+  it('relocates a Critical entry into the body Criticals — never a throw, never deferred', () => {
+    // The entry is a Critical by its own field, so it counts toward C, the
+    // event blocks, the round posts, and it rides the machine ledger ("the
+    // findings always ride" includes the mis-routed ones).
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        nit({
+          file: 'src/auth.ts',
+          line: 88,
+          severity: 'Critical',
+          title: 'auth bypass',
+        }),
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.deferredCount).toBe(0);
+    expect(r.body).toContain(
+      '**[Critical]** `src/auth.ts:88 — [review] auth bypass` _(relocated from the deferral channel',
+    );
+    expect(parseLedger(r.body)?.findings.some((f) => f.sev === 'C')).toBe(true);
+    // A relocation-only run (no floor echoed) incurs no licence cap — the
+    // licence keys on the post-split deferred list, and salvage is exactly
+    // the run relocation exists for.
+    expect(r.cappedBy).not.toContain('unlicensed-deferral');
+  });
+
+  it('a relocated Critical is classified by its source FIELD, never its title', () => {
+    // `source: 'review'` owes a verifier and caps `criticals-unverified`
+    // when none ran, whatever the title mentions; `source: 'test'` is
+    // pre-confirmed and blocks. Own case: the flagship relocation test's
+    // verify record in the shared dir would satisfy the very floor this
+    // proves.
+    const titled = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      deferredSuggestions: [
+        nit({
+          severity: 'Critical',
+          title: 'mishandles [test] configuration files',
+        }),
+      ],
+    });
+    expect(titled.cappedBy).toContain('criticals-unverified');
+    expect(titled.event).toBe('COMMENT');
+    const genuine = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      deferredSuggestions: [
+        nit({
+          severity: 'Critical',
+          source: 'test',
+          title: 'red on the merge',
+        }),
+      ],
+    });
+    expect(genuine.cappedBy).not.toContain('criticals-unverified');
+    expect(genuine.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('a relocated Critical is bounded like its deferred siblings — no unbounded feed into the body', () => {
+    // Round-9 finding: relocation bypassed the per-entry cap, the newline
+    // collapse, the surrogate trim and the Markdown neutralization that the
+    // deferred exit applies; twenty-five 4,000-char relocated titles would
+    // splice ~100 KB into the body and lose the review at GitHub's limit.
+    const r = composeReview(
+      base({
+        deferredSuggestions: [
+          nit({
+            severity: 'Critical',
+            title: `${'x'.repeat(4000)}\nsecond line @mention #123`,
+          }),
+        ],
+      }),
+    );
+    const bodyLine = r.body
+      .split('\n')
+      .find((l) => l.startsWith('**[Critical]**'))!;
+    // marker + backticked bounded line + relocation note: well under 4,000.
+    expect(bodyLine.length).toBeLessThan(400);
+    expect(bodyLine).toContain('…');
+    expect(bodyLine).not.toContain('\nsecond');
+    // Neutralized: the title rides inside a code span.
+    expect(bodyLine).toMatch(/\*\*\[Critical\]\*\* `a\.ts:1 — \[review\] x+…`/);
+  });
+
+  it('refuses a malformed entry — the channel that un-posts findings is not guessed at', () => {
+    const cases: Array<[unknown, RegExp]> = [
+      ['a.ts:1 — nit', /free-text entry is not accepted/],
+      [
+        { file: 'a.ts', source: 'review', severity: 'Suggestion' },
+        /non-empty file and title/,
+      ],
+      [
+        { file: 'a.ts', source: 'lint?', severity: 'Suggestion', title: 't' },
+        /source must be one of/,
+      ],
+      [
+        { file: 'a.ts', source: 'review', severity: 'Blocker', title: 't' },
+        /severity must be one of/,
+      ],
+      [
+        {
+          file: 'a.ts',
+          source: 'review',
+          severity: 'Nice to have',
+          title: 't',
+        },
+        /terminal-only findings are never deferred/,
+      ],
+      [
+        {
+          file: 'a.ts',
+          line: 0,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 't',
+        },
+        /line must be a positive integer/,
+      ],
+    ];
+    for (const [entry, re] of cases) {
+      expect(() =>
+        composeReview(base({ deferredSuggestions: [entry] as never })),
+      ).toThrow(re);
+    }
+    expect(() =>
+      composeReview(base({ deferredSuggestions: 'a.ts' as never })),
+    ).toThrow(/deferredSuggestions/);
+  });
+
+  it('caps — never refuses — deferrals the posture does not license', () => {
+    // The channel only ever removes findings from posting, so unlicensed
+    // shapes fail CLOSED but not FATAL: a thrown compose loses the whole
+    // round, Criticals included, and `prevRound` is a best-effort side-file
+    // read whose every failure mode returns 0 — a missing file at a true
+    // round 6 must degrade to a disclosed, capped verdict, never to no
+    // verdict at all. Every shape renders the list, discloses the missing
+    // licence, caps the event, and withholds the anchor.
+    const explicitOff = composeReview(
+      base({ severityFloor: 'suggestion', deferredSuggestions: [nit()] }),
+    );
+    expect(explicitOff.cappedBy).toContain('unlicensed-deferral');
+    expect(explicitOff.event).toBe('COMMENT');
+    expect(explicitOff.body).toContain('without a posture licence');
+    expect(explicitOff.body).toContain('- `a.ts:1 — [review] nit`');
+    // The opener may not certify what the ⚠️ clause retracts.
+    expect(explicitOff.body).not.toContain('no blockers');
+    expect(parseLedger(explicitOff.body)?.sha).toBeUndefined();
+    const round1Auto = composeReview(
+      base({ severityFloor: 'auto', deferredSuggestions: [nit()] }),
+    );
+    expect(round1Auto.cappedBy).toContain('unlicensed-deferral');
+    expect(verdictLine(round1Auto)).toContain(
+      'findings were deferred without a posture licence',
+    );
+    // An ABSENT floor beside a non-empty list is unlicensed too: the field
+    // ships in the same PR as the channel, so omission is fail-closed.
+    const absent = composeReview(base({ deferredSuggestions: [nit()] }));
+    expect(absent.cappedBy).toContain('unlicensed-deferral');
+    expect(absent.body).toContain('carried no recognisable `severityFloor`');
+    // And `auto` in the context-unavailable state: the round is unknowable.
+    const noContext = composeReview(
+      base({
+        severityFloor: 'auto',
+        contextUnavailable: true,
+        deferredSuggestions: [nit()],
+      }),
+    );
+    expect(noContext.cappedBy).toContain('unlicensed-deferral');
+    expect(noContext.body).toContain('context-unavailable');
+  });
+
+  it('an unrecognised severityFloor is unknown — never a throw', () => {
+    // A model-transcribed drift ("Critical", "auto ", "") on an ordinary
+    // zero-deferral round must not lose the WHOLE composed round over a
+    // field that changes no output. Unknown folds into the absent state:
+    // unlicensed (capped, disclosed) with a list, inert without one.
+    // Trimmed/cased spellings of the three legal values still resolve.
+    const withList = composeReview(
+      base({ severityFloor: 'blocker' as never, deferredSuggestions: [nit()] }),
+    );
+    expect(withList.cappedBy).toContain('unlicensed-deferral');
+    const inert = composeReview(base({ severityFloor: 'blocker' as never }));
+    expect(inert.event).toBe('APPROVE');
+    expect(inert.cappedBy).toEqual([]);
+    const cased = composeReview(
+      base({
+        severityFloor: ' Critical ' as never,
+        deferredSuggestions: [nit()],
+      }),
+    );
+    expect(cased.cappedBy).toEqual([]);
+    expect(cased.deferredCount).toBe(1);
+  });
+
+  it('auto with a recovered previous round licenses the age-rule deferral', () => {
+    // The state carries `auto` unresolved and the module licenses it by the
+    // round it derives itself — this pins the legal rounds-2-5 shape end to
+    // end (a round-resolved `suggestion` would have been refused as the
+    // operator's override — the shipped round-5 regression).
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, round: 2, findings: [] }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      deferredSuggestions: [nit({ title: 'aged-out nit' })],
+    });
+    expect(r.cappedBy).toEqual([]);
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('convergence posture (round 3, not a blocker)');
   });
 });
 
