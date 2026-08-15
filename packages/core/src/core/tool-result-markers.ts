@@ -44,6 +44,13 @@ export const DUPLICATE_PROVIDER_TOOL_CALL_PREFIX =
 export const SUPPRESSED_SIBLING_SKIP_PREFIX =
   "Skipped: this turn's structured_output contract took precedence as the terminal output.";
 
+/** Prefix the scheduler applies when a PostToolUse/PostToolBatch hook stops
+ * execution: the stop rewrites an already-settled response (whose
+ * executionStatus reflects the tool's real outcome, so it may be 'success'),
+ * so the rewrite must stay classifiable as a non-failure regardless of the
+ * hook's arbitrary stop-reason text. */
+export const HOOK_STOP_PREFIX = '[Execution stopped by hook] ';
+
 // Heads that must survive the tool-output batch budget: the finalizer's
 // `fitText` rewrites over-allocation error slots with a 'Tool output
 // truncated' header, which would otherwise strip every marker the
@@ -53,6 +60,7 @@ const PROTECTED_ERROR_HEADS: readonly string[] = [
   operationCancelledErrorMessage(TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE),
   operationCancelledErrorMessage(TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE),
   OPERATION_CANCELLED_PREFIX,
+  HOOK_STOP_PREFIX,
   PERMISSION_DECLINED_MESSAGE_PREFIX,
   DUPLICATE_PROVIDER_TOOL_CALL_PREFIX,
   SUPPRESSED_SIBLING_SKIP_PREFIX,

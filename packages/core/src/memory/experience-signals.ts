@@ -10,6 +10,7 @@ import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/geminiChat.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from '../core/plan-mode-entry-policy.js';
 import {
   DUPLICATE_PROVIDER_TOOL_CALL_PREFIX,
+  HOOK_STOP_PREFIX,
   OPERATION_CANCELLED_PREFIX,
   PERMISSION_DECLINED_MESSAGE_PREFIX,
   SUPPRESSED_SIBLING_SKIP_PREFIX,
@@ -70,6 +71,7 @@ function isFailedResponse(part: {
     // `false` would close a pending genuine-failure arc for the same tool.
     if (
       error.startsWith(OPERATION_CANCELLED_PREFIX) ||
+      error.startsWith(HOOK_STOP_PREFIX) ||
       error.startsWith(DUPLICATE_PROVIDER_TOOL_CALL_PREFIX) ||
       error === ORPHAN_TOOL_USE_REPAIR_REASON ||
       // Prefix match, not exact equality: PostToolBatch hooks can append

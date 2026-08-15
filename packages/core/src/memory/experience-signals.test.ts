@@ -14,6 +14,7 @@ import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/geminiChat.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from '../core/plan-mode-entry-policy.js';
 import {
   DUPLICATE_PROVIDER_TOOL_CALL_PREFIX,
+  HOOK_STOP_PREFIX,
   operationCancelledErrorMessage,
   PERMISSION_DECLINED_MESSAGE_PREFIX,
   SUPPRESSED_SIBLING_SKIP_PREFIX,
@@ -56,6 +57,8 @@ const NEUTRAL_ERRORS = [
   ['cancelled', operationCancelledErrorMessage('user abort')],
   ['orphan repair', ORPHAN_TOOL_USE_REPAIR_REASON],
   ['plan sibling', PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE],
+  ['hook stop (arbitrary reason)', `${HOOK_STOP_PREFIX}DLP policy violation`],
+  ['hook stop (default text)', `${HOOK_STOP_PREFIX}Execution stopped by hook`],
   [
     'permission declined',
     `${PERMISSION_DECLINED_MESSAGE_PREFIX} "write_file", but that permission was declined.`,

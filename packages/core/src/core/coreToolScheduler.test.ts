@@ -23,6 +23,7 @@ import type {
   ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { HOOK_STOP_PREFIX } from '../core/tool-result-markers.js';
 import {
   ApprovalMode,
   BaseDeclarativeTool,
@@ -5557,7 +5558,7 @@ describe('CoreToolScheduler', () => {
       expect(lastResponse?.['error']).toContain('halt');
       expect(lastResponse?.['error']).toContain('batch context');
       expect(lastCompletedCall.response.contentLength).toBe(
-        'halt'.length + 'batch context'.length + 2,
+        HOOK_STOP_PREFIX.length + 'halt'.length + 'batch context'.length + 2,
       );
       expect(lastCompletedCall.outcome).toBeUndefined();
     }
@@ -5665,7 +5666,9 @@ describe('CoreToolScheduler', () => {
           'executionStatus',
         );
       }
-      expect(completedCalls[0]?.response.error?.message).toBe('halt');
+      expect(completedCalls[0]?.response.error?.message).toBe(
+        `${HOOK_STOP_PREFIX}halt`,
+      );
     },
   );
 

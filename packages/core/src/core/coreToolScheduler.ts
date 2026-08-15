@@ -115,6 +115,7 @@ import {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
 } from './plan-mode-entry-policy.js';
 import {
+  HOOK_STOP_PREFIX,
   operationCancelledErrorMessage,
   PERMISSION_DECLINED_MESSAGE_PREFIX,
   TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
@@ -1185,7 +1186,7 @@ function withPostToolBatchStop(
   // when the replaced response had no executionStatus, omit it here too.
   const { executionStatus: _es, ...baseResponse } = createErrorResponse(
     lastCall.request,
-    new Error(stopReason),
+    new Error(`${HOOK_STOP_PREFIX}${stopReason}`),
     ToolErrorType.EXECUTION_DENIED,
     executionStatus ?? 'not_started',
   );
@@ -5136,7 +5137,7 @@ export class CoreToolScheduler {
               postHookResult.stopReason || 'Execution stopped by hook';
             const errorResponse = createErrorResponse(
               scheduledCall.request,
-              new Error(stopMessage),
+              new Error(`${HOOK_STOP_PREFIX}${stopMessage}`),
               ToolErrorType.EXECUTION_DENIED,
               executionStatus,
             );
