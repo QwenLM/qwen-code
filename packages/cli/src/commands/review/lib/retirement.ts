@@ -229,9 +229,23 @@ const SEVERITY_LINE_RE = /\*\*Severity:\*\*/;
  * filler between phrase and separator (`were found`, `were detected`, a
  * parenthesised scope) is capped and word-only apart from parentheses:
  * other markdown in between is a new sentence, not this receipt.
+ *
+ * The polarity guard reads the LINE the receipt matched on — the match
+ * itself, filler and clause included, plus any text before the phrase on
+ * that same line — and nothing else (#9213 on #9206). Scanning only the
+ * match's own prefix left a hedge BEFORE the phrase invisible (`I could
+ * not check everything, but no new issues — re-walked…` retired);
+ * scanning the WHOLE return would refuse an honest receipt beside an
+ * innocent `not re-reporting it` paragraph, so prose on any other line
+ * neither certifies nor contradicts. The marker vocabulary names the
+ * families the executed leak probes carried, and it has no last word —
+ * prose has no last hedge — so a marker it misses inside the receipt's
+ * line still fails toward RETIREMENT; that residue is stated in the
+ * marker comment rather than papered over, while every miss OUTSIDE the
+ * line now reads `unknown`, where everything in this module fails.
  */
 const DRY_RECEIPT_PHRASE =
-  '(?:\\bno (?:new )?(?:issues?|findings?|gaps?)[ \\w()]{0,32}?' +
+  '(?:\\bno (?:new )?(?:issues?|findings?|gaps?)[ \\w()]{0,32}' +
   '|未发现(?:新的?)?(?:问题|发现)' +
   '|无新的?(?:问题|发现)' +
   '|没有(?:发现)?(?:新的?)?问题)';
@@ -265,53 +279,73 @@ const CJK_RE = /[一-鿿]/g;
  * The clause the brief's own example receipt leaves AFTER its separator —
  * extracted with the same regex that parses receipts, so the two cannot
  * drift. Empty when the example ever stops matching its own parser, which
- * disables the parrot refusal rather than refuse every clause.
+ * disables the parrot refusal rather than refuse every clause. The
+ * lowercase copy is the parrot compare itself: the example clause starts
+ * lowercase because it continues the model receipt mid-sentence, and a
+ * parroting auditor opening it as a NEW sentence capitalizes it — no
+ * honest clause contains the model clause verbatim in any casing (#9213).
  */
 const EXAMPLE_RECEIPT_CLAUSE = (
   DRY_RECEIPT_RE.exec(REVERSE_AUDIT_EXAMPLE_RECEIPT)?.[1] ?? ''
 ).trim();
+const EXAMPLE_RECEIPT_CLAUSE_LC = EXAMPLE_RECEIPT_CLAUSE.toLowerCase();
 
 /**
- * A contrast word riding in the receipt's LEAD — the phrase's filler,
- * before any clause exists (`…found but only skimmed.`) — hedges the claim
- * itself. The clause-only test never sees the filler, so the lead is
- * tested separately; refusing there costs only receipts whose own claim
- * is hedged. Misjudging here fails the way everything in this module
- * fails — the receipt reads `unknown` and the chunk stays under audit.
+ * A contrast word riding in the receipt's LEAD — the phrase's filler and
+ * any same-line text before the phrase, before any clause exists
+ * (`…found though only skimmed.`) — hedges the claim itself. The clause
+ * test never sees the lead, so the lead is tested separately; refusing
+ * there costs only receipts whose own claim is hedged. Misjudging here
+ * fails the way everything in this module fails — the receipt reads
+ * `unknown` and the chunk stays under audit.
  */
-const CONTRAST_RE = /\b(?:but|however|although|except)\b|但是|不过|然而/i;
+const CONTRAST_RE =
+  /\b(?:but|however|although|except|though|yet|unfortunately)\b|但是|不过|然而|只是/i;
 
 /**
- * The polarity guard, read by its INVERTED burden instead of an
- * enumeration of contrast words (#9213 on #9206): prose has no last hedge
- * — `though`, `yet`, `unfortunately`, 只是 all sat outside the old list —
- * and every list gap failed toward RETIREMENT, the direction this module
- * declares impossible. So a clause carrying ANY negation or incapacity
- * marker contradicts the all-clear phrase however long and object-named
- * it is (`…found. I could not open the generated files` clears every
- * length floor on the admission's own words), and reads `unknown`; a
+ * The polarity guard's marker vocabulary (#9213 on #9206): a receipt's
+ * line carrying ANY negation, incapacity, or omission marker contradicts
+ * the all-clear phrase however long and object-named the clause is
+ * (`…found — I was unable to open the generated files` clears every
+ * length floor on the admission's own words) and reads `unknown`; a
  * contrast word WITHOUT one contradicts nothing — `…the list already
  * covered them, but I re-verified the readers` is the walk the receipt
- * claims, not a hedge. Both separator paths share the guard — a dash-led
- * hedge is the same shape — and a marker the list misses still fails the
- * way everything here fails, on the audit side.
+ * claims, not a hedge. The vocabulary names the marker families the
+ * executed leak probes carried — incapacity (`unable`), omission
+ * (`failed`, `skipped`, `unchecked`, `untested`), a shallow walk
+ * (`skimmed`), zh bare-不 (`打不开`) and 跳过 — with 不过 exempted as the
+ * pinned innocuous connective. The list has no last word, and the
+ * direction is stated rather than papered over: a marker it misses
+ * INSIDE the receipt's line still fails toward RETIREMENT; what the
+ * line-scoped domain closes is every hedge the old clause-only test
+ * never saw (hedges before the phrase, in the filler, riding a stripped
+ * phrase echo).
  */
 const NEGATION_MARKER_RE =
-  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|未|没|无法/i;
+  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened)\b|未|没|无法|跳过|不(?!过)/i;
 
 /**
  * The brief's own all-clear vocabulary — the exact shapes
- * `DRY_RECEIPT_PHRASE` names — restates the phrase inside the clause
- * (`no gaps:`, 未发现问题) instead of contradicting it. Stripped before
- * the marker test, so a walk narrated in the brief's own words is not
- * refused by the same marker that catches `could not open the files`; a
- * novel positive phrasing the strip misses still fails toward audit,
- * like every other refusal here.
+ * `DRY_RECEIPT_PHRASE` names — restates the phrase inside the receipt's
+ * line (`no gaps:`, 未发现问题) instead of contradicting it. Stripped
+ * before the marker test and the substance floor, so a walk narrated in
+ * the brief's own words is not refused by the same marker that catches
+ * `could not open the files`, and a clause made of echoed phrases cannot
+ * lend the floor its length (the filler rides along in the strip, greedy
+ * with the phrase's own). A novel positive phrasing the strip misses
+ * still fails toward audit, like every other refusal here.
  */
 const SATURATED_CLAUSE_RE = new RegExp(DRY_RECEIPT_PHRASE, 'gi');
 
-function contradictsThePhrase(clause: string): boolean {
-  return NEGATION_MARKER_RE.test(clause.replace(SATURATED_CLAUSE_RE, ' '));
+/**
+ * The polarity test over its DOMAIN — the line the receipt matched on,
+ * pre-match text included (see the class comment). Quoted spans are
+ * exempted first: a marker inside a quotation belongs to the quoted text,
+ * not to the auditor's claim.
+ */
+function contradictsThePhrase(domain: string): boolean {
+  const unquoted = domain.replace(/"[^"]*"|“[^”]*”/g, ' ');
+  return NEGATION_MARKER_RE.test(unquoted.replace(SATURATED_CLAUSE_RE, ' '));
 }
 
 /**
@@ -321,31 +355,35 @@ function contradictsThePhrase(clause: string): boolean {
  * (one character on the slash's left), neither is the conjunction "and/or":
  * a path has a second slash or a dotted extension. Otherwise ~20 flattened
  * characters, or a handful of ideographs, is the least that can name a
- * territory; "all good." can not. The brief's own example receipt is
- * refused outright, but only VERBATIM: a clause containing the example's
- * whole clause reads as the parrot it is, while real parroting is partial
- * — the shape and a phrase or two — and a partial echo passes this check;
- * what catches that is the rest of the dry bar (the territory read, the
- * substance floor). This refusal closes the cheapest path: the exact
- * sentence every auditor is handed. BESIDE the substance floor sit the two
- * polarity refusals: a contrast word in the receipt's lead (a hedge on the
- * claim itself) and a clause that contradicts the phrase. Misjudging here
- * fails the way everything in this module fails — the receipt reads
+ * territory; "all good." can not — and the floor measures the
+ * phrase-STRIPPED clause, so echoed phrases cannot lend it their length
+ * (#9213). The brief's own example receipt is refused outright, in ANY
+ * casing: a clause containing the example's whole clause reads as the
+ * parrot it is, while real parroting is partial — the shape and a phrase
+ * or two — and a partial echo passes this check; what catches that is the
+ * rest of the dry bar (the territory read, the substance floor). This
+ * refusal closes the cheapest path: the exact sentence every auditor is
+ * handed. BESIDE the substance floor sit the two polarity refusals in
+ * `classifyReturn`: a contrast word in the receipt's lead (a hedge on the
+ * claim itself) and the marker test over the receipt's line. Misjudging
+ * here fails the way everything in this module fails — the receipt reads
  * `unknown` and the chunk stays under audit.
  */
-function substantiveClause(clause: string, lead: string): boolean {
+function substantiveClause(clause: string): boolean {
   const c = clause.replace(/\s+/g, ' ').trim();
   if (c.length === 0) return false;
-  if (CONTRAST_RE.test(lead)) return false;
-  if (contradictsThePhrase(c)) return false;
-  if (EXAMPLE_RECEIPT_CLAUSE.length > 0 && c.includes(EXAMPLE_RECEIPT_CLAUSE)) {
+  if (
+    EXAMPLE_RECEIPT_CLAUSE_LC.length > 0 &&
+    c.toLowerCase().includes(EXAMPLE_RECEIPT_CLAUSE_LC)
+  ) {
     return false;
   }
-  if (/`[^`]+`/.test(c)) return true;
-  if (/\w[\w.-]+\/[\w.$-]+\/\w/.test(c)) return true;
-  if (/\w[\w.-]+\/[\w$-]+\.\w+/.test(c)) return true;
-  if ((c.match(CJK_RE) ?? []).length >= 4) return true;
-  return c.length >= 20;
+  const stripped = c.replace(SATURATED_CLAUSE_RE, ' ').trim();
+  if (/`[^`]+`/.test(stripped)) return true;
+  if (/\w[\w.-]+\/[\w.$-]+\/\w/.test(stripped)) return true;
+  if (/\w[\w.-]+\/[\w$-]+\.\w+/.test(stripped)) return true;
+  if ((stripped.match(CJK_RE) ?? []).length >= 4) return true;
+  return stripped.length >= 20;
 }
 
 /**
@@ -467,11 +505,22 @@ function classifyReturn(
   const judgedClause =
     inlineGap === null ? clause : clause.slice(0, inlineGap.index);
   // Everything of the match BEFORE the clause capture — phrase, filler,
-  // separator: the polarity guard's lead side (see CONTRAST_RE).
+  // separator: the CONTRAST_RE side of the polarity guard.
   const lead =
     receipt === null
       ? ''
       : receipt[0].slice(0, receipt[0].length - clause.length);
+  // The polarity guard's DOMAIN: the line the receipt matched on — any
+  // same-line text before the phrase, then the match with its clause cut
+  // at the inline disclosure like the clause itself (#9213 on #9206). A
+  // hedge BEFORE the phrase contradicts the claim exactly as one inside
+  // the clause does; prose on any other line is not the receipt's.
+  const lineStart =
+    receipt === null ? 0 : judged.lastIndexOf('\n', receipt.index - 1) + 1;
+  const polarityDomain =
+    receipt === null
+      ? ''
+      : judged.slice(lineStart, receipt.index) + lead + judgedClause;
   const unknown = (failure: CertificationFailure): Classification => ({
     outcome: 'unknown',
     failure,
@@ -481,7 +530,11 @@ function classifyReturn(
   if (!openedTheTerritory(rec.diffReads, territory))
     return unknown('territory read missing');
   if (receipt === null) return unknown('receipt not matched');
-  if (!substantiveClause(judgedClause, lead))
+  if (CONTRAST_RE.test(judged.slice(lineStart, receipt.index) + lead))
+    return unknown('receipt clause not substantive');
+  if (contradictsThePhrase(polarityDomain))
+    return unknown('receipt clause not substantive');
+  if (!substantiveClause(judgedClause))
     return unknown('receipt clause not substantive');
   return { outcome: 'dry', failure: null };
 }

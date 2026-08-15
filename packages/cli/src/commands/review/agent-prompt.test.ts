@@ -3701,7 +3701,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
 
     runRound(3);
 
-    const err = (writeStderrLine as unknown as Mock).mock.calls
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
       .map((c) => c[0])
       .join('\n');
     expect(err).toContain('reverse-audit retirement certified nothing');
@@ -3723,7 +3723,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     const out = runRound(3);
 
     expect(out).toContain('3 auditors required this round — one per chunk.');
-    const err = (writeStderrLine as unknown as Mock).mock.calls
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
       .map((c) => c[0])
       .join('\n');
     expect(err).toContain('reverse-audit retirement unavailable this round');
@@ -4330,7 +4330,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     });
 
     expect(process.exitCode).toBeUndefined();
-    const err = (writeStderrLine as unknown as Mock).mock.calls
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
       .map((c) => c[0])
       .join('\n');
     expect(err).toContain('reverse-audit retirement certified nothing');
@@ -4373,7 +4373,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       chunk: 13,
       round: 3,
     });
-    let err = (writeStderrLine as unknown as Mock).mock.calls
+    let err = (writeStderrLineSafe as unknown as Mock).mock.calls
       .map((c) => String(c[0]))
       .join('\n');
     expect(err).toContain(
@@ -4393,7 +4393,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       round: 3,
     });
     expect(process.exitCode).toBeUndefined();
-    err = (writeStderrLine as unknown as Mock).mock.calls
+    err = (writeStderrLineSafe as unknown as Mock).mock.calls
       .map((c) => String(c[0]))
       .join('\n');
     expect(err).toContain('reverse-audit retirement certified nothing');
@@ -4427,7 +4427,7 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     });
 
     expect(process.exitCode).toBeUndefined();
-    const err = (writeStderrLine as unknown as Mock).mock.calls
+    const err = (writeStderrLineSafe as unknown as Mock).mock.calls
       .map((c) => c[0])
       .join('\n');
     expect(err).toContain('reverse-audit retirement unavailable this round');
@@ -4437,6 +4437,79 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(out).toContain('You are review agent');
     expect(keysOf(3)).toHaveLength(1);
+  });
+
+  it('a throwing stderr cannot zero the round — the schedule catch NOTE writes safe (#9213)', () => {
+    // EPIPE model: process.stderr.write throws (a headless retry whose
+    // stderr is redirected or closed — the very #9206 shape this loop
+    // serves). The catch's NOTE is informational on the CONTINUING build
+    // path; a throw out of it destroys the round that must audit every
+    // chunk, against the catch's own rationale.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLine as unknown as Mock).mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    try {
+      const out = runRound(3);
+      expect(out).toContain(
+        '3 auditors required this round \u2014 one per chunk.',
+      );
+      expect(keysOf(3)).toHaveLength(3);
+    } finally {
+      (writeStderrLine as unknown as Mock).mockReset();
+    }
+  });
+
+  it('a throwing stderr cannot zero the round — the uncertified-chunks NOTE writes safe (#9213)', () => {
+    // Diagnostics non-empty on the admission build: noteUncertifiedChunks
+    // prints with no try around it, before the budget gate. A throw out of
+    // it abandons the round in the exact never-retire shape the note
+    // exists to name.
+    answerRound(1, { 13: null, 14: null, 15: null });
+    answerRound(2, { 13: null, 14: null, 15: null });
+    (writeStderrLine as unknown as Mock).mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    try {
+      const out = runRound(3);
+      expect(out).toContain(
+        '3 auditors required this round \u2014 one per chunk.',
+      );
+      expect(keysOf(3)).toHaveLength(3);
+    } finally {
+      (writeStderrLine as unknown as Mock).mockReset();
+    }
+  });
+
+  it('a throwing stderr cannot refuse the per-chunk build either (#9213)', () => {
+    // The per-chunk twin of the catch NOTE: the same continuing path —
+    // the chunk still builds when stderr is gone.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    (writeStderrLine as unknown as Mock).mockImplementation(() => {
+      throw new Error('write EPIPE');
+    });
+    try {
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        findings,
+        chunk: 13,
+        round: 3,
+      });
+      expect(process.exitCode).toBeUndefined();
+      const out = (writeStdoutLine as unknown as Mock).mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(out).toContain('You are review agent');
+      expect(keysOf(3)).toHaveLength(1);
+    } finally {
+      (writeStderrLine as unknown as Mock).mockReset();
+    }
   });
 });
 

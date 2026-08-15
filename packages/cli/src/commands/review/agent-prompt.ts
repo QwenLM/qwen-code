@@ -41,7 +41,11 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import { launchToolBudget, reverseAuditRoundCap } from './lib/budget.js';
 import {
   clearBudgetStop,
@@ -1996,11 +2000,13 @@ function refuseConverged(planPath: string): void {
  * shared by the round builder and the per-chunk rebuild path so the two
  * cannot drift on the spelling. `diagnostics` is already narrowed to the
  * chunk(s) this build covers; stdout stays the deliverable the orchestrator
- * pastes.
+ * pastes. The write is incidental to the work in hand — the Safe writer,
+ * matching `writeFindingsFile`: a throw on a closed stderr here would
+ * abandon the very round the note exists to name (#9213).
  */
 function noteUncertifiedChunks(planPath: string, diagnostics: string[]): void {
   if (diagnostics.length === 0) return;
-  writeStderrLine(
+  writeStderrLineSafe(
     `NOTE: reverse-audit retirement certified nothing for ` +
       `${diagnostics.length} twice-audited chunk(s) — they stay under ` +
       `audit (the safe direction), but a chunk that looks dry and never ` +
@@ -2058,7 +2064,7 @@ function runAllChunks(
       // (#9206): a schedule that dies here retires nothing for the rest of
       // the run, and the round's own output is where the reader can see it.
       schedule = null;
-      writeStderrLine(
+      writeStderrLineSafe(
         `NOTE: reverse-audit retirement unavailable this round — ` +
           `${(err as Error).message ?? String(err)} — auditing every chunk.`,
       );
@@ -2591,7 +2597,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
         // and a repair stays the clean rebuild its exemption promises.
         schedule = null;
         if (!roundAdmitted) {
-          writeStderrLine(
+          writeStderrLineSafe(
             `NOTE: reverse-audit retirement unavailable this round — ` +
               `${(err as Error).message ?? String(err)} — auditing the chunk.`,
           );

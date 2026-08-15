@@ -760,6 +760,69 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.skipped).toEqual([]);
   });
 
+  it.each([
+    [
+      'an incapacity admission with no listed marker (unable)',
+      'No issues found — I was unable to open the generated files.',
+    ],
+    [
+      'an omission admission with no listed marker (failed)',
+      'No issues found — I failed to check them.',
+    ],
+    [
+      'an omission admission with no listed marker (skipped)',
+      'No issues found — I skipped the generated files.',
+    ],
+    [
+      'an omission admission with no listed marker (unchecked)',
+      'No issues found — left them unchecked.',
+    ],
+    [
+      'a Chinese bare-不 incapacity admission',
+      '未发现问题——打不开生成的文件。',
+    ],
+    ['a Chinese omission verb (跳过)', '未发现问题——跳过了生成的文件。'],
+    [
+      'a marker riding inside a phrase echo the strip removes',
+      'No issues found — no issues, left them unchecked.',
+    ],
+    [
+      'a clause whose substance is only echoed phrases',
+      'No issues found — no issues found, no issues found, no issues ' +
+        'found.',
+    ],
+    [
+      'a hedge BEFORE the phrase on the same line',
+      'I could not check everything, but no new issues — re-walked the ' +
+        "retry cap and both changed exports' call sites.",
+    ],
+    [
+      'a filler hedge the contrast list does not name (dash path)',
+      'No issues found though only skimmed — re-walked the retry cap and ' +
+        "both changed exports' call sites.",
+    ],
+    [
+      'a filler hedge the contrast list does not name (anchored path)',
+      'No new issues found though only skimmed. Re-walked the retry cap ' +
+        "and both changed exports' call sites.",
+    ],
+  ])('an executed leak family is refused: %s (#9213)', (_label, leaked) => {
+    // The six leak families executed against the real scheduler (#9213
+    // on #9206): incapacity/omission admissions carrying no listed
+    // marker, zh bare-不 and 跳过, a marker lost to the saturation
+    // strip, phrase echoes lending the floor their substance, a hedge
+    // BEFORE the phrase the guard never saw, and filler hedges the
+    // contrast list does not name on both separator paths. Every one
+    // read dry twice and retired the chunk — the direction this module
+    // declares impossible.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), leaked);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), leaked);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
   it('an innocuous "but" does not block retirement — only a hedge does (#9213)', () => {
     // The clause-contrast refusal used to reject ANY occurrence of a
     // contrast word, so the commonest honest connective — "already in the
@@ -999,6 +1062,57 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     );
 
     expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a case-shifted echo of the example receipt is not dry either (#9213)', () => {
+    // The example clause starts lowercase because it continues the model
+    // receipt mid-sentence; the widened sentence-punctuation separators
+    // let a parroting auditor open it as a NEW sentence — capitalized —
+    // and the case-sensitive compare never saw it. No honest clause
+    // contains the model clause verbatim in any casing.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      'No issues found. Re-walked the reconnect state machine and the ' +
+        "two changed exports' call sites; every gap I checked was " +
+        'already in the list',
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a doubled stock sentence is not dry — an echo cannot lend the floor its substance (#9213)', () => {
+    // The stock sentence pasted twice: the parrot refusal sees the model
+    // clause in any casing, and whatever the parrot misses the substance
+    // floor measures on the phrase-STRIPPED clause, so echoed phrases
+    // cannot lend the floor their length.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(
+      record(2, 13, 'chunk 13 round 2 territory walk'),
+      'No issues found. Re-walked the reconnect state machine and the ' +
+        "two changed exports' call sites; every gap I checked was " +
+        'already in the list. No issues found. Re-walked the reconnect ' +
+        "state machine and the two changed exports' call sites; every " +
+        'gap I checked was already in the list',
+    );
+
+    expect(schedule(3, [13]).due).toEqual([13]);
+  });
+
+  it('a quoted marker inside an honest clause does not contradict the phrase (#9213)', () => {
+    // The polarity domain exempts quoted spans: an auditor naming a check
+    // by its quoted label does not contradict the phrase on the marker
+    // inside the quotation. Misjudging here could only fail toward audit.
+    const receipt =
+      'No issues found — the "could not reproduce" note was already ' +
+      "known; re-walked the retry cap and both changed exports' call " +
+      'sites.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
   });
 
   it('a stray backtick is not a named object — only an enclosed span is', () => {
