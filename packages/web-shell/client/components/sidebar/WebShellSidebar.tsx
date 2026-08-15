@@ -586,11 +586,13 @@ function SidebarSessionSurface({
 }) {
   const closeTimerRef = useRef<number | undefined>(undefined);
   const pointerOpenRef = useRef(false);
+  const focusInsideSurfaceRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const changeOpen = useCallback(
     (nextOpen: boolean) => {
       if (!nextOpen && isCloseBlocked()) return;
+      if (nextOpen) focusInsideSurfaceRef.current = false;
       onOpenChange(nextOpen);
     },
     [isCloseBlocked, onOpenChange],
@@ -694,6 +696,9 @@ function SidebarSessionSurface({
           align="start"
           sideOffset={8}
           collisionPadding={8}
+          onFocus={() => {
+            focusInsideSurfaceRef.current = true;
+          }}
           className={styles.collapsedSessionPopover}
           style={
             {
@@ -705,8 +710,17 @@ function SidebarSessionSurface({
             if (pointerOpenRef.current) event.preventDefault();
           }}
           onCloseAutoFocus={(event) => {
-            if (pointerOpenRef.current) event.preventDefault();
+            // Suppress Radix's focus restoration only while focus stayed
+            // outside a pointer-opened surface; once focus has moved into
+            // the content (search, rename), closing must return it to the
+            // trigger like a keyboard-opened surface. Radix fires this
+            // after the content unmounts, so the flag is tracked while the
+            // surface is open instead of probed from document.activeElement.
+            if (pointerOpenRef.current && !focusInsideSurfaceRef.current) {
+              event.preventDefault();
+            }
             pointerOpenRef.current = false;
+            focusInsideSurfaceRef.current = false;
           }}
           onPointerEnter={cancelClose}
           onPointerLeave={closeAfterDelay}
@@ -950,6 +964,9 @@ export function WebShellSidebar({
   const [editingSession, setEditingSession] =
     useState<DaemonSessionSummary | null>(null);
   const [editingName, setEditingName] = useState('');
+  // Mirrors editingSessionIdentity for promise callbacks that outlive the
+  // render where the rename started.
+  const editingSessionIdentityRef = useRef<string | null>(null);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -1723,20 +1740,6 @@ export function WebShellSidebar({
     return () => window.removeEventListener('resize', handleWindowResize);
   }, []);
 
-  useEffect(() => {
-    if (!collapsed) {
-      setCollapsedSessionsOpen(false);
-    } else if (!collapsedSessionsOpen) {
-      // A stale open search would otherwise mount its autofocused input
-      // inside the collapsed hover popover and steal focus from the
-      // composer on every hover-open, so reset it whenever the collapsed
-      // surface is not showing (sidebar collapse, session click, hover-out,
-      // or dismissal).
-      setSearchOpen(false);
-      setSearchQuery('');
-    }
-  }, [collapsed, collapsedSessionsOpen]);
-
   const hasRunningSession = useMemo(
     () => sessions.some((session) => session.hasActivePrompt),
     [sessions],
@@ -2100,8 +2103,10 @@ export function WebShellSidebar({
   const startRename = useCallback(
     (session: DaemonSessionSummary) => {
       if (!canRenameSession(session)) return;
+      const identity = getIdentityForSession(session);
       setEditingSession(session);
-      setEditingSessionIdentity(getIdentityForSession(session));
+      setEditingSessionIdentity(identity);
+      editingSessionIdentityRef.current = identity;
       setEditingName(getSessionLabel(session));
     },
     [canRenameSession, getIdentityForSession],
@@ -2110,6 +2115,7 @@ export function WebShellSidebar({
   const cancelRename = useCallback(() => {
     setEditingSession(null);
     setEditingSessionIdentity(null);
+    editingSessionIdentityRef.current = null;
     setEditingName('');
   }, []);
 
@@ -2118,6 +2124,22 @@ export function WebShellSidebar({
       cancelRename();
     }
   }, [canRenameSession, cancelRename, editingSession]);
+
+  useEffect(() => {
+    if (!collapsed) {
+      setCollapsedSessionsOpen(false);
+    } else if (!collapsedSessionsOpen) {
+      // A stale open search or rename editor would otherwise mount its
+      // autofocused input inside the collapsed hover popover and steal
+      // focus from the composer on every hover-open, so reset it whenever
+      // the collapsed surface is not showing (sidebar collapse, session
+      // click, hover-out, or dismissal). Radix's outside-interaction
+      // dismissal unmounts a focused input without firing blur.
+      setSearchOpen(false);
+      setSearchQuery('');
+      cancelRename();
+    }
+  }, [cancelRename, collapsed, collapsedSessionsOpen]);
 
   const saveRename = useCallback(() => {
     const nextName = editingName.trim();
@@ -2168,12 +2190,18 @@ export function WebShellSidebar({
             );
           }
         }
-        cancelRename();
+        // A late settle must not close an editor the user moved to another
+        // session with while this request was in flight.
+        if (editingSessionIdentityRef.current === sessionIdentity) {
+          cancelRename();
+        }
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => {
         onError(err, t('sidebar.renameFailed'));
-        cancelRename();
+        if (editingSessionIdentityRef.current === sessionIdentity) {
+          cancelRename();
+        }
       })
       .finally(() => {
         if (!renamed && workspaceCwd) {
@@ -3474,6 +3502,7 @@ export function WebShellSidebar({
           onMouseEnter={(event) =>
             measureSessionTitleScroll(event.currentTarget)
           }
+          onFocus={(event) => measureSessionTitleScroll(event.currentTarget)}
           role="button"
           tabIndex={0}
           aria-current={isCurrent ? 'page' : undefined}
@@ -4671,6 +4700,7 @@ export function WebShellSidebar({
                 sourceType={selectedSessionSource}
                 channelGroupingEnabled={channelGroupingEnabled}
                 ungroupedLabel={t('sidebar.groupUngrouped')}
+                excludePinned={selectedSessionSource !== 'channel'}
                 autoExpandKey={
                   autoExpandWorkspace?.id === ws.id
                     ? autoExpandWorkspace.key

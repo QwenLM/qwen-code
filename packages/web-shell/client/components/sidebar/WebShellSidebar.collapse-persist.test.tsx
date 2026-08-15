@@ -1057,4 +1057,151 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     // Focus must return to the trigger, not drop to the body.
     expect(document.activeElement).toBe(trigger);
   });
+
+  it('restores focus to the trigger when a pointer-opened switcher closes with focus inside', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(switcher?.dataset.state).toBe('open');
+    const searchButton = switcher!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.focus();
+    });
+    expect(document.activeElement).toBe(searchButton);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    // Radix dispatches the close-time focus restoration from a 0ms timer.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const closed = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(closed === null || closed.dataset.state === 'closed').toBe(true);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('cancels an in-flight rename when the collapsed switcher is dismissed', async () => {
+    connection.sessionId = 'session-a';
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(switcher).not.toBeNull();
+    const moreActions = Array.from(
+      switcher!.querySelectorAll<HTMLButtonElement>(
+        'button[aria-label="More actions"]',
+      ),
+    ).find((button) =>
+      button
+        .closest<HTMLElement>('[role="button"]')
+        ?.textContent?.includes('API review'),
+    );
+    expect(moreActions).not.toBeNull();
+    act(() => {
+      moreActions!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+
+    const renameItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.includes('Rename'));
+    expect(renameItem).toBeDefined();
+    act(() => {
+      renameItem!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      renameItem!.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true }),
+      );
+      renameItem!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    const input = switcher!.querySelector<HTMLInputElement>('input');
+    expect(input).not.toBeNull();
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'xy');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // An outside pointer press dismisses the popover; the focused input
+    // unmounts without a blur event, so the dismissal itself must cancel
+    // the rename.
+    // Radix re-registers its document pointerdown listener through a 0ms
+    // timer whenever the dismissable-layer stack changes (the session menu
+    // above just unmounted); let it settle before the outside interaction.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    act(() => {
+      document.body.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      document.body.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true }),
+      );
+      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await flushSidebar();
+    expect(
+      document.querySelector('[data-web-shell-collapsed-session-switcher]'),
+    ).toBeNull();
+
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    const reopened = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(reopened).not.toBeNull();
+    expect(reopened!.querySelector('input')).toBeNull();
+  });
 });

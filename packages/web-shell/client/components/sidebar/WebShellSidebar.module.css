@@ -686,6 +686,7 @@
 }
 
 .collapsedSessionPopover {
+  overscroll-behavior: contain;
   width: min(
     var(--collapsed-session-popover-width, 260px),
     var(--radix-popover-content-available-width, 420px)
@@ -697,6 +698,7 @@
   gap: 0;
   padding: 8px;
   overflow-y: auto;
+  touch-action: pan-y;
 }
 
 .currentSession {
@@ -848,6 +850,11 @@
 
 .sessionRow:hover .sessionTextInner {
   animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 1s
+    linear forwards;
+}
+
+.sessionRow:focus-within .sessionTextInner {
+  animation: sessionTitleScroll var(--session-title-scroll-duration, 0s) 0.3s
     linear forwards;
 }
 
@@ -1019,7 +1026,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sessionRow:hover .sessionTextInner {
+  .sessionRow:hover .sessionTextInner,
+  .sessionRow:focus-within .sessionTextInner {
     animation: none;
   }
 }

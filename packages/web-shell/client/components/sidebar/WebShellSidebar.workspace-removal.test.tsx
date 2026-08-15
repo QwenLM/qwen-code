@@ -1592,6 +1592,7 @@ describe('WebShellSidebar workspace removal', () => {
         'Delete',
       ]),
     );
+    expect(normalItems).not.toContain('Details');
 
     expect(inlineSessionAction('Configured pinned', 'Unpin')).toBeDefined();
     expect(inlineSessionAction('Configured pinned', 'Archive')).toBeUndefined();
@@ -1611,6 +1612,7 @@ describe('WebShellSidebar workspace removal', () => {
     );
     expect(archivedItems).not.toContain('Pin');
     expect(archivedItems).not.toContain('Group');
+    expect(archivedItems).not.toContain('Details');
   });
 
   it('renders locked normal, pinned, and archived rows action-free when no items are configured', async () => {
@@ -2334,6 +2336,79 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(sessionActions.renameSession).not.toHaveBeenCalled();
     expect(onLoadSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the next rename editor when an earlier rename settles late', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      {
+        sessionId: 'current-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Current session',
+      },
+      {
+        sessionId: 'first-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'First session',
+      },
+      {
+        sessionId: 'second-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Second session',
+      },
+    );
+    let resolveFirstRename!: (value: unknown) => void;
+    updateSessionMetadata
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirstRename = resolve;
+          }),
+      )
+      .mockResolvedValue({});
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await expandWorkspace('project');
+
+    await act(async () => {
+      click(inlineSessionAction('First session', 'Rename')!);
+      await Promise.resolve();
+    });
+    const firstInput = container.querySelector<HTMLInputElement>('input');
+    expect(firstInput).not.toBeNull();
+    await act(async () => {
+      setInputValue(firstInput!, 'First renamed');
+      firstInput!
+        .closest('form')
+        ?.dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      await Promise.resolve();
+    });
+    expect(updateSessionMetadata).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      click(inlineSessionAction('Second session', 'Rename')!);
+      await Promise.resolve();
+    });
+    const secondInput = container.querySelector<HTMLInputElement>('input');
+    expect(secondInput).not.toBeNull();
+    await act(async () => {
+      setInputValue(secondInput!, 'Second renamed');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      resolveFirstRename({ displayName: 'First renamed' });
+      await updateSessionMetadata.mock.results[0]?.value;
+      await Promise.resolve();
+    });
+
+    const survivor = container.querySelector<HTMLInputElement>('input');
+    expect(survivor).not.toBeNull();
+    expect(survivor!.value).toBe('Second renamed');
   });
 
   it('keeps a persisted workspace collapse when sections remount', async () => {
@@ -4309,6 +4384,65 @@ describe('WebShellSidebar Live group', () => {
       liveWorkspace.cwd,
       expect.objectContaining({ archiveState: 'active' }),
     );
+  });
+});
+
+describe('WebShellSidebar pinned live session rows', () => {
+  async function settle(): Promise<void> {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it('renders a pinned session that is live in a trusted workspace once', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      displayName: 'Conversations',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd, options) => {
+      if (cwd !== liveWorkspace.cwd) return [];
+      const session = {
+        sessionId: 'live-pinned',
+        workspaceCwd: cwd,
+        displayName: 'Live pinned',
+        isPinned: true,
+      };
+      if (options?.group === 'pinned') return [session];
+      if (options?.archiveState === 'active') return [session];
+      return [];
+    });
+
+    renderSidebar({
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await settle();
+    await expandWorkspace('Live');
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).filter((row) => row.textContent?.includes('Live pinned'));
+    expect(rows).toHaveLength(1);
+
+    const rename = inlineSessionAction('Live pinned', 'Rename');
+    expect(rename?.disabled).toBe(false);
+    await act(async () => {
+      click(rename!);
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelectorAll('form[class*="renameForm"]'),
+    ).toHaveLength(1);
   });
 });
 
