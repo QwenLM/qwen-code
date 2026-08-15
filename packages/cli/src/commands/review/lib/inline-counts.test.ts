@@ -20,6 +20,9 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     expect(stripSeverityPrefix('  **[Critical]** broken')).toBe('broken');
     // The ledger's title extraction tolerates a colon after the marker.
     expect(stripSeverityPrefix('**[Critical]**: broken')).toBe('broken');
+    // The full-width colon is the same looping/truncated marker shape in a
+    // Chinese-context draft — every sibling parser admits both widths.
+    expect(stripSeverityPrefix('**[Critical]**： broken')).toBe('broken');
   });
 
   it('leaves an unmarked body alone', () => {
@@ -56,6 +59,11 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     expect(stripSeverityPrefix('**[Critical]**')).toBe('');
     expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe('');
     expect(stripSeverityPrefix('**[Critical]** **[Suggestion]**')).toBe('');
+    // Trailing render-nothing residue is still marker-only: `.trim()` sees
+    // neither Cf characters nor HTML comments.
+    expect(stripSeverityPrefix('**[Critical]**\u200B')).toBe('');
+    expect(stripSeverityPrefix('**[Critical]**<!-- x -->')).toBe('');
+    expect(stripSeverityPrefix('**[Critical]** <!-- x --> \u200B')).toBe('');
   });
 });
 

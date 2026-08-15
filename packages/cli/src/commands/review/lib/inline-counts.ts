@@ -26,14 +26,25 @@ export interface DraftedComment {
   body?: unknown;
 }
 
+// Render-nothing residue: whitespace, HTML comments, and Cf runs — what
+// the render-nothing projection already removes. Invisible BETWEEN stacked
+// markers on the rendered post, so the strip iteration skips it when
+// re-classifying; otherwise it hides the second marker from the classifier
+// and the loop converges with a bare machine marker intact. Stated once:
+// the leading strip, the marker-only test, and the ledger's title read all
+// project this same shape.
+const INVISIBLE_RESIDUE = String.raw`(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})`;
+
+/** Leading residue — stripped before classifying and re-stripping. */
+export const LEADING_INVISIBLE_RE = new RegExp(`^${INVISIBLE_RESIDUE}+`, 'u');
+
 /**
- * Leading render-nothing residue: whitespace, HTML comments, and Cf runs —
- * what the render-nothing projection already removes. Invisible BETWEEN
- * stacked markers on the rendered post, so the strip iteration skips it
- * when re-classifying; otherwise it hides the second marker from the
- * classifier and the loop converges with a bare machine marker intact.
+ * The marker-only test's projection: every residue token swept out,
+ * globally. A `^…*$` quantification would NOT do — under the end anchor
+ * the unterminated-comment alternative backtracks and swallows visible
+ * text to reach `$`, reading `<!-- x -->text` as residue-only.
  */
-const LEADING_INVISIBLE_RE = /^(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})+/u;
+const ALL_INVISIBLE_RE = new RegExp(INVISIBLE_RESIDUE, 'gu');
 
 /**
  * Which severity marker a drafted comment opens with — or null for neither.
@@ -98,8 +109,8 @@ export function stripSeverityPrefix(body: string): string {
     const rest = visible
       .trimStart()
       .slice(prefix.length)
-      .replace(/^[ \t]*:?[ \t]*/, '');
-    if (rest.trim() === '') return '';
+      .replace(/^[ \t]*[:：]?[ \t]*/, '');
+    if (rest.replace(ALL_INVISIBLE_RE, '') === '') return '';
     current = rest;
   }
 }

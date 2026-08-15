@@ -686,6 +686,33 @@ describe('composeReview — the C/S table', () => {
     ).toThrow(/renders as nothing/);
   });
 
+  it('refuses an entry whose lines are code-fence delimiters', () => {
+    // Collapsed onto one line, a tilde fence becomes `~~~ code ~~~` —
+    // CommonMark reads a line starting `~~~` as an OPENING fence whose
+    // info string is the rest of the line, and the unclosed fence then
+    // swallows every later body part. A backtick pair degrades to an
+    // inline code span, but a truncated or info-bearing backtick opener
+    // breaks the same way — no fence survives the collapse, so the draft
+    // fails while it is still cheap to fix.
+    expect(() =>
+      composeReview(
+        base({ bodyCriticals: ['~~~\nconst x = await db.query()\n~~~'] }),
+        '0.21.2',
+        false,
+      ),
+    ).toThrow(/code fence/);
+    expect(() =>
+      composeReview(base({ bodyCriticals: ['```js\nconst x = 1\n```'] })),
+    ).toThrow(/code fence/);
+    expect(() =>
+      composeReview(
+        base({
+          cannotTellCriticals: ['comment 1 (a.ts) — quoted\n~~~\ncode\n~~~'],
+        }),
+      ),
+    ).toThrow(/code fence/);
+  });
+
   it('attribution off: a same-line footer span and a blockquoted forged footer both strip', () => {
     const off = composeReview(
       base({
@@ -4416,6 +4443,26 @@ describe('buildLedger', () => {
       [],
     );
     expect(l.findings.map((f) => f.id)).toEqual(['R1-1', 'R2-1']);
+  });
+
+  it('reads a carried id through render-nothing residue after the marker', () => {
+    // A looping draft can leave an invisible comment or Cf run between the
+    // marker and the id it carries; the id anchor must see through it, or
+    // the finding is silently renumbered while the posted comment still
+    // says R1-2.
+    const l = buildLedger(
+      2,
+      [
+        {
+          path: 'a.ts',
+          body: '**[Critical]** <!-- x --> R1-2: still leaking',
+        },
+        { path: 'b.ts', body: '**[Critical]** \u200b R1-3: zwsp residue' },
+      ],
+      [],
+    );
+    expect(l.findings.map((f) => f.id)).toEqual(['R1-2', 'R1-3']);
+    expect(l.findings[0]?.title).toBe('still leaking');
   });
 });
 

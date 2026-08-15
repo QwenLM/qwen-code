@@ -355,7 +355,12 @@ const NEGATION = new RegExp(
 );
 
 export function carriesBlockerSignal(body: string | undefined): boolean {
-  const b = (body ?? '').toLowerCase();
+  // Only RENDERED text can promote through this ungated channel: GitHub
+  // renders an HTML comment as nothing, so a planted `<!-- [critical] -->`
+  // would otherwise become an invisible, irrefutable blocker — the exact
+  // harm `isBlockerBody`'s identity gate exists to prevent, reached around
+  // it. An unclosed comment swallows the rest of the body, as on GitHub.
+  const b = (body ?? '').replace(/<!--[\s\S]*?(?:-->|$)/g, '').toLowerCase();
   return BLOCKER_PATTERNS.some((re) => {
     // Preserve the pattern's own flags (a future `i`/`u` must not be silently
     // dropped) and add `g` for the scan; dedupe so `g` is never doubled.
@@ -478,18 +483,29 @@ export function isBlockerBody(
 }
 
 /**
- * Whether any posted comment carries the invisible severity marker — a
- * signal only authorship unlocks (`isBlockerBody`'s marker disjunct gates
- * on the reviewing account). When identity lookup fails while one is
- * present, the context must fail closed instead of proceeding with an
- * empty `me`: an unresolved attribution-off Critical would classify as
- * ordinary discussion and disappear from the blocker set later rounds use,
- * and "could not tell" must not read the same as "was not".
+ * Whether any posted ROOT comment carries the invisible CRITICAL marker —
+ * exactly the signal authorship unlocks (`isBlockerBody`'s marker disjunct
+ * reads root bodies only, and only `critical` promotes). When identity
+ * lookup fails while one is present, the context must fail closed instead
+ * of proceeding with an empty `me`: an unresolved attribution-off Critical
+ * would classify as ordinary discussion and disappear from the blocker set
+ * later rounds use, and "could not tell" must not read the same as "was
+ * not". Firing on anything WIDER — a reply's marker, a suggestion marker —
+ * would fail closed on a signal the identity decides nothing about, and the
+ * marker string is public: a planted reply would then convert every
+ * transient identity blip into a repeating hard refusal.
  */
-export function anyCommentCarriesMarker(
-  comments: ReadonlyArray<{ body?: string | undefined }>,
+export function anyRootCarriesCriticalMarker(
+  comments: ReadonlyArray<{
+    body?: string | undefined;
+    in_reply_to_id?: number | null;
+  }>,
 ): boolean {
-  return comments.some((c) => commentMarkerSeverity(c.body ?? '') !== null);
+  return comments.some(
+    (c) =>
+      (c.in_reply_to_id === undefined || c.in_reply_to_id === null) &&
+      commentMarkerSeverity(c.body ?? '') === 'critical',
+  );
 }
 
 /**
@@ -1012,25 +1028,26 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // marker's blocker promotion. `currentUser()` is a network round-trip;
   // with no reviews and no inline comments there is nothing for its answer
   // to match against, so it is not made. A failed lookup fails CLOSED when
-  // something the identity gates is present — a posted severity marker or a
-  // ledger — because proceeding with an empty `me` would demote a still-open
-  // attribution-off Critical to ordinary discussion and drop it from the
-  // blocker set later rounds use; when nothing needs the identity, the
-  // lookup's failure still costs nothing.
+  // something the identity gates is present — a root comment carrying a
+  // critical marker, or a ledger — because proceeding with an empty `me`
+  // would demote a still-open attribution-off Critical to ordinary
+  // discussion and drop it from the blocker set later rounds use; when
+  // nothing needs the identity, the lookup's failure still costs nothing.
   let me = '';
   if (reviews.length || inline.length) {
     try {
       me = currentUser();
     } catch (err) {
       if (
-        anyCommentCarriesMarker(inline) ||
+        anyRootCarriesCriticalMarker(inline) ||
         reviews.some((r) => parseLedger(r.body ?? '') !== null)
       ) {
         throw new Error(
           `cannot determine the reviewing account (${
             err instanceof Error ? err.message : String(err)
-          }) while posted comments carry Qwen severity markers or ledgers — ` +
-            'the blocker re-check and ledger recovery depend on it; re-run',
+          }) while a posted root comment carries a Qwen critical marker ` +
+            'or a review carries a ledger — the blocker re-check and ledger ' +
+            'recovery depend on it; re-run',
         );
       }
     }

@@ -400,6 +400,29 @@ describe('the review footer and the regex that strips it', () => {
       );
     });
 
+    it('a span truncated inside the version parens cannot swallow the prose after it', () => {
+      // The version content is restricted to the shape footerVersion()
+      // validates: with the closing paren cut off, an unrestricted run
+      // matches ordinary prose and erases the tail clause — the opposite
+      // of the bound documented on the regex.
+      expect(
+        stripFooterSpans(
+          'still leaks — the old post ended _— gpt-5 via Qwen Code /review (v0.9 and the race remains reproducible',
+        ),
+      ).toBe(
+        'still leaks — the old post ended and the race remains reproducible',
+      );
+      expect(
+        stripForUnattributedPost(
+          'see _— m via Qwen Code /review (v1 as noted in _docs_ for the origin',
+        ),
+      ).toBe('see as noted in _docs_ for the origin');
+      // Genuine truncated footers — mid-character cuts inside the parens —
+      // still strip.
+      expect(stripFooterSpans('x _— m via Qwen Code /review (v1.2.')).toBe('x');
+      expect(stripFooterSpans('x _— m via Qwen Code /review (v0.21')).toBe('x');
+    });
+
     it('strips a forged footer re-wrapping split across a soft break', () => {
       // Neither half contains the marker, so the per-line strips miss it —
       // but GitHub renders the soft break as a space, displaying the footer
@@ -631,6 +654,7 @@ describe('the review footer and the regex that strips it', () => {
       expect(
         stripParagraphMarkers('> **[Critical]** **[Critical]** text'),
       ).toBe('text');
+      expect(stripParagraphMarkers('**[Critical]**： text')).toBe('text');
       expect(stripParagraphMarkers('prose **[Critical]** text')).toBe(
         'prose **[Critical]** text',
       );

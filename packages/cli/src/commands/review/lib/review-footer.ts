@@ -84,9 +84,11 @@ export function stripCommentMarkerLines(body: string): string {
  * A footer SPAN removed wherever it sits in a (single-line) string — the
  * sanitation for ledger titles, where a forged footer ending the first line
  * of a multi-line entry would otherwise survive the whole-line strips.
- * Bounded; the optional closing paren of the version covers the looping-
- * model truncation (most mid-character cuts land inside the version parens
- * — they are the footer's final characters).
+ * The version content admits only the shape `footerVersion` validates, and
+ * its closing paren is optional — together they cover the looping-model
+ * truncation (most mid-character cuts land inside the version parens — the
+ * footer's final characters) without letting a cut inside the parens
+ * swallow the prose after the span.
  *
  * Two branches, tried in order: a span CLOSED by its `_` lets the middle
  * run past an earlier marker phrase, so a doubled-marker span strips whole
@@ -95,7 +97,7 @@ export function stripCommentMarkerLines(body: string): string {
  * after it. In both, the middle cannot cross another span's `_— ` opener.
  */
 const FOOTER_SPAN_RE =
-  /_— (?:(?:(?!_— )[^\n]){0,400}? via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_|(?:(?! via Qwen Code \/review)[^\n]){0,400}? via Qwen Code \/review(?: \(v[^\n)]{0,200}\)?)?_?)[ \t]*/g;
+  /_— (?:(?:(?!_— )[^\n]){0,400}? via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}\)?)?_|(?:(?! via Qwen Code \/review)[^\n]){0,400}? via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}\)?)?_?)[ \t]*/g;
 
 /**
  * The named HTML5 entities decoding to characters the footer's literal
@@ -715,7 +717,7 @@ export function stripForgedFooterLines(body: string): string {
 // re-ran the full fixpoint chain per stacked marker — quadratic on
 // model-written bodies whose rest defeats the strips' early bailouts.
 const PARAGRAPH_MARKER_RE =
-  /^[ \t]{0,3}(?:>[ \t]*)*(?:(?:\*\*\[Critical\]\*\*|\*\*\[Suggestion\]\*\*)[ \t]*:?[ \t]*)+/;
+  /^[ \t]{0,3}(?:>[ \t]*)*(?:(?:\*\*\[Critical\]\*\*|\*\*\[Suggestion\]\*\*)[ \t]*[:：]?[ \t]*)+/;
 
 export function stripParagraphMarkers(body: string): string {
   if (!body.includes('**[')) return body;

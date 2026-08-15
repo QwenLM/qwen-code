@@ -35,7 +35,7 @@ import {
 import { gitOpt } from './lib/git.js';
 import { worktreePath } from './lib/paths.js';
 import {
-  anyCommentCarriesMarker,
+  anyRootCarriesCriticalMarker,
   isBlockerBody,
   findRootId,
 } from './pr-context.js';
@@ -419,18 +419,19 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
     // The reviewing account gates the comment marker's blocker promotion —
     // the same gate pr-context applies, so this report and the context file
     // agree on what is a blocker. A failed lookup fails closed like the
-    // ledger read there when a posted comment carries a marker: an index
-    // that silently undercounts blockers reads as complete, while the
-    // report's degradation contract is an `error` a consumer sees.
+    // ledger read there when a posted root comment carries a critical
+    // marker: an index that silently undercounts blockers reads as
+    // complete, while the report's degradation contract is an `error` a
+    // consumer sees.
     let me = '';
     try {
       me = comments.length ? currentUser() : '';
     } catch (err) {
-      if (anyCommentCarriesMarker(comments)) {
+      if (anyRootCarriesCriticalMarker(comments)) {
         throw new Error(
           `cannot determine the reviewing account (${
             err instanceof Error ? err.message : String(err)
-          }) while posted comments carry Qwen severity markers — ` +
+          }) while a posted root comment carries a Qwen critical marker — ` +
             'the blocker signal depends on it; re-run',
         );
       }

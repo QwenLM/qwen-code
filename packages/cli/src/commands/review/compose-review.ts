@@ -66,6 +66,7 @@ import {
 } from './lib/ledger.js';
 import {
   CRITICAL_PREFIX,
+  LEADING_INVISIBLE_RE,
   SUGGESTION_PREFIX,
   countInlineFindings,
   severityOf,
@@ -583,6 +584,9 @@ function collapseEntry(entry: string): string {
     : entry;
 }
 
+/** A line that is a code-fence delimiter: a ``` or ~~~ run, any info string. */
+const ENTRY_FENCE_DELIMITER_RE = /^(?:`{3,}|~{3,})/;
+
 /**
  * A model-written entry list as EVERY consumer sees it: one line per entry,
  * trailing footers gone. Stripped per entry, not on the assembled body:
@@ -593,10 +597,32 @@ function collapseEntry(entry: string): string {
  * render legs, and the ledger titles must project ONE shape — line-anchored
  * strips have no power on the raw multi-line form, and a leg reading a
  * different shape once carried a forged-attribution fragment the visible
- * list had stripped.
+ * list had stripped. An entry containing a fence-delimiter line is refused
+ * instead: the collapse trims each line to a segment, so the delimiter
+ * surfaces in the posted one-line shape, where CommonMark reads a line
+ * starting ~~~ as an OPENING fence whose info string is the rest of the
+ * line — the unclosed fence swallows every later body part. A backtick pair
+ * degrades to an inline code span, but a truncated or info-bearing backtick
+ * opener breaks the same way; no fence survives the collapse, and a
+ * redraft is cheap while the draft is still in hand.
  */
 function ingestEntryList(value: unknown, field: string): string[] {
-  return toStringList(value, field)
+  const raw = toStringList(value, field);
+  for (const entry of raw) {
+    if (
+      entry
+        .split('\n')
+        .some((line) => ENTRY_FENCE_DELIMITER_RE.test(line.trim()))
+    ) {
+      throw new Error(
+        `compose-review: ${
+          field === 'bodyCriticals' ? 'a body Critical' : 'a cannot-tell entry'
+        } quotes a code fence its one-line render cannot carry — redraft ` +
+          'it quoting the code inline or indented instead',
+      );
+    }
+  }
+  return raw
     .map(collapseEntry)
     .filter((entry) => entry.trim() !== '')
     .map(stripReviewFooter);
@@ -2514,10 +2540,13 @@ export function buildLedger(
     // The title strips through the same fixpoint chain the post transform
     // uses — markers, forged footer lines, footer spans, in any order —
     // because the ledger rides the posted body as an HTML comment the
-    // autofix grep reads. `trimStart` first: a marker followed by a newline
-    // puts the title text on the SECOND line, and titleOf reads the first.
+    // autofix grep reads. Leading render-nothing residue goes too: a marker
+    // followed by a newline — or an invisible comment, or a Cf run — puts
+    // the title text past it, and residue left between the marker and a
+    // carried id would defeat the id anchor and silently renumber the
+    // finding while the posted comment still shows the old id.
     const { id: carried, title } = titleOf(
-      stripForUnattributedPost(body).trimStart(),
+      stripForUnattributedPost(body).replace(LEADING_INVISIBLE_RE, ''),
     );
     const file = typeof c.path === 'string' ? c.path : '(unknown)';
     findings.push({
@@ -2535,10 +2564,11 @@ export function buildLedger(
     // The title strips through the same fixpoint chain the visible list
     // uses — the ledger marker rides the posted body as an HTML comment,
     // and the autofix grep reads the whole body, comments included.
-    // `trimStart` first: a marker followed by a newline puts the title
-    // text on the SECOND line, and titleOf reads the first.
+    // Leading render-nothing residue goes too, for the same reason as the
+    // drafted-comment leg: residue between the marker and a carried id
+    // would defeat the id anchor and silently renumber the finding.
     const { id: carried, title } = titleOf(
-      stripForUnattributedPost(b).trimStart(),
+      stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, ''),
     );
     findings.push({
       id: idFor(carried),
