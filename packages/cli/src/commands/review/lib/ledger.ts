@@ -106,6 +106,19 @@ export const LEDGER_MAX_FILE = 200;
  * (`R2-1`), and anything longer is not one.
  */
 export const LEDGER_MAX_ID = 24;
+/**
+ * The highest round a marker may claim.
+ *
+ * The round is not decoration: `compose-review` stamps this round's findings
+ * `R<round + 1>-<n>`, so the number IS the id space. Recovery now prefers the
+ * highest round it can find — the counter only ever advances, so that is what
+ * keeps ids monotonic across accounts — which means an unbounded round from
+ * any poster wins every recovery from then on. At 2^53 the increment stops
+ * advancing in float64 and every subsequent round re-stamps the same ids
+ * against different findings. Ten thousand rounds is far past any real PR and
+ * far short of where the arithmetic breaks.
+ */
+export const LEDGER_MAX_ROUND = 10_000;
 
 /**
  * ...and a cap on the WHOLE marker, because the per-field ones do not bound it:
@@ -146,7 +159,13 @@ export function serializeLedger(ledger: Ledger): string {
     file: f.file.slice(0, LEDGER_MAX_FILE),
   }));
   const render = (findings: LedgerFinding[], dropped: number): string => {
-    const payload: Ledger = { v: 1, round: ledger.round, findings };
+    const payload: Ledger = {
+      v: 1,
+      // Mirrored on the write side like every other cap: a serializer that can
+      // emit what its own parser refuses would round-trip to nothing.
+      round: Math.min(ledger.round, LEDGER_MAX_ROUND),
+      findings,
+    };
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -192,7 +211,12 @@ export function parseLedger(body: string | undefined): Ledger | null {
   if (end < 0) return null;
   try {
     const raw = JSON.parse(body.slice(start + OPEN.length, end)) as Ledger;
-    if (raw?.v !== 1 || !Number.isInteger(raw.round) || raw.round < 1) {
+    if (
+      raw?.v !== 1 ||
+      !Number.isInteger(raw.round) ||
+      raw.round < 1 ||
+      raw.round > LEDGER_MAX_ROUND
+    ) {
       return null;
     }
     if (!Array.isArray(raw.findings)) return null;

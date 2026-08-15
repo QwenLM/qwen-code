@@ -714,16 +714,25 @@ function composeReviewBody(
   // (`reverse audit — chunk 2's auditor returned nothing substantive
   // twice`), in exactly the runs where a partial audit makes such scopes
   // likeliest.
-  // Snapshot BEFORE the budget-phrase splice below removes entries. The splice
-  // exists so the body does not say the same gap twice, and it matches on a
-  // PHRASE — so an entry that merely mentions the review time budget in its
-  // free-form reason ("security — the review time budget ended the round
-  // before the security relaunch returned evidence") is spliced out too. That
-  // was harmless while every cap withheld the anchor; it is not harmless now
-  // that one cap does not, because the spliced entry is exactly the
-  // line-coverage claim the anchor decision must see. Render from the spliced
-  // list, decide from this one.
-  const unreviewedAsDisclosed = [...unreviewed];
+  /**
+   * Entries the budget-phrase splice below removes from the rendered list.
+   *
+   * The splice exists so the body does not say the same gap twice, and it
+   * matches on a PHRASE — so an entry that merely mentions the review time
+   * budget in its free-form reason ("security — the review time budget ended
+   * the round before the security relaunch returned evidence") is spliced out
+   * too. Harmless while every cap withheld the anchor; not harmless now that
+   * one cap does not, because the spliced entry is exactly the line-coverage
+   * claim the anchor decision must see. Kept here so the decision can read the
+   * list AS DISCLOSED while the body renders the spliced one.
+   *
+   * Collected rather than snapshotted: the deterministic gates push their own
+   * machine-owed debts into `unreviewed` AFTER this point, and a snapshot
+   * taken here would miss them — a round capped solely by an unlinted script
+   * or an unwalked defect layer would classify as depth-only and anchor. The
+   * decision therefore reads the LIVE list plus these.
+   */
+  const splicedForBudgetPhrase: string[] = [];
   let budgetEntry: (typeof coverageEntries)[number] | undefined;
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
@@ -736,6 +745,7 @@ function composeReviewBody(
       const phrase = isRoundCap ? ROUND_CAP_PHRASE : BUDGET_STOP_PHRASE;
       for (let i = unreviewed.length - 1; i >= 0; i--) {
         if (unreviewed[i].includes(phrase)) {
+          splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
       }
@@ -1219,9 +1229,15 @@ function composeReviewBody(
   // anchor would let a twice-whiffed Security lens advance the range past the
   // lines it never reviewed — the harm the skill's own paragraph warns about,
   // and the reason the first cut of this exemption was wrong.
-  const dimensionGapsAreDepthOnly = unreviewedAsDisclosed.every(
-    isNonDiffDimensionGap,
-  );
+  // Read at the DECISION point, not at any earlier one: `unreviewed` is written
+  // both before this line (the orchestrator's own entries) and after the
+  // snapshot an earlier fix took (the script-lint and layer-audit gates, whose
+  // debts are machine-owed line-coverage claims). Reading it here plus the
+  // entries the phrase splice removed is the only list that sees every writer.
+  const dimensionGapsAreDepthOnly = [
+    ...unreviewed,
+    ...splicedForBudgetPhrase,
+  ].every(isNonDiffDimensionGap);
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';

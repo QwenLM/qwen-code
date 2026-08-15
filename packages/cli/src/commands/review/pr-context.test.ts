@@ -1083,6 +1083,27 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.findings).toHaveLength(1);
   });
 
+  it('refuses an out-of-range round from any account', () => {
+    // The round IS the id space: compose stamps `R<round + 1>-<n>`. Round-first
+    // selection makes the highest round authoritative, so an unbounded one from
+    // any poster wins every recovery from then on — and at 2^53 the increment
+    // stops advancing, so every later round re-stamps the same ids against
+    // different findings. Fail-quiet, like every other malformation here.
+    const huge = `LGTM <!-- qwen-review-ledger {"v":1,"round":9007199254740991,"findings":[]} -->`;
+    expect(
+      latestLedger([review('stranger', '2026-01-09T00:00:00Z', huge)], 'bot'),
+    ).toBeNull();
+    // A real round still recovers from the same input set.
+    const found = latestLedger(
+      [
+        review('stranger', '2026-01-09T00:00:00Z', huge),
+        review('bot', '2026-01-01T00:00:00Z', marker(3)),
+      ],
+      'bot',
+    );
+    expect(found?.ledger.round).toBe(3);
+  });
+
   it('never lets the recovered round run BACKWARD across accounts', () => {
     // The round counter is an id space: compose stamps this round's findings
     // `R<recovered + 1>-<n>`. Recovering a LOWER round re-issues ids the pull

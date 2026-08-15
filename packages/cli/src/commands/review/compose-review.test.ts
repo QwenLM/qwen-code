@@ -23,6 +23,7 @@ import { parseLedger } from './lib/ledger.js';
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
+  isNonDiffDimensionGap,
   buildLedger,
   repositoryContextGate,
   scriptLintGate,
@@ -4455,6 +4456,27 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(r.scopeUnproven).toBe(false);
     expect(r.dimensionGapsAreDepthOnly).toBe(true);
     expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+  });
+
+  it("sees a debt the deterministic gates push in AFTER the caller's entries", () => {
+    // `unreviewed` has three writers, at three different points: the caller's
+    // own entries, the budget-phrase splice that removes some of them, and the
+    // script-lint / layer-audit gates that push machine-owed debts later. A
+    // decision that reads any single snapshot misses one of them — an earlier
+    // fix read too late and missed the splice, its replacement read too early
+    // and missed the gates. Both directions are line-coverage claims, so both
+    // must withhold: an unlinted script or an unwalked defect layer is not a
+    // dimension nobody could run.
+    expect(
+      isNonDiffDimensionGap('the executable-script lint — no report'),
+    ).toBe(false);
+    expect(
+      isNonDiffDimensionGap('reverse-audit layer coverage — 2 layers unwalked'),
+    ).toBe(false);
+    // ...and the only entry that IS exempt stays exempt.
+    expect(
+      isNonDiffDimensionGap('build-and-test — the integration suite never ran'),
+    ).toBe(true);
   });
 
   it('sees a lens gap the budget-phrase splice removes from the rendered list', () => {

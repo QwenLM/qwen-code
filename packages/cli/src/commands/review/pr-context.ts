@@ -1038,7 +1038,21 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
     // is nothing for its answer to match against, so it is not made. It is
     // still needed with the split trust surface — not to FIND the ledger, but
     // to decide whether this one is ours and may carry an anchor.
-    const found = reviews.length ? latestLedger(reviews, currentUser()) : null;
+    // The identity lookup is a network round-trip, and its failure must not
+    // cost the recovery. Without this the transient case degraded to "no
+    // ledger", which leaves the machine-local side file at whatever round this
+    // machine last wrote — and compose stamps `prevRound + 1` from it
+    // unconditionally, so a machine that missed rounds K+1..K+m re-issues ids
+    // the PR already carries. A null login is the cheap honest fallback: the
+    // work list still recovers, and it recovers as FOREIGN, so no anchor rides
+    // on an identity this run could not confirm.
+    let login: string | null = null;
+    try {
+      login = currentUser();
+    } catch {
+      login = null;
+    }
+    const found = reviews.length ? latestLedger(reviews, login) : null;
     prevLedger = found?.ledger ?? null;
     prevLedgerAuthor = found?.foreign ? found.author : null;
   } catch {
