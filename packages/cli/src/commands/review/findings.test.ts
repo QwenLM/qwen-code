@@ -834,7 +834,7 @@ describe('findings (command boundary)', () => {
     expect(stderr).toContain('1 anchor request(s)');
   });
 
-  it('--to-anchors projects the held severity, not the filed one', () => {
+  it('--to-anchors skips a Critical the witness rule demoted to low confidence', () => {
     // A Critical the witness rule lowered to low confidence is terminal-only
     // and must not reach the resolver input: the projection runs after the
     // holds, on the same findings the artifact carries.
@@ -856,6 +856,56 @@ describe('findings (command boundary)', () => {
     });
     const requests = JSON.parse(readFileSync(anchors, 'utf8'));
     expect(requests.map((r: { id: string }) => r.id)).toEqual(['kept']);
+  });
+
+  it('--to-anchors projects a test-delta-held finding as a postable Suggestion', () => {
+    // The hold demotes Critical to Suggestion but leaves confidence high, so
+    // the held finding is still postable and must reach the resolver input —
+    // the severity hold's projection, untested at the command boundary.
+    // `[probe]` keeps the witness rule out of the picture so this tests the
+    // severity hold alone.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const delta = join(dir, 'test-delta.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'held',
+          source: '[probe]',
+          anchor: 'charge(amt);',
+          failureScenario:
+            'packages/cli/src/ui/auth/AuthDialog.test.tsx goes red on this change.',
+        },
+      ]),
+    );
+    writeFileSync(
+      delta,
+      JSON.stringify({
+        entries: [
+          {
+            command: 'npm test --workspace="packages/cli"',
+            netNew: [],
+            shared: ['src/ui/auth/AuthDialog.test.tsx'],
+          },
+        ],
+      }),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      testDelta: delta,
+      toAnchors: anchors,
+      print: false,
+    });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as FindingsReport;
+    expect(report.findings[0].severity).toBe('Suggestion');
+    expect(report.findings[0].confidence).toBe('high');
+    expect(JSON.parse(readFileSync(anchors, 'utf8'))).toEqual([
+      { id: 'held', path: 'src/retry.ts', anchor: 'charge(amt);', line: 42 },
+    ]);
   });
 
   it('--to-anchors leaves the previous pair untouched when the projection throws', () => {
