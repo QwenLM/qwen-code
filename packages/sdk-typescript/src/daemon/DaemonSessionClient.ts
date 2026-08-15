@@ -532,50 +532,43 @@ export class DaemonSessionClient {
    * policy. Forwards the bound `clientId` so identified clients update
    * their per-client timestamp instead of just the session-wide one.
    */
-  async heartbeat(): Promise<HeartbeatResult> {
-    return await this.client.heartbeat(this.sessionId, this.clientId);
+  heartbeat(): Promise<HeartbeatResult> {
+    return this.client.heartbeat(this.sessionId, this.clientId);
   }
 
-  async artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
-    return await this.client.listSessionArtifacts(
-      this.sessionId,
-      this.clientId,
-    );
+  artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+    return this.client.listSessionArtifacts(this.sessionId, this.clientId);
   }
 
-  async addArtifact(
+  addArtifact(
     artifact: DaemonSessionArtifactInput,
   ): Promise<DaemonSessionArtifactMutationResult> {
-    return await this.client.addSessionArtifact(
+    return this.client.addSessionArtifact(
       this.sessionId,
       artifact,
       this.clientId,
     );
   }
 
-  async removeArtifact(
+  removeArtifact(
     artifactId: string,
   ): Promise<DaemonSessionArtifactMutationResult> {
-    return await this.client.removeSessionArtifact(
+    return this.client.removeSessionArtifact(
       this.sessionId,
       artifactId,
       this.clientId,
     );
   }
 
-  async setModel(modelId: string): Promise<SetModelResult> {
-    return await this.client.setSessionModel(
-      this.sessionId,
-      modelId,
-      this.clientId,
-    );
+  setModel(modelId: string): Promise<SetModelResult> {
+    return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
   }
 
-  async setConfigOption(
+  setConfigOption(
     configId: 'reasoning_effort',
     value: string,
   ): Promise<DaemonSessionConfigOptionResult> {
-    return await this.client.setSessionConfigOption(
+    return this.client.setSessionConfigOption(
       this.sessionId,
       configId,
       value,
@@ -583,17 +576,17 @@ export class DaemonSessionClient {
     );
   }
 
-  async getRewindSnapshots(): Promise<{
+  getRewindSnapshots(): Promise<{
     snapshots: DaemonRewindSnapshotInfo[];
   }> {
-    return await this.client.getRewindSnapshots(this.sessionId);
+    return this.client.getRewindSnapshots(this.sessionId);
   }
 
-  async rewind(
+  rewind(
     promptId: string,
     opts?: { rewindFiles?: boolean },
   ): Promise<DaemonRewindResult> {
-    return await this.client.rewindSession(this.sessionId, promptId, {
+    return this.client.rewindSession(this.sessionId, promptId, {
       clientId: this.clientId,
       ...(opts?.rewindFiles !== undefined
         ? { rewindFiles: opts.rewindFiles }
@@ -601,8 +594,8 @@ export class DaemonSessionClient {
     });
   }
 
-  async fork(directive: string): Promise<DaemonForkSessionResult> {
-    return await this.client.forkSession(
+  fork(directive: string): Promise<DaemonForkSessionResult> {
+    return this.client.forkSession(
       this.sessionId,
       { directive },
       this.clientId,
@@ -617,10 +610,8 @@ export class DaemonSessionClient {
    * child both run to completion regardless (no cross-process abort
    * plumbing in v1).
    */
-  async recap(opts?: {
-    signal?: AbortSignal;
-  }): Promise<DaemonSessionRecapResult> {
-    return await this.client.recapSession(this.sessionId, {
+  recap(opts?: { signal?: AbortSignal }): Promise<DaemonSessionRecapResult> {
+    return this.client.recapSession(this.sessionId, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
@@ -636,11 +627,11 @@ export class DaemonSessionClient {
     });
   }
 
-  async btw(
+  btw(
     question: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonSessionBtwResult> {
-    return await this.client.btwSession(this.sessionId, question, {
+    return this.client.btwSession(this.sessionId, question, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
@@ -652,21 +643,21 @@ export class DaemonSessionClient {
    * create/attach. Accepted requests become daemon-owned even when the active
    * turn settles while the request is in flight.
    */
-  async enqueueMidTurnMessage(
+  enqueueMidTurnMessage(
     message: string,
     opts?: { signal?: AbortSignal; messageId?: string },
   ): Promise<DaemonMidTurnMessageResult> {
-    return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
+    return this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
 
-  async removeMidTurnMessage(
+  removeMidTurnMessage(
     messageId: string,
   ): Promise<DaemonRemoveMidTurnMessageResult> {
-    return await this.client.removeMidTurnMessage(this.sessionId, messageId, {
+    return this.client.removeMidTurnMessage(this.sessionId, messageId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -678,25 +669,25 @@ export class DaemonSessionClient {
    * `session_mid_turn_message_query`; older daemons reject with 404 and
    * callers preserve their current state.
    */
-  async getMidTurnMessages(opts?: {
+  getMidTurnMessages(opts?: {
     signal?: AbortSignal;
   }): Promise<DaemonMidTurnMessagesResult> {
-    return await this.client.getMidTurnMessages(this.sessionId, {
+    return this.client.getMidTurnMessages(this.sessionId, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
 
-  async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
-    return await this.client.getPendingPrompts(this.sessionId, {
+  getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
+    return this.client.getPendingPrompts(this.sessionId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
 
-  async removePendingPrompt(
+  removePendingPrompt(
     promptId: string,
   ): Promise<DaemonRemovePendingPromptResult> {
-    return await this.client.removePendingPrompt(this.sessionId, promptId, {
+    return this.client.removePendingPrompt(this.sessionId, promptId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
@@ -707,54 +698,47 @@ export class DaemonSessionClient {
    * automatically forwards the client id bound when the session was created
    * or attached.
    */
-  async shellCommand(
+  shellCommand(
     command: string,
     signal?: AbortSignal,
   ): Promise<DaemonShellCommandResult> {
-    return await this.client.shellCommand(this.sessionId, command, {
+    return this.client.shellCommand(this.sessionId, command, {
       ...(signal ? { signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }
 
-  async context(): Promise<DaemonSessionContextStatus> {
-    return await this.client.sessionContext(this.sessionId, this.clientId);
+  context(): Promise<DaemonSessionContextStatus> {
+    return this.client.sessionContext(this.sessionId, this.clientId);
   }
 
-  async status(): Promise<DaemonSessionSummary> {
-    return await this.client.sessionStatus(this.sessionId, this.clientId);
+  status(): Promise<DaemonSessionSummary> {
+    return this.client.sessionStatus(this.sessionId, this.clientId);
   }
 
-  async contextUsage(
+  contextUsage(
     opts: { detail?: boolean } = {},
   ): Promise<DaemonSessionContextUsageStatus> {
-    return await this.client.sessionContextUsage(
-      this.sessionId,
-      opts,
-      this.clientId,
-    );
+    return this.client.sessionContextUsage(this.sessionId, opts, this.clientId);
   }
 
-  async supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
-    return await this.client.sessionSupportedCommands(
-      this.sessionId,
-      this.clientId,
-    );
+  supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
+    return this.client.sessionSupportedCommands(this.sessionId, this.clientId);
   }
 
-  async tasks(): Promise<DaemonSessionTasksStatus> {
-    return await this.client.sessionTasks(this.sessionId, this.clientId);
+  tasks(): Promise<DaemonSessionTasksStatus> {
+    return this.client.sessionTasks(this.sessionId, this.clientId);
   }
 
-  async lspStatus(): Promise<DaemonSessionLspStatus> {
-    return await this.client.sessionLspStatus(this.sessionId, this.clientId);
+  lspStatus(): Promise<DaemonSessionLspStatus> {
+    return this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
 
-  async cancelTask(
+  cancelTask(
     taskId: string,
     kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }> {
-    return await this.client.sessionTaskCancel(
+    return this.client.sessionTaskCancel(
       this.sessionId,
       taskId,
       kind,
@@ -762,24 +746,24 @@ export class DaemonSessionClient {
     );
   }
 
-  async clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
-    return await this.client.sessionGoalClear(this.sessionId, this.clientId);
+  clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
+    return this.client.sessionGoalClear(this.sessionId, this.clientId);
   }
 
-  async goal(): Promise<GoalStateResponse> {
-    return await this.client.sessionGoal(this.sessionId, this.clientId);
+  goal(): Promise<GoalStateResponse> {
+    return this.client.sessionGoal(this.sessionId, this.clientId);
   }
 
-  async controlGoal(request: GoalControlRequest): Promise<GoalStateResponse> {
-    return await this.client.sessionGoalControl(
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse> {
+    return this.client.sessionGoalControl(
       this.sessionId,
       request,
       this.clientId,
     );
   }
 
-  async stats(): Promise<DaemonSessionStatsStatus> {
-    return await this.client.sessionStats(this.sessionId, this.clientId);
+  stats(): Promise<DaemonSessionStatsStatus> {
+    return this.client.sessionStats(this.sessionId, this.clientId);
   }
 
   async respondToPermission(

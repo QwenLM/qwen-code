@@ -1764,7 +1764,8 @@ export function useQueuedPrompts({
       const prompt = queuedPromptsRef.current.find((item) => item.id === id);
       if (
         !canMutateMidTurn ||
-        latestStreamingStateRef.current === 'idle' ||
+        (latestStreamingStateRef.current === 'idle' &&
+          !holdQueuedPromptsLocallyRef.current) ||
         !prompt ||
         prompt.serverState !== undefined ||
         prompt.serverPromptId !== undefined ||

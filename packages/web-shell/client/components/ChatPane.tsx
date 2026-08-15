@@ -1208,7 +1208,10 @@ export function ChatPane({
               prompts={queuedPrompts}
               t={t}
               canMutateMidTurn={canMutateMidTurn}
-              canInsertMidTurn={streamingState !== 'idle'}
+              canInsertMidTurn={
+                streamingState !== 'idle' ||
+                connection.goalState?.goal?.status === 'active'
+              }
               onDelete={removeQueuedPrompt}
               onInsert={insertQueuedPrompt}
               onEdit={editQueuedPrompt}

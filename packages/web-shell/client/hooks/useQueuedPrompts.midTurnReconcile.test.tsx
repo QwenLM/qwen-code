@@ -923,6 +923,32 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
+  it('explicitly inserts a locally held Goal prompt while transport is idle', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'idle',
+        holdQueuedPromptsLocally: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('insert into active Goal');
+      });
+
+      const queuedPromptId = harness.result().queuedPrompts[0]?.id;
+      await act(async () => {
+        await harness.result().insertQueuedPrompt(queuedPromptId!);
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'insert into active Goal',
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
   it('reconciles a committed explicit insert after its response is lost', async () => {
     sdkMock.actions.enqueueMidTurnMessage.mockRejectedValueOnce(
       new Error('response lost'),
