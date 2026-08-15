@@ -17,6 +17,51 @@ import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
 
+const serveImportPatterns = ['**/serve', '**/serve/*', '**/serve/**'];
+const relativeServeImportPatterns = [
+  '../serve',
+  '../serve/*',
+  '../serve/**',
+  '../../serve',
+  '../../serve/*',
+  '../../serve/**',
+];
+const serveDynamicImportPathPattern =
+  String.raw`^(?:\.\.\x2f)+(?:[^\x2f]+\x2f\.\.\x2f)*serve(?:\x2f|$)`;
+
+const restrictedServeImports = (message) => ({
+  patterns: [
+    {
+      // `**/serve` also covers the bare directory specifier, which resolves to
+      // the serve/ barrel.
+      group: [...serveImportPatterns, ...relativeServeImportPatterns],
+      message,
+    },
+  ],
+});
+
+const restrictedServeDynamicImports = (message) => [
+  {
+    selector: `ImportExpression[source.value=/${serveDynamicImportPathPattern}/]`,
+    message,
+  },
+  {
+    selector: `ImportExpression[source.quasis.0.value.cooked=/${serveDynamicImportPathPattern}/]`,
+    message,
+  },
+];
+
+const restrictedRequire = {
+  selector: 'CallExpression[callee.name="require"]',
+  message: 'Avoid using require(). Use ES6 imports instead.',
+};
+
+const restrictedStringThrow = {
+  selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
+  message:
+    'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
+};
+
 export default tseslint.config(
   {
     // Global ignores
@@ -80,15 +125,9 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': [
         'error',
-        {
-          patterns: [
-            {
-              group: ['**/serve', '**/serve/*', '**/serve/**'],
-              message:
-                'packages/cli/src/runtime must not import serve/ internals (#8084).',
-            },
-          ],
-        },
+        restrictedServeImports(
+          'packages/cli/src/runtime must not import serve/ internals (#8084).',
+        ),
       ],
     },
   },
@@ -101,17 +140,9 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': [
         'error',
-        {
-          patterns: [
-            {
-              // `**/serve` also covers the bare directory specifier, which
-              // resolves to the serve/ barrel.
-              group: ['**/serve', '**/serve/*', '**/serve/**'],
-              message:
-                'packages/cli/src/utils must not import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
-            },
-          ],
-        },
+        restrictedServeImports(
+          'packages/cli/src/utils must not import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
+        ),
       ],
     },
   },
@@ -220,6 +251,36 @@ export default tseslint.config(
     },
   },
   {
+    // Positioned after the general TS block so the dynamic-import guard is not
+    // overwritten by the shared `no-restricted-syntax` rule.
+    files: ['packages/cli/src/runtime/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        restrictedRequire,
+        restrictedStringThrow,
+        ...restrictedServeDynamicImports(
+          'packages/cli/src/runtime must not dynamically import serve/ internals (#8084).',
+        ),
+      ],
+    },
+  },
+  {
+    // Positioned after the general TS block so the dynamic-import guard is not
+    // overwritten by the shared `no-restricted-syntax` rule.
+    files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        restrictedRequire,
+        restrictedStringThrow,
+        ...restrictedServeDynamicImports(
+          'packages/cli/src/utils must not dynamically import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
+        ),
+      ],
+    },
+  },
+  {
     // ACP integration and the daemon are separate runtime surfaces that happen
     // to share a package directory. ACP may consume neutral contracts under
     // `runtime/`, but never `serve/` implementation modules — see #8084.
@@ -235,39 +296,21 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': [
         'error',
-        {
-          patterns: [
-            {
-              // `**/serve` also covers the bare directory specifier, which
-              // resolves to the serve/ barrel (createServeApp, runQwenServe…).
-              group: ['**/serve', '**/serve/*', '**/serve/**'],
-              message:
-                'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
-            },
-          ],
-        },
+        restrictedServeImports(
+          'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+        ),
       ],
       'no-restricted-syntax': [
         'error',
-        {
-          selector: 'CallExpression[callee.name="require"]',
-          message: 'Avoid using require(). Use ES6 imports instead.',
-        },
-        {
-          selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
-          message:
-            'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
-        },
+        restrictedRequire,
+        restrictedStringThrow,
         // no-restricted-imports only visits static import/export declarations;
         // the same boundary applies to dynamic `await import('../serve/…')`.
         // The selector regex spells `/` as `\x2f` because esquery cannot parse
         // a literal slash inside its attribute-regex syntax.
-        {
-          selector:
-            "ImportExpression[source.value=/^(?:\\.\\.\\x2f)+serve(?:\\x2f|$)/]",
-          message:
-            'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
-        },
+        ...restrictedServeDynamicImports(
+          'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+        ),
       ],
     },
   },
