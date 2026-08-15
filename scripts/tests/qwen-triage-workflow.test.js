@@ -6047,7 +6047,10 @@ describe('triage skill non-functional routing (#7411)', () => {
     // The label alone would skip review for every future push; the marker
     // pins the skip to the triaged head so a later push re-enables review.
     expect(section).toContain(
-      'gh pr comment "$PR_NUMBER" --repo "$REPO" --body \'<!-- qwen-triage on-hold sha=<HEAD_SHA> -->\'',
+      "printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md",
+    );
+    expect(section).toContain(
+      '.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" \'qwen-triage on-hold sha=\' /tmp/qwen-triage-on-hold-marker.md',
     );
     expect(section).toContain(
       "skips the automatic lane only while the marker's SHA matches the live head",
