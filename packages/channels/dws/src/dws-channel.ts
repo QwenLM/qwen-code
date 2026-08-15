@@ -137,11 +137,12 @@ function parseDocumentMentionNotification(
   content: string,
 ): DwsDocumentMentionNotification | undefined {
   const links = content.matchAll(
-    /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\s\])\p{Script=Han}，。！？；：、”’）【】》〈]+/gu,
+    /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\s\])]+/gu,
   );
   for (const match of links) {
     try {
-      const url = new URL(match[0]);
+      const rawUrl = match[0].replace(/[\p{P}\p{S}]+$/gu, '');
+      const url = new URL(rawUrl);
       const documentId = url.pathname.match(/^\/i\/nodes\/([^/]+)$/u)?.[1];
       const iframeQuery = new URLSearchParams(
         url.searchParams.get('iframeQuery') ?? '',
@@ -154,15 +155,36 @@ function parseDocumentMentionNotification(
       ) {
         continue;
       }
-      const prefix = content.slice(0, match.index);
-      const mentionLine = prefix
-        .split(/\r?\n/u)
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith('@'))
-        .at(-1);
-      const request = mentionLine
-        ?.replace(/^@\S+(?:\([^)]*\))?\s*/u, '')
-        .trim();
+      const lines = content.split(/\r?\n/u).map((line) => line.trim());
+      let request = '';
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index]!;
+        const mentionIndex = line.indexOf('@');
+        if (mentionIndex === -1) continue;
+        const mentionText = line.slice(mentionIndex);
+        const mention =
+          mentionText.match(/^@[^()\r\n]*\([^)]*\)/u)?.[0] ??
+          mentionText.match(/^@[^\s\p{P}\p{S}]+/u)?.[0];
+        if (!mention) continue;
+        const after = mentionText
+          .slice(mention.length)
+          .replace(/^[\s\p{P}\p{S}]+/u, '')
+          .trim();
+        const before = line.slice(0, mentionIndex).trim();
+        const adjacent = after || before;
+        if (adjacent) {
+          request = adjacent;
+          continue;
+        }
+        const following = lines
+          .slice(index + 1)
+          .find(
+            (candidate) =>
+              Boolean(candidate) &&
+              !candidate.includes('https://alidocs.dingtalk.com/i/nodes/'),
+          );
+        if (following) request = following;
+      }
       return {
         documentId: decodeURIComponent(documentId),
         commentKey,
@@ -583,6 +605,8 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.selfProfile = identity.profile;
       this.cursor.todosInitialized = false;
       this.cursor.todoTasks = [];
+      this.cursor.pendingDocumentNotifications = [];
+      this.cursor.imTargets = [];
     }
     this.cursor.selfSenderIds = [
       ...new Set(identity.selfSenderIds ?? []),
@@ -1571,6 +1595,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   }
 
   private canReceiveOutboundEcho(conversationId: string): boolean {
+    if (this.cursor.selfSenderIds.length === 0) return false;
     const target = this.findImTarget(conversationId);
     if (!target) return false;
     if (

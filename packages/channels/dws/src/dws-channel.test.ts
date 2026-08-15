@@ -745,6 +745,61 @@ describe('DwsChannel', () => {
     );
   });
 
+  it.each([',', '.', ';', '!', '?', '…', '~'])(
+    'parses document mention URLs followed by %s',
+    async (punctuation) => {
+      const client = new FakeDwsClient();
+      const channel = await readyChannel(client);
+      const url = documentMentionCard('doc-1', 'comment-1').match(
+        /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+      )?.[0];
+      expect(url).toBeDefined();
+
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          `notification-${punctuation}`,
+          `@DataWorksAgent reply with the document code\n${url}${punctuation} thanks`,
+        ),
+      );
+
+      expect(channel.inbound).toEqual([
+        expect.objectContaining({ chatId: 'doc-1', threadId: 'comment-1' }),
+      ]);
+    },
+  );
+
+  it.each([
+    ['@DataWorksAgent，请总结这个评论的上下文', '请总结这个评论的上下文'],
+    ['please @DataWorksAgent summarize this thread', 'summarize this thread'],
+    [
+      '@Data Works Agent (bot-id) summarize this thread',
+      'summarize this thread',
+    ],
+    ['@DataWorksAgent\nsummarize this thread', 'summarize this thread'],
+  ])('extracts document request from %s', async (mention, request) => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const url = documentMentionCard('doc-1', 'comment-1').match(
+      /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+    )?.[0];
+    expect(url).toBeDefined();
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        `notification-${request}`,
+        `${url}\n${mention}`,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: request }),
+    ]);
+  });
+
   it('finds document mention notifications in direct-message history when the event stream misses them', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -1122,6 +1177,51 @@ describe('DwsChannel', () => {
 
     await channel.poll();
     expect(client.readDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops profile-scoped document work and IM targets on profile switch', async () => {
+    const config = makeConfig({ senderPolicy: 'pairing' });
+    const name = 'profile-scoped-pending-document-dws';
+    const firstClient = new FakeDwsClient();
+    firstClient.identity = { profile: 'corp-one' };
+    const { channel: first } = await readyPolicyChannel(
+      firstClient,
+      config,
+      name,
+    );
+    firstClient.directMessages = [
+      message(
+        'user_im_message_receive_o2o_all',
+        'pending-document',
+        documentMentionCard('doc-pending', 'comment-pending'),
+      ),
+    ];
+    await first.poll();
+    const pairingText = firstClient.replyToComment.mock.calls[0]?.[2];
+    const code = pairingText?.match(/pairing code is: ([A-Z0-9]+)/u)?.[1];
+    expect(code).toBeDefined();
+    expect(new PairingStore(name, config.cwd).approve(code!)).not.toBeNull();
+    await firstClient.emit(
+      1,
+      message('user_im_message_receive_o2o_all', 'remember-target', 'hello'),
+    );
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity = { profile: 'corp-two' };
+    const { channel: second, bridge } = await readyPolicyChannel(
+      secondClient,
+      config,
+      name,
+    );
+    await second.poll();
+
+    expect(secondClient.readDocument).not.toHaveBeenCalled();
+    expect(secondClient.replyToComment).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    await expect(second.sendMessage('cid-1', 'proactive')).rejects.toThrow(
+      'no DWS message target is known',
+    );
   });
 
   it('backs off persisted document notification delivery failures', async () => {
@@ -1632,6 +1732,32 @@ describe('DwsChannel', () => {
     }
   });
 
+  it('does not suppress matching peer text without an authoritative self sender', async () => {
+    const client = new FakeDwsClient();
+    client.identity = { profile: 'corp-only' };
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+    await client.emit(
+      2,
+      message('user_im_message_receive_group_all', 'request', 'please help'),
+    );
+    await channel.sendMessage('cid-1', 'ok');
+
+    await client.emit(
+      2,
+      message('user_im_message_receive_group_all', 'peer', 'ok', {
+        senderId: 'open-bob',
+      }),
+    );
+
+    expect(channel.inbound.map((item) => item.text)).toEqual([
+      'please help',
+      'ok',
+    ]);
+  });
+
   it('does not track group replies when their conversation requires mentions', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
@@ -1664,7 +1790,7 @@ describe('DwsChannel', () => {
     ]);
   });
 
-  it('does not mute a sender after consuming their matching text as an echo', async () => {
+  it('does not infer sender identity from matching outbound text', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const channel = await readyChannel(client, makeConfig(), 'learn-self-dws');
@@ -1702,11 +1828,12 @@ describe('DwsChannel', () => {
 
     expect(channel.inbound.map((item) => item.text)).toEqual([
       'hello',
+      'shared text',
       'still me',
     ]);
   });
 
-  it('consumes a JSON-wrapped Markdown echo', async () => {
+  it('does not silently drop JSON-wrapped matching text without a self id', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const { bridge } = await readyPolicyChannel(
@@ -1733,10 +1860,10 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('consumes an echo when DWS folds Markdown whitespace', async () => {
+  it('does not silently drop folded matching text without a self id', async () => {
     const client = new FakeDwsClient();
     client.identity = { profile: 'corp-only' };
     const { bridge } = await readyPolicyChannel(
@@ -1767,7 +1894,7 @@ describe('DwsChannel', () => {
     );
 
     expect(bridge.prompt).not.toHaveBeenCalled();
-    expect(client.sendImMessage).toHaveBeenCalledOnce();
+    expect(client.sendImMessage).toHaveBeenCalledTimes(2);
   });
 
   it('does not persist an echo sender as the authenticated identity', async () => {
