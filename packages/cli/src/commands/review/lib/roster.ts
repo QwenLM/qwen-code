@@ -179,18 +179,34 @@ function incrementalInteractionPaths(plan: RosterPlan): Set<string> {
     | null
     | undefined;
   const out = new Set<string>();
-  if (raw && Array.isArray(raw.interaction)) {
-    for (const e of raw.interaction) {
-      const path = (e as { path?: unknown } | null)?.path;
-      if (typeof path === 'string' && path.length > 0) out.add(path);
-    }
-    // A malformed block naming one path in BOTH lists must widen (the delta
-    // classification wins — its change is live), never narrow.
-    if (Array.isArray(raw.deltaFiles)) {
-      for (const p of raw.deltaFiles) {
-        if (typeof p === 'string') out.delete(p);
-      }
-    }
+  // Same validation the brief renderer applies (`incrementalScopeOf`): an
+  // anchor-less block is not an incremental plan, and an entry with no
+  // surviving edge is not an interaction — treating either as one NARROWS
+  // the roster, and every malformation here must widen instead.
+  if (
+    !raw ||
+    typeof (raw as { anchor?: unknown }).anchor !== 'string' ||
+    (raw as { anchor: string }).anchor === '' ||
+    !Array.isArray(raw.interaction)
+  ) {
+    return out;
+  }
+  // A malformed `deltaFiles` disables the delta-wins subtraction below, so
+  // it must disable the narrowing entirely: with no trustworthy delta list
+  // there is no way to tell a seam-only file from a live one.
+  if (!Array.isArray(raw.deltaFiles)) return out;
+  for (const e of raw.interaction) {
+    const path = (e as { path?: unknown } | null)?.path;
+    const edges = (e as { importsChanged?: unknown } | null)?.importsChanged;
+    const hasEdge =
+      Array.isArray(edges) &&
+      edges.some((x) => typeof x === 'string' && x.length > 0);
+    if (typeof path === 'string' && path.length > 0 && hasEdge) out.add(path);
+  }
+  // A path in BOTH lists is a DELTA file (its change is live): the delta
+  // classification wins and its invariant agents stay.
+  for (const p of raw.deltaFiles) {
+    if (typeof p === 'string') out.delete(p);
   }
   return out;
 }
