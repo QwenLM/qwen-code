@@ -188,12 +188,20 @@ describe('serve-ab.yml runner routing', () => {
     assert.match(runsOn, /ubuntu-latest/);
   });
 
-  it('wipes the reused workspace before checking out PR code', () => {
+  it('wipes only the reused A/B checkout dirs before checking out PR code', () => {
     const wipe = serveAbDoc.jobs.ab.steps.find(
       (s) => s.name === 'Wipe stale workspace before checkout',
     );
     assert.ok(wipe, 'self-hosted reuse must not bleed one PR into the next');
     assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
-    assert.match(wipe.run, /find "\$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf/);
+    assert.match(
+      wipe.run,
+      /rm -rf "\$\{GITHUB_WORKSPACE:\?\}\/head" "\$\{GITHUB_WORKSPACE:\?\}\/base"/,
+    );
+    // A whole-workspace wipe also destroys the shared root .git, forcing the
+    // next job on this runner to re-fetch the full history from github.com —
+    // on the ECS pool's slow link that is the "hung runner" pathology. Pin
+    // the narrow scope so it cannot regress.
+    assert.doesNotMatch(wipe.run, /-mindepth 1 -maxdepth 1 -exec rm -rf/);
   });
 });

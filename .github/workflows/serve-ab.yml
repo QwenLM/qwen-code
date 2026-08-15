@@ -80,7 +80,12 @@ jobs:
           # could bleed into the builds and silently change the posted A/B
           # diff. Hosted runners are ephemeral and never see this. After the
           # ownership-restore step everything is user-owned, so no sudo.
-          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          # Only these two directories are removed: wiping the whole workspace
+          # also destroys the shared root .git, forcing the next job on this
+          # runner to re-fetch the full ~900 MB of history from github.com. On
+          # the ECS pool's slow link that stalls checkouts for 20+ minutes and
+          # the fetches drop mid-pack often enough to read as hung runners.
+          rm -rf "${GITHUB_WORKSPACE:?}/head" "${GITHUB_WORKSPACE:?}/base"
 
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
