@@ -441,6 +441,19 @@ describe('requiredAgents — Step 3B', () => {
     expect(k).not.toContain('invariant-a--src/seam.ts');
     const mangled = { ...base, incremental: { interaction: 'nope' } };
     expect(keys(mangled as typeof base)).toContain('invariant-a--src/seam.ts');
+    // A path in BOTH lists is a DELTA file (its change is live): the delta
+    // classification wins and the invariant agents stay.
+    const both = {
+      ...base,
+      incremental: {
+        anchor: 'abc1234def567890',
+        deltaFiles: ['src/seam.ts'],
+        interaction: [
+          { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+        ],
+      },
+    };
+    expect(keys(both as typeof base)).toContain('invariant-a--src/seam.ts');
   });
 });
 

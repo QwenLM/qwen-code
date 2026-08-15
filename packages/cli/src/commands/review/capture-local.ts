@@ -24,7 +24,11 @@ import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
-import { buildDiffPlan, READ_FILE_CHAR_CAP } from './lib/diff-plan.js';
+import {
+  buildDiffPlan,
+  sliceDiffByLines,
+  READ_FILE_CHAR_CAP,
+} from './lib/diff-plan.js';
 import {
   type IncrementalScope,
   buildPlanReport,
@@ -38,7 +42,6 @@ import {
   hashWorktreeFiles,
   readLocalCache,
   stateIdOf,
-  sliceDiffByLines,
   type LocalCacheCandidate,
 } from './lib/local-anchor.js';
 import {
@@ -262,6 +265,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
         fullDiffPath,
       };
+      // Paths that vanished since the cached round have no diff section and
+      // no deltaFiles entry — say they existed, or a deletion-only round
+      // reads as if nothing drove its scope.
+      const removedCount = stateChanged.filter(
+        (p) => !planPaths.includes(p),
+      ).length;
       writeStderrLine(
         // The stop condition is the SYMMETRIC set: a deleted-since-cache
         // path with no diff section left is still a change, and "no
@@ -274,6 +283,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             )}: ` +
               `${changed.length} changed file(s), ${interaction.size} ` +
               `interaction file(s) (one import hop), ` +
+              (removedCount > 0
+                ? `${removedCount} cached path(s) no longer present ` +
+                  `(treated as changes for the widening), `
+                : '') +
               `${incremental.contextFileCount} clean file(s) left out of ` +
               `scope.`,
       );

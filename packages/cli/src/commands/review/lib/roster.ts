@@ -63,6 +63,8 @@ export interface RosterPlan {
   worktreePath?: unknown;
   prNumber?: unknown;
   untrackedFiles?: unknown;
+  /** Present only on a rescoped plan — see incrementalInteractionPaths. */
+  incremental?: unknown;
   /**
    * The review's effort, as the capturing command recorded it (`--effort`).
    * `'medium'` is the balanced tier and drops the adversarial personas; anything
@@ -159,14 +161,21 @@ export function hasExecutableScript(plan: RosterPlan): boolean {
 }
 
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
+function heavyFiles(plan: RosterPlan): string[] {
+  const files = Array.isArray(plan.files) ? plan.files : [];
+  return files
+    .filter((f) => f?.heavy === true && typeof f.path === 'string')
+    .map((f) => f.path as string);
+}
+
 /**
  * The interaction-file paths of a rescoped plan, defensively parsed — the
  * plan is disk JSON, and a malformed block must widen the roster (invariant
  * agents run), never narrow it.
  */
 function incrementalInteractionPaths(plan: RosterPlan): Set<string> {
-  const raw = (plan as { incremental?: unknown }).incremental as
-    | { interaction?: unknown }
+  const raw = plan.incremental as
+    | { interaction?: unknown; deltaFiles?: unknown }
     | null
     | undefined;
   const out = new Set<string>();
@@ -175,15 +184,15 @@ function incrementalInteractionPaths(plan: RosterPlan): Set<string> {
       const path = (e as { path?: unknown } | null)?.path;
       if (typeof path === 'string' && path.length > 0) out.add(path);
     }
+    // A malformed block naming one path in BOTH lists must widen (the delta
+    // classification wins — its change is live), never narrow.
+    if (Array.isArray(raw.deltaFiles)) {
+      for (const p of raw.deltaFiles) {
+        if (typeof p === 'string') out.delete(p);
+      }
+    }
   }
   return out;
-}
-
-function heavyFiles(plan: RosterPlan): string[] {
-  const files = Array.isArray(plan.files) ? plan.files : [];
-  return files
-    .filter((f) => f?.heavy === true && typeof f.path === 'string')
-    .map((f) => f.path as string);
 }
 
 /**

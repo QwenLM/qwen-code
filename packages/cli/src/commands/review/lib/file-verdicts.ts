@@ -59,10 +59,11 @@ function nullProtoMap<T>(): Record<string, T> {
  * fallback would silently convert into a skip.
  *
  * The listing is read as BYTES (`gitRaw`), not through the CRLF-normalising
- * text helpers: `-z` exists precisely to keep paths byte-faithful, and a
- * filename containing a CRLF pair mangled in transport fails the lookup and
- * degrades that file to a permanent `(absent, absent)` pair — a clean
- * verdict transferring over a full rewrite.
+ * text helpers: `-z` exists precisely to keep paths byte-faithful. (Even a
+ * mangled lookup would only ever fail SAFE now — an unmatched path stays
+ * `NO_BLOB`, and `changedPairs` never transfers an absent-base pair — but a
+ * byte-faithful read keeps the identity, so a CRLF filename costs nothing
+ * instead of a permanent re-review.)
  *
  * A ref that cannot be listed at all returns null: the caller must treat the
  * whole lookup as unusable rather than reading "everything absent".

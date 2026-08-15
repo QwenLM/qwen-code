@@ -151,6 +151,17 @@ describe('blobsAt / blobPairs', () => {
   });
 });
 
+describe('blobsAt — pathspec magic', () => {
+  it('a colon-prefixed filename lists literally under --literal-pathspecs', () => {
+    write(':weird.ts', 'W\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'colon');
+    const sha = git('rev-parse', 'HEAD');
+    const blobs = blobsAt(repo, sha, [':weird.ts'])!;
+    expect(blobs[':weird.ts']).toMatch(/^100644 [0-9a-f]{40,64}$/);
+  });
+});
+
 describe('readFileVerdicts', () => {
   it('round-trips a valid map and rejects every malformation', () => {
     const good = { 'a.ts': { base: 'b1', head: 'h1' } };
@@ -197,6 +208,12 @@ describe('changedPairs', () => {
     const rec = { 'added.ts': { base: NO_BLOB, head: 'h1' } };
     const cur = { 'added.ts': { base: NO_BLOB, head: 'h1' } };
     expect(changedPairs(rec, cur, ['added.ts'])).toEqual(['added.ts']);
+  });
+
+  it('an identical DELETION pair (blob, NO_BLOB) transfers — only absent-BASE never does', () => {
+    const rec = { 'gone.ts': { base: '100644 b1', head: NO_BLOB } };
+    const cur = { 'gone.ts': { base: '100644 b1', head: NO_BLOB } };
+    expect(changedPairs(rec, cur, ['gone.ts'])).toEqual([]);
   });
 
   it('a path named __proto__ compares as an ordinary key', () => {

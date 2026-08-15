@@ -28,9 +28,6 @@ import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { gitOpt, gitWithInput } from './git.js';
 
-/** Per-file identity for a path with NO file: a deletion the diff still shows.
- *  Stable across rounds on purpose — a deletion reviewed clean stays clean. */
-export const ABSENT = 'absent';
 /**
  * Per-file identity for a path whose state CANNOT be captured: a directory
  * (an embedded repo / submodule gitlink above all), a FIFO, an unreadable
@@ -111,8 +108,12 @@ export function hashWorktreeFiles(
     }
     if (st.isSymbolicLink()) {
       try {
-        const target = readlinkSync(join(repoRoot, p));
-        const oid = gitWithInput(Buffer.from(target, 'utf8'), [
+        // RAW BYTES: git identities and diffs use the link text's bytes, and
+        // a default-encoding readlink round-trips through a JS string where
+        // invalid UTF-8 collapses to U+FFFD — two distinct targets could
+        // then share one identity and a retarget compare "unchanged".
+        const target = readlinkSync(join(repoRoot, p), { encoding: 'buffer' });
+        const oid = gitWithInput(target, [
           '-C',
           repoRoot,
           'hash-object',
@@ -125,9 +126,11 @@ export function hashWorktreeFiles(
     } else if (st.isFile()) {
       // The mode is part of the identity: `git diff` reports an exec-bit
       // flip as its own lines, so identical bytes under a flipped bit are
-      // NOT an identical change. (On filesystems without a real exec bit
-      // the mode reads constant, which only ever compares equal — safe.)
-      modes[p] = (st.mode & 0o111) !== 0 ? '100755' : '100644';
+      // NOT an identical change. USER bit only (S_IXUSR) — git canonicalizes
+      // regular-file modes on that bit alone, and masking all three classes
+      // held the identity still across a chmod git visibly reports (0755 →
+      // 0655 prints old/new mode lines while g+other bits kept 0o111 truthy).
+      modes[p] = (st.mode & 0o100) !== 0 ? '100755' : '100644';
       hashable.push(p);
     } else {
       // Directories (embedded repos, submodule gitlinks the pinned diff
@@ -256,31 +259,4 @@ export function changedSince(
     if (!Object.hasOwn(current, path)) out.push(path);
   }
   return out;
-}
-
-/**
- * Cut a captured diff down to the file sections named in `keep`, by BYTES.
- *
- * The capture path's contract is bytes end to end: a decode/re-encode rewrites
- * the content of every hunk touching a file git handed over in a non-UTF-8
- * encoding (the header of `capture-local` says so where it writes the file).
- * So the filter works on the buffer: the caller passes the 1-based inclusive
- * LINE ranges `parseDiff` reported per file, and this maps them to byte
- * ranges over the same newline structure `parseDiff` walked.
- */
-export function sliceDiffByLines(
-  diff: Buffer,
-  keep: ReadonlyArray<{ startLine: number; endLine: number }>,
-): Buffer {
-  // Byte offset of the start of each 1-based line; sentinel = buffer length.
-  const starts: number[] = [0];
-  for (let i = 0; i < diff.length; i++) {
-    if (diff[i] === 0x0a) starts.push(i + 1);
-  }
-  const offsetOf = (line1: number): number =>
-    line1 - 1 < starts.length ? starts[line1 - 1] : diff.length;
-  const parts = [...keep]
-    .sort((a, b) => a.startLine - b.startLine)
-    .map((r) => diff.subarray(offsetOf(r.startLine), offsetOf(r.endLine + 1)));
-  return Buffer.concat(parts);
 }

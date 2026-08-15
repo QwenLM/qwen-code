@@ -11,13 +11,12 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  ABSENT,
   UNHASHABLE,
   changedSince,
   readLocalCache,
-  sliceDiffByLines,
   stateIdOf,
 } from './local-anchor.js';
+import { sliceDiffByLines } from './diff-plan.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,10 +52,12 @@ describe('changedSince', () => {
     ]);
   });
 
-  it('a legacy absent identity still compares as an ordinary stable value', () => {
-    expect(changedSince({ 'del.ts': ABSENT }, { 'del.ts': ABSENT })).toEqual(
-      [],
-    );
+  it('a legacy string identity still compares as an ordinary stable value', () => {
+    // Older caches may carry values no current producer emits ('absent',
+    // bare oids); they compare as opaque strings — equal is equal.
+    expect(
+      changedSince({ 'del.ts': 'absent' }, { 'del.ts': 'absent' }),
+    ).toEqual([]);
   });
 
   it('prototype-member names behave as ordinary keys in the comparison', () => {
@@ -161,6 +162,15 @@ describe('sliceDiffByLines', () => {
     const out = sliceDiffByLines(diff, [{ startLine: 1, endLine: 1 }]);
     expect([...out.subarray(5, 7)]).toEqual([0x80, 0x81]);
     expect(out.toString('latin1')).not.toContain('drop');
+  });
+
+  it('preserves lone \\r bytes — the CRLF-normalising idiom must never touch this path', () => {
+    // All three text wrappers in lib/git.ts apply `.replace(/\\r\\n/g, '\\n')`;
+    // a regression routing the slice through one of them rewrites every hunk
+    // touching a CRLF file.
+    const diff = Buffer.from('a\r\nb\nkeep\r\n', 'utf8');
+    const out = sliceDiffByLines(diff, [{ startLine: 1, endLine: 3 }]);
+    expect([...out]).toEqual([...diff]);
   });
 
   it('a range past the last line clamps to the buffer end', () => {

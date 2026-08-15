@@ -237,8 +237,10 @@ describe('rescope', () => {
     seedHistory();
     const planPath = join(repo, 'plan.json');
     writeFileSync(planPath, JSON.stringify({ prNumber: '7' }));
+    const before = readFileSync(planPath, 'utf8');
     run(planPath, 'HEAD');
     expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
   });
 
   it('a delta file nobody imports widens nothing', () => {
@@ -315,8 +317,10 @@ describe('rescope — contract pins from review findings', () => {
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
     expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
     expect(plan.incremental.interaction.map((e) => e.path)).toEqual([CALLER]);
-    // deep.ts is two hops out: context, not interaction.
-    expect(plan.incremental.contextFileCount).toBeGreaterThan(0);
+    // deep.ts is two hops out: context, not interaction — and the count is
+    // EXACT (bystander + deep), so a flood-fill or a dropped exclusion
+    // cannot hide inside a `> 0`.
+    expect(plan.incremental.contextFileCount).toBe(2);
   });
 
   it('a test-file dependent stays OUT of the interaction set', () => {
@@ -390,7 +394,7 @@ describe('rescope — contract pins from review findings', () => {
     git('add', '-A');
     git('commit', '-q', '--no-verify', '-m', 'round 1 rewrites big');
     const anchor2 = git('rev-parse', 'HEAD');
-    write('packages/app/src/big.ts', bigV2.replace('a0 = 2', 'a0 = 3'));
+    write('packages/app/src/big.ts', bigV2 + 'export const extra = 1;\n');
     git('add', '-A');
     git('commit', '-q', '--no-verify', '-m', 'fix big');
     const head2 = git('rev-parse', 'HEAD');
@@ -408,7 +412,7 @@ describe('rescope — contract pins from review findings', () => {
     ).find((f) => f.path === 'packages/app/src/big.ts')!;
     // The degradation rescope exists to prevent: a null post-image resolver
     // zeroes fileLines and heavy never fires — invariant agents vanish.
-    expect(big.fileLines).toBe(600);
+    expect(big.fileLines).toBe(601); // the HEAD count, not the base or anchor
     expect(big.heavy).toBe(true);
     expect(big.addedRanges).toBeDefined();
   });
@@ -656,5 +660,272 @@ describe('rescope — verdict transfer after a rebase', () => {
       maxChunkLines: 400,
     });
     expect(process.exitCode).toBe(RESCOPE_EXIT_NOTHING_NEW);
+  });
+
+  it('--cache without --model refuses the transfer on a dead anchor', () => {
+    const { planPath, anchor, cachePath } = seedRebase();
+    const before = readFileSync(planPath, 'utf8');
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      cache: cachePath,
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+
+  it('renders a non-sha anchor label WHOLE in the summary — never content-verd', () => {
+    const { planPath, anchor, cachePath } = seedRebase();
+    // Strip lastCommitSha so the transfer label falls back to the literal.
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete cache['lastCommitSha'];
+    writeFileSync(cachePath, JSON.stringify(cache));
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      cache: cachePath,
+      model: 'model-a',
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    expect(plan.incremental.anchor).toBe('content-verdicts');
+  });
+});
+
+describe('rescope — round-2 findings', () => {
+  it('a rename in the fix round keeps its RENAME section — hunks stay a subset of the PR diff', () => {
+    const { base, anchor } = seedHistory();
+    // The fix round renames caller.ts (routine `git mv` on review feedback).
+    git('mv', CALLER, 'packages/app/src/renamed-caller.ts');
+    git('commit', '-q', '--no-verify', '-m', 'rename in fix round');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
+    // A pathspec-scoped re-capture cannot see the rename source and renders
+    // a whole-file ADD ('new file mode'); the byte-slice keeps the pairing.
+    expect(diff).toContain('rename to packages/app/src/renamed-caller.ts');
+    expect(diff).not.toContain('new file mode');
+  });
+
+  it('empty and zero-usable files[] both refuse with the plan untouched', () => {
+    const { base, anchor, head } = seedHistory();
+    for (const files of [[], [{}, { path: 42 }]]) {
+      process.exitCode = undefined;
+      const planPath = writeFetchedPlan(base, head);
+      const mangled = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      mangled['files'] = files;
+      writeFileSync(planPath, JSON.stringify(mangled));
+      const before = readFileSync(planPath, 'utf8');
+      run(planPath, anchor);
+      expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+      expect(readFileSync(planPath, 'utf8')).toBe(before);
+    }
+  });
+
+  it('a delta file restored to its merge-base state is reconciled out of deltaFiles', () => {
+    const { base, anchor } = seedHistory();
+    // The fix round restores changed.ts to its merge-base content: it is in
+    // the interdiff, but the PR's own diff has no section for it.
+    write(CHANGED, 'export const v = 1;\n');
+    write(BYSTANDER, 'export const b = 9;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'restore + touch bystander');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    // bystander changed for real; the restored file names no phantom scope —
+    // but its importer still re-enters through the widening.
+    expect(plan.incremental.deltaFiles).toEqual([BYSTANDER]);
+    expect(plan.incremental.interaction.map((e) => e.path)).toContain(CALLER);
+    const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
+    expect(diff).not.toContain('changed.ts');
+  });
+
+  it('runs correctly from a cwd OUTSIDE the worktree — the documented production shape', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    // Rewrite the plan's diff path to absolute (fetch-pr always records it).
+    const plan0 = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan0['diffPathAbsolute'] = join(repo, plan0['diffPath'] as string);
+    writeFileSync(planPath, JSON.stringify(plan0));
+    const checkout = realpathSync(
+      mkdtempSync(join(tmpdir(), 'main-checkout-')),
+    );
+    const prev = process.cwd();
+    process.chdir(checkout);
+    try {
+      run(planPath, anchor);
+      expect(process.exitCode ?? 0).toBe(0);
+      const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+      expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
+      // The interaction hunks are present — the -C pin, not the cwd, decides.
+      const diff = readFileSync(join(checkout, plan.diffPath), 'utf8');
+      expect(diff).toContain('caller.ts');
+    } finally {
+      process.chdir(prev);
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it('an unwritable --out exits 2 instead of throwing', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const blocked = join(repo, 'blocked');
+    writeFileSync(blocked, 'a plain file where a directory must go');
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      out: join(blocked, 'nested', 'plan.json'),
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+  });
+});
+
+describe('rescope — candidate narrowing and remaining round-2 gates', () => {
+  /** A candidate as fetch-pr writes it, covering the full plan. */
+  function writeCandidate(base: string, head: string, paths: string[]): string {
+    const fv: Record<string, { base: string; head: string }> = {};
+    for (const p of paths) {
+      const at = (ref: string): string => {
+        try {
+          return `100644 ${git('rev-parse', `${ref}:${p}`)}`;
+        } catch {
+          return 'absent';
+        }
+      };
+      fv[p] = { base: at(base), head: at(head) };
+    }
+    const candidatePath = join(
+      repo,
+      '.qwen/tmp/qwen-review-pr-7-cache-candidate.json',
+    );
+    mkdirSync(join(repo, '.qwen/tmp'), { recursive: true });
+    writeFileSync(
+      candidatePath,
+      JSON.stringify({
+        v: 1,
+        target: 'pr-7',
+        lastCommitSha: head,
+        mergeBaseSha: base,
+        fileVerdicts: fv,
+      }),
+    );
+    return candidatePath;
+  }
+
+  it('narrows the candidate to reviewed pairs; unreviewed context pairs drop without a cache', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const candidatePath = writeCandidate(base, head, [
+      CHANGED,
+      CALLER,
+      BYSTANDER,
+    ]);
+    const plan0 = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan0['cacheCandidatePath'] = candidatePath;
+    writeFileSync(planPath, JSON.stringify(plan0));
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    const candidate = JSON.parse(readFileSync(candidatePath, 'utf8')) as {
+      fileVerdicts: Record<string, unknown>;
+      lastCommitSha: string;
+    };
+    // Scoped files (delta + interaction) keep their pairs; the context file
+    // was reviewed by NO round this rescope can vouch for (no --cache), so
+    // its pair is dropped — absence re-reviews it next time.
+    expect(Object.keys(candidate.fileVerdicts).sort()).toEqual([
+      CALLER,
+      CHANGED,
+    ]);
+    // Anchor fields survive untouched.
+    expect(candidate.lastCommitSha).toBeDefined();
+  });
+
+  it('carries a context pair forward when the previous cache certified that exact pair', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const candidatePath = writeCandidate(base, head, [
+      CHANGED,
+      CALLER,
+      BYSTANDER,
+    ]);
+    const plan0 = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan0['cacheCandidatePath'] = candidatePath;
+    writeFileSync(planPath, JSON.stringify(plan0));
+    // The previous clean round certified pairs at (base, anchor); the
+    // bystander is untouched by the fix, so its pair is identical at head.
+    const fv: Record<string, { base: string; head: string }> = {};
+    for (const p of [CHANGED, CALLER, BYSTANDER]) {
+      const at = (ref: string): string =>
+        `100644 ${git('rev-parse', `${ref}:${p}`)}`;
+      fv[p] = { base: at(base), head: at(anchor) };
+    }
+    const cachePath = join(repo, 'prev-cache.json');
+    writeFileSync(
+      cachePath,
+      JSON.stringify({ lastModelId: 'model-a', fileVerdicts: fv }),
+    );
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      cache: cachePath,
+      model: 'model-a',
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode ?? 0).toBe(0);
+    const candidate = JSON.parse(readFileSync(candidatePath, 'utf8')) as {
+      fileVerdicts: Record<string, unknown>;
+    };
+    expect(Object.keys(candidate.fileVerdicts).sort()).toEqual([
+      BYSTANDER,
+      CALLER,
+      CHANGED,
+    ]);
+  });
+
+  it('an all-delta plan refuses as a mislabeled full review', () => {
+    // A one-file PR whose fix touches that same file: delta == plan.
+    git('init', '-q', '--template=', '.');
+    git('config', 'user.email', 'a@b');
+    git('config', 'user.name', 'a');
+    git('config', 'commit.gpgsign', 'false');
+    write('only.ts', 'export const o = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    write('only.ts', 'export const o = 2;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'pr');
+    const anchor = git('rev-parse', 'HEAD');
+    write('only.ts', 'export const o = 3;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'fix');
+    const head = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head);
+    run(planPath, anchor);
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
   });
 });

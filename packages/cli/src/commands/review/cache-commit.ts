@@ -89,10 +89,18 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // basename IS the target by the cache's naming contract.
   const outTarget = basename(args.out).replace(/\.json$/, '');
   if (candidate['target'] !== outTarget) {
+    const hint =
+      typeof candidate['target'] === 'string' &&
+      candidate['target'].includes('/')
+        ? ' The target contains "/": file-path reviews must pass the ' +
+          'FLATTENED repo-relative path (src/foo.ts -> src_foo.ts) as ' +
+          '--target and name the cache file the same way.'
+        : '';
     throw new Error(
       `cache-commit: the candidate belongs to target ` +
         `${JSON.stringify(candidate['target'])}, but --out names ` +
-        `${JSON.stringify(outTarget)} — refusing to promote across targets.`,
+        `${JSON.stringify(outTarget)} — refusing to promote across targets.` +
+        hint,
     );
   }
 

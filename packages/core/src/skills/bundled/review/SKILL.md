@@ -99,8 +99,8 @@ Based on the parsed `target.type`:
 
 - **`local`**: Review local uncommitted changes — staged, unstaged, **and untracked**. Capture them with `qwen review capture-local` (below); do not run `git diff` yourself. A `git diff` of any form reports changes to files git already **tracks**, and a file the user created but has not `git add`ed is in neither the index nor HEAD — so it appears in no `git diff` output at all. Reviews have skipped brand-new files this way — not judged low-risk, simply unseen (measured; DESIGN.md — The unseen untracked file).
   - **At medium effort, the cache is a LEDGER, never an anchor**: if `.qwen/review-cache/local.json` (or the file-review's `<target>.json`) exists, read its `findings` — Step 6 owes each entry a ruling at medium too, and a medium round that cannot see the previous high round's open Critical presents zero blockers over a blocker that still stands. Do NOT pass `--cache` to the capture and do NOT write the cache: incremental scoping and the cache write stay high-only, for the PR cache's exact reasons.
-  - **Incremental local rounds** (high effort only — the same gate, and the same reasons, as the PR cache): if `.qwen/review-cache/local.json` exists (for a file-path review: `.qwen/review-cache/<the capture's --target value>.json`), append `--cache <that path> --model {{model}}` to the `capture-local` command. The command enforces the gates itself — same model, same HEAD, content actually unchanged — and on any refusal falls back to the full capture with the reason on stderr; **repeat that line to the user**, whichever way it went. When it does scope incrementally, the plan carries an `incremental` block (changed files + one-import-hop interaction files, the rest left out) and the chunk briefs direct each agent accordingly — nothing else about the flow changes. **Also read the cache's `findings` ledger**: those are the previous local round's findings with their ids, and Step 6 owes each of them a ruling this round, exactly as on the PR path.
-  - If the capture reported `No changes since the last local review round` (the incremental plan's `deltaFiles` is empty and `chunks: []`): **first check the cache's `findings` for open entries.** The state is byte-identical to the round that recorded them, so every open finding still stands VERBATIM — render the still-open list with ids and titles (no re-ruling is needed; nothing they describe can have changed), state that they remain the round's blockers, and stop. Only when the cached ledger has no open findings does the stop read as clean: inform the user nothing changed since the previous round's clean review — name that round's verdict — and stop here. This is NOT the clean-tree case below: the tree is dirty, but it is byte-identical to the state the previous round already reviewed.
+  - **Incremental local rounds** (high effort only — the same gate, and the same reasons, as the PR cache): if `.qwen/review-cache/local.json` exists (for a file-path review: `.qwen/review-cache/<the capture's --target value>.json`), append `--cache <that path> --model {{model}}` to the `capture-local` command. The command enforces the gates itself — same model, same HEAD, content actually unchanged — and on any refusal falls back to the full capture with the reason on stderr; **repeat that line to the user**, whichever way it went. When it does scope incrementally, the plan carries an `incremental` block (changed files + one-import-hop interaction files, the rest left out) and the chunk briefs direct each agent accordingly; the rest of the flow reads the same plan shape it always did. **Also read the cache's `findings` ledger**: those are the previous local round's findings with their ids, and Step 6 owes each of them a ruling this round, exactly as on the PR path.
+  - If the capture reported `No changes since the last local review round` (the incremental plan's `deltaFiles` is empty and `chunks: []`): **first check the cache's `findings` for open entries.** The state is byte-identical to the round that recorded them, so every open finding still stands VERBATIM — render the still-open list with ids and titles (no re-ruling is needed; nothing they describe can have changed), keeping severities distinct: open Criticals remain the round's blockers, open Suggestions are re-listed as open suggestions and block nothing. Then stop. Only when the cached ledger has no open findings does the stop read as clean: inform the user nothing changed since the previous round's clean review — name that round's verdict — and stop here. This is NOT the clean-tree case below: the tree is dirty, but it is byte-identical to the state the previous round already reviewed.
   - If the capture's plan is empty (`chunks: []` — nothing staged, nothing unstaged, nothing untracked), inform the user there are no changes to review and stop here — do not proceed to the review agents
 
 - **`pr-number`, or `pr-url` with a matching remote** (cross-repo `pr-url`s are handled by the lightweight mode above):
@@ -196,7 +196,7 @@ Based on the parsed `target.type`:
   - **Attach repository context** at medium or high effort, before `agent-prompt --roster` (and therefore before launching agents): run `qwen review repo-context` with absolute `--plan`, `--worktree`, and `--out` paths. See the repository-context step in the Diff capture section below; for same-repo PRs the manifest is read from the trusted merge base recorded by `fetch-pr`.
 
 - **`file`** (e.g., `src/foo.ts`):
-  - Run `"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the repo-relative path of the file> --out .qwen/tmp/qwen-review-<target>-plan.json` to get its changes (`--out` is required — see the capture block below for the full form). An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet. The path is taken relative to **your** working directory and must be inside the repo.
+  - Run `"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the file's repo-relative path with every / replaced by _> --out .qwen/tmp/qwen-review-<target>-plan.json` to get its changes (`--out` is required — see the capture block below for the full form). An **untracked** target file is captured whole (every line reads as added), which is the right frame for a file that does not exist upstream yet. The path is taken relative to **your** working directory and must be inside the repo.
   - If the plan is empty (the file is tracked and unmodified), read the file and review its current state — see the no-diff branch below
 
 ### Diff capture and the review topology
@@ -226,13 +226,17 @@ For **local-diff and file-path reviews**, capture and plan in one command:
 ```bash
 "${QWEN_CODE_CLI:-qwen}" review capture-local --effort <effort> --out .qwen/tmp/qwen-review-local-plan.json
 # for a file-path review:
-"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the repo-relative path of the file> --effort <effort> \
+"${QWEN_CODE_CLI:-qwen}" review capture-local --file <file> --target <the file's repo-relative path with every / replaced by _> --effort <effort> \
   --out .qwen/tmp/qwen-review-<target>-plan.json
-# The target is the file's REPO-RELATIVE PATH, never its basename: the target
-# keys the tmp stems AND the review cache, and `src/index.ts` and
-# `test/index.ts` reviewed under the shared target `index.ts` would overwrite
-# each other's cache — the second review erasing the first file's still-open
-# findings. (The CLI flattens separators for the filename itself.)
+# The target is the file's repo-relative path FLATTENED (`src/index.ts` →
+# `src_index.ts`), never its basename: the target keys the tmp stems AND the
+# review cache, and `src/index.ts` and `test/index.ts` reviewed under the
+# shared target `index.ts` would overwrite each other's cache — the second
+# review erasing the first file's still-open findings. Flattened, not raw:
+# the CLI flattens separators when it derives filenames anyway, and a raw
+# slashed target would nest the plan/cache under directories that Step 9's
+# `cleanup <target>` sweep and Step 8's cache write never look in. Pass the
+# SAME flattened token everywhere the target appears.
 # <effort> is the resolved level (local defaults to medium). It is recorded in
 # the plan so the roster, check-coverage and compose-review all read one value.
 ```

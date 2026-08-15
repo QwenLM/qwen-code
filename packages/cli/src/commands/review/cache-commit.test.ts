@@ -160,6 +160,56 @@ describe('cache-commit', () => {
     expect(cache['lastReviewDate']).not.toBe('1999-01-01T00:00:00Z');
   });
 
+  it('an allowlist key present only in the LEDGER is scrubbed from the merge', () => {
+    // The delete branch: a ledger smuggling `fileVerdicts` (an anchor field
+    // the candidate does not carry) must not have it survive into the cache.
+    const argv = seed(
+      { v: 1, target: 'pr-7' },
+      {
+        lastModelId: 'm1',
+        round: 1,
+        fileVerdicts: { 'a.ts': { base: 'x', head: 'y' } },
+      },
+    );
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect('fileVerdicts' in cache).toBe(false);
+  });
+
+  it('every candidate-owned anchor field survives the merge intact', () => {
+    const argv = seed(
+      {
+        v: 1,
+        target: 'local',
+        headSha: 'h1',
+        files: { 'a.ts': '100644:x' },
+        stateId: 's1',
+      },
+      { lastModelId: 'm1', round: 3, verdict: 'Approve', findings: [] },
+    );
+    argv['out'] = join(dir, 'cache/local.json');
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['v']).toBe(1);
+    expect(cache['target']).toBe('local');
+    expect(cache['headSha']).toBe('h1');
+    expect(cache['files']).toEqual({ 'a.ts': '100644:x' });
+    expect(cache['stateId']).toBe('s1');
+  });
+
+  it('a slashed target names the flattened-token contract in its refusal', () => {
+    const argv = seed({ v: 1, target: 'src/foo.ts' }, { lastModelId: 'm1' });
+    expect(() =>
+      run({ ...argv, out: join(dir, 'cache/src_foo.ts.json') }),
+    ).toThrow(/FLATTENED repo-relative path/);
+  });
+
   it('refuses an EMPTY lastModelId, not just a missing one', () => {
     const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: '' });
     expect(() => run(argv)).toThrow(/lastModelId/);
