@@ -58,6 +58,7 @@ export {
   type DaemonChannelStartupFailure,
   type DaemonChannelStopResult,
   type DaemonChannelWorkerStartErrorResponse,
+  type DaemonChannelStopErrorResponse,
   type DaemonChannelConfigFieldKind,
   type DaemonChannelConfigFieldDescriptor,
   type DaemonChannelConfigValueFieldDescriptor,

@@ -1183,23 +1183,35 @@ describe('createChannelManagementService', () => {
     // matching must read the unstripped view (ownershipSnapshots), or
     // the predicates are dead: runtimeFor reports a clean stop and
     // restart rejects with 409 instead of recovering via reloadWorkspace.
+    //
+    // Model the strip in the stub (R11-17): the default stub forwards the
+    // SAME unstripped worker objects to both `state()` and
+    // `ownershipSnapshots()`, so reverting `workerFor` to read
+    // `state().workers` still matched `lastRequestedChannels` and shipped
+    // green. In production `state()` returns publicWorkerSnapshot-stripped
+    // workers (no `lastRequestedChannels`) while ownershipSnapshots keeps
+    // them — split the two views so only the unstripped read matches.
+    const unstrippedWorker = {
+      enabled: true,
+      state: 'failed' as const,
+      channels: ['telegram'],
+      lastRequestedChannels: ['telegram', 'bot'],
+      error: 'Channel worker restart budget exhausted.',
+      workspaceId: 'primary',
+      workspaceCwd: WORKSPACE,
+      primary: true,
+    };
+    const { lastRequestedChannels: _stripped, ...strippedWorker } =
+      unstrippedWorker;
     vi.mocked(manager.state).mockReturnValue({
       enabled: true,
       selection: { mode: 'names', names: ['telegram', 'bot'] },
       transition: 'idle',
-      workers: [
-        {
-          enabled: true,
-          state: 'failed',
-          channels: ['telegram'],
-          lastRequestedChannels: ['telegram', 'bot'],
-          error: 'Channel worker restart budget exhausted.',
-          workspaceId: 'primary',
-          workspaceCwd: WORKSPACE,
-          primary: true,
-        },
-      ],
+      workers: [strippedWorker],
     });
+    vi.mocked(manager.ownershipSnapshots).mockReturnValue([
+      unstrippedWorker,
+    ] as never);
 
     const result = await service.list();
 

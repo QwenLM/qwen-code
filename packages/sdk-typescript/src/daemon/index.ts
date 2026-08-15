@@ -358,6 +358,7 @@ export type {
   DaemonChannelStartupFailure,
   DaemonChannelStopResult,
   DaemonChannelWorkerStartErrorResponse,
+  DaemonChannelStopErrorResponse,
   DaemonChannelConfigFieldKind,
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelConfigValueFieldDescriptor,

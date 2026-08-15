@@ -574,6 +574,151 @@ describe('qwen channel stop → start round trip (#8975)', () => {
     }
     child = undefined;
   }, 120000);
+
+  // The legacy global-file handoff (R11-38): recordStoppedChannels
+  // dual-writes the stop record into the legacy global file FOR THIS —
+  // the standalone service is a global singleton, so a restart from
+  // ANOTHER workspace must still see the stop via adoption. The sibling
+  // test above runs every phase from the same cwd and the unit suite
+  // mocks each half apart (stop.test.ts mocks the store; start.test.ts
+  // mocks adoptLegacyChannelState), so a divergence between the legacy
+  // WRITE path (stop.ts's zero-arg channelRuntimeStatePath) and the
+  // adoption READ (a start from a different cwd) shipped green — with
+  // the user-visible result being exactly the #8975 regression: stopped
+  // in workspace A, resurrected by `channel start` from workspace B.
+  it('keeps the stop visible to a restart from a SECOND workspace (legacy adoption)', async () => {
+    testRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), 'qwen-channel-crossws-')),
+    );
+    const qwenHome = path.join(testRoot, 'qwen-home');
+    const runtimeDir = path.join(testRoot, 'runtime');
+    const workspaceA = path.join(testRoot, 'workspace-a');
+    const workspaceB = path.join(testRoot, 'workspace-b');
+    mkdirSync(path.join(workspaceA, '.qwen'), { recursive: true });
+    mkdirSync(path.join(workspaceB, '.qwen'), { recursive: true });
+    mkdirSync(runtimeDir);
+    mkdirSync(qwenHome, { recursive: true });
+    mockServer = await createMockServer({ httpPort: 0, wsPort: 0 });
+
+    const extensionDir = path.join(qwenHome, 'extensions');
+    mkdirSync(extensionDir, { recursive: true });
+    symlinkSync(
+      path.join(REPO_ROOT, 'packages', 'channels', 'plugin-example'),
+      path.join(extensionDir, 'qwen-channel-plugin-example'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      'utf-8',
+    );
+    const trustedFoldersPath = path.join(qwenHome, 'trustedFolders.json');
+    writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({
+        [workspaceA]: 'TRUST_FOLDER',
+        [workspaceB]: 'TRUST_FOLDER',
+      }),
+      'utf-8',
+    );
+    // The same project checked out twice: both workspaces configure the
+    // channel, so a start from B has something to resurrect.
+    const channelsSettings = JSON.stringify({
+      channels: {
+        mockbot: {
+          type: 'plugin-example',
+          serverWsUrl: mockServer.wsUrl,
+          senderPolicy: 'open',
+          sessionScope: 'user',
+          cwd: workspaceA,
+        },
+      },
+    });
+    writeFileSync(
+      path.join(workspaceA, '.qwen', 'settings.json'),
+      channelsSettings,
+      'utf-8',
+    );
+    writeFileSync(
+      path.join(workspaceB, '.qwen', 'settings.json'),
+      channelsSettings,
+      'utf-8',
+    );
+    const env = {
+      ...process.env,
+      QWEN_HOME: qwenHome,
+      QWEN_RUNTIME_DIR: runtimeDir,
+      QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFoldersPath,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    };
+
+    // Phase 1: the service starts from workspace A and connects.
+    child = spawn(process.execPath, [CLI_BIN, 'channel', 'start'], {
+      cwd: workspaceA,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    await waitForLine(child, '[Channel] "mockbot" connected.');
+    const pidFile = path.join(qwenHome, 'channels', 'service.pid');
+    const pidFileDeadline = Date.now() + 5000;
+    while (!existsSync(pidFile)) {
+      if (Date.now() > pidFileDeadline) {
+        throw new Error(`Timed out waiting for pid file at ${pidFile}`);
+      }
+      await sleep(50);
+    }
+    const serviceExited = new Promise<number | null>((resolve) => {
+      child!.once('exit', (code) => resolve(code));
+    });
+
+    // Phase 2: stop from workspace A — persists the scoped record AND
+    // the legacy global record (the dual write under test).
+    const stopProc = spawn(process.execPath, [CLI_BIN, 'channel', 'stop'], {
+      cwd: workspaceA,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    const stopResult = await runToCompletion(stopProc);
+    expect(stopResult.code).toBe(0);
+    if (isPosix) {
+      expect(await serviceExited).toBe(0);
+    } else {
+      await serviceExited;
+    }
+    child = undefined;
+
+    // Phase 3: restart from workspace B. Its scoped state file does not
+    // exist yet — the stop must reach it through the legacy file's
+    // adoption, or mockbot resurrects (#8975).
+    child = spawn(process.execPath, [CLI_BIN, 'channel', 'start'], {
+      cwd: workspaceB,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    await waitForLine(child, '"mockbot" skipped (stopped before restart)');
+    await waitForLine(child, 'serving with 0 channels');
+    await sleep(2000);
+    expect(child.exitCode).toBeNull();
+    expect(child.signalCode).toBeNull();
+
+    const exited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const { code, signal } = await exited;
+    if (isPosix) {
+      expect(signal).toBeNull();
+      expect(code).toBe(0);
+    }
+    child = undefined;
+  }, 120000);
 });
 
 // Runs on ALL platforms — the writer/reader path-derivation split this

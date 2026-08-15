@@ -66,7 +66,11 @@ import {
 } from '../../serve/channel-worker-startup-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineBestEffort,
+} from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
@@ -479,15 +483,25 @@ export async function runChannelDaemonWorker(
       // prune throws only on write failure; the recorded states are still
       // readable — fall back, but surface that persistence is broken so a
       // later resurrection of stale entries has a traceable cause (#8975).
-      writeStdoutLine(
+      // Best-effort sink (R11-13).
+      writeStdoutLineBestEffort(
         '[Channel] Warning: failed to update channel state; falling back to recorded states.',
       );
       states = stateStore.readAll();
     }
-    selectedNames = selectActiveChannels(names, states, writeStdoutLine);
+    // Skip notices are best-effort diagnostics: a dead stdout reader must
+    // not kill the worker start (R11-13).
+    selectedNames = selectActiveChannels(
+      names,
+      states,
+      writeStdoutLineBestEffort,
+    );
   }
   if (selectedNames.length === 0) {
-    writeStdoutLine(
+    // Zero-channel degrade notice: the worker survives with no channels,
+    // so the notice is best-effort and must not crash it when stdout is
+    // the thing that is failing (R11-13).
+    writeStdoutLineBestEffort(
       names.length === 0
         ? '[Channel] No channels configured; serving with 0 channels.'
         : '[Channel] All configured channels are stopped; serving with 0 channels.',
@@ -713,7 +727,9 @@ export async function runChannelDaemonWorker(
     // like the stop direction does, or the next `--channel all` restore
     // skips channels the user explicitly asked for (#8975).
     if (!stateStore.trySetMany(connected, 'active')) {
-      writeStdoutLine(
+      // Best-effort sink: a warning write must not terminate the worker
+      // when stdout is already failing (R11-13).
+      writeStdoutLineBestEffort(
         '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
       );
     }

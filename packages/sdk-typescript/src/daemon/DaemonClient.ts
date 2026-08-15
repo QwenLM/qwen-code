@@ -3850,6 +3850,13 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Stop the channel worker. On success, `statePersisted` is present (and
+   * `false`) only when the stop's `stopped` record failed to persist
+   * (#8975). On FAILURE the same loss signal is typed on
+   * {@link DaemonChannelStopErrorResponse} — read it from
+   * `DaemonHttpError.body` without casting (R11-19).
+   */
   async stopChannelWorker(opts?: {
     clientId?: string;
     timeoutMs?: number;
@@ -3951,6 +3958,13 @@ export class DaemonClient {
     return this.workspaceChannelAction(name, 'start', opts);
   }
 
+  /**
+   * Stop one channel instance. On success, `statePersisted` on
+   * {@link DaemonChannelStopInstanceResult} is present (and `false`) only
+   * when the stop's `stopped` record failed to persist (#8975); on FAILURE
+   * the same signal is typed on {@link DaemonChannelStopErrorResponse} via
+   * `DaemonHttpError.body` (R11-19).
+   */
   stopWorkspaceChannel(
     name: string,
     opts?: DaemonChannelManagementOptions,
@@ -5080,6 +5094,13 @@ export class WorkspaceDaemonClient {
     return this.channelAction(name, 'start', opts);
   }
 
+  /**
+   * Stop one channel instance. On success, `statePersisted` on
+   * {@link DaemonChannelStopInstanceResult} is present (and `false`) only
+   * when the stop's `stopped` record failed to persist (#8975); on FAILURE
+   * the same signal is typed on {@link DaemonChannelStopErrorResponse} via
+   * `DaemonHttpError.body` (R11-19).
+   */
   stopWorkspaceChannel(
     name: string,
     opts?: DaemonChannelManagementOptions,

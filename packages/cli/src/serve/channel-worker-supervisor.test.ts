@@ -1167,6 +1167,89 @@ describe('createChannelWorkerSupervisor', () => {
     await supervisor.stop();
   });
 
+  it('re-carries the committed names across a SECOND crash inside the restart window (R11-18)', async () => {
+    // Multi-hop carry: a crash DURING the restart starting window (before
+    // the second child's ready) exercises launch('restart')'s fallback
+    // `requestedChannelNames(opts.selection) ?? snapshot.requestedChannels`
+    // — in mode-all the selection carries no names, so the ALREADY-carried
+    // set must be re-carried into the second restart window. Every other
+    // carry test crashes once from `running`, and every double-crash test
+    // is mode-names where the fallback never executes: narrowing that
+    // fallback (reading lastRequestedChannels, dropping an empty carried
+    // set) left a mode-all worker's second window with `channels:
+    // ['all']` and no carried names — a stop in the window records
+    // nothing and the stopped channels resurrect, while manager-level
+    // tests (which mock group.snapshots()) stay green (#8975).
+    vi.useFakeTimers();
+    const firstChild = new FakeChild(false);
+    const secondChild = new FakeChild(false);
+    const thirdChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild)
+      .mockReturnValueOnce(thirdChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker,
+      restartPolicy: { maxRestarts: 3, windowMs: 300_000, delaysMs: [10, 10] },
+    });
+
+    const started = supervisor.start();
+    firstChild.emit('message', {
+      type: 'ready',
+      pid: 11111,
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await started;
+
+    // Hop 1: crash from running into the restart starting window.
+    firstChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+
+    // Hop 2: the second child exits BEFORE ready — inside the first
+    // restart's starting window. The carried set must survive into the
+    // second restart window via the launch fallback.
+    secondChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'starting',
+      channels: ['all'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    expect(supervisor.snapshot().lastConnectedChannels).toEqual([
+      'telegram',
+      'feishu',
+    ]);
+
+    // The third child finally readies; the run recovers with the carried
+    // names intact.
+    thirdChild.emit('message', {
+      type: 'ready',
+      pid: 33333,
+      channels: ['telegram', 'feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await Promise.resolve();
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'running',
+      pid: 33333,
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await supervisor.stop();
+  });
+
   it('uses escalating restart delays from the restart policy', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);
@@ -1377,7 +1460,7 @@ describe('createChannelWorkerSupervisor', () => {
   it('resets restart budget after an intentional stop and start', async () => {
     vi.useFakeTimers();
     const firstChild = new FakeChild(false);
-    const secondChild = new FakeChild();
+    const secondChild = new FakeChild(false);
     const thirdChild = new FakeChild(false);
     const fourthChild = new FakeChild();
     const spawnWorker = vi
@@ -1390,17 +1473,18 @@ describe('createChannelWorkerSupervisor', () => {
       cliEntryPath: '/repo/dist/index.js',
       daemonUrl: 'http://127.0.0.1:4170',
       workspace: '/workspace',
-      selection: { mode: 'names', names: ['telegram'] },
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
       spawnWorker,
       restartPolicy: { maxRestarts: 1, windowMs: 300_000, delaysMs: [10] },
     });
 
     const firstStart = supervisor.start();
+    // feishu never connects (R10-22 shape): attempted ≠ connected.
     firstChild.emit('message', {
       type: 'ready',
       pid: 11111,
       channels: ['telegram'],
-      requestedChannels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
     });
     await firstStart;
     firstChild.emit('exit', 1, null);
@@ -1409,9 +1493,24 @@ describe('createChannelWorkerSupervisor', () => {
       type: 'ready',
       pid: 22222,
       channels: ['telegram'],
-      requestedChannels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
     });
     await Promise.resolve();
+    // Drive the OLD run to budget exhaustion before stop()/start()
+    // (R11-44): budget exhaustion is the ONLY path that sets
+    // lastRequestedChannels, so a fixture that never exhausts it leaves
+    // the fresh-start guard's lastRequestedChannels half vacuous — a
+    // regression carrying the terminal attempted set into the recovery
+    // relaunch shipped green. The production sequence is exactly
+    // budget-exhaustion → stop() → start() (the R9-6 recovery relaunch
+    // on the same supervisor instance).
+    secondChild.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'failed',
+      lastConnectedChannels: ['telegram'],
+      lastRequestedChannels: ['telegram', 'feishu'],
+    });
 
     await supervisor.stop();
 
@@ -1430,7 +1529,7 @@ describe('createChannelWorkerSupervisor', () => {
       type: 'ready',
       pid: 33333,
       channels: ['telegram'],
-      requestedChannels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
     });
     await secondStart;
     thirdChild.emit('exit', 1, null);
@@ -1439,7 +1538,7 @@ describe('createChannelWorkerSupervisor', () => {
       type: 'ready',
       pid: 44444,
       channels: ['telegram'],
-      requestedChannels: ['telegram'],
+      requestedChannels: ['telegram', 'feishu'],
     });
     await Promise.resolve();
 

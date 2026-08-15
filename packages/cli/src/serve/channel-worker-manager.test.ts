@@ -1406,6 +1406,13 @@ describe('createChannelWorkerManager', () => {
     const group = fakeGroup({
       snapshots: vi.fn(() => [leaked]),
       primarySnapshot: vi.fn(() => leaked),
+      // Feed reconcile's return with the SAME leaked worker (R11-43):
+      // reload()/reloadWorkspace() currently discard reconcile's return,
+      // but a refactor switching their return source to the reconcile
+      // workers would keep every strip assertion green against the clean
+      // default fake while production leaks both internal fields on the
+      // POST /workspace/channel/reload HTTP responses.
+      reconcile: vi.fn(async () => ({ changed: true, workers: [leaked] })),
     });
     const test = setup(group);
     await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
@@ -1515,6 +1522,46 @@ describe('createChannelWorkerManager', () => {
 
     expect(result).toMatchObject({ changed: true });
     expect(group.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a crashed-but-restart-scheduled worker committed (R11-37)', async () => {
+    // Manager-side twin of the service predicate pin (R11-v4):
+    // isTerminalFailedWorker's `&& nextRestartAt === undefined` clause is
+    // the boundary between a budget-exhausted TERMINAL worker and a
+    // crashed worker with a restart still SCHEDULED. Every other
+    // failed-worker fixture leaves nextRestartAt unset, so collapsing the
+    // predicate to `state === 'failed'` shipped green — making
+    // committedChannelNames() drop a scheduled-restart worker's names,
+    // so a per-channel start in that window reconciles a replacement
+    // against the mid-relaunch worker instead of idempotently returning
+    // {changed: false}.
+    const group = fakeGroup({ isHealthy: vi.fn(() => false) });
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['telegram'],
+        requestedChannels: undefined,
+        adapters: undefined,
+        lastRequestedChannels: ['telegram'],
+        nextRestartAt: new Date(Date.now() + 5000).toISOString(),
+        error: 'Channel worker crashed; restart scheduled.',
+      }),
+    ]);
+
+    // The scheduled restart keeps the worker NON-terminal: its names stay
+    // committed.
+    expect(test.manager.committedChannelNames()).toEqual(['telegram']);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'telegram', workspaceCwd: PRIMARY },
+      true,
+    );
+    // Idempotent: no replacement reconcile against the mid-relaunch
+    // worker.
+    expect(result).toMatchObject({ changed: false });
+    expect(group.reconcile).not.toHaveBeenCalled();
   });
 
   it('relaunches a never-connected channel on a terminal-failed mode-names worker (R9-6)', async () => {

@@ -1,10 +1,7 @@
 import {
   chmodSync,
-  closeSync,
   existsSync,
-  fstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
 } from 'node:fs';
 import * as path from 'node:path';
@@ -41,24 +38,39 @@ interface ChannelStateFile {
    */
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
   /**
-   * The legacy file's mtime at the last adoption sync. A content diff
-   * alone cannot see a re-stop written BYTE-IDENTICALLY: the only legacy
-   * writer is this PR's own no-workspace stop fallback (the file is
-   * introduced by this PR, so older releases never write it), and it
-   * echoes the WHOLE stored map on every stop — re-stopping an
-   * already-stopped channel rewrites the same bytes. The snapshot
-   * matches, so the merge loop would drop the re-stop and the explicitly
-   * re-stopped channel resurrects on `--channel all`. When the mtime
-   * moved AND the content still equals the snapshot, the rewrite itself
-   * is a new stop signal re-asserting the whole map, so snapshot-
+   * The legacy file's `generation` at the last adoption sync (R11-14).
+   * A content diff alone cannot see a re-stop whose entry set is
+   * unchanged: the only legacy writer is this PR's own no-workspace stop
+   * fallback (the file is introduced by this PR, so older releases never
+   * write it), and it echoes the WHOLE stored map on every stop —
+   * re-stopping an already-stopped channel re-asserts the same entries.
+   * The snapshot matches, so the merge loop would drop the re-stop and
+   * the explicitly re-stopped channel resurrects on `--channel all`.
+   * Every store rewrite bumps `generation`, so a generation DIFFERENT
+   * from the recorded one while the content still equals the snapshot
+   * proves a re-stop rewrite re-asserting the whole map — snapshot-
    * identical entries are re-applied too. (A rewrite that CHANGES the
    * content stays on the plain content diff — the unchanged entries were
    * not re-asserted, and re-applying them would override an explicit
-   * restart, the R9-3 hazard.) Absent on files written before mtime
-   * recording; adoption then keeps the content-only diff for that one
-   * sync and starts recording (#8975).
+   * restart, the R9-3 hazard.) The mtime-based watermark this replaced
+   * was unreliable in both directions: coarse-mtime filesystems
+   * (exFAT/FAT32 2 s, some NFS/SMB 1 s) hid real rewrites, and any
+   * external `touch`/backup re-materialization with unchanged bytes
+   * forged one. Generation lives in the content, so neither pole exists
+   * (R11-14). `-1` records a legacy file without generation (pre-
+   * feature, tolerated); absent means this file predates watermark
+   * recording and adoption keeps the content-only diff for one sync.
    */
-  adoptedLegacyMtime?: number;
+  adoptedLegacyGeneration?: number;
+  /**
+   * Monotonic rewrite counter stamped by every `applyChange` write:
+   * files created here start at 0, every rewrite bumps it (R11-14).
+   * Adoption diffs the legacy file's generation against the recorded
+   * `adoptedLegacyGeneration` watermark to see re-stops the content diff
+   * cannot. External mtime bumps cannot forge it and coarse filesystem
+   * granularity cannot hide it.
+   */
+  generation?: number;
 }
 
 /**
@@ -114,58 +126,44 @@ export function channelRuntimeStatePath(workspaceCwd?: string): string {
  * forever (a later-starting workspace adopts the same stops), so blindly
  * re-merging it would override an explicit restart recorded in this
  * workspace's own map with the stale old stop. Exception: a rewrite of
- * the legacy file that leaves an entry byte-identical (the no-workspace
- * stop fallback echoing the whole stored map when re-stopping an
+ * the legacy file whose entry set is unchanged (the no-workspace stop
+ * fallback echoing the whole stored map when re-stopping an
  * already-stopped channel) is invisible to the content diff, so the sync
- * also records the legacy mtime; when it moved since the snapshot was
- * recorded, the rewrite itself is a new stop signal and snapshot-
- * identical entries are re-applied (#8975). Entries that
+ * also records the legacy file's generation counter; when it moved since
+ * the snapshot was recorded, the rewrite itself is a new stop signal and
+ * snapshot-identical entries are re-applied (#8975, R11-14). Entries that
  * disappeared from the legacy file are likewise never propagated: it
  * carries no workspace attribution, so its loss or rewrite must not
  * destroy this workspace's records. Best-effort — any failure only loses
  * this sync and warns, matching the store's never-fails contract (#8975).
  */
-export function adoptLegacyChannelState(
-  workspaceCwd: string,
-  /** Internal test seam — see {@link atomicWriteFileSync}. */
-  _testFs?: { openLegacy?: (path: string, flags: 'r') => number },
-): void {
+export function adoptLegacyChannelState(workspaceCwd: string): void {
   const targetPath = channelRuntimeStatePath(workspaceCwd);
   const legacyPath = channelRuntimeStatePath();
   if (!existsSync(legacyPath)) return;
   let legacyChannels: Record<string, ChannelRuntimeState>;
-  let legacyMtime: number;
+  let legacyGeneration: number;
   try {
-    // The mtime watermark and the adopted content must describe the SAME
-    // file version: a path-based stat BEFORE the read lets a racing
-    // legacy rewrite land between the two, recording a stale mtime next
-    // to newer content; the next sync then reads moved-mtime +
-    // unchanged-content as a byte-identical re-stop rewrite and
-    // re-applies the stale snapshot over an explicit restart — the R9-3
-    // hazard the watermark exists to prevent. One open fd pins one
-    // inode, so fstat + read below observe one consistent (mtime,
-    // content) pair however many rewrites race this adoption: legacy
-    // writers replace via temp + rename, so a racing rewrite swaps the
-    // path to a new inode and never mutates the pinned one. The rewrite
-    // is then merged by the NEXT sync's content diff (#8975).
-    const fd =
-      _testFs?.openLegacy?.(legacyPath, 'r') ?? openSync(legacyPath, 'r');
-    try {
-      legacyMtime = fstatSync(fd).mtimeMs;
-      const raw = readFileSync(fd, 'utf-8');
-      const parsed = parseStateFile(raw);
-      // A legacy file that reads successfully but no longer parses is
-      // silently coerced to empty otherwise: the stops it carried are lost
-      // with no trace, so warn like every other discard path (#8975).
-      if (!parsed) {
-        writeStoreWarning(
-          `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; treating it as empty for this adoption.`,
-        );
-      }
-      legacyChannels = parsed?.channels ?? Object.create(null);
-    } finally {
-      closeSync(fd);
+    // The generation watermark lives INSIDE the content, so one
+    // readFileSync observes one consistent (generation, channels) pair by
+    // construction — the split stat+read window the old mtime watermark
+    // needed (and its fd-pinning, R11-2) is gone: a rewrite racing this
+    // adoption simply lands in the NEXT sync's diff (R11-14).
+    const raw = readFileSync(legacyPath, 'utf-8');
+    const parsed = parseStateFile(raw);
+    // A legacy file that reads successfully but no longer parses is
+    // silently coerced to empty otherwise: the stops it carried are lost
+    // with no trace, so warn like every other discard path (#8975).
+    if (!parsed) {
+      writeStoreWarning(
+        `[Channel] Warning: could not parse legacy channel state file ${legacyPath}; treating it as empty for this adoption.`,
+      );
     }
+    legacyChannels = parsed?.channels ?? Object.create(null);
+    // A generation-less legacy file predates the watermark (tolerated):
+    // record -1 so the NEXT rewrite — the first one stamping a real
+    // generation — is visible as a change (R11-14).
+    legacyGeneration = parsed?.generation ?? -1;
   } catch {
     // ENOENT can still race the existsSync above; anything else is a real
     // open/read failure (EACCES/EIO/EISDIR on a shared ~/.qwen): the
@@ -213,17 +211,20 @@ export function adoptLegacyChannelState(
   const channels: Record<string, ChannelRuntimeState> =
     target?.channels ?? Object.create(null);
   const snapshot = target?.adoptedLegacy;
-  // A snapshot-identical entry is re-applied only on a BYTE-IDENTICAL
-  // rewrite of the legacy file: the moved mtime proves a rewrite happened
-  // since the snapshot was recorded, and unchanged content means the
-  // rewrite re-asserted exactly the adopted map — a re-stop (see the
-  // function doc). Without a recorded mtime (a file written before mtime
-  // recording) the content-only diff stands for this sync; the write
-  // below starts recording.
+  // A snapshot-identical entry is re-applied only on an entry-set-
+  // unchanged rewrite of the legacy file: the moved generation proves a
+  // rewrite happened since the snapshot was recorded, and unchanged
+  // content means the rewrite re-asserted exactly the adopted map — a
+  // re-stop (see the function doc). Without a recorded generation (a file
+  // written before watermark recording) the content-only diff stands for
+  // this sync; the write below starts recording. The generation lives in
+  // the content, so external mtime bumps (touch, backup restore) cannot
+  // forge the signal and coarse-mtime filesystems cannot hide a real
+  // rewrite (R11-14).
   const legacyRewritten =
     snapshot !== undefined &&
-    target?.adoptedLegacyMtime !== undefined &&
-    target.adoptedLegacyMtime !== legacyMtime &&
+    target?.adoptedLegacyGeneration !== undefined &&
+    target.adoptedLegacyGeneration !== legacyGeneration &&
     sameChannelMaps(snapshot, legacyChannels);
   const merged: string[] = [];
   // A corrupt/unreadable target is treated as empty by design, so reseed
@@ -237,13 +238,13 @@ export function adoptLegacyChannelState(
         channels[name] = state;
         merged.push(name);
       } else if (legacyRewritten && channels[name] !== state) {
-        // Byte-identical rewrite since the snapshot (see the function
-        // doc): content cannot distinguish it from 'unchanged since
-        // adoption', but the moved mtime proves a rewrite, and the only
-        // legacy writer — this PR's own no-workspace stop fallback —
-        // echoes the WHOLE stored map on every stop, so the rewrite
-        // re-asserts every entry. Treat the re-assertion as a stop
-        // event over an explicit restart recorded since (R10-5).
+        // Entry-set-unchanged rewrite since the snapshot (see the
+        // function doc): content cannot distinguish it from 'unchanged
+        // since adoption', but the moved generation proves a rewrite, and
+        // the only legacy writer — this PR's own no-workspace stop
+        // fallback — echoes the WHOLE stored map on every stop, so the
+        // rewrite re-asserts every entry. Treat the re-assertion as a
+        // stop event over an explicit restart recorded since (R10-5).
         // Accepted trade-off: the echo cannot say WHICH entry the stop
         // touched, so a no-op re-stop of one already-stopped channel
         // also re-stops explicitly restarted siblings in every adopted
@@ -258,8 +259,17 @@ export function adoptLegacyChannelState(
   // Nothing new and the snapshot is already recorded: skip the write so a
   // normal start does not pay an fsync'd rewrite of an unchanged file. A
   // detected rewrite still writes even with nothing merged, to advance
-  // the recorded mtime — otherwise every later sync re-detects it.
-  if (targetExisted && target !== undefined && snapshot !== undefined) {
+  // the recorded generation — otherwise every later sync re-detects it. A
+  // MISSING generation watermark also writes (R11-20): the skip must not
+  // fire before the one-shot baseline write that STARTS recording, or
+  // entry-set-unchanged re-stops stay invisible on every subsequent sync
+  // while the legacy content stays unchanged.
+  if (
+    targetExisted &&
+    target !== undefined &&
+    snapshot !== undefined &&
+    target.adoptedLegacyGeneration !== undefined
+  ) {
     if (merged.length === 0 && !legacyRewritten) return;
   }
   try {
@@ -272,7 +282,7 @@ export function adoptLegacyChannelState(
       version: STORE_VERSION,
       channels,
       adoptedLegacy: legacyChannels,
-      adoptedLegacyMtime: legacyMtime,
+      adoptedLegacyGeneration: legacyGeneration,
     };
     atomicWriteFileSync(targetPath, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',
@@ -294,7 +304,8 @@ export function adoptLegacyChannelState(
 interface ParsedStateFile {
   channels: Record<string, ChannelRuntimeState>;
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
-  adoptedLegacyMtime?: number;
+  adoptedLegacyGeneration?: number;
+  generation?: number;
 }
 
 /** Tolerant state-file parse: any deviation yields `undefined`. */
@@ -327,10 +338,16 @@ function parseStateFile(raw: string): ParsedStateFile | undefined {
     result.adoptedLegacy = filterChannelStates(file.adoptedLegacy);
   }
   if (
-    typeof file.adoptedLegacyMtime === 'number' &&
-    Number.isFinite(file.adoptedLegacyMtime)
+    typeof file.adoptedLegacyGeneration === 'number' &&
+    Number.isFinite(file.adoptedLegacyGeneration)
   ) {
-    result.adoptedLegacyMtime = file.adoptedLegacyMtime;
+    result.adoptedLegacyGeneration = file.adoptedLegacyGeneration;
+  }
+  if (
+    typeof file.generation === 'number' &&
+    Number.isFinite(file.generation)
+  ) {
+    result.generation = file.generation;
   }
   return result;
 }
@@ -543,6 +560,7 @@ export class ChannelStateStore {
     // later re-adoption re-applying stale legacy stops over explicit
     // restarts (R9-3). A corrupt file is treated as empty by design, so
     // its snapshot is dropped with it.
+    const fileExisted = existsSync(this.filePath);
     const full = this.readFileFull();
     const channels = full?.channels ?? Object.create(null);
     mutate(channels);
@@ -555,23 +573,37 @@ export class ChannelStateStore {
     }
     const data: ChannelStateFile = {
       version: STORE_VERSION,
+      // Every rewrite bumps the generation watermark (R11-14): a new file
+      // starts at 0, so the no-workspace stop fallback echoing the legacy
+      // map is always generation-distinguishable from the snapshot the
+      // next adoption recorded.
+      generation: (full?.generation ?? -1) + 1,
       channels,
-      // Preserve the snapshot (and its legacy-mtime watermark) across
+      // Preserve the snapshot (and its legacy-generation watermark) across
       // writes this store does not own. When no snapshot exists to
-      // preserve, record an EMPTY one: every writer in this codebase
-      // creates a file only after adoption ran (start flow) or for a
-      // stop record, so the file has 'seen' the legacy file — `{}` marks
-      // that, letting a later first-ever legacy stop merge instead of
-      // baselining into permanent invisibility. Absent stays the marker
-      // for files that genuinely predate snapshot recording (#8975).
+      // preserve, stamp an EMPTY one ONLY if this write CREATES the file:
+      // every writer in this codebase creates a file only after adoption
+      // ran (start flow) or for a stop record, so the new file has 'seen'
+      // the legacy file — `{}` marks that, letting a later first-ever
+      // legacy stop merge instead of baselining into permanent
+      // invisibility. An EXISTING file without a snapshot keeps absence
+      // (R11-27): it predates snapshot recording (or was reseeded from a
+      // corrupt read), and stamping it would silently convert its next
+      // adoption from the baseline branch into the full-merge branch —
+      // an order-dependent R9-3 hazard where a stale legacy stop
+      // overrides an explicit restart recorded since. Absent stays the
+      // marker for files that genuinely predate snapshot recording
+      // (#8975).
       ...(full?.adoptedLegacy
         ? {
             adoptedLegacy: full.adoptedLegacy,
-            ...(full.adoptedLegacyMtime !== undefined
-              ? { adoptedLegacyMtime: full.adoptedLegacyMtime }
+            ...(full.adoptedLegacyGeneration !== undefined
+              ? { adoptedLegacyGeneration: full.adoptedLegacyGeneration }
               : {}),
           }
-        : { adoptedLegacy: Object.create(null) }),
+        : fileExisted
+          ? {}
+          : { adoptedLegacy: Object.create(null) }),
     };
     atomicWriteFileSync(this.filePath, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',

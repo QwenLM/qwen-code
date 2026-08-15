@@ -3,9 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   readFileSync,
-  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -160,13 +158,13 @@ describe('adoptLegacyChannelState (#8975)', () => {
     // start diffs the legacy file against it and merges only the entries
     // that changed since, so post-adoption legacy stops are honored
     // without the stale adopted ones ever overriding an explicit restart
-    // (R9-3). The legacy mtime watermark beside it lets a later sync see
-    // a byte-identical re-stop rewrite (R10-5).
+    // (R9-3). The legacy generation watermark beside it lets a later sync
+    // see an entry-set-unchanged re-stop rewrite (R10-5, R11-14).
     expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
       version: 1,
       channels: { telegram: 'stopped' },
       adoptedLegacy: { telegram: 'stopped' },
-      adoptedLegacyMtime: expect.any(Number),
+      adoptedLegacyGeneration: expect.any(Number),
     });
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'stopped',
@@ -197,6 +195,11 @@ describe('adoptLegacyChannelState (#8975)', () => {
       expect(writeSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('could not adopt legacy channel state'),
       );
+      // A clean adoption must write NOTHING to stderr (R11-28): a
+      // substring pin scoped to one message lets a differently worded or
+      // unconditional warning ship green — a false alarm on every clean
+      // startup, the exact thing this test exists to catch.
+      expect(writeSpy).not.toHaveBeenCalled();
     } finally {
       writeSpy.mockRestore();
     }
@@ -285,7 +288,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
       version: 1,
       channels: { telegram: 'stopped' },
       adoptedLegacy: { feishu: 'stopped' },
-      adoptedLegacyMtime: expect.any(Number),
+      adoptedLegacyGeneration: expect.any(Number),
     });
     expect(existsSync(legacyPath)).toBe(true);
 
@@ -362,6 +365,45 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(statSync(workspacePath).ino).toBe(beforeInode);
   });
 
+  it('starts recording the watermark when a snapshot file predates it (R11-20)', () => {
+    // A target holding a snapshot but NO generation watermark predates
+    // watermark recording: the skip guard must not fire before the
+    // one-shot baseline write that STARTS recording, or entry-set-
+    // unchanged re-stops stay invisible on every subsequent sync while
+    // the legacy content stays unchanged.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    mkdirSync(dirname(workspacePath), { recursive: true });
+    writeFileSync(
+      workspacePath,
+      JSON.stringify({
+        version: 1,
+        channels: { telegram: 'stopped' },
+        adoptedLegacy: { telegram: 'stopped' },
+      }),
+      'utf-8',
+    );
+
+    adoptLegacyChannelState(workspace);
+
+    // The baseline write happened and recorded the watermark.
+    const recorded = JSON.parse(readFileSync(workspacePath, 'utf-8')) as {
+      adoptedLegacyGeneration?: number;
+    };
+    expect(recorded.adoptedLegacyGeneration).toEqual(expect.any(Number));
+
+    // ...and an entry-set-unchanged re-stop is visible from now on.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    new ChannelStateStore(legacyPath).setMany(['telegram'], 'stopped');
+    adoptLegacyChannelState(workspace);
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+    });
+  });
+
   it('does nothing when no legacy file exists', () => {
     adoptLegacyChannelState(workspace);
     expect(existsSync(workspacePath)).toBe(false);
@@ -435,7 +477,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
       version: 1,
       channels: { telegram: 'stopped' },
       adoptedLegacy: { telegram: 'stopped' },
-      adoptedLegacyMtime: expect.any(Number),
+      adoptedLegacyGeneration: expect.any(Number),
     });
     // Kept for later-starting workspaces (#8975).
     expect(existsSync(legacyPath)).toBe(true);
@@ -471,7 +513,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
       version: 1,
       channels: { telegram: 'stopped' },
       adoptedLegacy: { telegram: 'stopped' },
-      adoptedLegacyMtime: expect.any(Number),
+      adoptedLegacyGeneration: expect.any(Number),
     });
     // Kept for later-starting workspaces (#8975).
     expect(existsSync(legacyPath)).toBe(true);
@@ -498,9 +540,15 @@ describe('adoptLegacyChannelState (#8975)', () => {
 
       // The reseed makes the file valid forever after — no later
       // read/prune can warn about the discarded records, so the discard
-      // itself must leave a trace (R10-8).
+      // itself must leave a trace (R10-8). Pin the DISTINGUISHING suffix:
+      // the skip warning shares the prefix but means the opposite (file
+      // untouched, retry next start), so a text swap between the two
+      // branches must not ship green (R11-39).
       expect(writeSpy).toHaveBeenCalledWith(
         expect.stringContaining('could not read channel state file'),
+      );
+      expect(writeSpy).toHaveBeenCalledWith(
+        expect.stringContaining('treating all channels as active'),
       );
     } finally {
       writeSpy.mockRestore();
@@ -509,7 +557,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
       version: 1,
       channels: { telegram: 'stopped' },
       adoptedLegacy: { telegram: 'stopped' },
-      adoptedLegacyMtime: expect.any(Number),
+      adoptedLegacyGeneration: expect.any(Number),
     });
   });
 
@@ -554,7 +602,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
       version: 1,
       channels: { telegram: 'stopped' },
       adoptedLegacy: { telegram: 'stopped' },
-      adoptedLegacyMtime: expect.any(Number),
+      adoptedLegacyGeneration: expect.any(Number),
     });
   });
 
@@ -579,7 +627,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
         version: 1,
         channels: {},
         adoptedLegacy: {},
-        adoptedLegacyMtime: expect.any(Number),
+        adoptedLegacyGeneration: expect.any(Number),
       });
     } finally {
       writeSpy.mockRestore();
@@ -636,12 +684,12 @@ describe('adoptLegacyChannelState (#8975)', () => {
     });
   });
 
-  it('honors a byte-identical legacy re-stop the content diff cannot see (R10-5)', () => {
+  it('honors an entry-set-unchanged legacy re-stop the content diff cannot see (R10-5)', () => {
     // The no-workspace stop fallback echoes the WHOLE stored map on
-    // every stop, so re-stopping an already-stopped channel rewrites
-    // the SAME bytes: the snapshot matches, the content diff drops the
+    // every stop, so re-stopping an already-stopped channel re-asserts
+    // the SAME entries: the snapshot matches, the content diff drops the
     // re-stop and the explicitly stopped channel resurrects. The moved
-    // mtime beside unchanged content is the rewrite signal (#8975).
+    // generation beside unchanged entries is the rewrite signal (#8975).
     writeFileSync(
       legacyPath,
       JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
@@ -650,16 +698,9 @@ describe('adoptLegacyChannelState (#8975)', () => {
     adoptLegacyChannelState(workspace);
     // An explicit restart recorded after adoption.
     new ChannelStateStore(workspacePath).set('telegram', 'active');
-    // The older release re-stops: same bytes, new mtime. utimesSync
-    // advances the mtime deterministically (two writes can land in the
-    // same millisecond).
-    const rewritten = JSON.stringify({
-      version: 1,
-      channels: { telegram: 'stopped' },
-    });
-    writeFileSync(legacyPath, rewritten, 'utf-8');
-    const future = new Date(Date.now() + 5000);
-    utimesSync(legacyPath, future, future);
+    // The no-workspace stop fallback re-stops through the store: same
+    // entries, bumped generation (the production write path).
+    new ChannelStateStore(legacyPath).setMany(['telegram'], 'stopped');
 
     adoptLegacyChannelState(workspace);
 
@@ -674,6 +715,58 @@ describe('adoptLegacyChannelState (#8975)', () => {
     expect(statSync(workspacePath).ino).toBe(beforeInode);
   });
 
+  it('detects a re-stop rewrite even when the mtime does not move (R11-14)', () => {
+    // False-negative pole of the old mtime watermark: on coarse-mtime
+    // filesystems (exFAT/FAT32 2 s, some NFS/SMB 1 s) a re-stop rewrite
+    // can land in the same granularity tick, leaving the mtime unchanged;
+    // the mtime signal missed it and the explicitly re-stopped channel
+    // resurrected. The generation lives in the content, so pinning the
+    // mtime back to the pre-rewrite value cannot hide the rewrite.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+
+    const staleMtime = statSync(legacyPath).mtime;
+    new ChannelStateStore(legacyPath).setMany(['telegram'], 'stopped');
+    // Coarse filesystem: the rewrite lands in the same mtime tick.
+    utimesSync(legacyPath, staleMtime, staleMtime);
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+    });
+  });
+
+  it('does not treat an external mtime bump with unchanged content as a re-stop (R11-14)', () => {
+    // False-positive pole of the old mtime watermark: ANY external mtime
+    // movement with unchanged bytes (`touch`, a backup/restore or sync
+    // tool re-materializing the file) looked like a whole-map
+    // re-assertion and re-applied the snapshot's stops over explicit
+    // restarts. External tools cannot forge the generation counter.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
+      'utf-8',
+    );
+    adoptLegacyChannelState(workspace);
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+
+    // Same bytes, moved mtime — the old watermark's forge signal.
+    const future = new Date(Date.now() + 5000);
+    utimesSync(legacyPath, future, future);
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'active',
+    });
+  });
+
   it('does not re-apply snapshot-identical entries when the rewrite CHANGES the legacy content (R10-5)', () => {
     // A rewrite that changes the content is handled by the plain content
     // diff; the unchanged entries were not re-asserted, so re-applying
@@ -685,18 +778,9 @@ describe('adoptLegacyChannelState (#8975)', () => {
     );
     adoptLegacyChannelState(workspace);
     new ChannelStateStore(workspacePath).set('slack', 'active');
-    // Rewrite with DIFFERENT content and a moved mtime: adds telegram,
+    // Rewrite with DIFFERENT content through the store: adds telegram,
     // leaves slack's entry unchanged.
-    writeFileSync(
-      legacyPath,
-      JSON.stringify({
-        version: 1,
-        channels: { slack: 'stopped', telegram: 'stopped' },
-      }),
-      'utf-8',
-    );
-    const future = new Date(Date.now() + 5000);
-    utimesSync(legacyPath, future, future);
+    new ChannelStateStore(legacyPath).setMany(['telegram'], 'stopped');
 
     adoptLegacyChannelState(workspace);
 
@@ -708,17 +792,12 @@ describe('adoptLegacyChannelState (#8975)', () => {
     });
   });
 
-  it('keeps the adoption watermark consistent with the content when a rewrite races the sync (R11-2)', () => {
-    // The watermark must come from the SAME file version as the adopted
-    // content: a path-based stat separated from the read lets a racing
-    // legacy rewrite land between the two, recording a stale mtime next
-    // to newer content; the next sync then reads moved-mtime +
-    // unchanged-content as a byte-identical re-stop rewrite and
-    // re-applies the stale snapshot over an explicit restart — the R9-3
-    // hazard the watermark exists to prevent. The adoption pins one
-    // inode (fstat + read on one open fd), and legacy writers replace
-    // via temp + rename, so a racing rewrite swaps the path to a new
-    // inode and the pinned pair stays consistent (#8975).
+  it('merges a rewrite that raced the sync on the NEXT start (R11-2)', () => {
+    // The generation watermark lives inside the content, so a racing
+    // legacy rewrite can no longer split a stat/read pair (the R11-2
+    // hazard class is gone with the mtime watermark): the rewrite either
+    // lands before the read — then this sync sees it — or after, and the
+    // next sync's diff merges it. Pin the latter half (#8975, R11-14).
     writeFileSync(
       legacyPath,
       JSON.stringify({ version: 1, channels: { telegram: 'stopped' } }),
@@ -728,38 +807,16 @@ describe('adoptLegacyChannelState (#8975)', () => {
     // An explicit restart recorded after adoption.
     new ChannelStateStore(workspacePath).set('telegram', 'active');
 
-    // Simulate the rewrite racing the adoption: it lands the moment the
-    // legacy file is opened, as a temp + rename (same as every real
-    // writer), adding slack while re-asserting telegram's stop. The
-    // openLegacy seam stands in for openSync, so the racing rewrite hits
-    // the exact window between the fd pin and the fstat/read pair.
-    const racingOpen = (p: string, f: 'r'): number => {
-      const fd = openSync(p, f);
-      const tmp = `${legacyPath}.race.tmp`;
-      writeFileSync(
-        tmp,
-        JSON.stringify({
-          version: 1,
-          channels: { telegram: 'stopped', slack: 'stopped' },
-        }),
-        'utf-8',
-      );
-      renameSync(tmp, legacyPath);
-      return fd;
-    };
-    adoptLegacyChannelState(workspace, { openLegacy: racingOpen });
+    // The rewrite lands between two syncs, adding slack while keeping
+    // telegram's entry unchanged.
+    new ChannelStateStore(legacyPath).setMany(['slack'], 'stopped');
 
-    // The pinned pair is the PRE-rewrite version, identical to the
-    // recorded snapshot: nothing merges and the explicit restart
-    // survives (re-applying the snapshot here would be the R9-3 hazard).
-    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
-      telegram: 'active',
-    });
-
-    // The racing rewrite is picked up by the NEXT sync's content diff:
-    // slack merges, and telegram's snapshot-identical entry is NOT
-    // re-applied because the rewrite changed the content (R10-5).
     adoptLegacyChannelState(workspace);
+
+    // slack merges via the content diff; telegram's snapshot-identical
+    // entry is NOT re-applied because the rewrite changed the content
+    // (R10-5) — the explicit restart survives, exactly what the old
+    // fd-pinning test pinned for the racing shape.
     expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
       telegram: 'active',
       slack: 'stopped',
@@ -774,6 +831,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
     new ChannelStateStore(workspacePath).set('telegram', 'active');
     expect(JSON.parse(readFileSync(workspacePath, 'utf-8'))).toEqual({
       version: 1,
+      generation: expect.any(Number),
       channels: { telegram: 'active' },
       adoptedLegacy: {},
     });
@@ -848,7 +906,7 @@ describe('adoptLegacyChannelState (#8975)', () => {
       version: 1,
       channels: { slack: 'active', telegram: 'stopped' },
       adoptedLegacy: { slack: 'stopped', telegram: 'stopped' },
-      adoptedLegacyMtime: expect.any(Number),
+      adoptedLegacyGeneration: expect.any(Number),
     });
   });
 });
@@ -1011,7 +1069,7 @@ describe('ChannelStateStore', () => {
       version: 1,
       channels: { telegram: 'stopped' },
       adoptedLegacy: { telegram: 'stopped' },
-      adoptedLegacyMtime: 1234,
+      adoptedLegacyGeneration: 1234,
     });
     writeFileSync(filePath, before, 'utf-8');
     const readError = new Error('EBUSY') as NodeJS.ErrnoException;
@@ -1033,9 +1091,10 @@ describe('ChannelStateStore', () => {
     expect(store.trySet('telegram', 'active')).toBe(true);
     expect(JSON.parse(readFileSync(filePath, 'utf-8'))).toEqual({
       version: 1,
+      generation: 0,
       channels: { telegram: 'active' },
       adoptedLegacy: { telegram: 'stopped' },
-      adoptedLegacyMtime: 1234,
+      adoptedLegacyGeneration: 1234,
     });
   });
 
@@ -1066,6 +1125,15 @@ describe('ChannelStateStore', () => {
       { telegram: 'active' },
       0,
     ],
+    // A malformed snapshot field must not taint the WHOLE file
+    // (R11-30): the channel records survive entry-wise and only the
+    // snapshot is dropped — whole-file discard here would empty readAll()
+    // and let the next `--channel all` select every stopped channel.
+    [
+      '{"channels": {"telegram": "stopped"}, "adoptedLegacy": "garbage"}',
+      { telegram: 'stopped' },
+      0,
+    ],
   ] as Array<[string, Record<string, string>, number]>)(
     'treats wrong-shaped files as empty: %s',
     (content, expected, expectedWarnings) => {
@@ -1084,6 +1152,7 @@ describe('ChannelStateStore', () => {
 
     expect(JSON.parse(readFileSync(filePath, 'utf-8'))).toEqual({
       version: 1,
+      generation: 0,
       channels: { telegram: 'stopped' },
       // A writer-created file records an EMPTY adoption snapshot: `{}`
       // marks 'has seen the legacy file' so a first-ever legacy stop
@@ -1091,6 +1160,46 @@ describe('ChannelStateStore', () => {
       // stays the marker for files predating snapshot recording (R10-6).
       adoptedLegacy: {},
     });
+
+    // The EMPTY marker must survive subsequent rewrites (R11-40):
+    // dropping it on a later write converts the next adoption from the
+    // merge branch back into the baseline branch — the R10-6 hazard,
+    // reachable through the real stop-before-first-start order (R11-27).
+    store.set('telegram', 'active');
+    const rewritten = JSON.parse(readFileSync(filePath, 'utf-8')) as {
+      adoptedLegacy?: Record<string, string>;
+      generation?: number;
+    };
+    expect(rewritten.adoptedLegacy).toEqual({});
+    // Every rewrite bumps the generation watermark (R11-14).
+    expect(rewritten.generation).toBe(1);
+  });
+
+  it('keeps the snapshot ABSENT when rewriting an existing snapshot-less file (R11-27)', () => {
+    // A valid file WITHOUT adoptedLegacy predates snapshot recording (a
+    // pre-snapshot relic). Rewriting it must preserve the absence:
+    // stamping the empty marker would silently convert the NEXT adoption
+    // from the baseline branch into the full-merge branch — the
+    // order-dependent R9-3 hazard where a workspace-scoped stop BEFORE
+    // the first start lets a stale legacy stop override an explicit
+    // restart. Only file CREATION stamps the empty marker (R10-6).
+    writeFileSync(
+      filePath,
+      JSON.stringify({ version: 1, channels: { telegram: 'active' } }),
+      'utf-8',
+    );
+
+    new ChannelStateStore(filePath).set('feishu', 'stopped');
+
+    const rewritten = JSON.parse(readFileSync(filePath, 'utf-8')) as {
+      channels: Record<string, string>;
+      adoptedLegacy?: unknown;
+    };
+    expect(rewritten.channels).toEqual({
+      telegram: 'active',
+      feishu: 'stopped',
+    });
+    expect(rewritten).not.toHaveProperty('adoptedLegacy');
   });
 
   describe('trySet / trySetMany (#8975)', () => {
@@ -1344,7 +1453,7 @@ describe('ChannelStateStore', () => {
             version: 1,
             channels: { telegram: 'stopped', feishu: 'stopped' },
             adoptedLegacy: snapshot,
-            adoptedLegacyMtime: 12345,
+            adoptedLegacyGeneration: 12345,
           },
           null,
           2,
@@ -1356,9 +1465,10 @@ describe('ChannelStateStore', () => {
 
       expect(JSON.parse(readFileSync(filePath, 'utf-8'))).toEqual({
         version: 1,
+        generation: 0,
         channels: { telegram: 'stopped' },
         adoptedLegacy: snapshot,
-        adoptedLegacyMtime: 12345,
+        adoptedLegacyGeneration: 12345,
       });
     });
 
@@ -1414,6 +1524,21 @@ describe('ChannelStateStore', () => {
       store.setMany(['feishu'], 'stopped');
       expect(statSync(target).mode & 0o777).toBe(0o600);
       expect(statSync(looseDir).mode & 0o777).toBe(0o700);
+
+      // Production never calls set/setMany directly — every production
+      // write goes through the best-effort wrappers (stop.ts, start.ts,
+      // daemon-worker.ts, workspace-channel-control.ts,
+      // channel-management-service.ts), so the permission pin must drive
+      // THOSE entry points too, or a softened trySet/trySetMany write
+      // path ships green while the state file lands umask-default
+      // world-readable (R11-29).
+      expect(store.trySet('slack', 'stopped')).toBe(true);
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+      expect(statSync(looseDir).mode & 0o777).toBe(0o700);
+
+      expect(store.trySetMany(['discord'], 'stopped')).toBe(true);
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+      expect(statSync(looseDir).mode & 0o777).toBe(0o700);
     },
   );
 
@@ -1454,5 +1579,32 @@ describe('selectActiveChannels (#8975)', () => {
     const message = onSkipped.mock.calls[0]![0] as string;
     expect(message).toContain('skipped (stopped before restart)');
     expect(message).not.toContain('\n');
+    // Pin the EXACT rendering (R11-41): a newline-only cleanup mutation
+    // (`name.replace(/\n/g, ' ')`) kept the old substring/no-newline
+    // oracle green while shipping a different escape. sanitizeLogText
+    // renders a real newline as the two-char `\n` escape, so the whole
+    // payload is locked, not merely de-newlined.
+    expect(message).toBe(
+      '[Channel] "evil\\n[Channel] "telegram" connected." skipped ' +
+        '(stopped before restart)',
+    );
+  });
+
+  it('strips the full control set, not just newlines, from skip names (R11-41)', () => {
+    // The oracle above could be satisfied by a newline-only cleanup; pin
+    // the rest of sanitizeLogText's strip set at this call site: a carriage
+    // return (line overwrite) and an ESC (ANSI/OSC injection) must not
+    // reach the rendered message, because both production callers write the
+    // skip notice straight to stdout.
+    const onSkipped = vi.fn();
+    const evilName = 'evil\r\u001b[2J';
+
+    selectActiveChannels([evilName], { [evilName]: 'stopped' }, onSkipped);
+
+    expect(onSkipped).toHaveBeenCalledTimes(1);
+    const message = onSkipped.mock.calls[0]![0] as string;
+    expect(message).not.toContain('\r');
+    expect(message).not.toContain('\u001b');
+    expect(message).toContain('skipped (stopped before restart)');
   });
 });

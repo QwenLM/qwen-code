@@ -174,6 +174,14 @@ describe('writeServiceInfo + readServiceInfo', () => {
       channels: ['telegram'],
       workspaceCwd: '/workspace/a',
     });
+    // Pin the ON-DISK key itself (T4): a consistent rename in writer +
+    // parser keeps the write-then-read round-trip above green while
+    // silently changing the pidfile contract the per-workspace stop
+    // recording depends on.
+    const raw = JSON.parse(fsStore[getPidFilePath()] ?? '') as {
+      workspaceCwd?: string;
+    };
+    expect(raw.workspaceCwd).toBe('/workspace/a');
   });
 
   it('parses a hand-written pidfile carrying workspaceCwd (#8975)', () => {

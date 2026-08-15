@@ -217,6 +217,10 @@ vi.mock('./channel-state-store.js', () => ({
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
+  // Same observable output as the loud sink; only the EPIPE-crash
+  // resilience differs, and that behavior is pinned in stdioHelpers.test
+  // (R11-13). Aliasing keeps the message pins on one call history.
+  writeStdoutLineBestEffort: mockWriteStdoutLine,
 }));
 
 vi.mock('./config-utils.js', () => ({

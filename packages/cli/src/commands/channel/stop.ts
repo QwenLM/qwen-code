@@ -1,5 +1,9 @@
 import type { CommandModule } from 'yargs';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineBestEffort,
+} from '../../utils/stdioHelpers.js';
 import {
   ChannelStateStore,
   channelRuntimeStatePath,
@@ -94,8 +98,10 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
         // The route reports a successful stop whose `stopped` record did
         // not persist; surface it like the standalone path does, or the
         // stopped channels resurrect on the next `--channel all` (#8975).
+        // Best-effort sink: a warning write must not terminate the process
+        // when stdout is already failing (R11-13).
         if (result.statePersisted === false) {
-          writeStdoutLine(
+          writeStdoutLineBestEffort(
             'Warning: could not persist the stopped record; --channel all may restart these channels.',
           );
         }
@@ -121,7 +127,7 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           typeof body === 'object' &&
           (body as Record<string, unknown>)['statePersisted'] === false
         ) {
-          writeStdoutLine(
+          writeStdoutLineBestEffort(
             'Warning: could not persist the stopped record; --channel all may restart these channels.',
           );
         }
@@ -148,11 +154,16 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
           pidfileSnapshot.workspaceCwd,
           pidfileSnapshot.channels,
         );
-        writeStdoutLine(
-          recorded
-            ? 'No channel service is running. Recorded the crashed service channels as stopped.'
-            : 'No channel service is running. Could not record the crashed service channels; --channel all may restart them.',
-        );
+        if (recorded) {
+          writeStdoutLine(
+            'No channel service is running. Recorded the crashed service channels as stopped.',
+          );
+        } else {
+          // Loss notice on the best-effort sink (R11-13).
+          writeStdoutLineBestEffort(
+            'No channel service is running. Could not record the crashed service channels; --channel all may restart them.',
+          );
+        }
       } else {
         writeStdoutLine('No channel service is running.');
       }
@@ -183,7 +194,7 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       // the realistic shape is a service dying between the liveness check
       // and signal delivery while the state write also fails (#8975).
       if (!recorded) {
-        writeStdoutLine(
+        writeStdoutLineBestEffort(
           'Warning: could not persist the stopped record; --channel all may restart these channels.',
         );
       }
@@ -210,11 +221,16 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       writeStdoutLine('Service killed.');
     }
 
-    writeStdoutLine(
-      recorded
-        ? 'Stopped channels stay stopped until started again by name: qwen channel start <name>.'
-        : 'Warning: could not persist the stopped record; --channel all may restart these channels.',
-    );
+    if (recorded) {
+      writeStdoutLine(
+        'Stopped channels stay stopped until started again by name: qwen channel start <name>.',
+      );
+    } else {
+      // Loss notice on the best-effort sink (R11-13).
+      writeStdoutLineBestEffort(
+        'Warning: could not persist the stopped record; --channel all may restart these channels.',
+      );
+    }
     process.exit(0);
   },
 };

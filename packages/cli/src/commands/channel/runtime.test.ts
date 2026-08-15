@@ -13,6 +13,7 @@ import {
   registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
+  resetReservedNameWarningsForTesting,
   sessionsPath,
 } from './runtime.js';
 
@@ -108,17 +109,51 @@ describe('loadChannelsConfig (#8975)', () => {
     return { merged: { channels } } as unknown as LoadedSettings;
   }
 
-  it('returns the configured channels untouched without a reserved name', () => {
+  beforeEach(() => {
+    // The reserved-name warning dedup is process-scoped (R11-15).
+    resetReservedNameWarningsForTesting();
+  });
+
+  it('returns the configured channels on a hardened null-prototype copy (R11-31)', () => {
+    // No identity fast path: the returned map is always a null-prototype
+    // rebuild, so indexing it with an unconfigured user-controlled name
+    // (`channelsConfig['constructor']` in startSingle's not-found guard)
+    // resolves undefined instead of an inherited Object.prototype member.
     const channels = {
       telegram: { type: 'telegram' },
       feishu: { type: 'feishu' },
     };
-    expect(loadChannelsConfig('/workspace', settingsWith(channels))).toBe(
-      channels,
-    );
+    const loaded = loadChannelsConfig('/workspace', settingsWith(channels));
+    expect(loaded).toEqual(channels);
+    expect(loaded).not.toBe(channels);
+    expect(Object.getPrototypeOf(loaded)).toBeNull();
+    expect(loaded['constructor']).toBeUndefined();
+    expect(loaded['toString']).toBeUndefined();
     expect(loadChannelsConfig('/workspace', settingsWith(undefined))).toEqual(
       {},
     );
+  });
+
+  it('warns once per process per workspace for a reserved name (R11-15)', () => {
+    // The deferred webhook auth path calls loadChannelsConfig per request;
+    // an unresolved hand-edited entry must not add an identical stderr
+    // line per webhook POST.
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      const entry = { all: { type: 'telegram' } };
+      loadChannelsConfig('/workspace', settingsWith(entry));
+      loadChannelsConfig('/workspace', settingsWith(entry));
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+
+      // A different workspace warns independently.
+      loadChannelsConfig('/other', settingsWith(entry));
+      expect(writeSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      writeSpy.mockRestore();
+    }
   });
 
   it('warns and skips a channel literally named "all" (R10-36)', () => {

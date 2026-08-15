@@ -292,6 +292,10 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStderrLineSafe: mockWriteStderrLineSafe,
   writeStdoutLine: mockWriteStdoutLine,
+  // Same observable output as the loud sink; only the EPIPE-crash
+  // resilience differs, and that behavior is pinned in stdioHelpers.test
+  // (R11-13). Aliasing keeps the message pins on one call history.
+  writeStdoutLineBestEffort: mockWriteStdoutLine,
 }));
 
 vi.mock('../../config/settings.js', () => ({
@@ -1469,6 +1473,12 @@ describe('runChannelDaemonWorker', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
     );
+    // Uniqueness pins (R11-21): the membership pins above are satisfied
+    // by a read/write store SPLIT (a second construction landing in a
+    // different file), so assert the store is constructed exactly once
+    // from exactly one path derivation.
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
     // One-sided warning pin: the prune-fallback warning is pinned on the
     // failure path below; a prune-success restore must NOT emit it —
     // emitting it on every normal restore drowns the genuine warning
@@ -1565,6 +1575,10 @@ describe('runChannelDaemonWorker', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
     );
+    // Uniqueness pins (R11-21): a read/write store split ships green
+    // against the membership pins alone.
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
     expect(ready).toHaveBeenCalledWith({
       channels: ['telegram', 'feishu'],
       requestedChannels: ['telegram', 'feishu'],
@@ -1619,6 +1633,10 @@ describe('runChannelDaemonWorker', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       mockDaemonChannelRuntimeStatePath.mock.results[0]!.value,
     );
+    // Uniqueness pins (R11-21): a read/write store split ships green
+    // against the membership pins alone.
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
+    expect(mockDaemonChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
     await handle.close();
   });
 

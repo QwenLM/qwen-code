@@ -72,6 +72,10 @@ vi.mock('./channel-state-store.js', () => ({
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
+  // Same observable output as the loud sink; only the EPIPE-crash
+  // resilience differs, and that behavior is pinned in stdioHelpers.test
+  // (R11-13). Aliasing keeps the message pins on one call history.
+  writeStdoutLineBestEffort: mockWriteStdoutLine,
   writeStderrLine: mockWriteStderrLine,
 }));
 
@@ -139,6 +143,11 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
+    // Mirror-pin the ternary's other half (R9-22, R11-26): a refactor
+    // rewriting the ternary into two writes must fail here.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      'Daemon-managed channels are already stopped.',
+    );
     // The success message must precede the exit — under the no-op exit
     // mock, relocating it below process.exit(0) ships green while
     // production exits silently and the stopped-vs-already-stopped
@@ -166,6 +175,10 @@ describe('stopCommand', () => {
 
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Daemon-managed channels are already stopped.',
+    );
+    // Mirror-pin the ternary's other half (R9-22, R11-26).
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      'Daemon-managed channels stopped.',
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(0);
@@ -197,6 +210,11 @@ describe('stopCommand', () => {
       'Daemon-managed channels stopped.',
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    // Mirror-pin the stream (R9-22, R11-32): the loss warning is a stdout
+    // diagnostic; a dual-stream emission refactor must not ship green.
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
@@ -234,6 +252,11 @@ describe('stopCommand', () => {
       expect.stringContaining('stop failed'),
     );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    // Mirror-pin the stream (R9-22, R11-32): the stop-failure diagnostic
+    // is the stderr half; the loss warning must not ALSO land on stderr.
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(process.exit).toHaveBeenCalledWith(1);
@@ -333,6 +356,11 @@ describe('stopCommand', () => {
       'stopped',
     );
     expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
+    // The clean SIGTERM path must clean up the pidfile too (R11-35):
+    // only the SIGKILL and signal-failure branches pinned this call, yet
+    // a stale pidfile left by the COMMON clean path sends the next stop
+    // down the crashed-service branch against a normally-exited process.
+    expect(mockRemoveServiceInfo).toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
     // The record persisted, so the exit message must be the durable-stop
     // guidance (the only user-visible way back out of the stopped state),
@@ -384,6 +412,14 @@ describe('stopCommand', () => {
     expect(persistedAt).toBeDefined();
     expect(signalledAt).toBeDefined();
     expect(persistedAt!).toBeLessThan(signalledAt!);
+    // Pin the LAST write too (R11-33): the record is dual-written
+    // (scoped + legacy, two calls guaranteed here since workspaceCwd is
+    // set), and an interruption between SIGTERM and a deferred legacy
+    // write leaves the service dead with only the scoped record — a
+    // restart from another workspace resurrects every stopped channel.
+    expect(
+      mockChannelStateStoreSetMany.mock.invocationCallOrder.at(-1)!,
+    ).toBeLessThan(signalledAt!);
   });
 
   it('scopes the stop record to the workspace from the pidfile (#8975)', async () => {
@@ -418,6 +454,22 @@ describe('stopCommand', () => {
       '/tmp/qwen-home/channels/channel-state.json',
     );
     expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
+    // Per-call STATE pins (R11-42): every `toHaveBeenCalledWith(…,
+    // 'stopped')` above is satisfied by the FIRST (scoped) write, so the
+    // legacy write could persist any state and ship green — recording
+    // 'active' in the legacy file resurrects exactly the stopped channels
+    // on adoption. Pin both calls' state, per the file's NthCalledWith
+    // convention.
+    expect(mockChannelStateStoreSetMany).toHaveBeenNthCalledWith(
+      1,
+      ['telegram'],
+      'stopped',
+    );
+    expect(mockChannelStateStoreSetMany).toHaveBeenNthCalledWith(
+      2,
+      ['telegram'],
+      'stopped',
+    );
     expect(process.exit).toHaveBeenCalledWith(0);
   });
 
@@ -460,6 +512,18 @@ describe('stopCommand', () => {
     // from another workspace resurrects them (R10-33).
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       '/tmp/qwen-home/channels/channel-state.json',
+    );
+    // Per-call STATE pins, twin of the live-path test (R11-42): the
+    // legacy (second) write must persist 'stopped', not merely happen.
+    expect(mockChannelStateStoreSetMany).toHaveBeenNthCalledWith(
+      1,
+      ['telegram', 'feishu'],
+      'stopped',
+    );
+    expect(mockChannelStateStoreSetMany).toHaveBeenNthCalledWith(
+      2,
+      ['telegram', 'feishu'],
+      'stopped',
     );
     expect(mockSignalService).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
@@ -553,7 +617,18 @@ describe('stopCommand', () => {
     await invokeStop();
 
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
-    expect(process.exit).toHaveBeenCalledWith(0);
+    // Pin PER INVOCATION (R11-34): vi.clearAllMocks() runs only in
+    // beforeEach, so the mock history accumulates across the two
+    // invokeStop() calls — a bare `toHaveBeenCalledWith`/
+    // `toHaveBeenCalledWith(0)` for the second subcase is already
+    // satisfied by the FIRST. The empty-pidfile branch must exit 0 and
+    // print its own diagnostic (the R9-21 doctrine in the most common
+    // teardown shape).
+    expect(vi.mocked(process.exit).mock.calls).toEqual([[0], [0]]);
+    expect(mockWriteStdoutLine).toHaveBeenNthCalledWith(
+      2,
+      'No channel service is running.',
+    );
   });
 
   it('does not record a crashed zero-channel service as stopped (#8975)', async () => {
@@ -705,6 +780,44 @@ describe('stopCommand', () => {
     expect(
       mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
     ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
+  });
+
+  it('surfaces a lost record when only the SECOND (legacy) write fails (R11-16)', async () => {
+    // Every other failure test injects via mockImplementationOnce, which
+    // the FIRST (workspace-scoped) write consumes; the `&& legacy` half
+    // of recordStoppedChannels' return was unguarded — a mutation
+    // returning `scoped` alone shipped green while the legacy file (the
+    // only record a restart from ANOTHER workspace sees via adoption)
+    // stayed unwritten and every stopped channel resurrected.
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    // First (scoped) write succeeds; only the second (legacy) throws.
+    mockChannelStateStoreSetMany
+      .mockReturnValueOnce(undefined)
+      .mockImplementationOnce(() => {
+        throw new Error('disk full');
+      });
+    mockSignalService.mockReturnValue(true);
+    mockWaitForExit.mockResolvedValue(true);
+    vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await invokeStop();
+
+    expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
+    // The loss must replace the durable-stop message, not join it.
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('stay stopped'),
+    );
+    // A lost record still exits 0 (the service IS stopped; R9-21).
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 
   it('escalates to SIGKILL when the service ignores SIGTERM (#8975)', async () => {

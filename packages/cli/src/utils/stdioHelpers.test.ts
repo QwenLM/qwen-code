@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   writeStderrLine,
   writeStderrLineSafe,
+  writeStdoutLineBestEffort,
   writeStdoutLineSafe,
 } from './stdioHelpers.js';
 
@@ -70,5 +71,46 @@ describe('writeStdoutLineSafe', () => {
     });
 
     expect(() => writeStdoutLineSafe('boom')).not.toThrow();
+  });
+});
+
+describe('writeStdoutLineBestEffort', () => {
+  it('writes with a trailing newline when stdout is healthy', () => {
+    const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    writeStdoutLineBestEffort('hello');
+
+    expect(write).toHaveBeenCalledWith('hello\n');
+  });
+
+  it('swallows a synchronous EPIPE like writeStdoutLineSafe', () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+
+    expect(() => writeStdoutLineBestEffort('boom')).not.toThrow();
+  });
+
+  it('survives the ASYNC stdout error event a plain safe write cannot', () => {
+    // The class try/catch cannot reach: a redirected stdout target failing
+    // makes Node emit 'error' on the stream ASYNCHRONOUSLY, terminating a
+    // process with no listener past any surrounding try/catch. The
+    // best-effort sink installs a no-op guard while nothing else listens
+    // (R11-13).
+    writeStdoutLineBestEffort('install the guard');
+    expect(process.stdout.listenerCount('error')).toBeGreaterThanOrEqual(1);
+
+    // With the guard present the emitted stream error is absorbed instead
+    // of surfacing as an unhandled 'error' event. Without the guard this
+    // emit itself throws 'Unhandled error event'.
+    expect(() =>
+      process.stdout.emit('error', new Error('write EPIPE')),
+    ).not.toThrow();
+
+    // The guard is a single no-op listener: repeated best-effort writes
+    // must not stack listeners on the shared stream.
+    const count = process.stdout.listenerCount('error');
+    writeStdoutLineBestEffort('again');
+    expect(process.stdout.listenerCount('error')).toBe(count);
   });
 });

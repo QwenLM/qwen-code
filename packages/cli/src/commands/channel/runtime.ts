@@ -82,6 +82,18 @@ export function channelLoopPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }
 
+// Workspaces already warned about a reserved channel name this process
+// (R11-15): `loadChannelsConfig` runs per-request on the deferred webhook
+// auth path (readDeferredWebhookSecret), so without dedup one unresolved
+// hand-edited entry grows stderr by an identical line per webhook POST,
+// burying real diagnostics while the runtime stays deferred.
+const reservedNameWarnedWorkspaces = new Set<string>();
+
+/** Test seam (R11-15): forget the warned-workspace dedup set. */
+export function resetReservedNameWarningsForTesting(): void {
+  reservedNameWarnedWorkspaces.clear();
+}
+
 export function loadChannelsConfig(
   cwd: string = process.cwd(),
   settings: LoadedSettings = loadSettings(cwd),
@@ -89,7 +101,7 @@ export function loadChannelsConfig(
   const channels = (
     settings.merged as unknown as { channels?: Record<string, unknown> }
   ).channels;
-  if (!channels) return {};
+  if (!channels) return Object.create(null);
   // `all` is the whole-selection placeholder, reserved by the management
   // API but unenforced here: a hand-edited/legacy `channels.all` entry
   // would be connected by a mode-`all` worker, yet the stop capture's
@@ -98,20 +110,26 @@ export function loadChannelsConfig(
   // Warn and skip the entry where settings are read so the collision
   // cannot be established; the placeholder filters downstream stay as
   // defense in depth.
-  if (!Object.keys(channels).some(isAllChannelSelectionName)) {
-    return channels;
-  }
-  // Null-prototype map: channel names are user-controlled settings keys,
-  // so a channel literally named `__proto__` must survive the filter as an
-  // own entry instead of routing through the Object.prototype setter —
-  // which would silently drop the channel and set the map's prototype to
-  // its config (same hazard the state store's filterChannelStates avoids).
+  //
+  // ALWAYS rebuild into the null-prototype map (R11-31): channel names are
+  // user-controlled settings keys, and lookup sites index this map with
+  // them (`channelsConfig[name]`); an identity return of the
+  // prototype-bearing settings object resolves inherited
+  // Object.prototype members (`constructor`, `toString`, ...) for
+  // unconfigured names, bypassing not-found guards. The rebuild also keeps
+  // a channel literally named `__proto__` as an own entry instead of
+  // routing through the Object.prototype setter — which would silently
+  // drop the channel and set the map's prototype to its config (same
+  // hazard the state store's filterChannelStates avoids).
   const filtered: Record<string, unknown> = Object.create(null);
   for (const [name, config] of Object.entries(channels)) {
     if (isAllChannelSelectionName(name)) {
-      writeStderrLine(
-        `[Channel] Warning: ignoring channel "${sanitizeLogText(name, 128)}" — the name is reserved for the whole-channel selection (#8975).`,
-      );
+      if (!reservedNameWarnedWorkspaces.has(cwd)) {
+        reservedNameWarnedWorkspaces.add(cwd);
+        writeStderrLine(
+          `[Channel] Warning: ignoring channel "${sanitizeLogText(name, 128)}" — the name is reserved for the whole-channel selection (#8975).`,
+        );
+      }
       continue;
     }
     filtered[name] = config;

@@ -11,7 +11,11 @@ import {
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStdoutLine,
+  writeStdoutLineBestEffort,
+} from '../../utils/stdioHelpers.js';
 import {
   AcpBridge,
   ChannelLoopScheduler,
@@ -367,7 +371,9 @@ function recordChannelActive(name: string, workspaceCwd: string): void {
   // would skip the channel the user explicitly restarted. Surface the loss
   // like the stop direction does (#8975).
   if (!persisted) {
-    writeStdoutLine(
+    // Best-effort sink: a warning write must not terminate the process
+    // when stdout is already failing (R11-13).
+    writeStdoutLineBestEffort(
       '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
     );
   }
@@ -544,15 +550,18 @@ async function startAll(
     // prune throws only on write failure; the recorded states are still
     // readable — fall back, but surface that persistence is broken so a
     // later resurrection of stale entries has a traceable cause (#8975).
-    writeStdoutLine(
+    // Best-effort sink (R11-13).
+    writeStdoutLineBestEffort(
       '[Channel] Warning: failed to update channel state; falling back to recorded states.',
     );
     states = stateStore.readAll();
   }
+  // Skip notices are best-effort diagnostics: route them through the
+  // guarded sink so a dead stdout reader cannot kill the start (R11-13).
   const selectedNames = selectActiveChannels(
     configuredNames,
     states,
-    writeStdoutLine,
+    writeStdoutLineBestEffort,
   );
   if (selectedNames.length === 0) {
     await serveWithoutChannels(

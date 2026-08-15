@@ -40,7 +40,7 @@
     "build": "node scripts/build.js",
     "bundle:cli": "node scripts/bundle-cli.js",
     "test": "vitest run",
-    "test:ci": "vitest run && tsc --noEmit -p tsconfig.typetest.json",
+    "test:ci": "tsc --noEmit -p tsconfig.typetest.json && vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src test",

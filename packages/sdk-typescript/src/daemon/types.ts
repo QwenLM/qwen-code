@@ -3220,6 +3220,21 @@ export interface DaemonChannelWorkerStartErrorResponse {
 }
 
 /**
+ * Typed body of a FAILED stop (`DaemonHttpError.body` from
+ * `stopChannelWorker` / `stopWorkspaceChannel`). Carries the same
+ * durability-loss signal as the success side: `statePersisted` is present
+ * (and `false`) only when the stop failed AND its torn-down `stopped`
+ * record also failed to persist — a later `--channel all` restart may bring
+ * the channels back (#8975). Consumers previously had to cast
+ * `DaemonHttpError.body: unknown` to read it (R11-19).
+ */
+export interface DaemonChannelStopErrorResponse {
+  error: string;
+  code: string;
+  statePersisted?: boolean;
+}
+
+/**
  * Result of `POST /workspace/channel/reload`: the daemon restarted its channel
  * worker group (which re-reads settings.json). `worker` is the compatible
  * primary snapshot, or the first snapshot when only a non-primary workspace

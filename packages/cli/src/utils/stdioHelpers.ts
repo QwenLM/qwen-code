@@ -67,6 +67,29 @@ export const writeStderrLineSafe = (message: string): void => {
 };
 
 /**
+ * `writeStdoutLine` that cannot terminate the process — the stdout analogue
+ * of the channel state store's `writeStoreWarning`.
+ *
+ * A try/catch alone is not enough: when stdout is redirected to a failing
+ * target (a dead pipe after `qwen … | head`, a full daemon-log disk), Node
+ * emits an ASYNCHRONOUS `'error'` event on `process.stdout` that terminates
+ * the process past any surrounding try/catch. Best-effort diagnostics — the
+ * persistence-loss warnings that fire exactly when the disk is failing, the
+ * skip notices on a dead reader — must not defeat the never-fails design
+ * they belong to, so install a no-op `'error'` guard while nothing else
+ * listens, then write through the sync-safe helper (#8975). Primary command
+ * output stays on the loud `writeStdoutLine`.
+ */
+export const writeStdoutLineBestEffort = (message: string): void => {
+  if (process.stdout.listenerCount('error') === 0) {
+    process.stdout.on('error', () => {
+      // The stdout target is gone; this diagnostic is already lost.
+    });
+  }
+  writeStdoutLineSafe(message);
+};
+
+/**
  * Clears the terminal screen.
  * Use instead of console.clear() to satisfy no-console lint rules.
  */

@@ -43,6 +43,7 @@ import type {
   DaemonChannelStartupAttemptFailure,
   DaemonChannelStartupFailure,
   DaemonChannelStopResult,
+  DaemonChannelStopErrorResponse,
   DaemonChannelStopInstanceResult,
   DaemonChannelWorkerStartErrorResponse,
   DaemonControlEvent,
@@ -277,6 +278,37 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(typeof Public.DaemonClient.prototype.stopWorkspaceChannel).toBe(
       'function',
     );
+    // The workspace-scoped client carries the same stop method (R11-4):
+    // pin its existence too, or a regression dropping it from the
+    // workspace client ships green while the daemon-client pin holds.
+    expect(
+      typeof Public.WorkspaceDaemonClient.prototype.stopWorkspaceChannel,
+    ).toBe('function');
+    // Tie the method's declared return type to the shape pinned above
+    // (R11-4): the shape assertion exercises the standalone type
+    // declaration and the prototype checks only test existence, so a
+    // return-type regression to the sibling methods'
+    // `Promise<DaemonChannelMutationResult>` (startWorkspaceChannel /
+    // restartWorkspaceChannel share exactly it from the same private
+    // helper) compiled cleanly and shipped green — consumers lost typed
+    // access to `statePersisted`. Mirrors the setWorkspaceSkillsEnabled
+    // sibling convention. Compiled under tsconfig.typetest.json.
+    expectTypeOf<
+      ReturnType<typeof Public.DaemonClient.prototype.stopWorkspaceChannel>
+    >().resolves.toEqualTypeOf<DaemonChannelStopInstanceResult>();
+    expectTypeOf<
+      ReturnType<
+        typeof Public.WorkspaceDaemonClient.prototype.stopWorkspaceChannel
+      >
+    >().resolves.toEqualTypeOf<DaemonChannelStopInstanceResult>();
+    // #8975 / R11-19: pin the typed FAILED-stop body's SHAPE — consumers
+    // read `statePersisted` off `DaemonHttpError.body` without casting;
+    // `not.toBeNever()` stays green if the shape degrades.
+    expectTypeOf<DaemonChannelStopErrorResponse>().toEqualTypeOf<{
+      error: string;
+      code: string;
+      statePersisted?: boolean;
+    }>();
     expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();
     expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();
