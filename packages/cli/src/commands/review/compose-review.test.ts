@@ -4519,6 +4519,27 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     });
     expect(hyphen.cappedBy).toEqual([]);
     expect(hyphen.event).toBe('APPROVE');
+    // Kebab-case paths are this repo's ENFORCED .ts convention, and the
+    // round-6 negated-class walk stopped at the first path hyphen —
+    // misclassifying the common shape (round-7 probe). Both separators, and
+    // the other two deterministic tags, must classify identically.
+    for (const entry of [
+      'packages/core/src/my-file.ts:42 — [test] mutation survivor',
+      'src/my-file.ts:42 - [build] tsc fails on the merge commit',
+      'a.ts:1 — [probe] sendShellCommand ran twice',
+    ]) {
+      const r = composeReview({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath,
+        env: ENV,
+        modelId: MODEL,
+        severityFloor: 'critical',
+        deferredSuggestions: [entry],
+      });
+      expect(r.cappedBy).toEqual([]);
+      expect(r.event).toBe('APPROVE');
+    }
   });
 
   it('auto with a recovered previous round licenses the age-rule deferral', () => {
@@ -4692,6 +4713,23 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
       expect(r.deferredCount).toBe(0);
       expect(r.body).toContain('relocated from the deferral channel');
     }
+    // The relocated blocker rides the machine ledger too — "the findings
+    // always ride" includes the mis-routed ones, or the next round's ruling
+    // table loses the id for a round (round-7 finding).
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    const marked = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: ['a.ts:1 — **[Critical]** auth bypass'],
+    });
+    const ledger = parseLedger(marked.body);
+    expect(ledger?.findings.some((f) => f.sev === 'C')).toBe(true);
     // The lookbehind spares hyphenated compounds — the SKILL's own
     // "non-Critical" phrasing is a realistic model output, and tripping on
     // it would have blocked over a nit.

@@ -439,16 +439,30 @@ export function parseReviewArgs(
       (shape.type === 'pr-number' || shape.type === 'pr-url')
     );
   };
-  const prShapedInvalid = kept.filter(
-    (k) => k.invalidValueOf !== undefined && isPrShaped(k.token),
-  );
-  if (!hasValidCandidate && prShapedInvalid.length > 1) {
+  // The pool counts BOTH spellings: an `=`-form invalid value never enters
+  // `kept` (it was recorded as `invalid-eq` and consumed in place), but it
+  // is the same typed PR number — `--severity-floor=6711 --effort 6712`
+  // must be exactly as ambiguous as the all-spaced spelling, or the guard
+  // is defeated by which syntax happened to be typed.
+  const prShapedPool = [
+    ...kept
+      .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
+      .map((k) => k.token),
+    ...[...effortIssues, ...floorIssues]
+      .filter(
+        (i): i is { kind: 'invalid-eq'; value: string } =>
+          i.kind === 'invalid-eq',
+      )
+      .map((i) => i.value)
+      .filter(isPrShaped),
+  ];
+  if (!hasValidCandidate && prShapedPool.length > 1) {
     warnings.push(
-      `Ambiguous target: ${prShapedInvalid
-        .map((k) => JSON.stringify(k.token))
+      `Ambiguous target: ${prShapedPool
+        .map((t) => JSON.stringify(t))
         .join(
           ' and ',
-        )} both arrived as invalid flag values and both look like PR targets; refusing to choose between them.`,
+        )} arrived as invalid flag values and all look like PR targets; refusing to choose between them.`,
     );
   }
   const targetTokens: string[] = [];
@@ -456,7 +470,7 @@ export function parseReviewArgs(
     const issues = k.invalidValueOf === '--effort' ? effortIssues : floorIssues;
     if (k.invalidValueOf !== undefined) {
       const survives = isPrShaped(k.token)
-        ? !hasValidCandidate && prShapedInvalid.length === 1
+        ? !hasValidCandidate && prShapedPool.length === 1
         : soleCandidate;
       if (!survives) {
         issues.push({ kind: 'discarded', value: k.token });

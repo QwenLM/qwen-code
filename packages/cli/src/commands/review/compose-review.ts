@@ -118,14 +118,44 @@ const DETERMINISTIC_TAG_RE = /\[(?:build|test|probe)\]/i;
  * immediately after the first em-dash: scanning the whole entry classified
  * `a.ts:1 — [review] mishandles [test] configuration files` deterministic
  * off its TITLE, which skipped the verifier floor for an unverified claim
- * (probe-confirmed fail-open). Separator-agnostic like the Critical tripwire
- * below: an ASCII hyphen or en dash is the cheapest real spelling drift, and
- * two spellings of one deterministic finding must not produce opposite
- * verdicts — the unmatched form demanded a verifier that cannot exist, the
- * self-inflicted cap the floor comment forbids. An entry with no separator
- * at all matches nothing and stays non-deterministic — fail-closed.
+ * (probe-confirmed fail-open). The position is the FIRST WHITESPACE-FLANKED
+ * separator after the leading `file:line` token — anchored `^\S+\s+`, not a
+ * negated-class walk: `[^—–-]*` stopped at the first hyphen INSIDE a
+ * kebab-case path (this repo's enforced .ts convention), misclassifying
+ * every `packages/.../my-file.ts — [test] …` entry non-deterministic and
+ * demanding a verifier that cannot exist — the self-inflicted permanent
+ * cap. Separator-agnostic like the Critical tripwire (hyphen/en/em — the
+ * cheapest real spelling drift), and an entry with no whitespace-flanked
+ * separator matches nothing: non-deterministic, the fail-closed direction.
  */
-const DETERMINISTIC_DEFERRAL_RE = /^[^—–-]*[—–-]\s*\[(?:build|test|probe)\]/i;
+const DETERMINISTIC_DEFERRAL_RE = /^\S+\s+[—–-]\s*\[(?:build|test|probe)\]/i;
+
+/**
+ * The deferral channel's Critical filter, shared by the body composer and
+ * the ledger marker: entries carrying a Critical marker are RELOCATED into
+ * the body Criticals (annotated), the rest defer. One split, two readers —
+ * a relocated blocker must ride the machine-ledger work list too, or the
+ * next round's ruling table loses its id for a round ("the findings always
+ * ride" includes the ones the model mis-routed).
+ */
+const CRITICAL_DEFERRAL_RE = /\[critical\]|(?<![\w-])critical\s*:/i;
+function splitDeferralChannel(raw: unknown): {
+  deferred: string[];
+  relocated: string[];
+} {
+  const entries = toStringList(raw, 'deferredSuggestions')
+    .map(stripReviewFooter)
+    .filter((entry) => entry.trim() !== '');
+  return {
+    deferred: entries.filter((x) => !CRITICAL_DEFERRAL_RE.test(x)),
+    relocated: entries
+      .filter((x) => CRITICAL_DEFERRAL_RE.test(x))
+      .map(
+        (stray) =>
+          `${stray} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
+      ),
+  };
+}
 
 /**
  * Reads a PR's description body, given its `owner/repo` and number. The one
@@ -646,9 +676,14 @@ function ledgerMarkerFor(
           line?: unknown;
           body?: unknown;
         }>,
-        toStringList(input.bodyCriticals, 'bodyCriticals')
-          .map(stripReviewFooter)
-          .filter((entry) => entry.trim() !== ''),
+        [
+          ...toStringList(input.bodyCriticals, 'bodyCriticals')
+            .map(stripReviewFooter)
+            .filter((entry) => entry.trim() !== ''),
+          // The same split the body performed: a relocated Critical is a
+          // posted, counted blocker and must enter the work list.
+          ...splitDeferralChannel(input.deferredSuggestions).relocated,
+        ],
       ),
       ...(sha ? { sha } : {}),
     });
@@ -681,35 +716,19 @@ function composeReviewBody(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );
-  const deferredIn = toStringList(
-    input.deferredSuggestions,
-    'deferredSuggestions',
-  )
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
   // A Critical marker in the deferral channel is RELOCATED, never fatal and
-  // never deferred: the entry is a Critical by its own marker, so it moves
-  // into the body Criticals — it counts toward `C`, the event blocks, and
-  // the round posts. The earlier refusal shared the flaw the round-5 fix
-  // removed from the licence check: a throw loses the WHOLE round, real
-  // drafted Criticals included, and in an unattended loop nothing
-  // recomposes. Separator-agnostic (an ASCII hyphen is the cheapest real
-  // spelling drift), with a lookbehind so hyphenated compounds — the
-  // SKILL's own "non-Critical findings" phrasing — do not trip it; the
-  // residual false positive (a Suggestion title literally opening
-  // `critical:`) now costs one wrongly-blocking body entry the next round
-  // rules on, not a lost round.
-  const CRITICAL_DEFERRAL_RE = /\[critical\]|(?<![\w-])critical\s*:/i;
-  const relocatedCriticals = deferredIn.filter((x) =>
-    CRITICAL_DEFERRAL_RE.test(x),
-  );
-  const deferredSuggestions = deferredIn.filter(
-    (x) => !CRITICAL_DEFERRAL_RE.test(x),
-  );
+  // never deferred: it counts toward `C`, the event blocks, and the round
+  // posts (a throw would lose the whole round — the round-5 doctrine). The
+  // lookbehind spares hyphenated compounds ("non-Critical findings", the
+  // SKILL's own phrasing); the residual false positive — a Suggestion title
+  // literally opening `critical:` — costs one wrongly-blocking body entry
+  // the next round rules on, not a lost round. The split lives in the
+  // shared helper: the ledger marker performs the same one, so a relocated
+  // blocker also rides the work list.
+  const { deferred: deferredSuggestions, relocated: relocatedCriticals } =
+    splitDeferralChannel(input.deferredSuggestions);
   for (const stray of relocatedCriticals) {
-    bodyCriticals.push(
-      `${stray} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
-    );
+    bodyCriticals.push(stray);
   }
   // The channel's OTHER precondition: deferring is only ever licensed by
   // the posture — `critical` at any round; `auto` from round 2 (the

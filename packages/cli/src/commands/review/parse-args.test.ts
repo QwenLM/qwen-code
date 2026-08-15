@@ -470,6 +470,55 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
     ).toBe(true);
   });
 
+  it('the ambiguity guard covers the equals form — syntax does not pick a PR', () => {
+    // Round-7 probe: the eq form never enters the disposal pool, so
+    // `--severity-floor=6711 --effort 6712` silently targeted 6712 while
+    // the all-spaced spelling was loudly refused. All four spellings must
+    // land the same place.
+    for (const raw of [
+      '--severity-floor 6711 --effort 6712',
+      '--severity-floor=6711 --effort 6712',
+      '--severity-floor 6711 --effort=6712',
+      '--severity-floor=6711 --effort=6712',
+    ]) {
+      const got = parseReviewArgs(raw);
+      expect(got.target).toEqual({ type: 'local' });
+      expect(got.warnings.some((w) => w.includes('Ambiguous target'))).toBe(
+        true,
+      );
+    }
+  });
+
+  it('an explicit auto floor is legal and overrides a configured floor for one run', () => {
+    // Mutation-shown gap: dropping 'auto' from SEVERITY_FLOORS shipped
+    // green while the documented one-shot override was rejected and, alone,
+    // promoted to a bogus `auto` file target.
+    expect(
+      parseReviewArgs('6711 --severity-floor auto', {
+        severityFloor: 'critical',
+      }),
+    ).toMatchObject({ severityFloor: 'auto', severityFloorSource: 'explicit' });
+    const sole = parseReviewArgs('--severity-floor auto');
+    expect(sole.target).toEqual({ type: 'local' });
+  });
+
+  it('a quoted-empty value is consumed as missing on both flags', () => {
+    // Mutation-shown gap: with the consumption branch deleted, '' survived
+    // as the sole candidate and became an empty-string file target.
+    for (const raw of ['--severity-floor ""', '--effort ""']) {
+      const got = parseReviewArgs(raw);
+      expect(got.target).toEqual({ type: 'local' });
+      expect(got.warnings.some((w) => w.includes('requires a value'))).toBe(
+        true,
+      );
+    }
+    const withTarget = parseReviewArgs('6711 --severity-floor ""');
+    expect(withTarget.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      withTarget.warnings.some((w) => w.includes('requires a value')),
+    ).toBe(true);
+  });
+
   it('two invalid values are two typos, not a target and a tiebreak', () => {
     // "Sole target candidate" is literal: with two invalid tokens neither is
     // sole, so both are discarded and the review falls back to the local
@@ -1000,6 +1049,20 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     const got = await verdictFor('6711\n');
     expect(got.severityFloor).toBe('critical');
     expect(got.severityFloorSource).toBe('configured');
+  });
+
+  it('discards an invalid configured severityFloor, warning instead of dropping it silently', async () => {
+    // Parity with the effort twin: a settings-layer "validation" that
+    // silently dropped non-enum values would leave every pure-parser test
+    // green while the operator's typo takes effect as silence.
+    reviewSettingsMock.mockReturnValue({ severityFloor: 'bogus' });
+    const got = await verdictFor('6711\n');
+    expect(got.severityFloor).toBe('auto');
+    expect(
+      got.warnings.some((w) =>
+        w.includes('Invalid review.severityFloor value "bogus" in settings'),
+      ),
+    ).toBe(true);
   });
 
   it('maps a configured auto severityFloor to the round-adaptive default without warning', async () => {

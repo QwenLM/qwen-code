@@ -247,6 +247,27 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'a first-time Suggestion in code nobody read must post like any round-1 finding',
     );
+    // The validation commands are the rebase-skip arm's only detection
+    // mechanism — without these pins, deleting the sentence leaves the
+    // skip-list's "fails the validation" clause dangling (round-7 finding).
+    expect(body).toContain('git cat-file -e <commitId>^{commit}');
+    expect(body).toContain('git merge-base --is-ancestor <commitId> HEAD');
+    // The two diff-output doubt states fail open (round-7 finding): a
+    // non-matching pathspec is about the path, and a zero-hunk non-empty
+    // diff (a PR-controlled .gitattributes binary mark) is a change.
+    expect(body).toContain("git cat-file -e HEAD:'<file>'");
+    expect(body).toContain('zero `@@` hunks');
+    // Multi-location findings have exactly one governing rule under the age
+    // gate (round-7 finding).
+    expect(body).toContain('A pattern aggregate is aged per location');
+    // The posture round's source of truth and the context-unavailable
+    // resolution (round-7 findings): the cache never decides the posture,
+    // and a degraded run fails open to full posting at round 1.
+    expect(body).toContain(
+      'the round that decides the posture is the SIDE FILE',
+    );
+    expect(body).toContain('no recovered ledger → round 1 → no posture');
+    expect(body).toContain('treat `auto` as round 1: no posture, full posting');
     // The age rule is auto-only: an explicit `suggestion` floor is the
     // operator saying "post everything", and the age gate deferring under it
     // would contradict the override (round-2 review finding).
