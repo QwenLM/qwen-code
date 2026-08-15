@@ -87,7 +87,7 @@ import type {
   ComposerSubmitCommit,
   EditorHandle,
 } from './hooks/useComposerCore';
-import type { PromptImage } from './adapters/promptTypes';
+import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -494,6 +494,7 @@ interface ActiveGoalStatus {
 interface SendPromptOptionsWithRetry {
   optimisticUserMessage?: boolean;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   retry?: boolean;
   onAdmissionStarted?: () => void;
@@ -517,6 +518,7 @@ interface FailedPrompt {
   previousIdentity?: TranscriptUserMessageIdentity;
   text: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   owner: CancelledRetryOwner;
 }
@@ -554,6 +556,7 @@ type CancelledRetryState =
       identity: TranscriptTurnErrorIdentity;
       text: string;
       images?: PromptImage[];
+      files?: PromptFile[];
       inputAnnotations?: DaemonInputAnnotation[];
       previousRetriedTurnErrorId: string | null;
       previousShowRetryHint: boolean;
@@ -616,6 +619,7 @@ interface UnknownPromptAdmission {
   messageId?: string;
   text?: string;
   images?: PromptImage[];
+  files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
   payloadAvailable: boolean;
 }
@@ -4120,6 +4124,7 @@ export function App({
   }, [displayMessages, streamingState]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
+  const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
   const lastSubmittedInputAnnotationsRef = useRef<
     DaemonInputAnnotation[] | undefined
   >(undefined);
@@ -4136,6 +4141,7 @@ export function App({
     errorId: string;
     text: string;
     images?: PromptImage[];
+    files?: PromptFile[];
     inputAnnotations?: DaemonInputAnnotation[];
     owner: CancelledRetryOwner;
   } | null>(null);
@@ -4175,6 +4181,7 @@ export function App({
       }
       lastSubmittedPromptRef.current = failedRetry.text;
       lastSubmittedImagesRef.current = failedRetry.images;
+      lastSubmittedFilesRef.current = failedRetry.files;
       lastSubmittedInputAnnotationsRef.current = failedRetry.inputAnnotations;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = retryableTurnError.id;
@@ -4250,6 +4257,7 @@ export function App({
     };
     lastSubmittedPromptRef.current = '';
     lastSubmittedImagesRef.current = undefined;
+    lastSubmittedFilesRef.current = undefined;
     lastSubmittedInputAnnotationsRef.current = undefined;
     lastSubmittedSourceVersionRef.current = -1;
     retryableTurnErrorIdRef.current = null;
@@ -4287,6 +4295,10 @@ export function App({
             failed.inputAnnotations?.length
               ? { inputAnnotations: failed.inputAnnotations }
               : undefined,
+            failed.files?.map((file) => ({
+              name: file.name,
+              mimeType: file.media_type,
+            })),
           );
           const rehydratedMessage = getLatestUserBlock(
             store.getSnapshot().blocks,
@@ -4339,6 +4351,7 @@ export function App({
       }
       lastSubmittedPromptRef.current = state.text;
       lastSubmittedImagesRef.current = state.images;
+      lastSubmittedFilesRef.current = state.files;
       lastSubmittedInputAnnotationsRef.current = state.inputAnnotations;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = renderedTurnError.id;
@@ -5522,6 +5535,7 @@ export function App({
     async (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
@@ -5645,6 +5659,7 @@ export function App({
       ) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
+        lastSubmittedFilesRef.current = files;
         lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
         lastSubmittedSourceVersionRef.current =
           composerSourceVersionRef.current;
@@ -5676,6 +5691,7 @@ export function App({
       let admitted = false;
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
+        files,
         inputAnnotations: opts?.inputAnnotations,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
@@ -5696,7 +5712,10 @@ export function App({
           opts?.onAdmitted?.();
         },
       };
-      if (sessionIdAfterEnsure && (text.trim() || (images?.length ?? 0) > 0)) {
+      if (
+        sessionIdAfterEnsure &&
+        (text.trim() || (images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
+      ) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId: sessionIdAfterEnsure,
@@ -6002,7 +6021,7 @@ export function App({
     });
     let admitted = false;
     let admissionStarted = false;
-    sendPrompt(failed.text, failed.images, {
+    sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
@@ -6037,6 +6056,7 @@ export function App({
             messageId: failed.messageId,
             text: failed.text,
             images: failed.images ? [...failed.images] : undefined,
+            files: failed.files ? [...failed.files] : undefined,
             inputAnnotations: failed.inputAnnotations,
             payloadAvailable: true,
           });
@@ -6117,6 +6137,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       onComplete?: () => void,
       commitComposerAccepted?: ComposerSubmitCommit,
       inputAnnotations?: DaemonInputAnnotation[],
@@ -6147,6 +6168,7 @@ export function App({
             const result = rawEnqueuePrompt(
               text,
               images,
+              files,
               onComplete,
               inputAnnotations,
             );
@@ -6157,7 +6179,12 @@ export function App({
                 editorRef.current?.clear();
               }
             }
-            if (sourceSessionId && (text.trim() || (images?.length ?? 0) > 0)) {
+            if (
+              sourceSessionId &&
+              (text.trim() ||
+                (images?.length ?? 0) > 0 ||
+                (files?.length ?? 0) > 0)
+            ) {
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
                 sessionId: sourceSessionId,
@@ -6182,11 +6209,15 @@ export function App({
       const result = rawEnqueuePrompt(
         text,
         images,
+        files,
         onComplete,
         inputAnnotations,
       );
       const sessionId = connectionRef.current.sessionId;
-      if (sessionId && (text.trim() || (images?.length ?? 0) > 0)) {
+      if (
+        sessionId &&
+        (text.trim() || (images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
+      ) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId,
@@ -6881,7 +6912,7 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(command, undefined, { ownerRef: owner })
+      sendPrompt(command, undefined, undefined, { ownerRef: owner })
         .then(refreshSettings)
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
@@ -7143,10 +7174,12 @@ export function App({
       lastSubmittedSourceVersionRef.current ===
         composerSourceVersionRef.current &&
       (lastSubmittedPromptRef.current.length > 0 ||
-        (lastSubmittedImagesRef.current?.length ?? 0) > 0);
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0 ||
+        (lastSubmittedFilesRef.current?.length ?? 0) > 0);
     if (retryableTurnError && previousIdentity && !identityMatches) {
       lastSubmittedPromptRef.current = '';
       lastSubmittedImagesRef.current = undefined;
+      lastSubmittedFilesRef.current = undefined;
       lastSubmittedInputAnnotationsRef.current = undefined;
       lastSubmittedSourceVersionRef.current = -1;
       retryableTurnErrorIdentityRef.current = undefined;
@@ -8277,7 +8310,7 @@ export function App({
           admitted = true;
           resolve();
         };
-        sendPrompt(prompt, undefined, { onAdmitted: admit }).then(
+        sendPrompt(prompt, undefined, undefined, { onAdmitted: admit }).then(
           () => {
             if (!admitted) {
               reject(new Error('Run was cancelled before it started'));
@@ -8514,6 +8547,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       opts?: {
         sendToDaemon?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -8528,7 +8562,7 @@ export function App({
           createSessionPromiseRef.current !== null;
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
-        sendPrompt(text, images, {
+        sendPrompt(text, images, files, {
           ownerRef: owner,
           clearComposerOnPromptStart,
           commitComposerAccepted: clearComposerOnPromptStart
@@ -8589,6 +8623,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
@@ -8623,6 +8658,7 @@ export function App({
       const submitPromptFromEditor = (
         promptText: string,
         promptImages: PromptImage[] | undefined,
+        promptFiles: PromptFile[] | undefined,
         errorMessage: string,
         opts?: {
           optimisticUserMessage?: boolean;
@@ -8655,7 +8691,7 @@ export function App({
         let admitted = false;
         let admissionStarted = false;
         let admissionSessionId: string | undefined;
-        sendPrompt(promptText, promptImages, {
+        sendPrompt(promptText, promptImages, promptFiles, {
           ownerRef: admissionAttachment,
           ...sendOptions,
           clearComposerOnPromptStart,
@@ -8692,6 +8728,7 @@ export function App({
                 messageId: failedMessage?.messageId,
                 text: promptText,
                 images: promptImages ? [...promptImages] : undefined,
+                files: promptFiles ? [...promptFiles] : undefined,
                 inputAnnotations: sendOptions.inputAnnotations,
                 payloadAvailable: true,
               });
@@ -8724,6 +8761,7 @@ export function App({
               ...failedMessage,
               text: promptText,
               images: promptImages,
+              files: promptFiles,
               inputAnnotations: sendOptions.inputAnnotations,
             });
           }
@@ -8740,6 +8778,7 @@ export function App({
               return enqueuePrompt(
                 text,
                 images,
+                files,
                 undefined,
                 commitComposerAccepted,
                 metadata?.inputAnnotations,
@@ -8748,6 +8787,7 @@ export function App({
             return submitPromptFromEditor(
               text,
               images,
+              files,
               'Failed to send hidden slash command',
               { inputAnnotations: metadata?.inputAnnotations },
             );
@@ -8809,7 +8849,7 @@ export function App({
               }
               return blockLocalCommandDuringTurn();
             }
-            return handleGoalSlashCommand(text, images, {
+            return handleGoalSlashCommand(text, images, files, {
               commitComposerAccepted,
             });
           }
@@ -8879,13 +8919,18 @@ export function App({
                   createSessionPromiseRef.current !== null;
                 const clearComposerOnPromptStart =
                   !connectionRef.current.sessionId || deferComposerCommit;
-                sendPrompt(`/language ui ${nextLanguage}`, undefined, {
-                  ownerRef: owner,
-                  clearComposerOnPromptStart,
-                  commitComposerAccepted: clearComposerOnPromptStart
-                    ? commitComposerAccepted
-                    : undefined,
-                })
+                sendPrompt(
+                  `/language ui ${nextLanguage}`,
+                  undefined,
+                  undefined,
+                  {
+                    ownerRef: owner,
+                    clearComposerOnPromptStart,
+                    commitComposerAccepted: clearComposerOnPromptStart
+                      ? commitComposerAccepted
+                      : undefined,
+                  },
+                )
                   .then(() => {
                     if (!owner.current.isCurrent()) return;
                     return sessionActions.refreshCommands();
@@ -8980,6 +9025,7 @@ export function App({
                 return enqueuePrompt(
                   text,
                   images,
+                  files,
                   undefined,
                   commitComposerAccepted,
                   metadata?.inputAnnotations,
@@ -8988,6 +9034,7 @@ export function App({
               return submitPromptFromEditor(
                 text,
                 images,
+                files,
                 'Failed to send /model --fast',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
@@ -9049,6 +9096,7 @@ export function App({
                 return submitPromptFromEditor(
                   prompt,
                   images,
+                  files,
                   'Failed to send plan prompt',
                   { inputAnnotations: metadata?.inputAnnotations },
                 );
@@ -9074,7 +9122,7 @@ export function App({
                   sessionWriteBlockGenerationRef.current ===
                     writeBlockGeneration
                 ) {
-                  return sendPrompt(prompt, images, {
+                  return sendPrompt(prompt, images, files, {
                     clearComposerOnPromptStart: true,
                     inputAnnotations: metadata?.inputAnnotations,
                   }).catch((error: unknown) =>
@@ -9135,6 +9183,7 @@ export function App({
                 return enqueuePrompt(
                   skillPrompt,
                   images,
+                  files,
                   undefined,
                   commitComposerAccepted,
                   metadata?.inputAnnotations,
@@ -9143,6 +9192,7 @@ export function App({
               return submitPromptFromEditor(
                 skillPrompt,
                 images,
+                files,
                 'Failed to send /skills command',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
@@ -9363,6 +9413,7 @@ export function App({
                 return enqueuePrompt(
                   text,
                   images,
+                  files,
                   undefined,
                   commitComposerAccepted,
                   metadata?.inputAnnotations,
@@ -9371,6 +9422,7 @@ export function App({
               return submitPromptFromEditor(
                 text,
                 images,
+                files,
                 'Failed to send /rename command',
                 { inputAnnotations: metadata?.inputAnnotations },
               );
@@ -9593,14 +9645,21 @@ export function App({
           return enqueuePrompt(
             text,
             images,
+            files,
             undefined,
             commitComposerAccepted,
             metadata?.inputAnnotations,
           );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send command', {
-          inputAnnotations: metadata?.inputAnnotations,
-        });
+        return submitPromptFromEditor(
+          text,
+          images,
+          files,
+          'Failed to send command',
+          {
+            inputAnnotations: metadata?.inputAnnotations,
+          },
+        );
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
@@ -9667,15 +9726,22 @@ export function App({
           return enqueuePrompt(
             text,
             images,
+            files,
             undefined,
             commitComposerAccepted,
             metadata?.inputAnnotations,
           );
         }
-        return submitPromptFromEditor(text, images, 'Failed to send message', {
-          inputAnnotations: metadata?.inputAnnotations,
-          trackSendFailure: true,
-        });
+        return submitPromptFromEditor(
+          text,
+          images,
+          files,
+          'Failed to send message',
+          {
+            inputAnnotations: metadata?.inputAnnotations,
+            trackSendFailure: true,
+          },
+        );
       }
     },
     [
@@ -9740,12 +9806,14 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
       const accepted = handleSubmitRef.current(
         text,
         images,
+        files,
         commitComposerAccepted,
         metadata,
       );
@@ -9836,6 +9904,7 @@ export function App({
       : draft;
     if (restoredText !== draft) editor.setText(restoredText);
     if (current.images?.length) editor.restoreImages(current.images);
+    if (current.files?.length) editor.restoreFiles(current.files);
     if (current.inputAnnotations?.length) {
       editor.restoreInputAnnotations?.(current.inputAnnotations);
     }
@@ -9865,7 +9934,8 @@ export function App({
       retryableTurnErrorIdentityRef.current &&
       connectionRef.current.sessionId &&
       (lastSubmittedPromptRef.current ||
-        (lastSubmittedImagesRef.current?.length ?? 0) > 0)
+        (lastSubmittedImagesRef.current?.length ?? 0) > 0 ||
+        (lastSubmittedFilesRef.current?.length ?? 0) > 0)
     ) {
       const savedRetryErrorIdentity = retryableTurnErrorIdentityRef.current;
       const currentRetryError = getRetryableTurnError(
@@ -9878,6 +9948,7 @@ export function App({
       ) {
         lastSubmittedPromptRef.current = '';
         lastSubmittedImagesRef.current = undefined;
+        lastSubmittedFilesRef.current = undefined;
         lastSubmittedInputAnnotationsRef.current = undefined;
         lastSubmittedSourceVersionRef.current = -1;
         retryableTurnErrorIdRef.current = null;
@@ -9891,6 +9962,7 @@ export function App({
       const retrySessionId = connectionRef.current.sessionId;
       const retryText = lastSubmittedPromptRef.current;
       const retryImages = lastSubmittedImagesRef.current;
+      const retryFiles = lastSubmittedFilesRef.current;
       const retryInputAnnotations = lastSubmittedInputAnnotationsRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
@@ -9922,7 +9994,7 @@ export function App({
       });
       let admissionStarted = false;
       let admitted = false;
-      sendPrompt(retryText, retryImages, {
+      sendPrompt(retryText, retryImages, retryFiles, {
         optimisticUserMessage: false,
         retry: true,
         inputAnnotations: retryInputAnnotations,
@@ -9948,6 +10020,7 @@ export function App({
             identity: retryErrorIdentity,
             text: retryText,
             images: retryImages,
+            files: retryFiles,
             inputAnnotations: retryInputAnnotations,
             previousRetriedTurnErrorId,
             previousShowRetryHint,
@@ -9964,6 +10037,7 @@ export function App({
               messageId: retryErrorId,
               text: retryText,
               images: retryImages ? [...retryImages] : undefined,
+              files: retryFiles ? [...retryFiles] : undefined,
               inputAnnotations: retryInputAnnotations,
               payloadAvailable: true,
             });
@@ -9982,6 +10056,7 @@ export function App({
               identity: retryErrorIdentity,
               text: retryText,
               images: retryImages,
+              files: retryFiles,
               inputAnnotations: retryInputAnnotations,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
@@ -9997,6 +10072,7 @@ export function App({
                 errorId: retryErrorId,
                 text: retryText,
                 images: retryImages,
+                files: retryFiles,
                 inputAnnotations: retryInputAnnotations,
                 owner: retryOwner,
               };
@@ -10456,7 +10532,7 @@ export function App({
       const scopeFlag =
         modelSettingScope === 'user' ? ' --global' : ' --project';
       const owner = { current: sessionOwnerGuard.capture() };
-      sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, {
+      sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, undefined, {
         ownerRef: owner,
       })
         .then(() => {
@@ -11873,10 +11949,15 @@ export function App({
                           current: sessionOwnerGuard.capture(),
                         };
                         try {
-                          await sendPrompt(`/goal ${condition}`, undefined, {
-                            clearComposerOnPromptStart: true,
-                            ownerRef: owner,
-                          });
+                          await sendPrompt(
+                            `/goal ${condition}`,
+                            undefined,
+                            undefined,
+                            {
+                              clearComposerOnPromptStart: true,
+                              ownerRef: owner,
+                            },
+                          );
                           if (!owner.current.isCurrent()) return false;
                         } catch (error) {
                           // `sendPrompt` creates the session lazily, so by now
