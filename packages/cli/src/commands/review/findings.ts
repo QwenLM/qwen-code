@@ -1064,8 +1064,13 @@ export const findingsCommand: CommandModule = {
 
     const target = resolve(out);
     mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
+    // The anchors file goes down BEFORE the artifact: Step 7 joins the pair
+    // by id, so a failure between the two writes must find both files still
+    // the previous run's consistent pair, never a rewritten findings.json
+    // beside a stale anchors.json. The anchors path is the realistic failure
+    // — a parent that cannot be created, a read-only directory — while the
+    // artifact's is the path the previous run already wrote.
     if (toAnchors !== undefined && anchorRequests !== undefined) {
       const anchorTarget = resolve(toAnchors);
       mkdirSync(dirname(anchorTarget), { recursive: true });
@@ -1084,6 +1089,8 @@ export const findingsCommand: CommandModule = {
         );
       }
     }
+
+    writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
     const { bySeverity, byConfidence } = report.counts;
     writeStderrLine(

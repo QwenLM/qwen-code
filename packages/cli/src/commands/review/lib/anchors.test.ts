@@ -745,6 +745,78 @@ describe('resolveAnchor — the substring fallback (KB-long lines)', () => {
       '+const deep = compute();',
     );
     expect(r.status).toBe('unmatched');
+    // The refusal is right; the REASON must be too. The quote IS in the hunk
+    // — refused by policy, not absent — and Step 7 keys its recovery to the
+    // reason: the generic absence one would re-attribute the file when the
+    // remedy is to quote the line verbatim, with its indentation.
+    expect(r.reason).toContain('indentation is normalised');
+    expect(r.reason).toContain('verbatim');
+    expect(r.reason).not.toContain('does not appear in any hunk');
+  });
+
+  it('does not prescribe a longer stretch of a whole line the marker retry guessed at', () => {
+    // `+return x;` for actual ` return x;` — the stacked marker+indentation
+    // guess under 12 characters. The containment check used to report the
+    // fragment as sitting inside a hunk line and prescribe a longer stretch,
+    // but the whole line IS 10 characters: there is no longer stretch, and
+    // quotes that DO place the line exist. The shape must refuse the same
+    // way at every length.
+    const shortDiff = [
+      'diff --git a/s.ts b/s.ts',
+      '--- a/s.ts',
+      '+++ b/s.ts',
+      '@@ -1,0 +1,1 @@',
+      '+ return x;',
+      '',
+    ].join('\n');
+    const hayS = lines(shortDiff, 's.ts');
+    const r = resolveAnchor(hayS, '+return x;');
+    expect(r.status).toBe('unmatched');
+    expect(r.reason).not.toContain('longer stretch');
+    expect(r.reason).toContain('verbatim');
+
+    // The quotes that DO place the line.
+    expect(resolveAnchor(hayS, ' return x;')).toMatchObject({
+      status: 'resolved',
+      tier: 'exact-added',
+    });
+    expect(resolveAnchor(hayS, 'return x;')).toMatchObject({
+      status: 'resolved',
+      tier: 'loose-added',
+    });
+  });
+
+  it('measures the substring floor on the collapsed needle, not its padding', () => {
+    // The collapsed matching pass abstracts away the very whitespace the
+    // floor counts: `a  b  c  d  e` is 13 characters as quoted, but its
+    // collapsed core `a b c d e` is 9 — below the floor the plainly-quoted
+    // core is refused for. The same core must not be noise or a posted
+    // anchor depending only on its internal padding.
+    const paddedDiff = [
+      'diff --git a/p.md b/p.md',
+      '--- a/p.md',
+      '+++ b/p.md',
+      '@@ -1,0 +1,1 @@',
+      '+x a b c d e y',
+      '',
+    ].join('\n');
+    const hayP = lines(paddedDiff, 'p.md');
+    const padded = resolveAnchor(hayP, 'a  b  c  d  e');
+    expect(padded.status).toBe('unmatched');
+    expect(padded.reason).toContain('too short to place a line');
+    expect(resolveAnchor(hayP, 'a b c d e').status).toBe('unmatched');
+  });
+
+  it('does not let an empty marker-stripped reading sit inside every line', () => {
+    // A bare `+` is an added blank line quoted with its marker. The
+    // marker-stripped reading reduces to the empty string, and
+    // `''.includes('')` is true of every line — containment would claim
+    // presence in this file and prescribe a longer stretch of a line the
+    // snippet does not sit in. The honest absence reason — possibly the
+    // wrong file — is the only productive recovery.
+    const r = resolveAnchor(hay(), '+');
+    expect(r.status).toBe('unmatched');
+    expect(r.reason).toContain('does not appear in any hunk');
   });
 });
 

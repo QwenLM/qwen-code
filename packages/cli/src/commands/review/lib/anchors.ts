@@ -367,24 +367,53 @@ function substringResolution(
 ): AnchorResolution | null {
   if (needleLines.length !== 1) return null;
   const needle = normalizeExact(needleLines[0]);
-  if (needle.trim().length < MIN_SUBSTRING_LENGTH) {
+  const collapsed = normalizeCollapsed(needle);
+  // A marker-stripped reading can reduce to nothing — a bare `+` quoting an
+  // added blank line. `''.includes('')` is true of every line, so an empty
+  // needle would "sit inside" every hunk and prescribe a longer stretch of a
+  // line it does not sit in; report nothing and let the caller fall through
+  // to the honest absence reason.
+  if (collapsed.length === 0) return null;
+
+  const sitsInside = (l: NewSideLine): boolean =>
+    l.text.includes(needle) || normalizeCollapsed(l.text).includes(collapsed);
+  // A containing line that EQUALS the fragment modulo whitespace is not
+  // mid-line containment — it is the indentation guess stacked on the marker
+  // guess the whole-line tiers refuse. With `midLineOnly`, every reading
+  // below drops such a line.
+  const lineGuess = (l: NewSideLine): boolean =>
+    midLineOnly && normalizeCollapsed(l.text) === collapsed;
+  // When that filter — not absence — is what refused the reading, say so:
+  // the quote IS in the hunk, and the generic absence reason would claim
+  // otherwise and key the recovery to re-attribution.
+  const indentationRefusal: AnchorResolution | null = hay.some(lineGuess)
+    ? {
+        status: 'unmatched',
+        reason:
+          'the marker-stripped reading matches a hunk line only after its ' +
+          'indentation is normalised — quote the line verbatim, with its ' +
+          'indentation',
+      }
+    : null;
+
+  // The floor measures what the collapsed matching pass actually runs on: a
+  // padded quote is longer than its collapsed core, and the core is what
+  // that weakest reading matches with.
+  if (collapsed.length < MIN_SUBSTRING_LENGTH) {
     // Too short to place — but when it IS inside a hunk line, say so: the
     // generic absence reason would claim the quote appears nowhere (false
     // here) and key the recovery to re-attribution, when the only remedy is
     // a longer fragment.
-    const contained = hay.some(
-      (l) =>
-        l.text.includes(needle) ||
-        normalizeCollapsed(l.text).includes(normalizeCollapsed(needle)),
-    );
-    if (!contained) return null;
-    return {
-      status: 'unmatched',
-      reason:
-        'the snippet sits inside a hunk line but is shorter than ' +
-        `${MIN_SUBSTRING_LENGTH} characters — too short to place a line ` +
-        'reliably; quote a longer stretch of the line it sits in',
-    };
+    if (hay.some((l) => !lineGuess(l) && sitsInside(l))) {
+      return {
+        status: 'unmatched',
+        reason:
+          'the snippet sits inside a hunk line but is shorter than ' +
+          `${MIN_SUBSTRING_LENGTH} characters — too short to place a line ` +
+          'reliably; quote a longer stretch of the line it sits in',
+      };
+    }
+    return indentationRefusal;
   }
 
   const norms: Array<[boolean, (s: string) => string]> = [
@@ -398,11 +427,7 @@ function substringResolution(
     // report an ambiguity the resolver does not actually have.
     const cands: Candidate[] = hay
       .filter((l) => norm(l.text).includes(normNeedle))
-      .filter(
-        (l) =>
-          !midLineOnly ||
-          normalizeCollapsed(l.text) !== normalizeCollapsed(needle),
-      )
+      .filter((l) => !lineGuess(l))
       .map((l) => ({ startLine: l.newLine, line: l.newLine, added: l.added }));
     if (cands.length === 0) continue;
 
@@ -439,7 +464,7 @@ function substringResolution(
         : {}),
     };
   }
-  return null;
+  return indentationRefusal;
 }
 
 /**

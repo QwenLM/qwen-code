@@ -909,6 +909,53 @@ describe('findings (command boundary)', () => {
     expect(readFileSync(anchors, 'utf8')).toBe(anchorsBefore);
   });
 
+  it('--to-anchors leaves the previous pair untouched when the anchors write fails', () => {
+    // Step 7 joins the pair by id, and carried-forward findings keep their
+    // ids across reruns — so a rewritten findings.json beside the previous
+    // run's anchors lets stale resolutions attach to the wrong finding
+    // bodies instead of failing loudly. The anchors write must go down
+    // first: its path is the realistic failure (a parent that cannot be
+    // created, a read-only directory), and a failure there must find both
+    // files still the previous consistent pair.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'a1', source: 'probe', anchor: 'charge(amt);' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const findingsBefore = readFileSync(out, 'utf8');
+    const anchorsBefore = readFileSync(anchors, 'utf8');
+
+    // Rerun with changed findings and an anchors path whose parent cannot
+    // be created: `anchors.json` already exists as a regular file, so a
+    // directory component through it throws ENOTDIR.
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'a2', source: 'probe', anchor: 'other(amt);' },
+      ]),
+    );
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        toAnchors: join(anchors, 'nested/anchors.json'),
+        print: false,
+      }),
+    ).toThrow();
+    expect(readFileSync(out, 'utf8')).toBe(findingsBefore);
+    expect(readFileSync(anchors, 'utf8')).toBe(anchorsBefore);
+  });
+
   it('--to-anchors names the postable locations it cannot project', () => {
     // The projection skips anchorless locations, and nothing downstream
     // cross-checks the artifact against the resolver input — so the skip
