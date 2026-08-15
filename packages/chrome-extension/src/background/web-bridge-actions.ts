@@ -525,7 +525,7 @@ async function mouseClick(args: Args): Promise<unknown> {
     await send('Runtime.callFunctionOn', {
       objectId,
       functionDeclaration:
-        "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); }",
+        "function() { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }",
     });
     const box = record(await send('DOM.getBoxModel', { objectId }));
     const content = record(box['model'])['content'];
@@ -804,7 +804,7 @@ async function screenshot(args: Args): Promise<unknown> {
       await send('Runtime.callFunctionOn', {
         objectId,
         functionDeclaration:
-          "function() { this.scrollIntoView({ block: 'center', inline: 'center' }); }",
+          "function() { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }",
       });
       const box = record(await send('DOM.getBoxModel', { objectId }));
       const border = record(box['model'])['border'];
@@ -879,7 +879,13 @@ async function saveAsPdf(args: Args): Promise<unknown> {
           returnByValue: true,
         }),
       );
-      pageTitle = string(record(titleResult['result'])['value']) ?? '';
+      // document.title is page-controlled and rides the unchunked metadata
+      // frame — cap it so a multi-MiB title cannot exceed the daemon's WS
+      // maxPayload and take down the bridge for every session.
+      pageTitle = (string(record(titleResult['result'])['value']) ?? '').slice(
+        0,
+        1024,
+      );
     } catch {
       // Metadata is optional.
     }

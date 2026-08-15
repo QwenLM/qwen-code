@@ -866,6 +866,14 @@ describe('WebBridge actions', () => {
       'Input.dispatchMouseEvent',
       expect.objectContaining({ type: 'mousePressed', x: 20, y: 30 }),
     );
+    // Coordinates are sampled after the scroll: it must not be a smooth
+    // animation still in flight when getBoxModel measures the box.
+    expect(cdp.send).toHaveBeenCalledWith(
+      'Runtime.callFunctionOn',
+      expect.objectContaining({
+        functionDeclaration: expect.stringContaining("behavior: 'instant'"),
+      }),
+    );
   });
 
   it('keeps a delivered mouse click successful if navigation clears metadata', async () => {
@@ -1701,6 +1709,22 @@ describe('WebBridge actions', () => {
         preferCSSPageSize: false,
       }),
     );
+  });
+
+  it('caps page-controlled pageTitle in the PDF metadata frame', async () => {
+    // document.title is page-controlled and rides the unchunked metadata
+    // frame; an uncapped multi-MiB title would exceed the daemon's WS
+    // maxPayload and drop the bridge for every session.
+    cdp.send
+      .mockResolvedValueOnce({ data: 'cGRm' })
+      .mockResolvedValueOnce({ result: { value: 't'.repeat(4096) } });
+    const { executeWebBridgeAction } = await loadActions();
+
+    const result = (await executeWebBridgeAction('save_as_pdf', {
+      _tabId: 17,
+    })) as { pageTitle: string };
+
+    expect(result.pageTitle).toHaveLength(1024);
   });
 
   it('captures element screenshots in document coordinates', async () => {
