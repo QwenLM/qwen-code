@@ -1192,7 +1192,7 @@ function isDegradedPlaceholderPrefix(text: string): boolean {
 function detachChunkParts(
   chunk: GenerateContentResponse,
 ): GenerateContentResponse {
-  return {
+  const copy = {
     ...chunk,
     candidates: chunk.candidates?.map((candidate) => ({
       ...candidate,
@@ -1204,6 +1204,11 @@ function detachChunkParts(
         : candidate.content,
     })),
   } as GenerateContentResponse;
+  const preparations = getToolCallPreparations(chunk);
+  if (preparations.length > 0) {
+    setToolCallPreparations(copy, preparations);
+  }
+  return copy;
 }
 
 function isDegradedPlaceholderTurn(content: Content): boolean {
@@ -1953,7 +1958,12 @@ export class GeminiChat {
           : undefined,
       );
       const requestHistory = curatedHistory.map(copyContentContainer);
-      const reattachParts = buildReattachParts(replaced, maxRecentImages);
+      const reattachParts = buildReattachParts(
+        replaced,
+        maxRecentImages,
+        requestHistory,
+        this.imagePayloadStore,
+      );
       if (reattachParts.length > 0) {
         const last = requestHistory.at(-1);
         if (last?.role === 'user') {
@@ -5016,10 +5026,6 @@ export class GeminiChat {
       );
     }
 
-    if (recoveredChunk) {
-      yield recoveredChunk;
-    }
-
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
     // JSONL never carries a partial turn we deliberately dropped from
@@ -5113,6 +5119,9 @@ export class GeminiChat {
     // IN PLACE and rewrote the shared part objects these chunks carry.
     for (const pendingChunk of pendingPreValidationChunks) {
       yield pendingChunk;
+    }
+    if (recoveredChunk) {
+      yield recoveredChunk;
     }
     if (
       willPersistToHistory &&

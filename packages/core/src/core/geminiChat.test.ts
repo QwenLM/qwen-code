@@ -12337,6 +12337,39 @@ describe('GeminiChat', async () => {
     },
   );
 
+  it('keeps tool preparations on a deferred finish chunk', async () => {
+    const response = stopResponse([
+      {
+        functionCall: {
+          id: 'call-1',
+          name: 'read_file',
+          args: { file_path: 'a.ts' },
+        },
+      },
+    ]);
+    setToolCallPreparations(response, [
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamResponse(response),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-deferred-preparation',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    const emittedPreparations = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => getToolCallPreparations(event.value));
+    expect(emittedPreparations).toEqual([
+      { callId: 'call-1', toolName: 'read_file' },
+    ]);
+  });
+
   it('does not retry after a structured tool call has already been emitted', async () => {
     const recordAssistantTurn = vi.fn();
     const chatWithRecording = new GeminiChat(
@@ -16292,6 +16325,12 @@ describe('GeminiChat', async () => {
         c.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
       );
       expect(syntheticChunk).toBeDefined();
+      expect(chunks[0]?.candidates?.[0]?.content?.parts?.[0]?.text).toBe(
+        'Sure.',
+      );
+      expect(
+        chunks[1]?.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+      ).toBe(true);
 
       // History keeps the short prefix as a text part ahead of the recovered
       // functionCall and drops the raw XML (--resume fidelity).

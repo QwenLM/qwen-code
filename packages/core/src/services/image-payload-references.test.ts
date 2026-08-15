@@ -313,6 +313,18 @@ describe('buildReattachParts', () => {
     expect(data).toEqual(['b', 'c']);
   });
 
+  it('reattaches stored images from existing stable references', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [toolImageTurn('a'), toolImageTurn('b')];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 2, contents, store);
+
+    expect(
+      parts.filter((p) => p.inlineData).map((p) => p.inlineData?.data),
+    ).toEqual(['a', 'b']);
+  });
+
   it('returns empty when maxRecentImages is zero', () => {
     const store = new InMemoryImagePayloadStore();
     const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
