@@ -72,4 +72,83 @@ describe('eslint cli serve boundary rules', () => {
       "export async function load() { await import('../serve/index.js'); }",
     );
   });
+
+  // R5-4: pins the bare-directory specifier (`../serve` resolves to the
+  // serve/ barrel) for both static and dynamic forms in utils/ — reverting
+  // the bare-entry hunk must turn this red.
+  it('rejects the bare serve barrel specifier', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/utils/boundary-fixture.ts',
+      "import '../serve';",
+    );
+
+    await expectServeBoundaryError(
+      'packages/cli/src/runtime/boundary-fixture.ts',
+      "export async function load() { await import('../serve'); }",
+    );
+  });
+
+  // R4-1: the per-spelling regex entrances demonstrated in round 4 —
+  // duplicated separators, traversal through intermediate segments,
+  // concatenated sources, `new URL(...)` sources, and type-level imports.
+  it('rejects non-canonical and computed dynamic serve imports', async () => {
+    const runtime = 'packages/cli/src/runtime/boundary-fixture.ts';
+
+    await expectServeBoundaryError(
+      runtime,
+      "export async function load() { await import('..//serve/index.js'); }",
+    );
+
+    await expectServeBoundaryError(
+      runtime,
+      "export async function load() { await import('../foo/../../../serve/index.js'); }",
+    );
+
+    await expectServeBoundaryError(
+      runtime,
+      "export async function load() { await import('../serve/' + 'index.js'); }",
+    );
+
+    await expectServeBoundaryError(
+      runtime,
+      'export async function load() { await import(new URL("../serve/index.js", import.meta.url)); }',
+    );
+
+    await expectServeBoundaryError(
+      runtime,
+      'export type Leak = import("../serve/live/types.js").Leak;',
+    );
+  });
+
+  // R5-5: the override blocks restate restrictedStringThrow; flat config's
+  // last-wins semantics mean dropping the restatement would silently legalize
+  // string throws in exactly these trees. This probe pins it.
+  it('still rejects string throws inside the guarded overrides', async () => {
+    const [result] = await lintCliFile(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "export function boom() { throw 'boom'; }",
+    );
+    expect(result.messages.map((message) => message.message)).toEqual(
+      expect.arrayContaining([expect.stringContaining('throw')]),
+    );
+  });
+
+  // R5-7: third-party packages whose name contains `serve` must not be
+  // caught by the boundary (the old `**/serve*` globs matched them).
+  it('allows third-party serve-named packages', async () => {
+    const code = [
+      "import handler from 'serve';",
+      "import scoped from '@scope/serve';",
+      "import sub from '@scope/serve/handler.js';",
+      '',
+    ].join('\n');
+    const [result] = await lintCliFile(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      code,
+    );
+    const boundaryHits = result.messages.filter((message) =>
+      message.message.includes('serve/ internals'),
+    );
+    expect(boundaryHits).toEqual([]);
+  });
 });

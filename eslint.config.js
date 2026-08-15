@@ -17,36 +17,64 @@ import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
 
-const serveImportPatterns = ['**/serve', '**/serve/*', '**/serve/**'];
-const relativeServeImportPatterns = [
-  '../serve',
-  '../serve/*',
-  '../serve/**',
-  '../../serve',
-  '../../serve/*',
-  '../../serve/**',
-];
-const serveDynamicImportPathPattern =
-  String.raw`^(?:\.\x2f)*(?:\.\.\x2f)+(?:[^\x2f]+\x2f(?:\.\.\x2f)*)*serve(?:\x2f|$)`;
+// Static-import guard: relative specifiers only, enumerated by depth. The
+// earlier `**/serve*` globs also matched third-party package names (`serve`,
+// `@scope/serve`, `@scope/serve/subpath`), so bare/scoped specifiers must
+// never reach the boundary check; imports deeper than six levels below src/
+// do not occur in the guarded trees. `../serve` (bare directory) resolves to
+// the serve/ barrel and stays covered.
+const relativeServeImportPatterns = [];
+for (let depth = 1; depth <= 6; depth++) {
+  const prefix = '../'.repeat(depth);
+  relativeServeImportPatterns.push(
+    `${prefix}serve`,
+    `${prefix}serve/*`,
+    `${prefix}serve/**`,
+  );
+}
 
 const restrictedServeImports = (message) => ({
-  patterns: [
-    {
-      // `**/serve` also covers the bare directory specifier, which resolves to
-      // the serve/ barrel.
-      group: [...serveImportPatterns, ...relativeServeImportPatterns],
-      message,
-    },
-  ],
+  patterns: [{ group: relativeServeImportPatterns, message }],
 });
 
+// Dynamic-import guard. Relative spellings are matched with linear-time
+// patterns — the previous nested-quantifier shape backtracked exponentially
+// (ReDoS: ~4x cost per two added `../` segments). Non-literal sources and
+// type-level imports cannot be resolved statically, and rounds 2-5 each
+// demonstrated a new spelling entrance, so those are rejected fail-closed.
+const serveDynamicImportPatterns = [
+  // Canonical and duplicated-separator spellings: ../serve, ./../serve,
+  // ..//serve, ../../serve/x, ...
+  String.raw`^(?:\.\x2f+|\.\.\x2f+)+serve(?:\x2f|$)`,
+  // Spellings routing through intermediate or traversal segments:
+  // ../runtime/../serve/x, ../foo/../../../serve/x, ..//foo//serve, ...
+  String.raw`^(?:\.\x2f+|\.\.\x2f+)+(?:[^\x2f]+\x2f+)+serve(?:\x2f|$)`,
+];
+
 const restrictedServeDynamicImports = (message) => [
+  ...serveDynamicImportPatterns.flatMap((pattern) => [
+    {
+      selector: `ImportExpression[source.value=/${pattern}/]`,
+      message,
+    },
+    {
+      selector: `ImportExpression[source.quasis.0.value.cooked=/${pattern}/]`,
+      message,
+    },
+    {
+      selector: `TSImportType[argument.value=/${pattern}/]`,
+      message,
+    },
+  ]),
+  // Fail-closed: concatenation, `new URL(...)`, and other computed sources
+  // cannot be proven safe statically (see R4-1 entrances).
   {
-    selector: `ImportExpression[source.value=/${serveDynamicImportPathPattern}/]`,
+    selector:
+      'ImportExpression:not([source.type="Literal"]):not([source.type="TemplateLiteral"])',
     message,
   },
   {
-    selector: `ImportExpression[source.quasis.0.value.cooked=/${serveDynamicImportPathPattern}/]`,
+    selector: 'TSImportType:not([argument.type="Literal"])',
     message,
   },
 ];
@@ -61,6 +89,17 @@ const restrictedStringThrow = {
   message:
     'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
 };
+
+// The three guarded trees (runtime/, utils/, acp-integration/) share one
+// no-restricted-syntax shape. Flat config replaces rule options wholesale,
+// so the array is built in one place — a future selector added here reaches
+// every guarded tree instead of needing hand-replication in each block.
+const serveGuardSyntaxRules = (message) => [
+  'error',
+  restrictedRequire,
+  restrictedStringThrow,
+  ...restrictedServeDynamicImports(message),
+];
 
 export default tseslint.config(
   {
@@ -248,14 +287,9 @@ export default tseslint.config(
     // overwritten by the shared `no-restricted-syntax` rule.
     files: ['packages/cli/src/runtime/**/*.{ts,tsx}'],
     rules: {
-      'no-restricted-syntax': [
-        'error',
-        restrictedRequire,
-        restrictedStringThrow,
-        ...restrictedServeDynamicImports(
-          'packages/cli/src/runtime must not dynamically import serve/ internals (#8084).',
-        ),
-      ],
+      'no-restricted-syntax': serveGuardSyntaxRules(
+        'packages/cli/src/runtime must not dynamically import serve/ internals (#8084).',
+      ),
     },
   },
   {
@@ -263,28 +297,24 @@ export default tseslint.config(
     // overwritten by the shared `no-restricted-syntax` rule.
     files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
     rules: {
-      'no-restricted-syntax': [
-        'error',
-        restrictedRequire,
-        restrictedStringThrow,
-        ...restrictedServeDynamicImports(
-          'packages/cli/src/utils must not dynamically import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
-        ),
-      ],
+      'no-restricted-syntax': serveGuardSyntaxRules(
+        'packages/cli/src/utils must not dynamically import serve/. Move lifecycle-free logic down into utils/ instead (#9146).',
+      ),
     },
   },
   {
     // ACP integration and the daemon are separate runtime surfaces that happen
     // to share a package directory. ACP may consume neutral contracts under
     // `runtime/`, but never `serve/` implementation modules — see #8084.
-    // Enforcement point is `npm run lint` in CI; no fixture test pins this
-    // block — accepted trade-off, the boundary lives in config, not code.
+    // Enforcement point is `npm run lint` in CI; fixture coverage lives in
+    // scripts/tests/eslint-boundary-rules.test.js (serve-boundary cases plus
+    // a string-throw probe that pins the restated selectors below).
     //
     // Positioned after the general TS block on purpose: flat config lets the
     // last matching block win per rule, and that block also configures
     // `no-restricted-syntax` — placing this one earlier would silently lose
-    // the dynamic-import guard below. Its two selectors are restated here so
-    // this override does not drop them for acp-integration files.
+    // the dynamic-import guard below. The shared selectors are restated via
+    // serveGuardSyntaxRules so this override does not drop them.
     files: ['packages/cli/src/acp-integration/**/*.{ts,tsx}'],
     rules: {
       'no-restricted-imports': [
@@ -293,18 +323,13 @@ export default tseslint.config(
           'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
         ),
       ],
-      'no-restricted-syntax': [
-        'error',
-        restrictedRequire,
-        restrictedStringThrow,
-        // no-restricted-imports only visits static import/export declarations;
-        // the same boundary applies to dynamic `await import('../serve/…')`.
-        // The selector regex spells `/` as `\x2f` because esquery cannot parse
-        // a literal slash inside its attribute-regex syntax.
-        ...restrictedServeDynamicImports(
-          'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
-        ),
-      ],
+      // no-restricted-imports only visits static import/export declarations;
+      // the same boundary applies to dynamic `await import('../serve/…')`.
+      // The selector regex spells `/` as `\x2f` because esquery cannot parse
+      // a literal slash inside its attribute-regex syntax.
+      'no-restricted-syntax': serveGuardSyntaxRules(
+        'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+      ),
     },
   },
   {
