@@ -324,6 +324,54 @@ export function redactStructuredOutputArgsForRecording(
   };
 }
 
+/**
+ * Project an in-memory history turn's parts into the message shape every
+ * other `recordAssistantTurn` call site writes: optional thought part
+ * first, then one trimmed `{text}` built from the non-thought text parts,
+ * then functionCall parts passed through
+ * `redactStructuredOutputArgsForRecording`. Anything else
+ * (`inlineData`/`fileData`) is dropped — no other assistant record carries
+ * those, and persisting them would both bloat the JSONL and hand transcript
+ * consumers a message shape they never otherwise see.
+ *
+ * Exported for tests.
+ */
+export function buildRecordMessageFromHistoryParts(parts: Part[]): Part[] {
+  const thoughtPart = parts.find((part) => part.thought);
+  const contentText = parts
+    .filter((part) => !part.thought && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('')
+    .trim();
+  const functionCallParts = parts
+    .map((part) =>
+      part.functionCall ? redactStructuredOutputArgsForRecording(part) : null,
+    )
+    .filter(
+      (part): part is { functionCall: NonNullable<Part['functionCall']> } =>
+        part !== null,
+    );
+  return [
+    ...(thoughtPart ? [thoughtPart] : []),
+    ...(contentText ? [{ text: contentText }] : []),
+    ...functionCallParts,
+  ];
+}
+
+/**
+ * Last-wins `candidates[0]` finish-reason derivation, shared by the outer
+ * send loop, both recovery continuation streams, and
+ * `processStreamResponse`'s record-deferral decision. All four callers must
+ * agree on whether a stream ended in MAX_TOKENS — a divergent copy would let
+ * the record-deferral decision disagree with the recovery-entry decision and
+ * strand or duplicate a JSONL record.
+ */
+function firstCandidateFinishReason(
+  chunk: GenerateContentResponse | undefined,
+): FinishReason | undefined {
+  return chunk?.candidates?.[0]?.finishReason;
+}
+
 function isCompressionFailureStatus(status: CompressionStatus): boolean {
   return (
     status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
@@ -2831,7 +2879,7 @@ export class GeminiChat {
               if (chunkParts?.some((part) => part.functionCall)) {
                 streamYieldedFunctionCall = true;
               }
-              const fr = chunk.candidates?.[0]?.finishReason;
+              const fr = firstCandidateFinishReason(chunk);
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
             }
@@ -3441,7 +3489,7 @@ export class GeminiChat {
                 yield event;
                 continue;
               }
-              const fr = event.value.candidates?.[0]?.finishReason;
+              const fr = firstCandidateFinishReason(event.value);
               if (fr) recoveryFinishReason = fr;
               yield event;
             }
@@ -3627,13 +3675,16 @@ export class GeminiChat {
               : 0;
 
           // Flush the deferred JSONL records. When every recovery pair merged
-          // cleanly into one history turn, write a single record whose parts ARE
-          // that coalesced turn's — so the durable transcript `--resume` reads
-          // matches in-memory history byte-for-byte (the same single-source-of-
-          // truth rule the transport-cut continuation path follows). If nothing
-          // coalesced (recovery skipped on a functionCall turn) or the merge
-          // bailed defensively, fall back to the per-attempt records, which
-          // still match the un-coalesced history.
+          // cleanly into one history turn, write a single record built from
+          // that coalesced turn — projected through
+          // `buildRecordMessageFromHistoryParts` so its message keeps the
+          // record shape every other assistant record uses (one trimmed text
+          // part, structured_output args redacted, no inlineData/fileData) —
+          // and the durable transcript `--resume` reads carries the same
+          // merged content as in-memory history. If nothing coalesced
+          // (recovery skipped on a functionCall turn) or the merge bailed
+          // defensively, fall back to the per-attempt records, which still
+          // match the un-coalesced history.
           const deferredRecords = self.deferredMaxTokensRecords;
           self.deferredMaxTokensRecords = [];
           if (deferredRecords.length > 0) {
@@ -3645,7 +3696,9 @@ export class GeminiChat {
             ) {
               self.chatRecordingService?.recordAssistantTurn({
                 ...deferredRecords[deferredRecords.length - 1]!,
-                message: mergedTurn.parts ?? [],
+                message: buildRecordMessageFromHistoryParts(
+                  mergedTurn.parts ?? [],
+                ),
               });
             } else {
               for (const record of deferredRecords) {
@@ -4617,12 +4670,12 @@ export class GeminiChat {
         hasFinishReason ||=
           chunk?.candidates?.some((candidate) => candidate.finishReason) ??
           false;
-        // Mirror the outer send loop's `lastFinishReason` derivation exactly
+        // Shares `firstCandidateFinishReason` with the outer send loop
         // (last-wins, `candidates[0]`) so the record-deferral decision agrees
         // with the recovery-entry decision even on a malformed multi-finish
         // stream — otherwise a `STOP`-before-`MAX_TOKENS` stream could record
         // immediately while recovery still runs, stranding a record on disk.
-        const chunkFinishReason = chunk?.candidates?.[0]?.finishReason;
+        const chunkFinishReason = firstCandidateFinishReason(chunk);
         if (chunkFinishReason) {
           observedFinishReason = chunkFinishReason as FinishReason;
         }
