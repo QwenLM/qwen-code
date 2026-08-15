@@ -101,11 +101,12 @@ export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
 
 /**
- * The deferred-suggestions list's rendered bounds. Module-scoped because two
- * surfaces read the line cap: the body renderer that applies it, and
- * `verdictLine`, whose "(listed in the body)" claim must turn cap-aware the
- * moment the list overflows — a verdict that counts 21 over a body that
- * lists 20 is a false record persisted into the archived report.
+ * The deferred-suggestions list's rendered bounds, shared by the
+ * duplicate-drop account. Module-scoped because two surfaces read the line
+ * cap: the body renderer that applies it, and `verdictLine`, whose "(listed
+ * in the body)" claim must turn cap-aware the moment the list overflows — a
+ * verdict that counts 21 over a body that lists 20 is a false record
+ * persisted into the archived report.
  */
 const MAX_DEFERRED_SUGGESTION_LINES = 20;
 const MAX_DEFERRED_SUGGESTION_CHARS = 240;
@@ -172,8 +173,9 @@ export function renderDeferredEntry(entry: DeferredEntry): string {
 }
 
 /**
- * The per-entry bound every deferral-channel exit applies — deferred AND
- * relocated: collapse newlines, cap at MAX_DEFERRED_SUGGESTION_CHARS
+ * The per-entry bound every model-written list exit applies — deferred,
+ * relocated, AND duplicate-dropped: collapse newlines, cap at
+ * MAX_DEFERRED_SUGGESTION_CHARS
  * without splitting a surrogate pair, mark a trim with an ellipsis. The
  * relocation exit once bypassed all of it (round-9 finding): twenty-five
  * relocated 4,000-char titles spliced ~100 KB of unbounded model text into
@@ -1891,6 +1893,16 @@ function composeReviewBody(
   // the posted body said anchoring failed). Its own paragraph: entries are a
   // list, not verdict prose. Rendered on every event — `s` counts them even
   // when `c` forces REQUEST_CHANGES.
+  // Bounded like the deferral channel — same 65,536-char body limit, same
+  // all-or-nothing post: entries are model-written with no upstream cap, so
+  // one oversized entry here would lose the round's Criticals over this
+  // disclosure paragraph. The count sentence keeps naming the total; an
+  // overflow item names what the cap cut.
+  const duplicatesShown = suggestionsDroppedAsDuplicates
+    .slice(0, MAX_DEFERRED_SUGGESTION_LINES)
+    .map((entry) => asListLine(boundDeferredLine(entry), pr));
+  const duplicatesMore =
+    suggestionsDroppedAsDuplicates.length - duplicatesShown.length;
   const duplicatesBlock: Bi[] =
     suggestionsDroppedAsDuplicates.length === 0
       ? []
@@ -1900,9 +1912,10 @@ function composeReviewBody(
               `${suggestionsDroppedAsDuplicates.length} Suggestion-level ` +
               `finding(s) this review confirmed are already reported on this PR ` +
               `and are not repeated:\n\n` +
-              suggestionsDroppedAsDuplicates
-                .map((entry) => `- ${asListLine(entry, pr)}`)
-                .join('\n'),
+              duplicatesShown.map((line) => `- ${line}`).join('\n') +
+              (duplicatesMore > 0
+                ? `\n- …and ${duplicatesMore} more (see the run report)`
+                : ''),
             zh:
               `本轮确认的 ${suggestionsDroppedAsDuplicates.length} 条建议级发现已在 PR ` +
               `上报告过，不再重复发布（列表见上方英文部分）。`,

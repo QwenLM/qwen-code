@@ -1388,6 +1388,55 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
       '- R1-1 pin gap — already reported (comment 3788857375)',
     );
   });
+
+  it('bounds one oversized entry the way the deferred channel does — the body must not die at the 65,536 limit', () => {
+    // Witness shape from the deferral channel's own incident record: one
+    // ~70,000-char entry composes a body past GitHub's 65,536-char limit,
+    // and `submit` posts all-or-nothing — the round's Criticals die with
+    // this disclosure paragraph. Entries are model-written with no upstream
+    // cap, so the bound lives where the deferred channel's already does.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          `R1-1 ${'x'.repeat(70_000)} — already reported (comment 3788857375)`,
+        ],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.body.length).toBeLessThan(65_536);
+    expect(r.body).toContain(
+      '1 Suggestion-level finding(s) this review confirmed',
+    );
+    expect(r.body).toContain('- R1-1 ');
+    expect(r.body).toContain('…');
+  });
+
+  it('caps the rendered list at the deferred line cap and keeps the count truthful with an overflow item', () => {
+    const entry = (i: number) =>
+      `R1-${i} finding — already reported (comment 378885${String(i).padStart(5, '0')})`;
+    const dropped = Array.from({ length: 25 }, (_, i) => entry(i + 1));
+    const r = composeReview(base({ suggestionsDroppedAsDuplicates: dropped }));
+    expect(r.event).toBe('COMMENT');
+    // The count sentence names ALL 25; the rendered list is the cap, and the
+    // overflow item keeps the two from disagreeing — a verdict counting 25
+    // over a silent list of 20 is the false record the cap exists to avoid.
+    expect(r.body).toContain(
+      '25 Suggestion-level finding(s) this review confirmed are already reported on this PR and are not repeated:',
+    );
+    expect(r.body).toContain(`- ${entry(1)}`);
+    expect(r.body).toContain(`- ${entry(20)}`);
+    expect(r.body).not.toContain(`- ${entry(21)}`);
+    expect(r.body).toContain('- …and 5 more (see the run report)');
+
+    // Exactly at the cap there is no overflow item — no "…and 0 more".
+    const atCap = composeReview(
+      base({ suggestionsDroppedAsDuplicates: dropped.slice(0, 20) }),
+    );
+    expect(atCap.body).toContain(
+      '20 Suggestion-level finding(s) this review confirmed',
+    );
+    expect(atCap.body).not.toContain('…and');
+  });
 });
 
 describe('composeReview — presubmit downgrades', () => {
