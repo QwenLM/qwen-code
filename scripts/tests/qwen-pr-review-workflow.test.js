@@ -2564,7 +2564,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             '#!/usr/bin/env bash',
             'echo "$@" >> "$CONTEXT_GH_CALLS"',
             'case "$*" in',
-            '  */labels*) printf \'%s\\n\' $CONTEXT_LABELS ;;',
+            "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
             '  */comments*) printf \'%s\\n\' "$CONTEXT_MARKERS" ;;',
             '  *pulls/*) printf \'%s\\n\' "$CONTEXT_HEAD_SHA" ;;',
             '  *) ;;',
@@ -2700,5 +2700,49 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(r.output).toContain('should_run=true');
     expect(r.ghCalls).not.toContain('labels');
     rmSync(r.dir, { recursive: true, force: true });
+  });
+});
+
+describe('review_requested burst coalescing (#8945)', () => {
+  // Opening a same-repo PR that touches CODEOWNERS-covered paths auto-requests
+  // every owner individually, so one PR open emits one `review_requested` run
+  // per owner (observed: five within the same second on #8830/#9142). Only
+  // the bot-requested run can reach `review-pr`; the human-requested siblings
+  // used to spend an `authorize` job (permission API + runner slot) each
+  // before no-op exiting. `authorize` and `review-config` must filter those
+  // siblings at the job level so they complete as instant all-skipped runs.
+  const doc = parse(workflow);
+
+  const botLoginMatch = doc.jobs['review-config'].steps[0].run.match(
+    /bot_login=([A-Za-z0-9-]+)/,
+  );
+  const botLogin = botLoginMatch ? botLoginMatch[1] : '';
+
+  const botRequestedClause = new RegExp(
+    [
+      String.raw`\(\s*github\.event_name != 'pull_request_target' \|\|`,
+      String.raw`\s*github\.event\.action != 'review_requested' \|\|`,
+      String.raw`\s*github\.event\.requested_reviewer\.login == '${botLogin}'\s*\)`,
+    ].join(''),
+  );
+
+  it('resolves the bot login from review-config, not a paraphrase', () => {
+    expect(botLogin).toBe('qwen-code-ci-bot');
+  });
+
+  it('filters non-bot review_requested events before authorize spends compute', () => {
+    // The same disjunction precheck-pr already applies to fork PRs; mirroring
+    // it here covers same-repo PRs, which precheck-pr deliberately skips.
+    expect(doc.jobs['authorize'].if).toMatch(botRequestedClause);
+  });
+
+  it('keeps review-config from running for non-bot review_requested events', () => {
+    // review-config exists to feed bot_login into review-pr; only the
+    // bot-requested run can get there, so every other sibling is pure waste.
+    const cond = doc.jobs['review-config'].if;
+    expect(cond).toContain("github.event.action == 'review_requested'");
+    expect(cond).toContain(
+      `github.event.requested_reviewer.login == '${botLogin}'`,
+    );
   });
 });
