@@ -2052,6 +2052,78 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should keep MAX_TOKENS quiet tool result completions fatal after retry exhaustion (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          samplingParams: { max_tokens: 1024 },
+        });
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount < 5) {
+            return streamResponse(stopResponse([]));
+          }
+          return streamResponse({
+            candidates: [
+              {
+                content: {
+                  parts: [{ thought: true, text: 'Still truncated.' }],
+                },
+                finishReason: 'MAX_TOKENS',
+              },
+            ],
+          } as GenerateContentResponse);
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-max-tokens-after-exhaustion',
+        );
+
+        await expect(
+          collectStreamWithFakeTimers(stream, 35_000),
+        ).rejects.toMatchObject({
+          type: 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS',
+        });
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should not retry tool result continuations that make another tool call', async () => {
       chat.setHistory([
         { role: 'user', parts: [{ text: 'inspect the project' }] },
@@ -2189,6 +2261,75 @@ describe('GeminiChat', async () => {
         role: 'model',
         parts: [{ text: 'Finished the analysis.' }],
       });
+    });
+
+    it('should accept quiet completions after MAX_TOKENS escalation retries exhaust (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const streams = [
+          streamResponse({
+            candidates: [
+              {
+                content: {
+                  parts: [{ thought: true, text: 'I need more tokens.' }],
+                },
+                finishReason: 'MAX_TOKENS',
+              },
+            ],
+          } as GenerateContentResponse),
+          streamResponse(stopResponse([])),
+          streamResponse(stopResponse([])),
+          streamResponse(stopResponse([])),
+          streamResponse(stopResponse([])),
+          streamResponse(stopResponse([])),
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => streams.shift()!);
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-max-tokens-quiet-continuation',
+        );
+        await collectStreamWithFakeTimers(stream, 35_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(6);
+        expect(chat.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: '(empty content)' }],
+        });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should not escalate thought-only MAX_TOKENS responses when max tokens are user-set', async () => {
