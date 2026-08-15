@@ -52,10 +52,7 @@ import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
-import {
-  computeWindowTitle,
-  writeTerminalTitle,
-} from './utils/windowTitle.js';
+import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
