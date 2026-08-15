@@ -159,20 +159,40 @@ describe('ledger marker', () => {
     }
   });
 
-  it('normalises the model on both sides — trimmed, capped, never a non-string', () => {
+  it('normalises the model on both sides — trimmed, WHOLE, never a non-string', () => {
+    // The model rides whole or not at all: a truncated id is a prefix, and a
+    // prefix can equal a DIFFERENT model's full id — the same-model gate
+    // would then scope that other model past code it never reviewed
+    // (probe-measured: a 75-char id recovered as its 64-char prefix compared
+    // equal to the prefix's owner). On WRITE an over-cap model takes the
+    // anchor pair with it; on READ an over-cap model is one the serializer
+    // would never have written, so it drops — the gate reads the absence as
+    // a mismatch — and the sha survives.
     const wide = serializeLedger({
       v: 1,
       round: 1,
       findings: [],
       sha: 'abc1234',
-      model: `  ${'m'.repeat(500)}  `,
+      model: `  ${'m'.repeat(LEDGER_MAX_MODEL + 1)}  `,
     });
-    expect(wide.length).toBeLessThan(LEDGER_MAX_MODEL + 200);
-    expect(parseLedger(wide)!.model).toHaveLength(LEDGER_MAX_MODEL);
+    expect(wide).not.toContain('"model"');
+    expect(wide).not.toContain('"sha"');
     const forged = parseLedger(
-      `<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"abc1234","model":${JSON.stringify('x'.repeat(500))}} -->`,
+      `<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"abc1234","model":${JSON.stringify('x'.repeat(LEDGER_MAX_MODEL + 1))}} -->`,
     );
-    expect(forged!.model).toHaveLength(LEDGER_MAX_MODEL);
+    expect(forged!.sha).toBe('abc1234');
+    expect(forged!.model).toBeUndefined();
+    // Exactly at the cap the identity rides whole — trimmed on both sides.
+    const full = serializeLedger({
+      v: 1,
+      round: 1,
+      findings: [],
+      sha: 'abc1234',
+      model: `  ${'m'.repeat(LEDGER_MAX_MODEL)}  `,
+    });
+    const recovered = parseLedger(full)!;
+    expect(recovered.model).toHaveLength(LEDGER_MAX_MODEL);
+    expect(recovered.model).toBe('m'.repeat(LEDGER_MAX_MODEL));
     for (const model of ['', '   ', 42, null]) {
       const raw = `<!-- qwen-review-ledger {"v":1,"round":1,"findings":[],"sha":"abc1234","model":${JSON.stringify(model)}} -->`;
       expect(parseLedger(raw)!.model).toBeUndefined();

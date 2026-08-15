@@ -194,7 +194,15 @@ function incrementalInteractionPaths(plan: RosterPlan): Set<string> {
   // A malformed `deltaFiles` disables the delta-wins subtraction below, so
   // it must disable the narrowing entirely: with no trustworthy delta list
   // there is no way to tell a seam-only file from a live one.
-  if (!Array.isArray(raw.deltaFiles)) return out;
+  if (
+    !Array.isArray(raw.deltaFiles) ||
+    raw.deltaFiles.some((p) => typeof p !== 'string')
+  ) {
+    // An array of junk passes `Array.isArray` but leaves the delta-wins
+    // subtraction unable to name what it must subtract — the same reason a
+    // missing list disables the narrowing.
+    return out;
+  }
   for (const e of raw.interaction) {
     const path = (e as { path?: unknown } | null)?.path;
     const edges = (e as { importsChanged?: unknown } | null)?.importsChanged;

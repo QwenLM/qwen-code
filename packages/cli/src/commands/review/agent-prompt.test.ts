@@ -4719,6 +4719,31 @@ describe('incremental-scope briefs', () => {
     expect(p).toContain('deliberately absent');
   });
 
+  it('a chunk-scoped ROLE brief lists its OWN files uncapped', () => {
+    // The reverse auditors are the sole reviewers of their territory; the
+    // globally capped list can elide their own files past entry 30, leaving
+    // no way to learn the class or recover the tail.
+    const wide = {
+      ...INCREMENTAL_PLAN,
+      incremental: {
+        anchor: 'abc1234def567890',
+        deltaFiles: Array.from({ length: 40 }, (_, i) => `src/d${i}.ts`).concat(
+          ['src/changed.ts'],
+        ),
+        interaction: [
+          { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
+        ],
+      },
+    };
+    const brief = buildRoleBrief(wide, 'reverse-audit', { chunk: 2 });
+    expect(brief).toContain("Your territory's files, by scope class:");
+    expect(brief).toContain('src/caller.ts — **interaction only**');
+    // Chunk 1's delta file is named in ITS brief, not elided by the cap.
+    expect(buildRoleBrief(wide, 'reverse-audit', { chunk: 1 })).toContain(
+      'src/changed.ts — **changed since the last round**',
+    );
+  });
+
   it('a full-range plan renders no incremental framing at all', () => {
     expect(buildChunkAgentPrompt(PLAN, 13)).not.toContain('INCREMENTAL');
     expect(buildRoleBrief(PLAN, '2')).not.toContain('Incremental round');

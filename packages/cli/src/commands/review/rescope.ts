@@ -93,7 +93,18 @@ function fail(code: number, message: string): void {
 function runRescope(args: RescopeArgs): void {
   let plan: FetchedPlan;
   try {
-    plan = JSON.parse(readFileSync(args.plan, 'utf8')) as FetchedPlan;
+    const parsed: unknown = JSON.parse(readFileSync(args.plan, 'utf8'));
+    // `JSON.parse('null')` succeeds; dereferencing it does not. A truncated
+    // or clobbered plan must land on the refusal, not on a TypeError with an
+    // exit code the skill has no branch for.
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error('the plan is not a JSON object');
+    }
+    plan = parsed as FetchedPlan;
   } catch (err) {
     fail(
       RESCOPE_EXIT_FULL_RANGE,
@@ -334,6 +345,13 @@ function runRescope(args: RescopeArgs): void {
       gitOpt('-C', worktreePath, 'rev-parse', `${ref}:${p}`);
     const b = at(mergeBaseSha);
     const h = at(fetchedSha);
+    // Absent on BOTH sides is deliberately NOT droppable. Two shapes produce
+    // it and this layer cannot tell them apart: a file the PR added and this
+    // round deleted (net-zero — safe to drop), and a file renamed before the
+    // anchor and deleted now, whose unreviewed deletion hunks sit in the PR
+    // diff under its pre-rename name (dropping it loses them). Refusing
+    // costs a full review on the first shape; dropping loses scope on the
+    // second, so the refusal wins.
     return b !== null && h !== null && b === h;
   };
   const lineageLost = unmatched.filter((p) => !restored(p));
@@ -403,7 +421,11 @@ function runRescope(args: RescopeArgs): void {
     ...(plan as Record<string, unknown>),
     diffPath: diffRel,
     diffPathAbsolute: resolve(diffRel),
-    ...buildPlanReport(diffPlan, (path) => fileLineCount(fetchedSha, path)),
+    // `-C`-pinned like every other git call here: an unpinned `git show`
+    // resolves `<ref>:<path>` against the process cwd's repository.
+    ...buildPlanReport(diffPlan, (path) =>
+      fileLineCount(fetchedSha, path, worktreePath),
+    ),
     incremental,
   };
 
