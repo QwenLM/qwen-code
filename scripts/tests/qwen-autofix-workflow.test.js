@@ -8251,14 +8251,17 @@ exit 1
         .filter((l) => !l.trimStart().startsWith('#'))
         .join('\n');
       expect(code).not.toMatch(/BASH_FUNC/);
-      expect(code).not.toMatch(/\bunset -f\b/);
-      expect(code).not.toMatch(/\bhash -r\b/);
+      // No trailing \b on a flag: it sits between `-f` and a space (both
+      // non-word), so it fails on the standard spellings — `unset -fv name`
+      // and `trap - ERR EXIT` slipped straight through.
+      expect(code).not.toMatch(/\bunset -f/);
+      expect(code).not.toMatch(/\bhash -r/);
       // The other enumeration families a sweep gets rewritten into: alias
       // clearing, trap resets, and per-name proxy/loader unsets. Isolation is
       // the clean child's job, not a list maintained in the tainted shell.
       expect(code).not.toMatch(/\bunalias\b/);
       expect(code).not.toMatch(/expand_aliases/);
-      expect(code).not.toMatch(/\btrap -\b/);
+      expect(code).not.toMatch(/\btrap -/);
       expect(code).not.toMatch(
         /\bunset [A-Z_ ]*\b(?:HTTPS?_PROXY|SSL_CERT_[A-Z]+|BASH_ENV)\b/,
       );
