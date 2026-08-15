@@ -4187,15 +4187,13 @@ export class Session implements SessionContext {
                   shouldRecordSlashCommand,
                 );
               } catch (error) {
-                if (slashCommandName === 'advisor') {
-                  logConversationFinishedEvent(
-                    this.config,
-                    new ConversationFinishedEvent(
-                      this.config.getApprovalMode(),
-                      0,
-                    ),
-                  );
-                }
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
                 throw error;
               }
 

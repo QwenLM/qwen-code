@@ -138,15 +138,15 @@ function normalizeOpenAIStrictSchema(
       return undefined;
     }
 
-    normalized.properties = normalizedProperties;
-    normalized.required = required;
-    normalized.additionalProperties = false;
+    normalized['properties'] = normalizedProperties;
+    normalized['required'] = required;
+    normalized['additionalProperties'] = false;
   }
 
   if (type === 'array') {
     const items = normalizeOpenAIStrictSchema(source['items']);
     if (!items) return undefined;
-    normalized.items = items;
+    normalized['items'] = items;
   }
 
   return normalized;
