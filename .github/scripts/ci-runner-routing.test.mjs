@@ -194,14 +194,32 @@ describe('serve-ab.yml runner routing', () => {
     );
     assert.ok(wipe, 'self-hosted reuse must not bleed one PR into the next');
     assert.equal(wipe.if, "${{ runner.environment == 'self-hosted' }}");
-    assert.match(
-      wipe.run,
-      /rm -rf "\$\{GITHUB_WORKSPACE:\?\}\/head" "\$\{GITHUB_WORKSPACE:\?\}\/base"/,
+    // Derive the wipe targets from the checkout steps so this pin cannot
+    // drift from the paths the checkouts actually use.
+    const checkoutPaths = serveAbDoc.jobs.ab.steps
+      .filter(
+        (s) =>
+          String(s.uses || '').startsWith('actions/checkout') &&
+          s.with &&
+          s.with.path,
+      )
+      .map((s) => s.with.path);
+    assert.ok(
+      checkoutPaths.length >= 2,
+      'expected at least two checkout paths',
     );
     // A whole-workspace wipe also destroys the shared root .git, forcing the
     // next job on this runner to re-fetch the full history from github.com —
     // on the ECS pool's slow link that is the "hung runner" pathology. Pin
-    // the narrow scope so it cannot regress.
-    assert.doesNotMatch(wipe.run, /-mindepth 1 -maxdepth 1 -exec rm -rf/);
+    // exactly one executed (non-comment) rm line covering exactly the
+    // checkout dirs so the narrow scope cannot regress.
+    const expectedRm =
+      'rm -rf ' +
+      checkoutPaths.map((p) => '"${GITHUB_WORKSPACE:?}/' + p + '"').join(' ');
+    const rmLines = wipe.run
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('#') && /\brm\b/.test(l));
+    assert.deepEqual(rmLines, [expectedRm]);
   });
 });
