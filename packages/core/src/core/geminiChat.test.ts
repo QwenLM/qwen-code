@@ -9614,9 +9614,14 @@ describe('GeminiChat', async () => {
           const collecting = (async () => {
             for await (const event of stream) events.push(event);
           })();
+          // Attach the rejection handler BEFORE advancing timers: the send
+          // loop rejects mid-advance, and a still-handlerless rejection at
+          // a timer checkpoint trips vitest's unhandled-error gate under
+          // parallel CI load even though the assertion below would pass.
+          const rejection = expect(collecting).rejects.toBeTruthy();
           await vi.advanceTimersByTimeAsync(0);
           await vi.advanceTimersByTimeAsync(60_000);
-          await expect(collecting).rejects.toBeTruthy();
+          await rejection;
 
           // No fresh attempt after the functionCall was delivered.
           expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
