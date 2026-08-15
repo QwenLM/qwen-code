@@ -754,6 +754,32 @@ describe('resolveAnchor — the substring fallback (KB-long lines)', () => {
     expect(r.reason).not.toContain('does not appear in any hunk');
   });
 
+  it('refuses the marker retry when a policy-dropped equal line coexists with a containment line', () => {
+    // The diff adds a line that EQUALS the marker-stripped fragment modulo
+    // whitespace and an unrelated line that merely CONTAINS it. Before the
+    // refusal, the retry dropped the equal line as a lineGuess and resolved
+    // the fragment to the containment line at `matchCount: 1, ambiguous:
+    // false` — a confidently posted misplacement where the old contract was a
+    // loud unmatched. The equal-line reading stays alive, so refuse.
+    const stacked = [
+      'diff --git a/x.ts b/x.ts',
+      '--- a/x.ts',
+      '+++ b/x.ts',
+      '@@ -1,0 +1,2 @@',
+      '+ const x = 1;',
+      '+review const x = 1; here',
+      '',
+    ].join('\n');
+    const hayX = lines(stacked, 'x.ts');
+    const blind = resolveAnchor(hayX, '+const x = 1;');
+    expect(blind.status).toBe('unmatched');
+    expect(blind.reason).toContain('verbatim');
+    // A claim on the equal line does not rescue the containment reading.
+    const claimed = resolveAnchor(hayX, '+const x = 1;', 1);
+    expect(claimed.status).toBe('unmatched');
+    expect(claimed.reason).toContain('verbatim');
+  });
+
   it('does not prescribe a longer stretch of a whole line the marker retry guessed at', () => {
     // `+return x;` for actual ` return x;` — the stacked marker+indentation
     // guess under 12 characters. The containment check used to report the

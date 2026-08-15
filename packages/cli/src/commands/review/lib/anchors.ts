@@ -395,6 +395,13 @@ function substringResolution(
           'indentation',
       }
     : null;
+  // A containing line equal to the fragment modulo whitespace keeps the
+  // equal-line reading alive — the agent may have meant THAT line and dropped
+  // its indentation. Resolving to a different containment line while it is a
+  // candidate would choose between the two readings with nothing to choose:
+  // the confident misplacement this tier exists to refuse. The refusal
+  // outranks any remaining containment candidate.
+  if (indentationRefusal) return indentationRefusal;
 
   // The floor measures what the collapsed matching pass actually runs on: a
   // padded quote is longer than its collapsed core, and the core is what

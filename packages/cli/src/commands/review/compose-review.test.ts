@@ -1569,10 +1569,10 @@ describe('composeReview — input validation (the producer is a model that omits
   });
 
   it('accepts the array form of suggestionsDiscarded, counting it by length', () => {
-    // The Step 7 prose reads the field as the LIST of discarded items, and a
-    // run that wrote the list itself used to die at this gate late, after
-    // hours of analysis. `[]` is zero; a populated list is its length — the
-    // same claim as the number, spelled the way the prose invites.
+    // The Step 7 prose prescribes a count, but runs following older skill
+    // revisions wrote the LIST of discarded items and used to die at this gate
+    // late, after hours of analysis. `[]` is zero; a populated list is its
+    // length — the same claim as the number, spelled the older way.
     expect(composeReview(base({ suggestionsDiscarded: [] })).event).toBe(
       'APPROVE',
     );
