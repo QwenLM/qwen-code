@@ -215,6 +215,10 @@ describe('eslint cli serve boundary rules', () => {
       acp,
       "export async function load() { return vi.importActual('../../serve/live/live-task-service.js'); }",
     );
+    await expectServeBoundaryError(
+      acp,
+      "vitest.mock('../../serve/live/live-task-service.js');",
+    );
 
     // A non-serve vi.mock stays silent on the boundary.
     const [result] = await lintCliFile(acp, "vi.mock('../utils/foo.js');");

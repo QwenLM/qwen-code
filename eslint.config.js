@@ -75,7 +75,7 @@ const SERVE_BOUNDARY_PERCENT_MESSAGE =
 // the real module — same boundary, CallExpression shape (round-6
 // suggestion: vi.mock/doMock/importActual/importMock).
 const vitestModuleLoadingCallSelector =
-  'CallExpression[callee.object.name="vi"][callee.property.name=/^(?:mock|doMock|importActual|importMock)$/]';
+  'CallExpression[callee.object.name=/^(?:vi|vitest)$/][callee.property.name=/^(?:mock|doMock|importActual|importMock)$/]';
 
 const restrictedServeDynamicImports = (message) => [
   ...serveDynamicImportPatterns.flatMap((pattern) => [
