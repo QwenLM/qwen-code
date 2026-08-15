@@ -77,6 +77,42 @@ describe('Local Control routes', () => {
     expect(enable).toHaveBeenCalledOnce();
   });
 
+  it('rejects runtime enable when the primary bind is not loopback', async () => {
+    // The `--local-control` CLI flag refuses non-loopback binds for this
+    // reason; the runtime enable route must enforce the same precondition
+    // instead of 500ing with EADDRINUSE from the LAN listen.
+    const app = express();
+    const enable = vi.fn();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: { enable } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+      primaryBindHostname: '0.0.0.0',
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('local_control_non_loopback_bind');
+    expect(enable).not.toHaveBeenCalled();
+  });
+
+  it('allows runtime enable on a loopback primary bind', async () => {
+    const app = express();
+    const enable = vi.fn(async () => ({ active: true }));
+    registerWorkspaceLocalControlRoutes(app, {
+      service: { enable } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+      primaryBindHostname: '127.0.0.1',
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(200);
+    expect(enable).toHaveBeenCalledOnce();
+  });
+
   it('rejects enable when the Web Shell is unavailable', async () => {
     const app = express();
     const enable = vi.fn();

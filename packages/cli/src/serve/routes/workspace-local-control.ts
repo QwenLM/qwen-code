@@ -12,6 +12,7 @@ import {
   UnknownLanInterfaceError,
 } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
+import { isLoopbackBind } from '../loopback-binds.js';
 import {
   InvalidLocalControlTargetError,
   type LocalControlService,
@@ -25,6 +26,8 @@ export interface RegisterWorkspaceLocalControlRoutesDeps {
   safeBody: (req: Request) => Record<string, unknown>;
   isDaemonDraining?: () => boolean;
   webShellAvailable?: boolean;
+  /** The daemon's primary bind hostname (runtime enable precondition). */
+  primaryBindHostname?: string;
 }
 
 async function withUiData(status: LocalControlStatus) {
@@ -92,6 +95,22 @@ export function registerWorkspaceLocalControlRoutes(
         res.status(409).json({
           error: 'Local Control requires the Web Shell.',
           code: 'local_control_web_shell_unavailable',
+        });
+        return;
+      }
+      // Same precondition the `--local-control` CLI flag enforces: the LAN
+      // listener binds the primary listener's port on the selected LAN
+      // address, which a wildcard or LAN primary bind already owns —
+      // enabling there would fail with EADDRINUSE and no remediation.
+      if (
+        deps.primaryBindHostname !== undefined &&
+        !isLoopbackBind(deps.primaryBindHostname)
+      ) {
+        res.status(409).json({
+          error:
+            'Local Control requires the daemon to be bound to loopback; ' +
+            'restart it with --hostname 127.0.0.1.',
+          code: 'local_control_non_loopback_bind',
         });
         return;
       }

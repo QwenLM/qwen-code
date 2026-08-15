@@ -2807,6 +2807,7 @@ export function createServeApp(
     safeBody,
     isDaemonDraining: deps.isChannelControlDraining,
     webShellAvailable: Boolean(webShellDir),
+    primaryBindHostname: opts.hostname,
   });
 
   // Web Shell SPA deep-link fallback — registered AFTER every API route (and
