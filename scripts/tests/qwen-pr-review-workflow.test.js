@@ -31,6 +31,13 @@ const workflowFiles = readdirSync(workflowsDir).filter((f) =>
   /\.ya?ml$/.test(f),
 );
 
+// Single shared recipe for the review-config bot login; every suite that pins
+// it reads this constant so the extraction cannot drift between call sites.
+const botLogin =
+  parse(workflow)
+    .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
+    ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
+
 function runReviewStep() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find((s) => s.name === 'Run review');
@@ -2552,11 +2559,6 @@ describe('qwen pr review concurrency routing', () => {
     // The group expression cannot read review-config's bot_login output, so
     // it carries the literal; pin it against the constant it mirrors so a
     // rename of the bot cannot desync all three sites.
-    const botLogin = parse(workflow)
-      .jobs['review-config'].steps.find(
-        (s) => s.name === 'Set review constants',
-      )
-      .run.match(/bot_login=([a-zA-Z0-9-]+)/)[1];
     expect(group).toContain(
       `github.event.requested_reviewer.login == '${botLogin}'`,
     );
@@ -2575,11 +2577,6 @@ describe('review_requested burst coalescing (#8945)', () => {
   // before no-op exiting. `authorize` and `review-config` must filter those
   // siblings at the job level so they complete as instant all-skipped runs.
   const doc = parse(workflow);
-
-  const botLoginMatch = doc.jobs['review-config'].steps[0].run.match(
-    /bot_login=([A-Za-z0-9-]+)/,
-  );
-  const botLogin = botLoginMatch ? botLoginMatch[1] : '';
 
   const botRequestedClause = new RegExp(
     [
