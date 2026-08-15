@@ -19,6 +19,7 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
   type Ledger,
+  type LedgerFinding,
 } from './ledger.js';
 
 const LEDGER: Ledger = {
@@ -246,6 +247,67 @@ describe('ledger marker', () => {
     expect(overCount.findings).toHaveLength(LEDGER_MAX_FINDINGS);
     expect(overCount.dropped).toBe(1);
     expect(overCount.sha).toBeUndefined();
+  });
+
+  it('over the cap, sheds the anchor pair BEFORE the work list', () => {
+    // The model field rides every clean marker, so a round that used to
+    // fit the cap overflows once it joins — and the loop's first casualty
+    // used to be a finding, with `dropped` then withholding the pair in
+    // the same render: the next round lost a ruling AND the anchor. The
+    // pair now sheds first and the whole work list survives; recovery
+    // degrades to the full diff, which the findings ride out.
+    const sha = 'deadbeef'.repeat(5);
+    const model = 'qwen3.7-max';
+    const wide = (i: number): LedgerFinding => ({
+      id: `R2-${i}`,
+      sev: 'S',
+      file: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
+      line: 99999,
+      title: 'x'.repeat(LEDGER_MAX_TITLE),
+    });
+    const small = (i: number): LedgerFinding => ({
+      id: `R2-${i}`,
+      sev: 'S',
+      file: 'a.ts',
+      line: i,
+      title: '',
+    });
+    const anchoredOf = (findings: LedgerFinding[]): string =>
+      serializeLedger({ v: 1, round: 2, findings, sha, model });
+    const anchorlessOf = (findings: LedgerFinding[]): string =>
+      serializeLedger({ v: 1, round: 2, findings });
+    const pairBytes = anchoredOf([]).length - anchorlessOf([]).length;
+    // Fill the ANCHORLESS form toward the cap: an over-cap render
+    // self-sheds, so a true fit is recognized by its signature — the
+    // marker growing by the added finding's width — which a shed render
+    // never shows (it reports `dropped` and shrinks instead).
+    const findings: LedgerFinding[] = [];
+    const fits = (candidate: LedgerFinding): boolean => {
+      const growth =
+        anchorlessOf([...findings, candidate]).length -
+        anchorlessOf(findings).length;
+      return growth >= 50;
+    };
+    for (;;) {
+      const i = findings.length;
+      if (i > LEDGER_MAX_FINDINGS) break;
+      if (fits(wide(i))) findings.push(wide(i));
+      else if (fits(small(i))) findings.push(small(i));
+      else break;
+    }
+    // The filled list sits at the boundary this ordering exists for: the
+    // anchorless form fits the cap, and the anchor pair's bytes beside it
+    // do not. Both halves measured from the below-cap anchorless render,
+    // which never self-sheds.
+    const anchorless = anchorlessOf(findings).length;
+    expect(anchorless).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(anchorless + pairBytes).toBeGreaterThan(LEDGER_MAX_BYTES);
+
+    const back = parseLedger(anchoredOf(findings))!;
+    expect(back.findings).toHaveLength(findings.length);
+    expect(back.dropped).toBeUndefined();
+    expect(back.sha).toBeUndefined();
+    expect(back.model).toBeUndefined();
   });
 
   it('drops a malformed sha but keeps the ledger — field-level fail-quiet', () => {

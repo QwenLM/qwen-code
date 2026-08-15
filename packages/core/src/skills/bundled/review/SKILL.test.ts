@@ -81,6 +81,19 @@ describe('bundled review skill', () => {
     expect(body).toContain('`agent-prompt --roster` after the rules load');
   });
 
+  it('pins the same-model gate on both incremental-anchor paths', () => {
+    // The gate is prompt-level: the cache path refuses another model's
+    // `<lastCommitSha>..HEAD` range, and the recovered-anchor path refuses
+    // another model's marker (absence counts as mismatch). The unit suites
+    // pin the gate's INPUTS — identity carriage, rendered instruction —
+    // but not these clauses themselves; measured on this PR, reverting both
+    // hunks left every suite green. A revert or paraphrase must fail here.
+    const body = skillBody();
+    expect(body).toContain('If SHAs differ **but** model differs');
+    expect(body).toContain("require the side file's `model` to equal");
+    expect(body).toContain('recovers the findings work list but NO anchor');
+  });
+
   it('launches the 3B convergence pair in the same response', () => {
     // The pair's wall-clock saving exists only while both rounds go out
     // together: a later edit serializing the skill while the prompt-builder

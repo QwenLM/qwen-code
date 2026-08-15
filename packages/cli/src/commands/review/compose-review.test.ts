@@ -4479,6 +4479,38 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(ledger.model).toBeUndefined();
   });
 
+  it('attribution off WITH a runtime identity: the session model stays withheld', () => {
+    // The runtime channel is the primary identity path — every session
+    // publishes QWEN_CODE_MODEL — so the attribution gate must reach it,
+    // not just the typed fallback the sibling cases pin: a gate reading
+    // `(attribution || runtime !== '') && certifying !== ''` would leak the
+    // session model into every ordinary attribution-off post, and measured,
+    // it ships CI-green — both earlier attribution-off tests omit
+    // runtimeModelId.
+    const r = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      false,
+      'the-session-model',
+    );
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.sha).toBe('deadbeef00112233');
+    expect(ledger.model).toBeUndefined();
+    expect(r.body).not.toContain('the-session-model');
+  });
+
   it('the anchor carries the RUNTIME identity — injected at the CLI boundary, never typed by the model', () => {
     // The certifying model used to be `input.modelId` — a field of the
     // model-written state JSON. A review running under one model could type

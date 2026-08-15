@@ -1366,7 +1366,11 @@ describe('the ledger marker on the body that reaches GitHub', () => {
       launch: string,
       reads: string[],
     ) => {
-      writeFileSync(join(d, `${key}.txt`), launch);
+      // Match production (`prompt-record.ts`): the record filename is the
+      // percent-encoded key — a no-op for today's role keys, but a future
+      // one `encodeURIComponent` transforms would otherwise be written to a
+      // name the reader never looks for.
+      writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), launch);
       const brief = briefPath(planPath, key);
       writeFileSync(brief, `The ${key} brief.`);
       transcript(id, launch, [...reads, brief]);
