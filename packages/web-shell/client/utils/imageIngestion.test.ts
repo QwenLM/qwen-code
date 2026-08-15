@@ -294,6 +294,12 @@ describe('attachment naming', () => {
     expect(sanitizeAttachmentName('   ')).toBe('attachment');
   });
 
+  it('strips invisible bidi and zero-width format characters', () => {
+    expect(sanitizeAttachmentName('app\u202e.log')).toBe('app.log');
+    expect(sanitizeAttachmentName('sec\u200bret.log')).toBe('secret.log');
+    expect(sanitizeAttachmentName('a\u2066b\u2069.log')).toBe('ab.log');
+  });
+
   it('dedupes against taken names with a numeric suffix', () => {
     const taken = new Set(['app.log', 'app.log-2']);
     expect(dedupeAttachmentName('app.log', taken)).toBe('app.log-3');

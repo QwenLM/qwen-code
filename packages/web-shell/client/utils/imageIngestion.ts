@@ -170,8 +170,10 @@ export function normalizeTextMediaType(
 // resource URI, and `@`-token scanning stops at these characters — keep the
 // name identical across chip, URI, and token by normalizing once here.
 const ATTACHMENT_NAME_UNSAFE_RE = /[\s,;!?()[\]{}]+/g;
-// eslint-disable-next-line no-control-regex -- intentionally strips control chars from dropped file names
-const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/g;
+/* eslint-disable no-control-regex -- intentionally strips C0/DEL controls and invisible bidi/zero-width format chars from dropped file names */
+const CONTROL_CHAR_RE =
+  /[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 export function sanitizeAttachmentName(name: string): string {
   const cleaned = name

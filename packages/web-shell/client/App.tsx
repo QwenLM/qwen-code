@@ -551,6 +551,7 @@ type CancelledRetryState =
       identity: TranscriptTurnErrorIdentity;
       text: string;
       images?: PromptImage[];
+      files?: PromptFile[];
       inputAnnotations?: DaemonInputAnnotation[];
       previousRetriedTurnErrorId: string | null;
       previousShowRetryHint: boolean;
@@ -4131,6 +4132,7 @@ export function App({
     errorId: string;
     text: string;
     images?: PromptImage[];
+    files?: PromptFile[];
     inputAnnotations?: DaemonInputAnnotation[];
     owner: CancelledRetryOwner;
   } | null>(null);
@@ -4170,6 +4172,7 @@ export function App({
       }
       lastSubmittedPromptRef.current = failedRetry.text;
       lastSubmittedImagesRef.current = failedRetry.images;
+      lastSubmittedFilesRef.current = failedRetry.files;
       lastSubmittedInputAnnotationsRef.current = failedRetry.inputAnnotations;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = retryableTurnError.id;
@@ -4245,6 +4248,7 @@ export function App({
     };
     lastSubmittedPromptRef.current = '';
     lastSubmittedImagesRef.current = undefined;
+    lastSubmittedFilesRef.current = undefined;
     lastSubmittedInputAnnotationsRef.current = undefined;
     lastSubmittedSourceVersionRef.current = -1;
     retryableTurnErrorIdRef.current = null;
@@ -4282,6 +4286,10 @@ export function App({
             failed.inputAnnotations?.length
               ? { inputAnnotations: failed.inputAnnotations }
               : undefined,
+            failed.files?.map((file) => ({
+              name: file.name,
+              mimeType: file.media_type,
+            })),
           );
           const rehydratedMessage = getLatestUserBlock(
             store.getSnapshot().blocks,
@@ -4334,6 +4342,7 @@ export function App({
       }
       lastSubmittedPromptRef.current = state.text;
       lastSubmittedImagesRef.current = state.images;
+      lastSubmittedFilesRef.current = state.files;
       lastSubmittedInputAnnotationsRef.current = state.inputAnnotations;
       lastSubmittedSourceVersionRef.current = composerSourceVersionRef.current;
       retryableTurnErrorIdRef.current = renderedTurnError.id;
@@ -9872,6 +9881,7 @@ export function App({
       ) {
         lastSubmittedPromptRef.current = '';
         lastSubmittedImagesRef.current = undefined;
+        lastSubmittedFilesRef.current = undefined;
         lastSubmittedInputAnnotationsRef.current = undefined;
         lastSubmittedSourceVersionRef.current = -1;
         retryableTurnErrorIdRef.current = null;
@@ -9943,6 +9953,7 @@ export function App({
             identity: retryErrorIdentity,
             text: retryText,
             images: retryImages,
+            files: retryFiles,
             inputAnnotations: retryInputAnnotations,
             previousRetriedTurnErrorId,
             previousShowRetryHint,
@@ -9978,6 +9989,7 @@ export function App({
               identity: retryErrorIdentity,
               text: retryText,
               images: retryImages,
+              files: retryFiles,
               inputAnnotations: retryInputAnnotations,
               previousRetriedTurnErrorId,
               previousShowRetryHint,
@@ -9993,6 +10005,7 @@ export function App({
                 errorId: retryErrorId,
                 text: retryText,
                 images: retryImages,
+                files: retryFiles,
                 inputAnnotations: retryInputAnnotations,
                 owner: retryOwner,
               };

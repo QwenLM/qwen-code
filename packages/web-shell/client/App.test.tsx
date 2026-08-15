@@ -54,6 +54,7 @@ type ChatEditorTestProps = {
   onSubmit: (
     text: string,
     images?: { data: string; media_type: string }[],
+    files?: { name: string; media_type: string; text: string }[],
     commitAccepted?: () => void,
     metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
@@ -11877,6 +11878,121 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('carries file attachments through a cancelled turn-error retry restoration', async () => {
+    let approveRetry: (() => void) | undefined;
+    let admissionCount = 0;
+    const onSubmitBefore = vi.fn(() => {
+      admissionCount += 1;
+      if (admissionCount === 1) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        approveRetry = resolve;
+      });
+    });
+    const files = [
+      { name: 'app.log', media_type: 'text/plain', text: 'SECRET=1' },
+    ];
+    const { container, rerender } = renderApp({ onSubmitBefore });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'first',
+        undefined,
+        files,
+        undefined,
+      );
+      await Promise.resolve();
+    });
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-first',
+        },
+      ];
+      rerender({ onSubmitBefore });
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    mockSessionActions.sendPrompt.mockClear();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    act(() => {
+      mockConnection.loadingTranscript = true;
+      rerender({ onSubmitBefore });
+    });
+
+    const allowBPrompt = vi.fn().mockResolvedValue(undefined);
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.blocks = [];
+      testState.ownerVersion += 1;
+      mockConnection.loadingTranscript = false;
+      rerender({ onSubmitBefore: allowBPrompt });
+    });
+    const otherFiles = [
+      { name: 'b.log', media_type: 'text/plain', text: 'OTHER=1' },
+    ];
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'second',
+        undefined,
+        otherFiles,
+        undefined,
+      );
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'second',
+      expect.objectContaining({ files: otherFiles }),
+    );
+    await act(async () => {
+      approveRetry?.();
+      await Promise.resolve();
+    });
+
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      mockConnection.workspaceCwd = '/tmp/project';
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-first',
+        },
+      ];
+      testState.ownerVersion += 1;
+      rerender({ onSubmitBefore });
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+    mockSessionActions.sendPrompt.mockClear();
+    const allowRetry = vi.fn().mockResolvedValue(undefined);
+    rerender({ onSubmitBefore: allowRetry });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'first',
+      expect.objectContaining({
+        files: [expect.objectContaining({ name: 'app.log' })],
+        optimisticUserMessage: false,
+        retry: true,
+      }),
+    );
+  });
+
   it('defers retry restoration until navigation commits', async () => {
     const retryApproval = deferred<void>();
     let admissionCount = 0;
@@ -17994,6 +18110,7 @@ describe('App prompt send failure retry', () => {
         'hello',
         undefined,
         undefined,
+        undefined,
       );
     });
     act(() => {
@@ -18432,6 +18549,7 @@ describe('App prompt send failure retry', () => {
       'hello',
       undefined,
       undefined,
+      undefined,
     );
     expect(
       container.querySelector('[data-testid="failed-prompt-retry"]')
@@ -18552,6 +18670,7 @@ describe('App prompt send failure retry', () => {
     });
     expect(mockStore.appendLocalUserMessage).toHaveBeenCalledWith(
       'hello',
+      undefined,
       undefined,
       undefined,
     );

@@ -248,7 +248,7 @@ export const UserMessage = memo(function UserMessage({
                     className={styles.chatFileChip}
                   >
                     <FileTextIcon size={13} aria-hidden="true" />
-                    {file.name}
+                    <span className={styles.chatFileName}>{file.name}</span>
                   </span>
                 ))}
               </div>

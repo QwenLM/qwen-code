@@ -2721,6 +2721,7 @@ export const ChatEditor = memo(
                             if (disabled) return;
                             core.removeFile(i);
                           }}
+                          aria-label={`Remove ${file.name}`}
                         >
                           ×
                         </button>
