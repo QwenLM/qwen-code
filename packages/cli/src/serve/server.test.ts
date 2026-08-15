@@ -11912,6 +11912,26 @@ describe('createServeApp', () => {
           },
         },
       } satisfies BridgeEvent;
+      // The in-flight journal can hold a fresher snapshot than the compacted
+      // turns (mid-turn load); it must be redacted too.
+      const journalCommandsEvent = {
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'persisted-replay',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'help', description: 'Help' }],
+            _meta: {
+              availableSkills: ['bugfix'],
+              availableSkillDetails: [
+                { name: 'bugfix', body: 'y'.repeat(600_000) },
+              ],
+            },
+          },
+        },
+      } satisfies BridgeEvent;
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
           sessionId: req.sessionId,
@@ -11920,7 +11940,7 @@ describe('createServeApp', () => {
           clientId: 'client-load',
           state: {},
           compactedReplay: [commandsEvent],
-          liveJournal: [textEvent],
+          liveJournal: [journalCommandsEvent, textEvent],
         }),
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -11941,8 +11961,20 @@ describe('createServeApp', () => {
       const meta = update['_meta'] as Record<string, unknown>;
       expect(meta['availableSkills']).toEqual(['bugfix']);
       expect(meta).not.toHaveProperty('availableSkillDetails');
-      expect(res.body.liveJournal).toEqual([textEvent]);
+      const journal = res.body.liveJournal as Array<{
+        data: { update: Record<string, unknown> };
+      }>;
+      const journalUpdate = journal[0]!.data.update;
+      expect(journalUpdate['sessionUpdate']).toBe('available_commands_update');
+      expect(journalUpdate['availableCommands']).toEqual([
+        { name: 'help', description: 'Help' },
+      ]);
+      const journalMeta = journalUpdate['_meta'] as Record<string, unknown>;
+      expect(journalMeta['availableSkills']).toEqual(['bugfix']);
+      expect(journalMeta).not.toHaveProperty('availableSkillDetails');
+      expect(journal[1]).toEqual(textEvent);
       expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+      expect(JSON.stringify(res.body)).not.toContain('y'.repeat(64));
       // Bus events are shared with other subscribers (e.g. the /acp pump);
       // the redaction must reshape immutably, never mutate the source.
       expect(
@@ -17441,6 +17473,132 @@ describe('createServeApp', () => {
         removeSpy.mockRestore();
         await fsp.rm(runtimeDir, { recursive: true, force: true });
       }
+    });
+
+    it('redacts skill bodies from the branch response replay arrays (#9234)', async () => {
+      const commandsEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'branched-session',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'help', description: 'Help' }],
+            _meta: {
+              availableSkills: ['bugfix'],
+              availableSkillDetails: [
+                { name: 'bugfix', body: 'x'.repeat(600_000) },
+              ],
+            },
+          },
+        },
+      } satisfies BridgeEvent;
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async (sessionId) => ({
+        sessionId: 'branched-session',
+        workspaceCwd: WS_BOUND,
+        attached: false,
+        clientId: 'client-branch',
+        state: {},
+        displayName: 'Branched',
+        forkedFrom: { sessionId, displayName: 'Source' },
+        compactedReplay: [commandsEvent],
+      }));
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'branch-redaction',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+        generationGuard: createWorkspaceGenerationGuard(),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
+
+      const res = await request(app)
+        .post('/session/source-session/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(201);
+      const replay = res.body.compactedReplay as Array<{
+        data: { update: Record<string, unknown> };
+      }>;
+      const update = replay[0]!.data.update;
+      expect(update['sessionUpdate']).toBe('available_commands_update');
+      expect(update['availableCommands']).toEqual([
+        { name: 'help', description: 'Help' },
+      ]);
+      const meta = update['_meta'] as Record<string, unknown>;
+      expect(meta['availableSkills']).toEqual(['bugfix']);
+      expect(meta).not.toHaveProperty('availableSkillDetails');
+      expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+    });
+  });
+
+  describe('POST /session/:id/side-task (skill-detail redaction, #9234)', () => {
+    it('redacts skill bodies from the side-task response replay arrays', async () => {
+      const commandsEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'side-task-session',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'help', description: 'Help' }],
+            _meta: {
+              availableSkills: ['bugfix'],
+              availableSkillDetails: [
+                { name: 'bugfix', body: 'x'.repeat(600_000) },
+              ],
+            },
+          },
+        },
+      } satisfies BridgeEvent;
+      const bridge = fakeBridge();
+      bridge.createSideTaskSession = vi.fn(async () => ({
+        sessionId: 'side-task-session',
+        workspaceCwd: WS_BOUND,
+        attached: false,
+        clientId: 'client-side-task',
+        state: {},
+        liveJournal: [commandsEvent],
+      }));
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'side-task-redaction',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+        generationGuard: createWorkspaceGenerationGuard(),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
+
+      const res = await request(app)
+        .post('/session/source-session/side-task')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ name: 'follow-up' });
+
+      expect(res.status).toBe(201);
+      const journal = res.body.liveJournal as Array<{
+        data: { update: Record<string, unknown> };
+      }>;
+      const update = journal[0]!.data.update;
+      expect(update['sessionUpdate']).toBe('available_commands_update');
+      expect(update['availableCommands']).toEqual([
+        { name: 'help', description: 'Help' },
+      ]);
+      const meta = update['_meta'] as Record<string, unknown>;
+      expect(meta['availableSkills']).toEqual(['bugfix']);
+      expect(meta).not.toHaveProperty('availableSkillDetails');
+      expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
     });
   });
 

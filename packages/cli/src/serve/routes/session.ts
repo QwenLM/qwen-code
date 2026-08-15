@@ -2599,7 +2599,19 @@ export function registerSessionRoutes(
           }
         }
         if (!res.writable) return;
-        res.status(201).json(result);
+        // Branch/side-task responses carry the same replay snapshot shape as
+        // load; apply the same redaction (#9234). Checkpoint branches
+        // (`atRecordId` set) return no replay arrays, so only the restored
+        // variant needs shaping.
+        res
+          .status(201)
+          .json(
+            atRecordId === undefined
+              ? omitSkillDetailsFromReplayArrays(
+                  result as BridgeBranchedSession,
+                )
+              : result,
+          );
       },
     ),
   );
@@ -2663,7 +2675,7 @@ export function registerSessionRoutes(
           }
           return;
         }
-        res.status(201).json(result);
+        res.status(201).json(omitSkillDetailsFromReplayArrays(result));
       },
     ),
   );
