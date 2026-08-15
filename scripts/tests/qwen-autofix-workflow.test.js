@@ -6578,6 +6578,29 @@ exit 1
         ],
       }),
     ).toBe('false 0');
+    // An INERT marker (the failure path posts one with no measured= when
+    // prepare never ran, so it carries src/test 0 and over=false) must not
+    // erase a real over-budget measurement for the SAME run: its created_at
+    // fallback is ~2h later than the prepare-time measured= it would displace,
+    // so the collapse prefers the marker that actually measured something.
+    // Dropping `.explicit` from the collapse key silently loses the count.
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        history: [
+          marker(500, 300, 'true', 2, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:01:00Z',
+          }),
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T02:00:00Z',
+            body: '<!-- autofix-growth-now src=0 test=0 over=false round=2 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
     // Backward compatibility: a marker posted BEFORE measured= existed still
     // counts, falling back to its comment's created_at — deploying the
     // measured= switch must not blank the census of an in-flight window.
