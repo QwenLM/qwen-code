@@ -147,6 +147,15 @@
       <div id="dir-recent" style="margin-top: 0.6rem; font-size: 0.85rem">
         (no recent workspaces)
       </div>
+      <div style="margin-top: 0.6rem">
+        <strong>Past conversations</strong> — for the current folder
+        <div>
+          <button id="continue-last" disabled>Continue last</button>
+        </div>
+        <div id="past-list" style="margin-top: 0.4rem; font-size: 0.85rem">
+          (none)
+        </div>
+      </div>
     </section>
     <section>
       <button id="enable">Enable notifications</button>
@@ -1188,6 +1197,11 @@
           none.textContent = '(no subfolders)';
           list.appendChild(none);
         }
+        // Landing on a new path is "a workspace is selected" — refresh the
+        // past-conversations list for it (single call site: default open,
+        // subfolder tap, ".." , and a typed path routed through browseTo
+        // below all flow through here).
+        void refreshPastConversations(curDirPath);
       }
 
       // GET /rc/fs?path=<abs> (path omitted → server default, $HOME). Renders
@@ -1229,6 +1243,144 @@
       $('dir-use').onclick = () => {
         if (!curDirPath) return setStatus('browse a folder first');
         startConversationIn(curDirPath);
+      };
+
+      // Typing an absolute path and leaving the field (blur, or Enter — both
+      // fire `change`) counts as choosing a workspace the same way browsing
+      // does: route it through browseTo so curDirPath updates and the
+      // past-conversations refresh (renderDirList, above) fires from that one
+      // call site. A programmatic `.value =` (recent-workspace tap, "Use this
+      // folder") does NOT fire `change`, so this only reacts to real typing.
+      $('new-session-cwd').onchange = () => {
+        const p = $('new-session-cwd').value.trim();
+        if (p) void browseTo(p);
+      };
+
+      // ---- Past conversations (add-resume-conversations) --------------------
+      // Tied to the currently-browsed workspace folder (curDirPath, above):
+      // renderDirList calls refreshPastConversations(curDirPath) every time
+      // the folder browser lands on a new path. "Continue last" resumes
+      // sessions[0]; a row tap resumes that row. Both funnel into
+      // resumeConversation, which mirrors the New-conversation flow's watch
+      // hand-off ($('new-session').onclick, below) — drop the id into
+      // #session, fire #watch's click handler — so a resumed session replays
+      // history and opens the composer exactly the same way a fresh one does.
+      let pastConvos = []; // sessions[] from the last successful /rc/sessions fetch
+      let pastConvosCwd = null; // the cwd that list was fetched FOR (closed over per row)
+
+      // "just now" / "N min ago" / "N h ago" / "N d ago". A skewed clock or a
+      // future timestamp must never print a negative count — clamp the raw
+      // diff at 0 so it reads "just now" instead of "-3 min ago". An
+      // unparseable updatedAt renders as ''.
+      function relativeTime(iso) {
+        const t = Date.parse(iso);
+        if (Number.isNaN(t)) return '';
+        const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (diffSec < 60) return 'just now';
+        const diffMin = Math.floor(diffSec / 60);
+        if (diffMin < 60) return diffMin + ' min ago';
+        const diffH = Math.floor(diffMin / 60);
+        if (diffH < 24) return diffH + ' h ago';
+        const diffD = Math.floor(diffH / 24);
+        return diffD + ' d ago';
+      }
+
+      // createElement + textContent only — a session title is user/model data
+      // (never innerHTML), same discipline as renderPermissionCard/subRow.
+      function renderPastConversations(sessions, cwd) {
+        pastConvos = Array.isArray(sessions) ? sessions : [];
+        pastConvosCwd = cwd;
+        const box = $('past-list');
+        box.textContent = '';
+        const btn = $('continue-last');
+        if (pastConvos.length === 0) {
+          box.textContent = '(no past conversations)';
+          btn.disabled = true;
+          return;
+        }
+        btn.disabled = false;
+        for (const s of pastConvos) {
+          const row = document.createElement('div');
+          row.className = 'token-row';
+          row.style.cursor = 'pointer';
+          const label = document.createElement('span');
+          const title =
+            strOr(s.title, '') || 'session ' + String(s.sessionId).slice(0, 8);
+          label.textContent = title + '  ·  ' + relativeTime(s.updatedAt);
+          row.appendChild(label);
+          row.onclick = () => resumeConversation(s.sessionId, cwd);
+          box.appendChild(row);
+        }
+      }
+
+      // GET /rc/sessions?cwd=<cwd> (Bearer/OWNER). Renders only if `cwd` is
+      // STILL the folder browser's current path by the time the response
+      // lands — guards a slow response from an earlier browse arriving AFTER
+      // a newer one (fetch for A in flight, browse to B completes first, A's
+      // response must not clobber B's list).
+      async function refreshPastConversations(cwd) {
+        if (!cwd || !token()) {
+          renderPastConversations([], cwd);
+          return;
+        }
+        try {
+          const res = await fetch(
+            '/rc/sessions?cwd=' + encodeURIComponent(cwd),
+            { headers: { Authorization: 'Bearer ' + token() } },
+          );
+          if (!res.ok) {
+            if (cwd === curDirPath) renderPastConversations([], cwd);
+            return;
+          }
+          const body = await res.json();
+          if (cwd !== curDirPath) return; // superseded by a newer browse
+          renderPastConversations(body.sessions, cwd);
+        } catch {
+          if (cwd === curDirPath) renderPastConversations([], cwd);
+        }
+      }
+
+      // POST /session/<id>/resume { cwd } (Bearer). On 200, hand off to the
+      // SAME watch flow the New-conversation button uses.
+      async function resumeConversation(sessionId, cwd) {
+        if (!token()) return setStatus('pair first');
+        setStatus('resuming…');
+        try {
+          const res = await fetch(
+            '/session/' + encodeURIComponent(sessionId) + '/resume',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify({ cwd }),
+            },
+          );
+          if (res.status === 200) {
+            const j = await res.json();
+            $('session').value = j.sessionId;
+            setStatus('resumed ' + j.sessionId.slice(0, 8) + '…');
+            $('watch').onclick(); // connect the stream + open the composer
+          } else if (res.status === 400) {
+            setStatus('invalid workspace — pick a valid folder');
+          } else if (res.status === 404) {
+            setStatus('session not found');
+          } else if (res.status === 503) {
+            setStatus('workspace busy — try again');
+          } else if (res.status === 401 || res.status === 403) {
+            setStatus('not authorized');
+          } else {
+            setStatus('resume failed (' + res.status + ')');
+          }
+        } catch (e) {
+          setStatus('resume failed: ' + e);
+        }
+      }
+
+      $('continue-last').onclick = () => {
+        if (!pastConvos.length) return; // disabled in the UI; guard direct calls too
+        resumeConversation(pastConvos[0].sessionId, pastConvosCwd);
       };
 
       renderRecentWorkspaces();
