@@ -13,6 +13,12 @@ import {
   prepareImagePayloadsForRequest,
   replaceImagePayloadsInPlace,
 } from './image-payload-references.js';
+import { getFunctionResponseParts } from './compactionInputSlimming.js';
+import {
+  clearCacheSafeParams,
+  getCacheSafeParams,
+  saveCacheSafeParams,
+} from '../utils/forkedAgent.js';
 
 function toolImageTurn(data: string): Content {
   return {
@@ -329,5 +335,99 @@ describe('buildReattachParts', () => {
     const store = new InMemoryImagePayloadStore();
     const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
     expect(buildReattachParts(replaced, 0)).toEqual([]);
+  });
+
+  it('keeps snapshot history parts isolated from the durable originals (fork boundary)', () => {
+    // CacheSafeParams consumers (forked chats) must never mutate the main
+    // conversation's durable parts: the fork boundary shallow-clones part
+    // objects, so an eviction pass over the snapshot rewrites only the
+    // fork's copies (#8938 review).
+    const original: Content = {
+      role: 'user',
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'shared-shot' } }],
+    };
+    saveCacheSafeParams({}, [original], 'test-model');
+    try {
+      const snapshot = getCacheSafeParams();
+      expect(snapshot).not.toBeNull();
+      const snapPart = snapshot!.history[0]!.parts![0]!;
+      expect(snapPart).not.toBe(original.parts![0]);
+      expect(snapPart.inlineData?.data).toBe('shared-shot');
+
+      // Evicting over the snapshot must not strip the durable original.
+      const store = new InMemoryImagePayloadStore();
+      replaceImagePayloadsInPlace(snapshot!.history, store);
+      expect(store.size).toBe(1);
+      expect(snapPart.inlineData).toBeUndefined();
+      expect(original.parts![0]!.inlineData?.data).toBe('shared-shot');
+    } finally {
+      clearCacheSafeParams();
+    }
+  });
+
+  it('clones nested functionResponse parts at the fork boundary too', () => {
+    const inner: Part = {
+      inlineData: { mimeType: 'image/png', data: 'nested-shot' },
+    };
+    const original: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-nested',
+            name: 'screenshot',
+            response: { output: 'captured nested-shot' },
+            parts: [inner],
+          },
+        },
+      ],
+    };
+    saveCacheSafeParams({}, [original], 'test-model');
+    try {
+      const snapshot = getCacheSafeParams();
+      const snapInner = getFunctionResponseParts(
+        snapshot!.history[0]!.parts![0]!,
+      )![0]!;
+      expect(snapInner).not.toBe(inner);
+
+      const store = new InMemoryImagePayloadStore();
+      replaceImagePayloadsInPlace(snapshot!.history, store);
+      expect(snapInner.inlineData).toBeUndefined();
+      expect(inner.inlineData?.data).toBe('nested-shot');
+    } finally {
+      clearCacheSafeParams();
+    }
+  });
+
+  it('does not reattach a marker-referenced image that is also inline', () => {
+    // Image ids are content hashes: an image that is both
+    // marker-referenced (earlier eviction) and inline again (identical
+    // re-sent bytes) must not ship twice per send (#8938 review).
+    const store = new InMemoryImagePayloadStore();
+    const stored = store.put({
+      inlineData: { mimeType: 'image/png', data: 'dup-bytes' },
+    });
+    const contents: Content[] = [
+      {
+        role: 'model',
+        parts: [{ text: `earlier screenshot Image #${stored.id} here` }],
+      },
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'dup-bytes' } }],
+      },
+    ];
+    // The only referenced image is already inline, so nothing reattaches.
+    expect(buildReattachParts([], 3, contents, store)).toEqual([]);
+    // A marker without an inline twin still resolves as before.
+    const markerOnly: Content[] = [
+      {
+        role: 'model',
+        parts: [{ text: `earlier screenshot Image #${stored.id} here` }],
+      },
+      { role: 'user', parts: [{ text: 'what was in it?' }] },
+    ];
+    const reattached = buildReattachParts([], 3, markerOnly, store);
+    expect(JSON.stringify(reattached)).toContain('"data":"dup-bytes"');
   });
 });

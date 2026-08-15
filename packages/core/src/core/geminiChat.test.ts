@@ -2621,6 +2621,74 @@ describe('GeminiChat', async () => {
       expect(serialized).toContain('"data":"current-shot"');
     });
 
+    it('resolves evicted markers back into bytes on a later below-threshold send', async () => {
+      // End-to-end wiring of the below-threshold fallback: send 1 evicts
+      // in place (durable history keeps `Image #<id>` markers, the store
+      // keeps the bytes); send 2 is text-only and below threshold, so the
+      // fallback alone must reattach the stored bytes (#8938 review).
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 2,
+        imagePayloadThreshold: 2,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/png', data: 'first-shot' } },
+            { inlineData: { mimeType: 'image/png', data: 'second-shot' } },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'I see both images' }] },
+      ]);
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'response' }], role: 'model' },
+                  finishReason: 'STOP',
+                  index: 0,
+                  safetyRatings: [],
+                },
+              ],
+              text: () => 'response',
+            } as unknown as GenerateContentResponse;
+          })(),
+      );
+
+      // Send 1: at threshold — eviction fires, durable history holds
+      // markers, the store holds both payloads.
+      const stream1 = await chat.sendMessageStream(
+        'test-model',
+        { message: 'first question' },
+        'prompt-id-reattach-below-threshold-1',
+      );
+      for await (const _ of stream1) {
+        // consume stream
+      }
+      const durableAfterSend1 = JSON.stringify(chat.getHistory());
+      expect(durableAfterSend1).not.toContain('"data":"first-shot"');
+      expect(durableAfterSend1).toMatch(/Image #[a-f0-9]{12}/);
+
+      // Send 2: text-only, below threshold — the fallback must resolve the
+      // markers from the store back into image bytes.
+      const stream2 = await chat.sendMessageStream(
+        'test-model',
+        { message: 'second question' },
+        'prompt-id-reattach-below-threshold-2',
+      );
+      for await (const _ of stream2) {
+        // consume stream
+      }
+
+      const request2 = vi.mocked(mockContentGenerator.generateContentStream)
+        .mock.calls.at(-1)?.[0];
+      const serialized2 = JSON.stringify(request2?.contents);
+      expect(serialized2).toContain('"data":"first-shot"');
+      expect(serialized2).toContain('"data":"second-shot"');
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {
@@ -6458,6 +6526,13 @@ describe('GeminiChat', async () => {
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+            model: 'test-model',
+          }),
+        );
         expect(
           events.some(
             (event) =>
@@ -6535,14 +6610,16 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         1,
       );
+      // BOTH finishReason-bearing chunks must reach the consumer: the ??=
+      // latch regression deferred/flushed only the first, which
+      // events.some(...) could not observe (#8938 review).
+      const delivered = events.filter(
+        (event) => event.type === StreamEventType.CHUNK,
+      );
+      expect(delivered).toHaveLength(2);
       expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-              'Hello world',
-        ),
-      ).toBe(true);
+        delivered[0]?.value.candidates?.[0]?.content?.parts?.[0]?.text,
+      ).toBe('Hello world');
       expect(chat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'test' }] },
         { role: 'model', parts: [{ text: 'Hello world' }] },
@@ -6572,6 +6649,11 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         1,
       );
+      // Both finishReason-bearing chunks must be delivered — the latch
+      // regression flushed only the first (#8938 review).
+      expect(
+        events.filter((event) => event.type === StreamEventType.CHUNK),
+      ).toHaveLength(2);
       expect(
         events.some(
           (event) =>
@@ -6639,6 +6721,12 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         1,
       );
+      // Every chunk must be delivered — the content chunk, the second
+      // finishReason-bearing chunk, and the synthetic deferred-finish
+      // chunk: the ??= latch regression flushed only the first (#8938).
+      expect(
+        events.filter((event) => event.type === StreamEventType.CHUNK),
+      ).toHaveLength(3);
       expect(
         events.some(
           (event) =>
@@ -6751,49 +6839,70 @@ describe('GeminiChat', async () => {
     });
 
     it('should not yield a split placeholder tail when the stream errors before any yield', async () => {
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [{ content: { parts: [{ text: '(request ' }] } }],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [
-              {
-                content: { parts: [{ text: 'timeout)' }] },
-                finishReason: 'STOP',
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          throw new Error('stream failed');
-        })(),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-split-placeholder-error-path',
-      );
-      const events: StreamEvent[] = [];
-      await expect(
-        (async () => {
-          for await (const event of stream) {
-            events.push(event);
+      // The completed placeholder is converted to the invalid-stream budget
+      // (#8938): the turn retries fresh instead of failing on the raw
+      // transport error, and no placeholder fragment may reach the
+      // consumer on the garbage attempt.
+      vi.useFakeTimers();
+      try {
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return (async function* () {
+              yield {
+                candidates: [{ content: { parts: [{ text: '(request ' }] } }],
+              } as unknown as GenerateContentResponse;
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'timeout)' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw new Error('stream failed');
+            })();
           }
-        })(),
-      ).rejects.toThrow('stream failed');
+          return streamResponse(stopResponse([{ text: 'Recovered response' }]));
+        });
 
-      expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.some((part) =>
-              part.text?.includes('timeout)'),
-            ),
-        ),
-      ).toBe(false);
-      expect(chat.getHistory()).toEqual([
-        { role: 'user', parts: [{ text: 'test' }] },
-      ]);
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-split-placeholder-error-path',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 60_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        // No chunk at all may escape from the garbage attempt: the held head
+        // chunk is dropped wholesale with the completing tail, never
+        // delivered partially (#8938 review).
+        expect(
+          events.filter((event) => event.type === StreamEventType.CHUNK),
+        ).toHaveLength(1);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.some(
+                (part) =>
+                  part.text?.includes('(request') ||
+                  part.text?.includes('timeout)'),
+              ),
+          ),
+        ).toBe(false);
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'test' }] },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should yield a deferred function call before surfacing a stream error', async () => {
@@ -6899,6 +7008,13 @@ describe('GeminiChat', async () => {
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(2);
+        expect(mockLogContentRetry).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+            model: 'test-model',
+          }),
+        );
         expect(
           events.some(
             (event) =>
@@ -6907,10 +7023,37 @@ describe('GeminiChat', async () => {
                 '(request timeout)',
           ),
         ).toBe(false);
-        expect(chat.getHistory().at(-1)).toEqual({
-          role: 'model',
-          parts: [{ text: 'Recovered response' }],
-        });
+        // Full-history pin: the retry pops the partial turn by an index
+        // marker — at(-1) cannot see a drifted marker orphaning the
+        // functionResponse turn (#8938 review).
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          { role: 'model', parts: [{ text: 'Recovered response' }] },
+        ]);
       } finally {
         vi.useRealTimers();
       }
@@ -9009,7 +9152,18 @@ describe('GeminiChat', async () => {
             { message: 'test' },
             'prompt-transport-continuation-placeholder',
           );
-          await collectStreamWithFakeTimers(stream, 25_000);
+          const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+          // The deferral withholds the remainder chunk: the assembled
+          // placeholder must never reach the consumer (#8938 review).
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  'timeout)',
+            ),
+          ).toBe(false);
 
           expect(
             mockContentGenerator.generateContentStream,
@@ -9020,6 +9174,99 @@ describe('GeminiChat', async () => {
             role: 'model',
             parts: [{ text: 'Recovered response' }],
           });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('routes a double-cut completed placeholder through the invalid-stream budget', async () => {
+        // The remainder itself ending in a transport cut used to throw the
+        // converted placeholder error straight out of the catch — zero
+        // invalid-stream retries. It must reach the budget like every
+        // other placeholder shape and replay fresh (#8938 review).
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('timeout)', 'STOP')]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Recovered response', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-double-cut-placeholder',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 60_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  'timeout)',
+            ),
+          ).toBe(false);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
+          expect(chatWithRecording.getHistory().at(-1)).toEqual({
+            role: 'model',
+            parts: [{ text: 'Recovered response' }],
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('routes a double-cut placeholder completed before the finish frame through the budget', async () => {
+        // Shape A of the double cut: the remainder chunk carries NO
+        // finishReason (the error lands before the finish frame), so it is
+        // yielded and folded into the send loop's buffer; the completed
+        // placeholder must still reach the invalid-stream budget instead of
+        // escaping the catch (#8938 review).
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
+            .mockResolvedValueOnce(cutAfter([textChunk('timeout)')]))
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Recovered response', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-transport-continuation-double-cut-no-finish',
+          );
+          const events = await collectStreamWithFakeTimers(stream, 60_000);
+
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).toHaveBeenCalledTimes(3);
+          expect(
+            events.some(
+              (event) =>
+                event.type === StreamEventType.CHUNK &&
+                event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                  'timeout)',
+            ),
+          ).toBe(false);
+          expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+          expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
         } finally {
           vi.useRealTimers();
         }
@@ -9061,6 +9308,19 @@ describe('GeminiChat', async () => {
                   '(request timeout)',
             ),
           ).toBe(false);
+          // The retry following the rejected continuation must be PLAIN
+          // (no isContinuation): that is the only signal telling the UI
+          // to discard the already-delivered 'The answer is 42. ' prefix,
+          // keeping the screen aligned with the persisted turn (#8938).
+          const retries = events.filter(
+            (event) => event.type === StreamEventType.RETRY,
+          );
+          expect(retries.length).toBeGreaterThan(0);
+          const lastRetry = retries[retries.length - 1] as Extract<
+            StreamEvent,
+            { type: StreamEventType.RETRY }
+          >;
+          expect(lastRetry.isContinuation).toBeFalsy();
           expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
           expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
           expect(chatWithRecording.getHistory().at(-1)).toEqual({

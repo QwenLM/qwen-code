@@ -1168,11 +1168,22 @@ const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
 // stream-error path — must agree on what counts as the turn's text, so they
 // share this exact computation.
 function nonThoughtText(parts: Part[]): string {
+  return nonThoughtTextUntrimmed(parts).trim();
+}
+
+/**
+ * The same join WITHOUT the trim: comparisons that merge a delivered
+ * prefix with the attempt's remainder (persistence merge, placeholder
+ * discard) must see a remainder opening with whitespace verbatim —
+ * trimming first fuses words across the boundary ("(request" +
+ * "timeout)" -> "(requesttimeout)") and the merge disagrees with the
+ * raw-text persistence path by exactly one leading space (#8938 review).
+ */
+function nonThoughtTextUntrimmed(parts: Part[]): string {
   return parts
     .filter((part) => !part.thought && part.text)
     .map((part) => part.text)
-    .join('')
-    .trim();
+    .join('');
 }
 
 function isDegradedPlaceholderPrefix(text: string): boolean {
@@ -1979,13 +1990,19 @@ export class GeminiChat {
     // leaving `Image #<id>` markers without pixels. Below the eviction
     // threshold this pass would not reattach anything, so a fallback or
     // recovery rebuild would carry marker text alone. Resolve any present
-    // references from the store regardless of the threshold.
-    const reattachParts = buildReattachParts(
-      [],
-      maxRecentImages,
-      requestHistory,
-      this.imagePayloadStore,
-    );
+    // references from the store regardless of the threshold. An EMPTY
+    // store can resolve nothing, so skip the O(history-text) reference
+    // scan entirely — the common steady state is below threshold with no
+    // stored payloads (#8938 review).
+    const reattachParts =
+      this.imagePayloadStore.size > 0
+        ? buildReattachParts(
+            [],
+            maxRecentImages,
+            requestHistory,
+            this.imagePayloadStore,
+          )
+        : [];
     if (reattachParts.length > 0) {
       const last = requestHistory.at(-1);
       if (last?.role === 'user') {
@@ -3097,6 +3114,7 @@ export class GeminiChat {
             // produces a sequence providers reject (the same constraint the
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
+            let convertedPlaceholderError: InvalidStreamError | undefined;
             if (
               isRetryableStreamTransportError &&
               transportContinuationText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER
@@ -3104,16 +3122,27 @@ export class GeminiChat {
               // The delivered text completed the fail-fast placeholder
               // across attempts (prefix before the cut, remainder after).
               // Continuing from it would persist gateway garbage into
-              // history/JSONL and replay it into every later request;
-              // route it through the invalid-stream budget instead, which
-              // retries fresh with the continuation reset.
-              throw new InvalidStreamError(
+              // history/JSONL and replay it into every later request.
+              // Convert the error instead of throwing: a throw from
+              // inside this catch would escape the for(;;) loop and skip
+              // the invalid-stream budget handler below, failing the turn
+              // with zero retries; the converted error falls through to
+              // the isInvalidStreamError branch, which retries fresh with
+              // the continuation reset (the loop prelude's
+              // resetTransportContinuation) like every other placeholder
+              // shape raised from inside the try.
+              convertedPlaceholderError = new InvalidStreamError(
                 'Model response is an upstream fail-fast placeholder.',
                 'UPSTREAM_DEGRADED_RESPONSE',
               );
+              lastError = convertedPlaceholderError;
             }
             const canContinueAfterTransportCut =
               isRetryableStreamTransportError &&
+              // The converted placeholder error above must take the
+              // invalid-stream budget path, not a continuation resuming
+              // from the garbage prefix.
+              convertedPlaceholderError === undefined &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3310,13 +3339,17 @@ export class GeminiChat {
 
             // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
             // is independent from HTTP retries handled by retryWithBackoff.
-            const isInvalidStreamError = error instanceof InvalidStreamError;
+            // The converted placeholder error takes precedence over the
+            // raw transport error it replaced.
+            const budgetError = convertedPlaceholderError ?? error;
+            const isInvalidStreamError =
+              budgetError instanceof InvalidStreamError;
             const maxInvalidStreamRetries =
-              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+              isInvalidStreamError && budgetError.type === 'PROTOCOL_TAG_LEAK'
                 ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
                 : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
             const invalidStreamRetryCount =
-              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+              isInvalidStreamError && budgetError.type === 'PROTOCOL_TAG_LEAK'
                 ? protocolTagLeakRetryCount
                 : transientInvalidStreamRetryCount;
             if (
@@ -3325,7 +3358,7 @@ export class GeminiChat {
             ) {
               self.popPendingPartialAssistantTurn();
               const nextInvalidStreamRetryCount = invalidStreamRetryCount + 1;
-              if (error.type === 'PROTOCOL_TAG_LEAK') {
+              if (budgetError.type === 'PROTOCOL_TAG_LEAK') {
                 protocolTagLeakRetryCount = nextInvalidStreamRetryCount;
               } else {
                 transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
@@ -4819,8 +4852,21 @@ export class GeminiChat {
         }
 
         const pendingPlaceholderText = nonThoughtText(allModelParts);
+        // When a continuation prefix is in flight the placeholder can
+        // complete ACROSS the cut — compare the merged delivered text,
+        // or a remainder that finishes the placeholder over several
+        // chunks is yielded inline before the post-stream gate throws
+        // (display-only leak; persistence stays covered by the throw)
+        // (#8938 review).
+        const holdCandidateText =
+          transportContinuationPrefix !== undefined
+            ? mergeDeliveredPrefix(
+                transportContinuationPrefix,
+                nonThoughtTextUntrimmed(allModelParts),
+              )
+            : pendingPlaceholderText;
         const shouldHoldDegradedPlaceholder =
-          !hasToolCall && isDegradedPlaceholderPrefix(pendingPlaceholderText);
+          !hasToolCall && isDegradedPlaceholderPrefix(holdCandidateText);
 
         if (!deferredNow) {
           if (
@@ -4876,13 +4922,28 @@ export class GeminiChat {
           (transportContinuationPrefix !== undefined &&
             mergeDeliveredPrefix(
               transportContinuationPrefix,
-              accumulatedText,
+              // Untrimmed attempt text, trimmed only after the merge —
+              // mirrors the persistence merge, so a remainder opening
+              // with whitespace cannot slip past the discard here while
+              // the success path would still catch it.
+              nonThoughtTextUntrimmed(allModelParts),
             ).trim() === UPSTREAM_DEGRADED_PLACEHOLDER));
       if (completedPlaceholder) {
         // Trace the deliberate discard: without it, a benign transport-cut
         // recovery is indistinguishable from lost output after the fact.
         debugLogger.warn(
           `[UPSTREAM_DEGRADED] stream error completed the fail-fast placeholder; discarding ${pendingPreValidationChunks.length} withheld chunk(s) and replaying fresh`,
+        );
+        // Replace the raw error with the invalid-stream one BEFORE the
+        // rethrow below: if the raw transport error escaped, the send loop
+        // would schedule another continuation resuming from the garbage
+        // prefix (the folded buffer still starts with the placeholder)
+        // until that budget exhausted. The invalid-stream error takes the
+        // budget handler, which retries fresh with the continuation reset
+        // (#8938 review).
+        streamError = new InvalidStreamError(
+          'Model response is an upstream fail-fast placeholder.',
+          'UPSTREAM_DEGRADED_RESPONSE',
         );
       } else {
         for (const pendingChunk of pendingPreValidationChunks) {

@@ -27,6 +27,8 @@ export interface StoredImagePayload {
 export interface ImagePayloadStore {
   put(part: Part): StoredImagePayload;
   get(id: string): StoredImagePayload | undefined;
+  /** Number of payloads currently stored (0 = nothing can resolve). */
+  readonly size: number;
 }
 
 interface CollectedImage {
@@ -35,6 +37,10 @@ interface CollectedImage {
 
 export class InMemoryImagePayloadStore implements ImagePayloadStore {
   private readonly images = new Map<string, StoredImagePayload>();
+
+  get size(): number {
+    return this.images.size;
+  }
 
   put(part: Part): StoredImagePayload {
     const stored = imagePartToStoredPayload(part);
@@ -130,9 +136,20 @@ export function buildReattachParts(
   store?: ImagePayloadStore,
 ): Part[] {
   if (maxRecentImages <= 0) return [];
-  const candidates = replaced.map((stored) => ({ stored }));
+  // Ids already carried INLINE in this request must not be reattached:
+  // image ids are content hashes, so an image that is both
+  // marker-referenced (from an earlier eviction) and inline again
+  // (identical re-sent bytes) would otherwise ship twice per send
+  // (#8938 review).
+  const inlineIds = referencedContents
+    ? collectInlineImageIds(referencedContents)
+    : new Set<string>();
+  const candidates = replaced
+    .filter((stored) => !inlineIds.has(stored.id))
+    .map((stored) => ({ stored }));
   if (referencedContents && store) {
     for (const id of collectReferencedImageIds(referencedContents)) {
+      if (inlineIds.has(id)) continue;
       const stored = store.get(id);
       if (stored) {
         candidates.push({ stored });
@@ -258,6 +275,31 @@ function transformPart(
   }
 
   return part;
+}
+
+function collectInlineImageIds(contents: Content[]): Set<string> {
+  const ids = new Set<string>();
+  for (const content of contents) {
+    for (const part of content.parts ?? []) {
+      if (
+        part.inlineData?.mimeType?.startsWith('image/') &&
+        part.inlineData.data
+      ) {
+        ids.add(imagePartToStoredPayload(part).id);
+      }
+      const nested = getFunctionResponseParts(part);
+      if (!nested) continue;
+      for (const inner of nested) {
+        if (
+          inner.inlineData?.mimeType?.startsWith('image/') &&
+          inner.inlineData.data
+        ) {
+          ids.add(imagePartToStoredPayload(inner).id);
+        }
+      }
+    }
+  }
+  return ids;
 }
 
 function collectReferencedImageIds(contents: Content[]): Set<string> {

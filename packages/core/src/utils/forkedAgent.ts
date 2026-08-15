@@ -33,6 +33,7 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
+  Part,
 } from '@google/genai';
 import {
   runWithRuntimeContentGenerator,
@@ -92,10 +93,38 @@ export interface CacheSafeParams {
 let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
 
+function clonePartShallow(part: Part): Part {
+  // One level deeper for functionResponse payloads: image eviction also
+  // rewrites the NESTED parts inside functionResponse.parts, so a
+  // top-level clone alone would keep those aliased to the main history.
+  const fr = part.functionResponse as { parts?: unknown } | undefined;
+  if (Array.isArray(fr?.parts)) {
+    return {
+      ...part,
+      functionResponse: {
+        ...part.functionResponse,
+        parts: (fr.parts as Part[]).map((inner) => ({ ...inner })),
+      },
+    };
+  }
+  return { ...part };
+}
+
 function copyHistoryContainers(history: Content[]): Content[] {
   return history.map((content) => ({
     ...content,
-    ...(content.parts ? { parts: [...content.parts] } : {}),
+    // Shallow-clone the Part objects too, not just the parts array.
+    // CacheSafeParams shares parts by reference with the MAIN
+    // conversation's durable history, and a forked chat's image-eviction
+    // pass rewrites Part objects IN PLACE (storing the payload in the
+    // fork's own store and turning the part into an `Image #<id>`
+    // marker). Cloning confines that rewrite to the fork's copies;
+    // without it, a fork evicting >= threshold images permanently strips
+    // the pixels out of the main conversation's history, and the ids
+    // exist only in the discarded fork's store (#8938 review).
+    ...(content.parts
+      ? { parts: content.parts.map(clonePartShallow) }
+      : {}),
   }));
 }
 
