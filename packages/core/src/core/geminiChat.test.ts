@@ -6735,10 +6735,36 @@ describe('GeminiChat', async () => {
               'Continuation answer',
         ),
       ).toBe(true);
-      expect(chat.getHistory().at(-1)).toEqual({
-        role: 'model',
-        parts: [{ text: 'Continuation answer' }],
-      });
+      // Full-history pin (not just at(-1)) so a drifted partial-turn pop
+      // that orphaned the functionResponse turn could not hide (#8938).
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'inspect the project' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_read_file',
+                name: 'read_file',
+                args: { path: '/tmp/example' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_read_file',
+                name: 'read_file',
+                response: { output: 'file contents' },
+              },
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Continuation answer' }] },
+      ]);
     });
 
     it('delivers a deferred finishReason chunk before later held chunks in arrival order', async () => {
