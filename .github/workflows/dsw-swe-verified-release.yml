@@ -99,6 +99,15 @@ jobs:
             execution_backend='eas-smoke'
             instance_limit='1'
             instance_id='astropy__astropy-12907'
+          elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-tb-smoke-[0-9A-Za-z._-]+$ ]]; then
+            # A release-event smoke must exercise the same persistent EAS
+            # Harbor and Publisher chain as the full 500 + 89 benchmark.
+            should_run='true'
+            execution_backend='eas-harbor'
+            instance_limit='1'
+            instance_id='sympy__sympy-20590'
+            terminal_bench_limit='1'
+            terminal_bench_instance_id='regex-log'
           elif [[ "${RELEASE_PRERELEASE}" == 'true' && "${RELEASE_TAG}" =~ ^dsw-eas-full-[0-9A-Za-z._-]+$ ]]; then
             should_run='true'
             execution_backend='eas-harbor'
