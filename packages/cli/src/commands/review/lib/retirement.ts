@@ -413,6 +413,17 @@ function substantiveClause(clause: string): boolean {
  * this module lands on the audit side. `memo` keys on the pointer so the
  * pairing walk reads each round's list once, not once per record.
  */
+/**
+ * Did this transcript's agent successfully `read_file` the findings pointer
+ * its record's prompt names? True when the prompt names none.
+ */
+function readTheFindingsPointer(rec: AgentRecord, lines: string[]): boolean {
+  const pointer = findingsPointerOf(lines.join('\n'));
+  if (pointer === null) return true;
+  const needle = JSON.stringify(pointer);
+  return rec.successfulReadFileArgs.some((a) => a.includes(needle));
+}
+
 function findingsListFor(
   prompt: string,
   recordDir: string,
@@ -755,7 +766,17 @@ export function scheduleReverseAuditRound(
   const failuresByRecord: CertificationFailure[][] = [];
   matchesByRecord.forEach((matches, i) => {
     const unique = matches.filter((t) => recordsPerTranscript.get(t) === 1);
-    const classifications = unique.map((t) =>
+    // The auditor must have READ the cumulative findings list its prompt
+    // points at before its receipt can classify at all. The brief's whole
+    // method is the comparison against known findings; an auditor that
+    // skipped the read cannot have performed it, and two such receipts
+    // would retire the chunk on a comparison nobody made. A prompt with no
+    // pointer (the pre-#8597 shape, list folded in verbatim) has nothing
+    // to open and keeps the old bar.
+    const readCompliant = unique.filter((t) =>
+      readTheFindingsPointer(t, records[i].lines),
+    );
+    const classifications = readCompliant.map((t) =>
       classifyReturn(t, records[i].territory, records[i].findings),
     );
     classificationsByRecord.push(classifications);

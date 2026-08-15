@@ -368,6 +368,14 @@ export function runRepoContext(
     throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
   }
 
+  // The plan's identity, captured BEFORE the provider work. The providers
+  // take real time, the plan path is shared per PR, and a concurrent capture
+  // can replace the file mid-computation — this run would then write contents
+  // derived from the OLD plan and restore the NEW run's epoch over them,
+  // leaving the other run's ledger and transcripts to pass an exact mtime
+  // fence against a plan they never described. Compared just before the
+  // write; a moved identity aborts rather than corrupts.
+  const planStatBefore = statSync(planPath);
   const plan = readPlan(planPath);
   if (plan.worktreePath !== undefined) {
     if (
@@ -409,6 +417,20 @@ export function runRepoContext(
   // restored after it; letting it advance re-keyed the epoch mid-run and
   // silently orphaned everything recorded before this command ran.
   const planStat = statSync(planPath);
+  // Compare-and-refuse: if the plan is no longer the file this run read —
+  // mtime moved or inode swapped since the capture above — another run owns
+  // the path now, and writing stale derived contents under ITS epoch is the
+  // one outcome worse than doing nothing.
+  if (
+    Math.abs(planStat.mtimeMs - planStatBefore.mtimeMs) > 1 ||
+    planStat.ino !== planStatBefore.ino
+  ) {
+    throw new Error(
+      `repo-context: the plan at ${planPath} changed while repository ` +
+        'context was being computed (another run captured it); aborting ' +
+        'rather than writing stale contents under its epoch.',
+    );
+  }
   const serialized = stringifyPlanReport(plan);
   // The cheapest way to keep the epoch is not to move it: an enrichment that
   // changes nothing (the common case on a resumed run, where the plan

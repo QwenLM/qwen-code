@@ -2480,6 +2480,51 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.recoveredAgents).toBe(0);
   });
 
+  it('does NOT credit a prior agent whose text is progress, not a return', () => {
+    // `finalText` keeps the last non-empty assistant text, and agents narrate
+    // between tool calls — so an agent that said "reading the diff now" and
+    // died mid-flight carries plausible text. Tool traffic AFTER the text is
+    // what marks it as progress, and the empty-return filter alone cannot
+    // see it.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1prog', good(1), { calls: 2, text: 'Reading the diff now…' });
+    // Re-order: append one more tool call AFTER the text, the died-mid-work
+    // shape.
+    const f = join(dir, 'subagents', 'S1', 'agent-a1prog.jsonl');
+    const lines = readFileSync(f, 'utf8').trim().split('\n');
+    const textLine = lines.findIndex((l) => l.includes('Reading the diff'));
+    const callLine = lines.findIndex((l) => l.includes('functionCall'));
+    lines.push(lines[callLine], lines[callLine + 1]);
+    void textLine;
+    writeFileSync(f, lines.join('\n') + '\n');
+    moveToSession('a1prog', 'S0');
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.coveredChunks).not.toContain(1);
+    expect(r.recoveredAgents).toBe(0);
+  });
+
+  it('an honest Uncoverable declaration survives an unreturned relaunch', () => {
+    // The probe from review: agent A declares chunk 1 unreachable; a verbatim
+    // relaunch B reads the diff once and dies. B must not supersede A — the
+    // declaration is the only honest account of the chunk, and B's told-range
+    // presumption would otherwise mark it covered.
+    const p = plan();
+    transcript('aDecl', good(1), {
+      calls: 2,
+      text: 'Uncoverable: chunk 1 — a line exceeds the read limit',
+    });
+    transcript('aRelaunch', good(1), { calls: 1, text: '' });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.uncoverableChunks).toEqual([1]);
+    expect(r.coveredChunks).not.toContain(1);
+  });
+
   it('counts two prior records that only supersede each other', () => {
     // A whiff-relaunch INSIDE the interrupted attempt: two records for the
     // same chunk, both clearing the bar, and no current-session agent at all.

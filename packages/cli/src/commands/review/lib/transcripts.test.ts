@@ -247,6 +247,7 @@ describe('wasGivenTheDiff', () => {
     successfulCallArgs: [],
     successfulReadFileArgs: [],
     finalText: '',
+    returned: false,
     mtimeMs: 0,
   });
 
@@ -352,6 +353,51 @@ describe('readRunTranscripts — the run across its sessions', () => {
     file('agent-a1.jsonl', transcript('a1'));
     const recs = readRunTranscripts(plan, Date.now() - 60_000, ENV);
     expect(recs.map((r) => r.agentId)).toEqual(['a1']);
+  });
+
+  it('refuses a foreign-stamped transcript in the CURRENT directory too', () => {
+    // The one-sided version of the copy rule was the gap: prior directories
+    // checked ownership, the current one did not, so an S0-stamped file
+    // planted under S1 was trusted as current evidence — `since` cannot
+    // catch a copy (fresh mtime), and the prompt pairing passes (prompts are
+    // deterministic per plan).
+    // The fixture's records carry no session stamp (older harness shape), so
+    // stamp this one explicitly: the check refuses a MISMATCH, not absence.
+    file(
+      'agent-planted.jsonl',
+      JSON.stringify({
+        agentId: 'planted',
+        agentName: 'general-purpose',
+        sessionId: 'S0',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'launch planted' }] },
+      }) + '\n',
+    );
+    file('agent-own.jsonl', transcript('own'));
+    const recs = readTranscripts(undefined, ENV);
+    expect(recs.map((r) => r.agentId)).toEqual(['own']);
+  });
+
+  it('looks up the session directory under the SANITIZED id', () => {
+    // The harness writes `subagents/<sanitized>` — everything outside
+    // [A-Za-z0-9_-] maps to '_' — while the ledger's charset admits dots
+    // ("room for prefixed variants"). Joined raw, an id like `resume.1`
+    // reaches a path that does not exist and every reader silently sees
+    // nothing, one underscore away from the records.
+    const env = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S.dot' };
+    mkdirSync(join(dir, 'subagents', 'S_dot'), { recursive: true });
+    writeFileSync(
+      join(dir, 'subagents', 'S_dot', 'agent-a9.jsonl'),
+      JSON.stringify({
+        agentId: 'a9',
+        agentName: 'general-purpose',
+        sessionId: 'S.dot',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'launch a9' }] },
+      }) + '\n',
+    );
+    const recs = readTranscripts(undefined, env);
+    expect(recs.map((r) => r.agentId)).toEqual(['a9']);
   });
 
   it('lists each prior session once, and only those that exist', () => {

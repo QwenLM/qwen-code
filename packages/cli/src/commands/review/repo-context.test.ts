@@ -1061,6 +1061,37 @@ describe('the plan mtime is the run epoch — enrichment must not advance it', (
     }
   });
 
+  it('aborts when the plan changed while providers were running', () => {
+    // The plan path is shared per PR and providers take real time: a
+    // concurrent capture can replace the file mid-computation, and this run
+    // would then write contents derived from the OLD plan and restore the
+    // NEW run's epoch over them — the other run's ledger and transcripts
+    // pass an exact mtime fence against a plan they never described.
+    const root = mkdtempSync(join(tmpdir(), 'repo-context-cas-'));
+    try {
+      const worktree = join(root, 'wt');
+      mkdirSync(worktree, { recursive: true });
+      const planPath = planAt(root, { files: [{ path: 'src/a.ts' }] });
+      const racer: RepositoryContextProvider = {
+        provide() {
+          // The concurrent run captures the plan mid-computation.
+          writeFileSync(planPath, JSON.stringify({ files: [] }));
+          const later = new Date(Date.now() + 60_000);
+          utimesSync(planPath, later, later);
+          return null;
+        },
+      };
+      expect(() =>
+        runRepoContext(
+          { plan: planPath, worktree, out: join(root, 'ctx.json') },
+          [racer],
+        ),
+      ).toThrow(/changed while repository context was being computed/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('preserves a SUB-MILLISECOND plan mtime, and stays silent about it', () => {
     // The case a `Date`-backdated fixture cannot reach. `Date` carries whole
     // milliseconds; APFS and ext4 keep nanoseconds. Restoring from

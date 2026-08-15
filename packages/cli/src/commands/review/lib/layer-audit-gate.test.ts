@@ -7,6 +7,7 @@
 import {
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -355,6 +356,50 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
     expect(out).toHaveLength(4);
     expect(out.some((e) => e.includes('scope-propagation'))).toBe(true);
     expect(out.some((e) => e.includes('lexing'))).toBe(false);
+  });
+
+  it('refuses a receipt whose auditor only NAMED the brief, never read it', () => {
+    // `successfulCallArgs` covers every successful tool, so a grep whose args
+    // merely contain the brief path cleared `delivered()` — an auditor that
+    // never opened its instructions supplied the receipt. Only a successful
+    // `read_file` of the exact brief is opening it.
+    ledger('S1');
+    auditorTranscript('S1', LAYERS);
+    const f = join(dir, 'subagents', 'S1', 'agent-ra-S1.jsonl');
+    // Turn the brief READ into a search that names the same path.
+    writeFileSync(
+      f,
+      readFileSync(f, 'utf8').replace(
+        '"functionCall":{"name":"read_file","args":{"file_path":' +
+          JSON.stringify(briefPath(plan, 'reverse-audit')) +
+          '}}',
+        '"functionCall":{"name":"search_file_content","args":{"pattern":"x","path":' +
+          JSON.stringify(briefPath(plan, 'reverse-audit')) +
+          '}}',
+      ),
+    );
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(6);
+  });
+
+  it('refuses a STALE record a dead attempt left beside the plan', () => {
+    // The records read as HISTORY must take the run-epoch fence, like the
+    // sibling history reader in retirement: nothing clears the record dir,
+    // and an orchestrator that hand-launches a stale record's prompt
+    // verbatim otherwise corroborates a run whose builder never emitted an
+    // auditor — a fail-open on the gate's own withhold-only invariant.
+    ledger('S1');
+    auditorTranscript('S1', LAYERS);
+    // Backdate the record to before the plan's epoch (the suite pins the
+    // plan at 2020-01-01, so the dead attempt's leftovers predate it).
+    const past = new Date(2019, 0, 1);
+    const rec = join(
+      promptRecordDir(plan),
+      `${encodeURIComponent('reverse-audit')}.txt`,
+    );
+    utimesSync(rec, past, past);
+    const out = layerAuditGate(plan, ENV()).unreviewed;
+    expect(out).toHaveLength(6);
   });
 
   it('sees nothing from a prior session the ledger never recorded', () => {

@@ -525,6 +525,16 @@ export function coverageFromTranscripts(
       (r) =>
         r !== self &&
         only(r) &&
+        // A superseding record must have RETURNED. Current-session records
+        // with empty finalText stay in `records` for the idle checks, and
+        // without this a verbatim relaunch that read the diff once and died
+        // mid-flight (a) suppressed an honest `Uncoverable:` declaration and
+        // earned the chunk off the told-range presumption, (b) let two
+        // honest declarations of one chunk annihilate into `missingChunks`,
+        // and (c) silenced a prior attempt's `Budget gap:` disclosure as a
+        // "genuine repair" — three symptoms of the one missing requirement
+        // `certifies()` and `liveRecords()` already impose.
+        r.returned &&
         assignedChunk(r) === c &&
         wasDeliveredVerbatim(r.launchPrompt, b) &&
         r.diffToolCalls > 0,
@@ -544,6 +554,8 @@ export function coverageFromTranscripts(
           (r) =>
             r !== rec &&
             only(r) &&
+            // Same return requirement as the chunk branch above.
+            r.returned &&
             wasDeliveredVerbatim(r.launchPrompt, b) &&
             r.successfulCallArgs.some((a) => a.includes(needle)),
         )
@@ -597,6 +609,10 @@ export function coverageFromTranscripts(
       return records.some(
         (r) =>
           r !== rec &&
+          // Returned, like every superseding record: an empty return has no
+          // gaps BECAUSE it has nothing at all, and reading that as a
+          // gap-free repair silences the disclosure it never addressed.
+          r.returned &&
           assignedChunk(r) === chunk &&
           wasDeliveredVerbatim(r.launchPrompt, b) &&
           r.diffToolCalls > 0 &&
@@ -614,6 +630,7 @@ export function coverageFromTranscripts(
         records.some(
           (r) =>
             r !== rec &&
+            r.returned &&
             wasDeliveredVerbatim(r.launchPrompt, b) &&
             r.successfulCallArgs.some((a) => a.includes(needle)) &&
             gapsOf(r).length === 0,
@@ -1048,8 +1065,9 @@ export function coverageFromTranscripts(
   // the diff actually opened earns a count here.
   const certifies = (r: AgentRecord): boolean => {
     // Same bar as the coverage walk: a prior agent that never returned did
-    // not finish, so it is not recovered work either.
-    if (r.finalText.trim() === '') return false;
+    // not finish, so it is not recovered work either — and "returned" means
+    // terminal text, not progress narrated between tool calls.
+    if (!r.returned) return false;
     // A record whose own return declares a chunk unreachable did not review
     // it; counting it as recovered would have the body announce work
     // "counted as reviewed" beside the gap that same record disclosed.
@@ -1480,7 +1498,12 @@ export interface VerificationReport {
  * than its siblings is how a review certifies work nobody did.
  */
 function liveRecords(all: AgentRecord[]): AgentRecord[] {
-  return all.filter((r) => !(r.fromPriorSession && r.finalText.trim() === ''));
+  // `returned`, not merely non-empty: `finalText` keeps the last non-empty
+  // assistant text, which includes progress narrated between tool calls — an
+  // agent that opened its inputs, said "reading the diff now…" and died
+  // carries plausible text that certifies nothing. A record with tool
+  // traffic after its text never returned.
+  return all.filter((r) => !(r.fromPriorSession && !r.returned));
 }
 
 export function verificationGaps(

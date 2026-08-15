@@ -38,7 +38,10 @@
 // come from the environment the CLI itself exported.
 
 import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { ToolNames } from '@qwen-code/qwen-code-core';
+import {
+  ToolNames,
+  sanitizeFilenameComponent,
+} from '@qwen-code/qwen-code-core';
 import { join } from 'node:path';
 import { priorSessionEntries } from './run-ledger.js';
 
@@ -98,6 +101,17 @@ export interface AgentRecord {
   recordedSession: string;
   /** The agent's own final text, as the harness saw it. */
   finalText: string;
+  /**
+   * True when `finalText` is a RETURN rather than progress: no tool activity
+   * follows it in the transcript. `parseTranscript` keeps the last non-empty
+   * assistant text, which includes narration emitted between tool calls — so
+   * an agent that opened its inputs, said "reading the diff now…" and died
+   * (or is still running) carries non-empty finalText that certifies
+   * nothing. The harness appends records in order and writes the final
+   * message last, so text with tool traffic after it is progress by
+   * construction.
+   */
+  returned: boolean;
   /** When the transcript was last written. */
   mtimeMs: number;
   /**
@@ -146,7 +160,12 @@ export function transcriptPaths(env: NodeJS.ProcessEnv = process.env): {
   return {
     projectDir,
     sessionId,
-    dir: join(projectDir, 'subagents', sessionId),
+    // The harness writes the directory under the SANITIZED id
+    // (`getSubagentSessionDir` maps everything outside [A-Za-z0-9_-] to '_'),
+    // so the lookup must apply the same mapping: joined raw, any id carrying
+    // a dot reaches a path that does not exist, and every reader silently
+    // sees nothing while the harness's records sit one underscore away.
+    dir: join(projectDir, 'subagents', sanitizeFilenameComponent(sessionId)),
   };
 }
 
@@ -236,6 +255,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
   let recordedSession = '';
   let launchPrompt = '';
   let finalText = '';
+  let toolTrafficAfterText = true;
   let successfulToolCalls = 0;
   let diffToolCalls = 0;
 
@@ -335,8 +355,21 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
 
     if (type === 'assistant') {
       const t = textOf(rec);
-      if (t) finalText = t;
+      if (t) {
+        finalText = t;
+        toolTrafficAfterText = false;
+      }
     }
+    // Any function call or response AFTER the text marks it as progress —
+    // the agent went on working, so that text was narration, not a return.
+    if (parts.some((p) => (p as FunctionCallPart).functionCall !== undefined))
+      toolTrafficAfterText = true;
+    if (
+      parts.some(
+        (p) => (p as FunctionResponsePart).functionResponse !== undefined,
+      )
+    )
+      toolTrafficAfterText = true;
   }
 
   if (!agentId) return null;
@@ -359,6 +392,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     successfulCallArgs,
     successfulReadFileArgs,
     finalText,
+    returned: finalText.trim() !== '' && !toolTrafficAfterText,
     mtimeMs,
   };
 }
@@ -411,7 +445,14 @@ export function readTranscripts(
     );
   }
 
-  return recordsIn(dir, names, since, diffPath);
+  // The same ownership check the prior directories get. A record stamped
+  // with a DIFFERENT session was copied here — `since` cannot catch it (a
+  // copy gets a fresh mtime) and the launch-prompt pairing passes (prompts
+  // are deterministic per plan) — and a copy is not evidence of THIS
+  // session's work any more than it was of the attempt it was planted in.
+  return recordsIn(dir, names, since, diffPath, {
+    sessionId: transcriptPaths(env).sessionId,
+  });
 }
 
 /**
@@ -491,7 +532,11 @@ export function priorSessionDirs(
     endsAtMs: number | null;
   }> = [];
   for (const { sessionId, endsAtMs } of priorSessionEntries(planPath, env)) {
-    const dir = join(projectDir, 'subagents', sessionId);
+    const dir = join(
+      projectDir,
+      'subagents',
+      sanitizeFilenameComponent(sessionId),
+    );
     try {
       if (lstatSync(dir).isSymbolicLink()) continue;
     } catch {

@@ -161,6 +161,48 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
         }),
       );
     }
+    // A compliant auditor reads the cumulative findings list its prompt
+    // points at — the comparison against known findings IS the audit's
+    // method, and the scheduler now refuses receipts from an auditor that
+    // skipped it. Modeled by default, like the brief-opens elsewhere; a test
+    // that wants a skipping auditor writes its own transcript.
+    const pointer = /read_file\(file_path="([^"]*\.findings\.md)"\)/.exec(
+      launchPrompt,
+    );
+    if (pointer) {
+      lines.push(
+        JSON.stringify({
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: pointer[1] },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'the cumulative list' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+    }
     lines.push(
       JSON.stringify({
         ...base,
@@ -1483,6 +1525,84 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.diagnostics).toEqual([
       'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
     ]);
+  });
+
+  it('an auditor that SKIPPED the findings read cannot retire the chunk', () => {
+    // The comparison against known findings IS the audit's method, and the
+    // brief instructs the read. Two dry receipts from auditors that skipped
+    // it would retire the chunk on a comparison nobody made. The fixture
+    // builder models the compliant read automatically, so this one writes
+    // its transcripts by hand, minus the read.
+    for (const r of [1, 2]) {
+      const findingsFile = writeFindingsFile(
+        plan,
+        `reverse-audit--round-${r}--skip99`,
+        '- **File:** src/pay.ts:42 — the double charge\n' +
+          '- **Severity:** Suggestion\n',
+      );
+      const built = record(
+        r,
+        13,
+        `chunk 13 round ${r} territory\n` +
+          `read_file(file_path="${findingsFile}")`,
+      );
+      const id = `aud-skip-${r}`;
+      const base = {
+        agentId: id,
+        agentName: 'general-purpose',
+        sessionId: 'S1',
+      };
+      writeFileSync(
+        join(dir, 'subagents', 'S1', `agent-${id}.jsonl`),
+        [
+          JSON.stringify({
+            ...base,
+            type: 'user',
+            message: { role: 'user', parts: [{ text: built }] },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'read_file',
+                    args: { file_path: diff, offset: 0, limit: 100 },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'tool_result',
+            message: {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: 'read_file',
+                    response: { output: 'diff bytes' },
+                  },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            ...base,
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: DRY }] },
+          }),
+        ].join('\n') + '\n',
+      );
+    }
+
+    const r3 = schedule(3, [13]);
+    // The receipts do not classify, both rounds read `unknown`, and the
+    // chunk stays hot.
+    expect(r3.due).toEqual([13]);
   });
 
   it('quoting a WHOLE entry from the findings FILE is not a yield (post-#8597 shape)', () => {

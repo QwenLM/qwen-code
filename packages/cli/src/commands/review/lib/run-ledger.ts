@@ -217,11 +217,14 @@ export function appendRunSession(
     const entries = readSessions(planPath);
     if (entries.some((e) => e.sessionId === id)) return;
     const mtime = planMtimeMs(planPath);
-    entries.push({
-      sessionId: id,
-      atMs: nowMs,
-      ...(mtime === null ? {} : { planMtimeMs: mtime }),
-    });
+    // No plan mtime, no entry. `readSessions` hard-requires the field — an
+    // entry that cannot say which plan it saw is dropped on every read, and
+    // the next append rewrites the file from the filtered list, so a
+    // field-less entry is not a degraded record but a GUARANTEED-dead write
+    // that silently loses the id. Refusing up front is honest and identical
+    // in effect, minus the false success.
+    if (mtime === null) return;
+    entries.push({ sessionId: id, atMs: nowMs, planMtimeMs: mtime });
     const dir = promptRecordDir(planPath);
     mkdirSync(dir, { recursive: true });
     atomicWriteFileSync(runSessionsPath(planPath), JSON.stringify(entries), {

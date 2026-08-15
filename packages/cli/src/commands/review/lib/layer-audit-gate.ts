@@ -61,6 +61,7 @@ import {
   readRecordedPrompts,
   wasDeliveredVerbatim,
   briefPath,
+  runEpochMs,
 } from './prompt-record.js';
 import {
   repositoryContextOf,
@@ -112,13 +113,27 @@ function readReverseAuditReturns(
     // and opened the brief it points at. Territory alone let a compliant
     // sibling satisfy the floor while a hand-written auditor supplied the
     // receipt — the launch is exactly what the built record proves.
-    const built = readRecordedPrompts(planPath);
+    // Fenced: this reads the records as HISTORY, pairing them against the
+    // run's transcripts, and `readRecordedPrompts` documents the fence as
+    // mandatory for exactly that shape — without it a dead attempt's records
+    // survive beside the stable plan path, and an orchestrator that hand
+    // launches a stale record's prompt verbatim gets `corroborated`
+    // non-empty on a run whose builder never emitted an auditor. The failure
+    // direction of a dropped corroboration is withhold, never release.
+    const built = readRecordedPrompts(planPath, runEpochMs(planPath));
     const delivered = (t: (typeof auditors)[number]): boolean => {
       for (const [key, prompt] of built) {
         if (prompt.trim() === '') continue;
         if (!wasDeliveredVerbatim(t.launchPrompt, prompt)) continue;
         const needle = JSON.stringify(briefPath(planPath, key));
-        if (t.successfulCallArgs.some((a) => a.includes(needle))) return true;
+        // READ, not named: `successfulCallArgs` covers every successful
+        // tool, so a grep or listing whose args merely CONTAIN the brief
+        // path cleared this — an auditor that never opened its instructions
+        // supplied a receipt. Only a successful `read_file` of the exact
+        // brief is opening it.
+        if (t.successfulReadFileArgs.some((a) => a.includes(needle))) {
+          return true;
+        }
       }
       return false;
     };
