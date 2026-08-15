@@ -81,16 +81,6 @@ export {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   findPlanModeEntryBatchBoundaryIndex,
 } from './core/plan-mode-entry-policy.js';
-/** @internal */
-export {
-  didToolCallProduceWork,
-  SUPPRESSED_SIBLING_SKIP_PREFIX,
-  operationCancelledErrorMessage,
-  OPERATION_CANCELLED_PREFIX,
-  PERMISSION_DECLINED_MESSAGE_PREFIX,
-  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-  TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE,
-} from './core/tool-result-markers.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/inlineMediaLimit.js';
@@ -414,6 +404,10 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Production code: config.getMemoryManager().method(...)
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
+export type {
+  CompletedToolCallOutcome,
+  ExperienceSignals,
+} from './memory/experience-signals.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)

@@ -72,7 +72,6 @@ import {
   finalizeToolResponses,
   endInteractionSpan,
   getActiveInteractionSpan,
-  didToolCallProduceWork,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -4182,18 +4181,6 @@ export const useGeminiStream = (
           },
         );
 
-      // The dedup drop path and the main loop must classify completed calls
-      // identically — pre-PR these sites drifted apart, re-introducing the
-      // asymmetric counting this projection exists to prevent.
-      const toolCallProducedWork = (
-        tc: TrackedCompletedToolCall | TrackedCancelledToolCall,
-      ) =>
-        didToolCallProduceWork({
-          status: tc.status,
-          executionStatus: tc.response?.executionStatus,
-          responseParts: tc.response?.responseParts,
-        });
-
       // History-based dedup MUST run before the active-stream early-return.
       // If a synthetic `functionResponse` for this callId is already in
       // chat.history (planted on session-load by
@@ -4231,16 +4218,18 @@ export const useGeminiStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
-        // Dropped wire results still count when local side effects landed;
-        // use the same client-tool and never-ran filters as the main loop.
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
-          if (!toolCallProducedWork(tc)) {
-            continue;
-          }
           geminiClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
+            {
+              callId: tc.request.callId,
+              status: tc.status,
+              executionStatus: tc.response?.executionStatus,
+              errorType: tc.response?.errorType,
+              responseParts: tc.response?.responseParts,
+            },
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
@@ -4645,13 +4634,16 @@ export const useGeminiStream = (
       }
 
       for (const toolCall of geminiTools) {
-        // Keep the skill-review window limited to calls that actually ran.
-        if (!toolCallProducedWork(toolCall)) {
-          continue;
-        }
         geminiClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
+          {
+            callId: toolCall.request.callId,
+            status: toolCall.status,
+            executionStatus: toolCall.response?.executionStatus,
+            errorType: toolCall.response?.errorType,
+            responseParts: toolCall.response?.responseParts,
+          },
         );
       }
 

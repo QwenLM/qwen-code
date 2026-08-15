@@ -8,7 +8,6 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from '../tools/tools.js';
 import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
-import { getToolResultMarkerPrefix } from '../core/tool-result-markers.js';
 import { createDebugLogger } from './debugLogger.js';
 import {
   observeToolResultBoundary,
@@ -143,21 +142,12 @@ function collectTextSlots(
         }
       }
       if (typeof error === 'string') {
-        const protectedPrefix = excludeBudgetExemptOutput
-          ? getToolResultMarkerPrefix(error)
-          : undefined;
-        const budgetedError = protectedPrefix
-          ? error.slice(protectedPrefix.length)
-          : error;
-        if (budgetedError.length > 0) {
-          slots.push({
-            entryIndex,
-            partIndex,
-            field: 'error',
-            text: budgetedError,
-            ...(protectedPrefix ? { protectedPrefix } : {}),
-          });
-        }
+        slots.push({
+          entryIndex,
+          partIndex,
+          field: 'error',
+          text: error,
+        });
       }
     }
   }
@@ -223,6 +213,7 @@ function fitText(
   persistedOutputFiles: string[] | undefined,
 ): string {
   if (text.length <= maxChars) return text;
+  if (maxChars <= 0) return '';
 
   const header =
     persistedOutputFiles && persistedOutputFiles.length > 0
@@ -232,13 +223,6 @@ function fitText(
             .map((file) => `- ${file}`)
             .join('\n')}`
       : 'Tool output truncated.';
-  // A zero allocation must still surface the persisted-artifact pointer —
-  // returning '' would orphan the file the finalizer just persisted.
-  if (maxChars <= 0) {
-    return persistedOutputFiles && persistedOutputFiles.length > 0
-      ? header
-      : '';
-  }
   if (header.length >= maxChars) {
     return sliceStartWithoutBrokenSurrogate(header, maxChars);
   }
@@ -318,30 +302,23 @@ export function toolResponseTextLength(parts: Part[]): number {
   ).reduce((total, slot) => total + slot.text.length, 0);
 }
 
-function allocateSlots(slots: TextSlot[], budget: number): number[] {
-  const reserved = slots.reduce(
-    (sum, slot) => sum + (slot.protectedPrefix?.length ?? 0),
-    0,
-  );
-  return allocateTextBudget(
-    slots.map((slot) => slot.text.length),
-    Math.max(0, budget - reserved),
-  );
-}
-
 export function enforceFunctionResponseBudget(
   entries: ToolResponseBudgetEntry[],
   budget: number,
 ): ToolResponseBudgetEntry[] {
   if (!Number.isFinite(budget) || budget <= 0) return entries;
   const slots = collectTextSlots(entries, false);
-  const total = slots.reduce(
-    (sum, slot) => sum + slot.text.length + (slot.protectedPrefix?.length ?? 0),
-    0,
-  );
+  const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
 
-  return replaceTextSlots(entries, slots, allocateSlots(slots, budget));
+  return replaceTextSlots(
+    entries,
+    slots,
+    allocateTextBudget(
+      slots.map((slot) => slot.text.length),
+      budget,
+    ),
+  );
 }
 
 export async function finalizeToolResponses(
@@ -394,10 +371,7 @@ export async function finalizeToolResponses(
   }
 
   const slots = collectTextSlots(entries);
-  const total = slots.reduce(
-    (sum, slot) => sum + slot.text.length + (slot.protectedPrefix?.length ?? 0),
-    0,
-  );
+  const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
     observeUnchangedEntries();
     if (shouldAssociateBoundary)
@@ -405,7 +379,10 @@ export async function finalizeToolResponses(
     return entries;
   }
 
-  const allocations = allocateSlots(slots, budget);
+  const allocations = allocateTextBudget(
+    slots.map((slot) => slot.text.length),
+    budget,
+  );
   const entriesToPersist = new Set<number>();
   for (let index = 0; index < slots.length; index++) {
     if (slots[index].text.length > allocations[index]) {
@@ -501,7 +478,7 @@ export async function finalizeToolResponses(
     associateFinalizerEntries(finalized, new Set(finalized.keys()));
   }
   const finalizedTotal = collectTextSlots(finalized).reduce(
-    (sum, slot) => sum + slot.text.length + (slot.protectedPrefix?.length ?? 0),
+    (sum, slot) => sum + slot.text.length,
     0,
   );
   debugLogger.info(

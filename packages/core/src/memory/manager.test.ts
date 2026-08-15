@@ -314,6 +314,34 @@ describe('MemoryManager', () => {
       },
     );
 
+    it('preserves the legacy count-only threshold when signals are omitted', async () => {
+      const below = new MemoryManager().scheduleSkillReview({
+        projectRoot: '/below',
+        sessionId: 'sess',
+        history: [],
+        toolCallCount: 4,
+        skillsModified: false,
+        threshold: 5,
+        config: makeMockConfig(),
+      });
+      expect([below.status, below.skippedReason]).toEqual([
+        'skipped',
+        'below_threshold',
+      ]);
+
+      const atThreshold = new MemoryManager().scheduleSkillReview({
+        projectRoot: '/at-threshold',
+        sessionId: 'sess',
+        history: [],
+        toolCallCount: 5,
+        skillsModified: false,
+        threshold: 5,
+        config: makeMockConfig(),
+      });
+      expect(atThreshold.status).toBe('scheduled');
+      await atThreshold.promise;
+    });
+
     it('skips when skills were modified in session', () => {
       const mgr = new MemoryManager();
       const result = mgr.scheduleSkillReview({

@@ -56,8 +56,6 @@ import {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   ToolErrorType,
   finalizeToolResponses,
-  didToolCallProduceWork,
-  SUPPRESSED_SIBLING_SKIP_PREFIX,
   clampInlineMediaPart,
   formatFullTurnVisionNotice,
   formatVisionBridgeNotice,
@@ -141,7 +139,8 @@ function isHeadlessLoopSentinel(prompt: string): boolean {
  * Shared between the main-turn and drain-turn synthesis sites so a
  * future wording change can't desync them.
  */
-const SUPPRESSED_OUTPUT_SUCCESS = SUPPRESSED_SIBLING_SKIP_PREFIX;
+const SUPPRESSED_OUTPUT_SUCCESS =
+  "Skipped: this turn's structured_output contract took precedence as the terminal output.";
 const SUPPRESSED_OUTPUT_RETRY = `${SUPPRESSED_OUTPUT_SUCCESS} Re-issue this call in a separate turn if needed.`;
 function suppressedOutputBody(structuredCaptured: boolean): string {
   return structuredCaptured
@@ -1969,21 +1968,21 @@ export async function runNonInteractive(
           adapter.emitToolResult(requestInfo, toolResponse);
           responseByRequest.set(requestInfo, toolResponse);
           terminateTurn ||= toolResponse.terminateTurn === true;
-          // Keep the skill-review window limited to calls that actually ran.
-          if (
-            didToolCallProduceWork({
-              status: statusByResponse.get(toolResponse),
-              executionStatus: toolResponse.executionStatus,
-              responseParts: toolResponse.responseParts,
-            })
-          ) {
-            config
-              .getGeminiClient()
-              .recordCompletedToolCall(
-                requestInfo.name,
-                requestInfo.args as Record<string, unknown>,
-              );
-          }
+          config
+            .getGeminiClient()
+            .recordCompletedToolCall(
+              requestInfo.name,
+              requestInfo.args as Record<string, unknown>,
+              {
+                callId: requestInfo.callId,
+                status:
+                  statusByResponse.get(toolResponse) ??
+                  (toolResponse.error ? 'error' : 'success'),
+                executionStatus: toolResponse.executionStatus,
+                errorType: toolResponse.errorType,
+                responseParts: toolResponse.responseParts,
+              },
+            );
 
           // Capture model override from skill tool results.
           // Use `in` so that undefined (from inherit/no-model skills)
@@ -2177,7 +2176,7 @@ export async function runNonInteractive(
                 functionResponse: {
                   id: call.callId,
                   name: call.name,
-                  response: { error: skippedOutput },
+                  response: { output: skippedOutput },
                 },
               },
             ];

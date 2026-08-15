@@ -44,7 +44,6 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
-import { DUPLICATE_PROVIDER_TOOL_CALL_PREFIX } from './tool-result-markers.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -222,7 +221,7 @@ function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
 }
 
 function duplicateProviderToolCallMessage(providerCallId: string): string {
-  return `${DUPLICATE_PROVIDER_TOOL_CALL_PREFIX}${providerCallId}" was already handled. The duplicate tool call was ignored and not executed again.`;
+  return `Duplicate provider tool call id "${providerCallId}" was already handled. The duplicate tool call was ignored and not executed again.`;
 }
 
 export function createDuplicateProviderToolCallResponse(

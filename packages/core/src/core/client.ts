@@ -82,9 +82,13 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import {
-  accumulateExperienceSignals,
+  accumulateExperienceOutcome,
+  classifyToolExperienceOutcome,
+  didToolCallProduceWork,
   isSubstantiveToolCall,
+  type CompletedToolCallOutcome,
   type ExperienceSignalAccumulator,
+  type ToolExperienceOutcome,
 } from '../memory/experience-signals.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -363,20 +367,10 @@ export class GeminiClient {
     hasSubstantiveWork: false,
     failedToolNames: new Set(),
   };
-  /** Window retained while a dispatched skill review is in flight, so its
-   * signals can be re-armed when that review settles without running
-   * (memory-pressure skip or failure). Keyed by taskId so a late-settling
-   * review cannot null or re-arm a later review's retained window. */
-  private pendingSkillReviewWindow: {
-    taskId: string;
-    toolCallCount: number;
-    userSteer: boolean;
-    signals: ExperienceSignalAccumulator;
-  } | null = null;
-  /** Consecutive skill reviews that settled skipped/failed without running.
-   * Caps re-arming so a deterministically failing review is not re-dispatched
-   * on every turn end. Cleared on completion and on session-level resets. */
-  private skillReviewFailureStreak = 0;
+  private readonly pendingExperienceOutcomes = new Map<
+    string,
+    { toolName: string; outcome: ToolExperienceOutcome }
+  >();
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
@@ -489,8 +483,7 @@ export class GeminiClient {
     // Session switch (/resume, /branch) reuses this client: the review
     // window belongs to the old session and must not leak into the new one.
     this.resetSkillReviewWindow();
-    this.pendingSkillReviewWindow = null;
-    this.skillReviewFailureStreak = 0;
+    this.pendingExperienceOutcomes.clear();
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -1094,11 +1087,8 @@ export class GeminiClient {
 
     this.initializedSessionId = undefined;
     // /clear starts a fresh session; the skill-review window must not leak.
-    // Drop any retained in-flight window too: it belongs to the cleared
-    // session, so it must not be re-armed into the new one.
     this.resetSkillReviewWindow();
-    this.pendingSkillReviewWindow = null;
-    this.skillReviewFailureStreak = 0;
+    this.pendingExperienceOutcomes.clear();
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
@@ -2114,62 +2104,16 @@ export class GeminiClient {
           experienceSignals,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
-        // Log the gate's deciding state: a dispatched window is destructively
-        // reset below (and on /clear), so without this the trigger decision is
-        // unrecoverable after the fact.
-        debugLogger.debug(
-          `[autoSkill] skill review gate: status=${skillReviewResult.status}` +
-            (skillReviewResult.skippedReason
-              ? `, reason=${skillReviewResult.skippedReason}`
-              : '') +
-            `, toolCallCount=${this.toolCallCount}` +
-            `, signals=${JSON.stringify(experienceSignals)}`,
-        );
         if (skillReviewResult.status === 'scheduled') {
-          // Retain the dispatched window until the review settles so its
-          // signals can be re-armed if the review never runs.
-          this.pendingSkillReviewWindow = {
-            taskId: skillReviewResult.taskId ?? '',
-            toolCallCount: this.toolCallCount,
-            userSteer: this.userSteeredSinceReview,
-            signals: this.experienceSignalsSinceReview,
-          };
-          // Reset the review window when a review is dispatched so the next
-          // review requires a fresh window of tool calls and signals.
           this.resetSkillReviewWindow();
           if (skillReviewResult.promise) {
             this.pendingMemoryTaskPromises.push(
               skillReviewResult.promise
                 .then((record) => {
-                  // A late-settling review must not touch a later review's
-                  // retained window; the slot is keyed to the dispatched task.
-                  if (
-                    this.pendingSkillReviewWindow?.taskId ===
-                    skillReviewResult.taskId
-                  ) {
-                    if (record.status === 'completed') {
-                      this.pendingSkillReviewWindow = null;
-                      this.skillReviewFailureStreak = 0;
-                    } else {
-                      // Terminal 'skipped' (e.g. memory pressure): the review
-                      // never ran, so the window's signals must not be lost.
-                      this.skillReviewFailureStreak += 1;
-                      this.reArmSkillReviewWindow();
-                    }
-                  }
                   const touched = record.metadata?.['touchedSkillFiles'];
                   return Array.isArray(touched) ? touched.length : 0;
                 })
                 .catch((error: unknown) => {
-                  // Terminal 'failed': the review never ran; re-arm the
-                  // retained window so its signals can re-trigger.
-                  if (
-                    this.pendingSkillReviewWindow?.taskId ===
-                    skillReviewResult.taskId
-                  ) {
-                    this.skillReviewFailureStreak += 1;
-                    this.reArmSkillReviewWindow();
-                  }
                   debugLogger.warn(
                     'Failed to run managed skill review.',
                     error,
@@ -2178,6 +2122,8 @@ export class GeminiClient {
                 }),
             );
           }
+        } else if (skillReviewResult.skippedReason === 'already_running') {
+          this.resetSkillReviewWindow();
         }
         // Always reset the skills-modified flag after the scheduleSkillReview
         // check, regardless of whether a review was dispatched. This prevents
@@ -2269,51 +2215,15 @@ export class GeminiClient {
     };
   }
 
-  private reArmSkillReviewWindow(): void {
-    const pending = this.pendingSkillReviewWindow;
-    this.pendingSkillReviewWindow = null;
-    if (!pending) {
-      return;
-    }
-    // Two consecutive reviews settled without running: the failure is
-    // likely deterministic (e.g. timeouts on very large history), so drop
-    // the window instead of re-dispatching on every turn end. Later tool
-    // activity rebuilds a fresh window.
-    if (this.skillReviewFailureStreak >= 2) {
-      this.skillReviewFailureStreak = 0;
-      return;
-    }
-    // The dispatched review settled without running (skipped/failed): merge
-    // the retained window back so its signals can re-trigger a review
-    // instead of being lost. Signals accumulated after dispatch are kept.
-    // Pending failures are NOT carried across the merge: the accumulator
-    // only tracks not-yet-succeeded failures, so a success that landed
-    // after dispatch cannot close a retained pre-dispatch failure —
-    // carrying it would let a stale failure latch a spurious retryArc.
-    this.toolCallCount += pending.toolCallCount;
-    this.userSteeredSinceReview ||= pending.userSteer;
-    const current = this.experienceSignalsSinceReview;
-    this.experienceSignalsSinceReview = {
-      retryArc: current.retryArc || pending.signals.retryArc,
-      hasSubstantiveWork:
-        current.hasSubstantiveWork || pending.signals.hasSubstantiveWork,
-      failedToolNames: new Set(current.failedToolNames),
-    };
-  }
-
   recordCompletedToolCall(
     toolName: string,
     args?: Record<string, unknown>,
+    outcome?: CompletedToolCallOutcome,
   ): void {
+    if (outcome && !didToolCallProduceWork(outcome)) {
+      return;
+    }
     this.rememberCompletedToolName(toolName);
-
-    // Known deviation: these backstop inputs advance at local tool
-    // completion, before the ToolResult submission is accepted into history
-    // (every other signal is acceptance-gated in
-    // recordAcceptedExperienceInput). A UserPromptSubmit hook that blocks
-    // the submission still counts here. Accepted: blocked ToolResult
-    // submissions are rare, and the count backstop only fails open (one
-    // skippable review), never loses data. A test pins this on purpose.
 
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
       const filePath = args['file_path'] ?? args['path'] ?? args['target_file'];
@@ -2328,6 +2238,43 @@ export class GeminiClient {
       this.experienceSignalsSinceReview.hasSubstantiveWork = true;
     }
     this.toolCallCount += 1;
+
+    if (outcome) {
+      const experienceOutcome = classifyToolExperienceOutcome(
+        toolName,
+        outcome,
+      );
+      if (experienceOutcome && outcome.callId) {
+        this.pendingExperienceOutcomes.set(outcome.callId, {
+          toolName,
+          outcome: experienceOutcome,
+        });
+        if (
+          this.chat?.getHistoryFunctionResponseIds().has(outcome.callId) ===
+          true
+        ) {
+          this.acceptCompletedToolCallOutcome(outcome.callId);
+        }
+      }
+    }
+  }
+
+  private acceptCompletedToolCallOutcome(callId: string): void {
+    const pending = this.pendingExperienceOutcomes.get(callId);
+    if (!pending) return;
+    this.pendingExperienceOutcomes.delete(callId);
+    this.experienceSignalsSinceReview = accumulateExperienceOutcome(
+      this.experienceSignalsSinceReview,
+      pending.toolName,
+      pending.outcome,
+    );
+  }
+
+  private acceptCompletedToolCallOutcomes(content: Content): void {
+    for (const part of content.parts ?? []) {
+      const callId = part.functionResponse?.id;
+      if (callId) this.acceptCompletedToolCallOutcome(callId);
+    }
   }
 
   private rememberCompletedToolName(toolName: string): void {
@@ -2663,38 +2610,14 @@ export class GeminiClient {
 
     const attachedSteerInput = options?.steerInput;
     const attachedSteerPushCount = currentPushCount();
-    let experienceInputRecorded = false;
     const recordAcceptedExperienceInput = () => {
-      if (experienceInputRecorded) return;
-      // A Retry whose strip popped a trailing user turn is re-submitting
-      // content whose original push landed — and was already recorded by the
-      // original send. Scanning it again would feed identical
-      // functionResponse parts to accumulateExperienceSignals a second time,
-      // where a leading ok part "closes" the pending failure the first scan
-      // left behind and latches a spurious retryArc.
-      if (
-        messageType === SendMessageType.Retry &&
-        strippedRetryEntries.length > 0
-      ) {
-        return;
-      }
       const content =
         messageType === SendMessageType.ToolResult ||
         messageType === SendMessageType.Retry
           ? createUserContent(request)
           : undefined;
-      if (
-        content &&
-        (messageType === SendMessageType.ToolResult ||
-          // A Retry can re-submit a ToolResult whose original submission was
-          // rejected before the history push; once this push lands, its
-          // functionResponse parts carry real tool outcomes.
-          content.parts?.some((part) => part.functionResponse))
-      ) {
-        this.experienceSignalsSinceReview = accumulateExperienceSignals(
-          [content],
-          this.experienceSignalsSinceReview,
-        );
+      if (content?.parts?.some((part) => part.functionResponse)) {
+        this.acceptCompletedToolCallOutcomes(content);
         // A steer attached to an accepted ToolResult submission counts as a
         // user steer too: the CLI's mid-tool-loop steer flow submits steers
         // under ToolResult, not SendMessageType.Steer.
@@ -2706,7 +2629,6 @@ export class GeminiClient {
       } else {
         return;
       }
-      experienceInputRecorded = true;
     };
 
     const restoreStrippedRetryEntries = () => {

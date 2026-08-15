@@ -2760,45 +2760,27 @@ describe('Gemini Client (client.ts)', () => {
       client['toolCallCount'] = 19;
       client['skillsModifiedInSession'] = true;
       client['userSteeredSinceReview'] = true;
-      client['skillReviewFailureStreak'] = 1;
       client['experienceSignalsSinceReview'] = {
         retryArc: true,
         hasSubstantiveWork: true,
         failedToolNames: new Set(['run_shell_command']),
       };
+      client['pendingExperienceOutcomes'].set('call-pre-clear', {
+        toolName: 'edit',
+        outcome: 'failure',
+      });
 
       await client.resetChat();
 
+      expect(client['pendingExperienceOutcomes'].size).toBe(0);
       expect(client['toolCallCount']).toBe(0);
       expect(client['skillsModifiedInSession']).toBe(false);
       expect(client['userSteeredSinceReview']).toBe(false);
-      expect(client['skillReviewFailureStreak']).toBe(0);
       expect(client['experienceSignalsSinceReview']).toEqual({
         retryArc: false,
         hasSubstantiveWork: false,
         failedToolNames: new Set(),
       });
-    });
-
-    it('drops a retained in-flight skill-review window so it cannot re-arm after /clear', async () => {
-      client['pendingSkillReviewWindow'] = {
-        taskId: 'task-pre-clear',
-        toolCallCount: 12,
-        userSteer: true,
-        signals: {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['run_shell_command']),
-        },
-      };
-
-      await client.resetChat();
-
-      expect(client['pendingSkillReviewWindow']).toBeNull();
-      // reArmSkillReviewWindow after the clear must be a no-op.
-      client['reArmSkillReviewWindow']();
-      expect(client['toolCallCount']).toBe(0);
-      expect(client['userSteeredSinceReview']).toBe(false);
     });
 
     it('clears revealedDeferred set so /clear gives a clean tool slate', async () => {
@@ -6630,9 +6612,7 @@ hello
       expect(capture.commitResponse).toHaveBeenCalledWith(false);
     });
 
-    it('starts Goal as a fresh invocation without assigning the session structured-output contract and counts its Hook-carrier steer', async () => {
-      let pushCount = 0;
-      client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+    it('starts Goal as a fresh invocation without assigning the session structured-output contract', async () => {
       const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
       const finishTurn = vi.fn().mockResolvedValue(undefined);
       const goalRuntime = {
@@ -6643,41 +6623,11 @@ hello
       } as unknown as GoalRuntime;
       mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(goalRuntime);
       vi.mocked(mockConfig.getJsonSchema).mockReturnValue({ type: 'object' });
-      const messageBus = {
-        request: vi
-          .fn()
-          .mockResolvedValueOnce({
-            output: { decision: 'block', reason: 'Keep working' },
-            stopHookCount: 1,
-          })
-          .mockResolvedValue({ output: undefined }),
-        response: vi.fn(),
-      };
-      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
-      vi.mocked(mockConfig.getMessageBus).mockReturnValue(
-        messageBus as unknown as ReturnType<Config['getMessageBus']>,
-      );
-      vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
-        (event: string) => event === 'Stop',
-      );
-      vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(4);
-      mockTurnRunFn.mockImplementation(() => {
-        pushCount += 1;
-        return (async function* () {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
           yield { type: GeminiEventType.Content, value: 'goal progress' };
-        })();
-      });
-      const accept = vi.fn();
-      const restore = vi.fn();
-      const getSteerInput = vi
-        .fn<() => Promise<SteerInput | undefined>>()
-        .mockResolvedValueOnce(undefined)
-        .mockResolvedValueOnce({
-          parts: [{ text: 'steer goal continuation' }],
-          accept,
-          restore,
-        })
-        .mockResolvedValue(undefined);
+        })(),
+      );
 
       await fromAsync(
         client.sendMessageStream(
@@ -6688,7 +6638,6 @@ hello
             type: SendMessageType.Goal,
             goalPermit: permit,
             goalTurnKey: 'goal-runtime:turn-1',
-            getSteerInput,
           },
         ),
       );
@@ -6706,13 +6655,6 @@ hello
         'ok',
         { promptId: 'goal-prompt' },
       );
-      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
-      expect(accept).toHaveBeenCalledOnce();
-      expect(restore).not.toHaveBeenCalled();
-      // The steer text must actually reach the continuation turn's request —
-      // accept() alone does not prove delivery.
-      expect(getLastTurnRequestText()).toContain('steer goal continuation');
-      expect(client['userSteeredSinceReview']).toBe(true);
       expect(finishTurn).toHaveBeenCalledWith(permit);
     });
 
@@ -8732,45 +8674,10 @@ hello
     });
 
     describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
-      let mockStreamFn: () => AsyncGenerator<{ type: string; value: string }>;
-      let mockChat: Partial<GeminiChat>;
-
-      function deferReview(taskId = 'task-1') {
-        let resolve!: (value: unknown) => void;
-        let reject!: (reason?: unknown) => void;
-        const promise = new Promise<unknown>((nextResolve, nextReject) => {
-          resolve = nextResolve;
-          reject = nextReject;
-        });
-        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
-          status: 'scheduled',
-          taskId,
-          promise,
-        });
-        return { promise, resolve, reject };
-      }
-
-      async function dispatchReview(promptId: string) {
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'trigger review' }],
-            new AbortController().signal,
-            promptId,
-          ),
-        );
-      }
-
-      async function settleReview(
-        promise: Promise<unknown>,
-        settle: () => void,
-      ) {
-        settle();
-        await promise.catch(() => {});
-        await Promise.resolve();
-      }
+      let pushCount: number;
 
       function acceptTurns() {
-        let pushCount = 0;
+        pushCount = 0;
         client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
@@ -8780,33 +8687,84 @@ hello
         );
       }
 
+      function recordOutcome(
+        callId: string,
+        toolName: string,
+        status: 'success' | 'error' | 'cancelled',
+        executionStatus: 'not_started' | 'success' | 'error' | 'cancelled',
+        response: Record<string, unknown>,
+      ) {
+        client.recordCompletedToolCall(toolName, undefined, {
+          callId,
+          status,
+          executionStatus,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: toolName,
+                response,
+              },
+            },
+          ],
+        });
+      }
+
+      async function sendToolResult(
+        callId: string,
+        toolName: string,
+        response: Record<string, unknown>,
+        type = SendMessageType.ToolResult,
+      ) {
+        await fromAsync(
+          client.sendMessageStream(
+            [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: toolName,
+                  response,
+                },
+              },
+            ],
+            new AbortController().signal,
+            'prompt-' + callId + '-' + type,
+            { type },
+          ),
+        );
+      }
+
       beforeEach(() => {
         vi.spyOn(client['config'], 'getAutoSkillEnabled').mockReturnValue(true);
-        mockStreamFn = async function* () {
-          yield { type: GeminiEventType.Content, value: 'Done' };
-        };
-        mockTurnRunFn.mockReturnValue(mockStreamFn());
-        mockChat = {
+        client['chat'] = {
           addHistory: vi.fn(),
+          getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
           getHistory: vi.fn().mockReturnValue([
             { role: 'user', parts: [{ text: 'hello' }] },
-            { role: 'model', parts: [{ text: 'Done' }] },
+            { role: 'model', parts: [{ text: 'done' }] },
           ]),
-        };
-        client['chat'] = mockChat as GeminiChat;
-      });
-
-      it('should call scheduleSkillReview with correct params on UserQuery', async () => {
+        } as unknown as GeminiChat;
         mockMemoryManager.scheduleSkillReview.mockReturnValue({
           status: 'skipped',
           skippedReason: 'below_threshold',
         });
+        acceptTurns();
+      });
+
+      it('passes the complete gate state to MemoryManager', async () => {
+        client['toolCallCount'] = 7;
+        client['userSteeredSinceReview'] = true;
+        client['experienceSignalsSinceReview'] = {
+          retryArc: true,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(),
+        };
 
         await fromAsync(
           client.sendMessageStream(
-            [{ text: 'a query' }],
+            [{ text: 'review this session' }],
             new AbortController().signal,
-            'prompt-id-autoskill-query',
+            'prompt-autoskill-gate',
           ),
         );
 
@@ -8814,647 +8772,82 @@ hello
           expect.objectContaining({
             projectRoot: '/test/project/root',
             sessionId: 'test-session-id',
-            config: mockConfig,
-          }),
-        );
-        expect(
-          mockMemoryManager.scheduleSkillReview.mock.calls[0][0],
-        ).not.toHaveProperty('maxTurns');
-      });
-
-      it('should reset a dispatched window and preserve new work after completion', async () => {
-        const review = deferReview();
-
-        client['toolCallCount'] = 7;
-        client['userSteeredSinceReview'] = true;
-        client['skillReviewFailureStreak'] = 1;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['read_file']),
-        };
-
-        await dispatchReview('prompt-id-autoskill-completed');
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
-          expect.objectContaining({
             toolCallCount: 7,
             experienceSignals: {
               retryArc: true,
               userSteer: true,
               hasSubstantiveWork: true,
             },
-          }),
-        );
-        expect(client['toolCallCount']).toBe(0);
-        expect(client['userSteeredSinceReview']).toBe(false);
-        expect(client['experienceSignalsSinceReview']).toEqual({
-          retryArc: false,
-          hasSubstantiveWork: false,
-          failedToolNames: new Set(),
-        });
-        expect(client['pendingMemoryTaskPromises']).not.toHaveLength(0);
-
-        // Work accumulates while the review is in flight; a completing
-        // review must preserve it (only the retained window is dropped).
-        client['toolCallCount'] = 4;
-        client['userSteeredSinceReview'] = true;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['write_file']),
-        };
-
-        await settleReview(review.promise, () => {
-          review.resolve({ status: 'completed', metadata: {} });
-        });
-
-        expect(client['toolCallCount']).toBe(4);
-        expect(client['userSteeredSinceReview']).toBe(true);
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-        expect(client['pendingSkillReviewWindow']).toBeNull();
-        expect(client['skillReviewFailureStreak']).toBe(0);
-      });
-
-      it('should re-arm the retained window when the dispatched review is skipped without running', async () => {
-        const review = deferReview();
-
-        client['toolCallCount'] = 12;
-        client['userSteeredSinceReview'] = false;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['run_shell_command']),
-        };
-
-        await dispatchReview('prompt-id-autoskill-pressure-skip');
-        // Dispatched: window reset, snapshot retained.
-        expect(client['toolCallCount']).toBe(0);
-
-        // New work accumulates while the review is in flight, including
-        // current-side signals the re-arm must merge, not overwrite.
-        client['toolCallCount'] = 3;
-        client['userSteeredSinceReview'] = true;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: false,
-          hasSubstantiveWork: false,
-          failedToolNames: new Set(['edit']),
-        };
-
-        // The review settles as 'skipped' (e.g. memory pressure) without
-        // running: the retained window is re-armed on top of new work.
-        await settleReview(review.promise, () => {
-          review.resolve({ status: 'skipped', metadata: {} });
-        });
-
-        expect(client['toolCallCount']).toBe(15);
-        // userSteer comes from the current side (pending side was false).
-        expect(client['userSteeredSinceReview']).toBe(true);
-        // retryArc comes from the pending side (current side was false).
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
-          true,
-        );
-        // Only current-side failures survive the merge: the retained
-        // window's pending failures are NOT carried across (a post-dispatch
-        // success cannot close them, so carrying them would latch a
-        // spurious retryArc).
-        expect(
-          client['experienceSignalsSinceReview'].failedToolNames.has(
-            'run_shell_command',
-          ),
-        ).toBe(false);
-        expect(
-          client['experienceSignalsSinceReview'].failedToolNames.has('edit'),
-        ).toBe(true);
-        expect(client['pendingSkillReviewWindow']).toBeNull();
-      });
-
-      it('should re-arm the retained window when the dispatched review fails', async () => {
-        const review = deferReview();
-
-        client['toolCallCount'] = 9;
-        client['userSteeredSinceReview'] = true;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: false,
-          hasSubstantiveWork: false,
-          failedToolNames: new Set(['edit']),
-        };
-
-        await dispatchReview('prompt-id-autoskill-failed');
-        expect(client['toolCallCount']).toBe(0);
-
-        // Signals accumulated after dispatch (current side) must survive
-        // the re-arm even though the retained window's own signals are
-        // false — the merge must not overwrite them with the pending side.
-        client['userSteeredSinceReview'] = false;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['write_file']),
-        };
-
-        await settleReview(review.promise, () => {
-          review.reject(new Error('planner timeout'));
-        });
-
-        expect(client['toolCallCount']).toBe(9);
-        // userSteer survives from the pending side (current side was false).
-        expect(client['userSteeredSinceReview']).toBe(true);
-        // retryArc/hasSubstantiveWork survive from the current side (pending
-        // side was false).
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
-          true,
-        );
-        // Only current-side failures survive the merge.
-        expect(
-          client['experienceSignalsSinceReview'].failedToolNames.has(
-            'write_file',
-          ),
-        ).toBe(true);
-        expect(
-          client['experienceSignalsSinceReview'].failedToolNames.has('edit'),
-        ).toBe(false);
-        expect(client['pendingSkillReviewWindow']).toBeNull();
-      });
-
-      it('should stop re-arming after two consecutive failed settlements', async () => {
-        const firstReview = deferReview('task-1');
-
-        client['toolCallCount'] = 12;
-        await dispatchReview('prompt-id-autoskill-fail-streak-1');
-        await settleReview(firstReview.promise, () => {
-          firstReview.reject(new Error('deterministic failure'));
-        });
-        // First failure re-arms: the window is restored for one retry.
-        expect(client['toolCallCount']).toBe(12);
-
-        const secondReview = deferReview('task-2');
-        await dispatchReview('prompt-id-autoskill-fail-streak-2');
-        // Work accumulated while the second review was in flight must
-        // survive the destructive drop (only the retained window is lost).
-        client['toolCallCount'] = 5;
-        client['userSteeredSinceReview'] = true;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['edit']),
-        };
-        await settleReview(secondReview.promise, () => {
-          secondReview.reject(new Error('deterministic failure again'));
-        });
-        // Second consecutive failure drops the window instead of re-arming
-        // it, so a deterministically failing review is not re-dispatched on
-        // every turn end — but the in-flight work survives the drop.
-        expect(client['toolCallCount']).toBe(5);
-        expect(client['userSteeredSinceReview']).toBe(true);
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-        expect(client['pendingSkillReviewWindow']).toBeNull();
-        // The streak clears: the next window starts fresh.
-        expect(client['skillReviewFailureStreak']).toBe(0);
-      });
-
-      it('should not let a late-settling review touch a later review window', async () => {
-        const reviewA = deferReview('task-a');
-
-        await dispatchReview('prompt-id-autoskill-late-a');
-        expect(client['pendingSkillReviewWindow']?.taskId).toBe('task-a');
-
-        // Review B dispatches while A is still settling (the manager drops
-        // its in-flight entry before promise reactions run).
-        const reviewB = deferReview('task-b');
-        await dispatchReview('prompt-id-autoskill-late-b');
-        const windowB = client['pendingSkillReviewWindow'];
-        expect(windowB?.taskId).toBe('task-b');
-
-        // A settles late as skipped: it must not re-arm or null B's window.
-        await settleReview(reviewA.promise, () => {
-          reviewA.resolve({ status: 'skipped', metadata: {} });
-        });
-        expect(client['pendingSkillReviewWindow']).toBe(windowB);
-        expect(client['toolCallCount']).toBe(0);
-
-        reviewB.resolve({ status: 'completed', metadata: {} });
-        await reviewB.promise;
-      });
-
-      it('should not let a replaced review that rejects or settles completed touch a later window', async () => {
-        const reviewA = deferReview('task-a2');
-        await dispatchReview('prompt-id-autoskill-stale-reject-a');
-        const reviewB = deferReview('task-b2');
-        await dispatchReview('prompt-id-autoskill-stale-reject-b');
-        const windowB = client['pendingSkillReviewWindow'];
-        expect(windowB?.taskId).toBe('task-b2');
-
-        // In-flight work under B: a stale streak bump or re-arm from A
-        // must be detectable against non-empty state.
-        client['toolCallCount'] = 4;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['edit']),
-        };
-
-        // A rejects late while B occupies the slot: B's window, streak and
-        // accumulated work must be untouched.
-        await settleReview(reviewA.promise, () => {
-          reviewA.reject(new Error('stale review failed late'));
-        });
-        expect(client['pendingSkillReviewWindow']).toBe(windowB);
-        expect(client['skillReviewFailureStreak']).toBe(0);
-        expect(client['toolCallCount']).toBe(4);
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-
-        // A late 'completed' from a replaced review must not null the
-        // occupying window either.
-        const reviewC = deferReview('task-c2');
-        await dispatchReview('prompt-id-autoskill-stale-completed-c');
-        const windowC = client['pendingSkillReviewWindow'];
-        expect(windowC?.taskId).toBe('task-c2');
-        await settleReview(reviewB.promise, () => {
-          reviewB.resolve({ status: 'completed', metadata: {} });
-        });
-        expect(client['pendingSkillReviewWindow']).toBe(windowC);
-        expect(client['skillReviewFailureStreak']).toBe(0);
-
-        reviewC.resolve({ status: 'completed', metadata: {} });
-        await reviewC.promise;
-      });
-
-      it('should always reset skillsModifiedInSession after scheduleSkillReview check', async () => {
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'skills_modified_in_session',
-        });
-
-        client['skillsModifiedInSession'] = true;
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'wrote a skill file' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-modified',
-          ),
-        );
-
-        expect(client['skillsModifiedInSession']).toBe(false);
-      });
-
-      it('should pass confirmBeforePersist from getAutoSkillConfirmEnabled', async () => {
-        vi.spyOn(
-          client['config'],
-          'getAutoSkillConfirmEnabled',
-        ).mockReturnValue(true);
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'a query' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-confirm',
-          ),
-        );
-
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
-          expect.objectContaining({ confirmBeforePersist: true }),
-        );
-      });
-
-      it('should accumulate experience signals from tool results', async () => {
-        acceptTurns();
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-
-        client.recordCompletedToolCall('run_shell_command');
-        await fromAsync(
-          client.sendMessageStream(
-            [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'run_shell_command',
-                  response: { error: 'test failed' },
-                },
-              },
-            ],
-            new AbortController().signal,
-            'prompt-id-autoskill-signal-failure',
-            { type: SendMessageType.ToolResult },
-          ),
-        );
-        client.recordCompletedToolCall('run_shell_command');
-        await fromAsync(
-          client.sendMessageStream(
-            [
-              {
-                functionResponse: {
-                  id: 'c2',
-                  name: 'run_shell_command',
-                  response: {
-                    output: 'Command: npm test\nExit Code: 0\nSignal: (none)',
-                  },
-                },
-              },
-            ],
-            new AbortController().signal,
-            'prompt-id-autoskill-signal-success',
-            { type: SendMessageType.ToolResult },
-          ),
-        );
-
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
-          expect.objectContaining({
-            experienceSignals: {
-              retryArc: true,
-              userSteer: false,
-              hasSubstantiveWork: true,
-            },
+            confirmBeforePersist: true,
           }),
         );
       });
 
-      it('should count Steer turns into the userSteer signal', async () => {
-        acceptTurns();
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'no, do it differently' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-steer',
-            { type: SendMessageType.Steer },
-          ),
-        );
-        expect(client['userSteeredSinceReview']).toBe(true);
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'continue' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-after-steer',
-          ),
-        );
-
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
-          expect.objectContaining({
-            experienceSignals: expect.objectContaining({ userSteer: true }),
-          }),
-        );
-      });
-
-      it('should count a Steer turn that returns a tool call', async () => {
-        let pushCount = 0;
-        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
-        mockTurnRunFn.mockImplementation(async function* (this: {
-          pendingToolCalls: unknown[];
-        }) {
-          pushCount += 1;
-          const call = {
-            callId: 'steer-tool-call',
-            name: 'read_file',
-            args: { file_path: 'a.ts' },
+      it.each([
+        ['scheduled', { status: 'scheduled', taskId: 'task-1' }],
+        [
+          'already running',
+          {
+            status: 'skipped',
+            skippedReason: 'already_running',
+            taskId: 'task-1',
+          },
+        ],
+      ] as const)(
+        'resets a window when a review is %s',
+        async (_name, result) => {
+          mockMemoryManager.scheduleSkillReview.mockReturnValueOnce(result);
+          client['toolCallCount'] = 7;
+          client['skillsModifiedInSession'] = true;
+          client['userSteeredSinceReview'] = true;
+          client['experienceSignalsSinceReview'] = {
+            retryArc: true,
+            hasSubstantiveWork: true,
+            failedToolNames: new Set(['edit']),
           };
-          this.pendingToolCalls.push(call);
-          yield { type: GeminiEventType.ToolCallRequest, value: call };
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'trigger review' }],
+              new AbortController().signal,
+              'prompt-autoskill-reset-' + _name,
+            ),
+          );
+
+          expect(client['toolCallCount']).toBe(0);
+          expect(client['skillsModifiedInSession']).toBe(false);
+          expect(client['userSteeredSinceReview']).toBe(false);
+          expect(client['experienceSignalsSinceReview']).toEqual({
+            retryArc: false,
+            hasSubstantiveWork: false,
+            failedToolNames: new Set(),
+          });
+        },
+      );
+
+      it('records an accepted same-tool failure and recovery', async () => {
+        recordOutcome('failed-edit', 'edit', 'error', 'error', {
+          error: 'patch failed',
         });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'inspect this file instead' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-steer-tool-call',
-            { type: SendMessageType.Steer },
-          ),
-        );
-
-        expect(client['userSteeredSinceReview']).toBe(true);
-      });
-
-      it('should count a steer attached to an accepted ToolResult submission', async () => {
-        acceptTurns();
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
+        await sendToolResult('failed-edit', 'edit', {
+          error: 'patch failed',
         });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'read_file',
-                  response: { output: 'contents' },
-                },
-              },
-            ],
-            new AbortController().signal,
-            'prompt-id-autoskill-attached-steer',
-            {
-              type: SendMessageType.ToolResult,
-              steerInput: {
-                parts: [{ text: 'not that file, the other one' }],
-                accept: vi.fn(),
-                restore: vi.fn(),
-              },
-            },
-          ),
-        );
-
-        expect(client['userSteeredSinceReview']).toBe(true);
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'continue' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-after-attached-steer',
-          ),
-        );
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
-          expect.objectContaining({
-            experienceSignals: expect.objectContaining({ userSteer: true }),
-          }),
-        );
-      });
-
-      it('should accumulate tool results re-submitted as an accepted Retry', async () => {
-        acceptTurns();
-        // The Retry path strips orphaned user entries first.
-        Object.assign(client.getChat(), {
-          getHistoryLength: vi.fn().mockReturnValue(2),
-          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
-        });
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'run_shell_command',
-                  response: { error: 'test failed' },
-                },
-              },
-            ],
-            new AbortController().signal,
-            'prompt-id-autoskill-retry-tool-result',
-            { type: SendMessageType.Retry },
-          ),
-        );
-
         expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
-          new Set(['run_shell_command']),
+          new Set(['edit']),
         );
+
+        recordOutcome('fixed-edit', 'edit', 'success', 'success', {
+          output: 'done',
+        });
+        await sendToolResult('fixed-edit', 'edit', { output: 'done' });
+
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
       });
 
-      it('should not double-scan an accepted Retry whose strip popped a re-submitted turn', async () => {
-        acceptTurns();
-        // A non-empty strip means the re-submitted content landed — and was
-        // already recorded — with its original push.
-        Object.assign(client.getChat(), {
-          getHistoryLength: vi.fn().mockReturnValue(2),
-          stripOrphanedUserEntriesFromHistory: vi
-            .fn()
-            .mockReturnValue([{ role: 'user', parts: [{ text: 'popped' }] }]),
+      it('waits for acceptance and consumes a retried ToolResult once', async () => {
+        recordOutcome('retry-edit', 'edit', 'error', 'error', {
+          error: 'patch failed',
         });
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-        client['experienceSignalsSinceReview'] = {
-          retryArc: false,
-          hasSubstantiveWork: false,
-          failedToolNames: new Set(['read_file']),
-        };
-
-        await fromAsync(
-          client.sendMessageStream(
-            [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'read_file',
-                  response: { output: 'ok' },
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'c2',
-                  name: 'read_file',
-                  response: { error: 'boom' },
-                },
-              },
-            ],
-            new AbortController().signal,
-            'prompt-id-autoskill-retry-nonempty-strip',
-            { type: SendMessageType.Retry },
-          ),
-        );
-
-        // A second scan would let the leading ok part close the pending
-        // failure and latch a spurious retryArc.
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
-        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
-          new Set(['read_file']),
-        );
-      });
-
-      it('should record an accepted submission exactly once (parallel ok/error parts)', async () => {
-        acceptTurns();
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-
-        await fromAsync(
-          client.sendMessageStream(
-            [
-              {
-                functionResponse: {
-                  id: 'c1',
-                  name: 'read_file',
-                  response: { output: 'ok' },
-                },
-              },
-              {
-                functionResponse: {
-                  id: 'c2',
-                  name: 'read_file',
-                  response: { error: 'boom' },
-                },
-              },
-            ],
-            new AbortController().signal,
-            'prompt-id-autoskill-single-scan',
-            { type: SendMessageType.ToolResult },
-          ),
-        );
-
-        // A second scan of the same submission would let its leading ok
-        // part close the failure its own error part left, latching a
-        // spurious arc.
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
-        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
-          new Set(['read_file']),
-        );
-      });
-
-      it('should keep the full fast-path window when review is already_running', async () => {
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'already_running',
-          taskId: 'task-inflight',
-        });
-
-        // Fast-path window: count between the experience floor and the
-        // backstop threshold, with populated signals.
-        client['toolCallCount'] = 10;
-        client['userSteeredSinceReview'] = true;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: false,
-          failedToolNames: new Set(['run_shell_command']),
-        };
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'trigger while in-flight' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-inflight-fastpath',
-          ),
-        );
-
-        // already_running consumed a window that provably no review will
-        // cover if reset: the signals are one-shot and the in-flight
-        // review's snapshot predates them, so the window must survive.
-        expect(client['toolCallCount']).toBe(10);
-        expect(client['userSteeredSinceReview']).toBe(true);
-        expect(client['experienceSignalsSinceReview']).toEqual({
-          retryArc: true,
-          hasSubstantiveWork: false,
-          failedToolNames: new Set(['run_shell_command']),
-        });
-      });
-
-      it('should not count inputs rejected before history push', async () => {
-        // Documented deviation: the count backstop advances at local tool
-        // completion, before submission acceptance, so a blocked submission
-        // still counts toward the backstop (fail-open: one skippable
-        // review, never data loss). Only the history-derived signals are
-        // acceptance-gated.
-        client.recordCompletedToolCall('run_shell_command');
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
@@ -9465,193 +8858,131 @@ hello
           })(),
         );
 
+        await sendToolResult('retry-edit', 'edit', { error: 'patch failed' });
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(),
+        );
+        expect(client['pendingExperienceOutcomes'].has('retry-edit')).toBe(
+          true,
+        );
+
+        acceptTurns();
+        Object.assign(client.getChat(), {
+          getHistoryLength: vi.fn().mockReturnValue(2),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        await sendToolResult(
+          'retry-edit',
+          'edit',
+          { error: 'patch failed' },
+          SendMessageType.Retry,
+        );
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+        expect(client['pendingExperienceOutcomes'].has('retry-edit')).toBe(
+          false,
+        );
+
+        await sendToolResult(
+          'retry-edit',
+          'edit',
+          { output: 'duplicate retry' },
+          SendMessageType.Retry,
+        );
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(false);
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+      });
+
+      it('records accepted steer input and ignores rejected steer input', async () => {
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'do it differently' }],
+            new AbortController().signal,
+            'prompt-autoskill-steer-accepted',
+            { type: SendMessageType.Steer },
+          ),
+        );
+        expect(client['userSteeredSinceReview']).toBe(true);
+
+        client['userSteeredSinceReview'] = false;
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield {
+              type: GeminiEventType.Error,
+              value: new Error('rejected'),
+            };
+          })(),
+        );
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'try another way' }],
+            new AbortController().signal,
+            'prompt-autoskill-steer-rejected',
+            { type: SendMessageType.Steer },
+          ),
+        );
+        expect(client['userSteeredSinceReview']).toBe(false);
+      });
+
+      it('records a steer attached to an accepted ToolResult', async () => {
+        recordOutcome('steered-read', 'read_file', 'success', 'success', {
+          output: 'contents',
+        });
         await fromAsync(
           client.sendMessageStream(
             [
               {
                 functionResponse: {
+                  id: 'steered-read',
                   name: 'read_file',
-                  response: { error: 'tool failed' },
+                  response: { output: 'contents' },
                 },
               },
             ],
             new AbortController().signal,
-            'prompt-id-autoskill-tool-result-rejected',
-            { type: SendMessageType.ToolResult },
+            'prompt-autoskill-attached-steer',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'read the other file' }],
+                accept: vi.fn(),
+                restore: vi.fn(),
+              },
+            },
           ),
         );
 
-        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
-          new Set(),
-        );
-
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'do this instead' }],
-            new AbortController().signal,
-            'prompt-id-autoskill-steer-rejected',
-            { type: SendMessageType.Steer },
-          ),
-        );
-
-        expect(client['userSteeredSinceReview']).toBe(false);
-        // The pinned deviation: the blocked ToolResult still advanced the
-        // backstop inputs at local completion time.
-        expect(client['toolCallCount']).toBe(1);
-        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
-          true,
-        );
+        expect(client['userSteeredSinceReview']).toBe(true);
       });
 
-      it('should reset the review window on a session switch in initialize', async () => {
-        // /resume and /branch switch sessions on the same GeminiClient via
-        // config.startNewSession + initialize(); the old session's window
-        // and retained pending window must not leak into the new one.
-        // Dispatch a real review so the settle handler's taskId guard is
-        // exercised across the session reset (a bare object literal would
-        // leave the guard untested).
-        const staleReview = deferReview('task-old');
+      it('clears the window and pending outcomes when the session changes', async () => {
         client['toolCallCount'] = 5;
-        client['skillsModifiedInSession'] = true;
         client['userSteeredSinceReview'] = true;
-        client['skillReviewFailureStreak'] = 1;
         client['experienceSignalsSinceReview'] = {
           retryArc: true,
           hasSubstantiveWork: true,
-          failedToolNames: new Set(['run_shell_command']),
+          failedToolNames: new Set(['edit']),
         };
-        await dispatchReview('prompt-id-autoskill-switch-before');
+        client['pendingExperienceOutcomes'].set('old-call', {
+          toolName: 'edit',
+          outcome: 'failure',
+        });
+        vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
 
-        vi.mocked(mockConfig.getSessionId).mockReturnValue(
-          'switched-session-id',
-        );
         await client.initialize();
 
         expect(client['toolCallCount']).toBe(0);
-        expect(client['skillsModifiedInSession']).toBe(false);
         expect(client['userSteeredSinceReview']).toBe(false);
-        expect(client['skillReviewFailureStreak']).toBe(0);
         expect(client['experienceSignalsSinceReview']).toEqual({
           retryArc: false,
           hasSubstantiveWork: false,
           failedToolNames: new Set(),
         });
-        expect(client['pendingSkillReviewWindow']).toBeNull();
-
-        // A stale settle from the old session's review must not touch the
-        // fresh state: no streak bump, no re-arm.
-        await settleReview(staleReview.promise, () => {
-          staleReview.resolve({ status: 'skipped', metadata: {} });
-        });
-        expect(client['skillReviewFailureStreak']).toBe(0);
-        expect(client['pendingSkillReviewWindow']).toBeNull();
-        expect(client['toolCallCount']).toBe(0);
-        expect(client['experienceSignalsSinceReview']).toEqual({
-          retryArc: false,
-          hasSubstantiveWork: false,
-          failedToolNames: new Set(),
-        });
-      });
-
-      it('should preserve substantive-work signals when history is compressed', async () => {
-        client.recordCompletedToolCall('run_shell_command');
-        client['chat'] = {
-          compressFast: vi.fn().mockReturnValue({
-            info: {
-              originalTokenCount: 1000,
-              newTokenCount: 200,
-              compressionStatus: CompressionStatus.COMPRESSED,
-            },
-          }),
-          getHistory: vi.fn().mockReturnValue([
-            { role: 'user', parts: [{ text: 'summary' }] },
-            { role: 'model', parts: [{ text: 'ok' }] },
-          ]),
-        } as unknown as GeminiChat;
-
-        await client.tryCompressChatFast();
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-        (
-          client as unknown as {
-            runManagedAutoMemoryBackgroundTasks: (
-              messageType: SendMessageType,
-            ) => void;
-          }
-        ).runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery);
-
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
-          expect.objectContaining({
-            experienceSignals: expect.objectContaining({
-              hasSubstantiveWork: true,
-            }),
-          }),
-        );
-      });
-
-      it('should preserve review-window signals across LLM compression', async () => {
-        // Override the suite-wide NOOP stub so the real tryCompressChat runs
-        // its mid-send LLM path: tryCompress → startChat(Compact).
-        vi.mocked(client.tryCompressChat).mockRestore();
-        const startChatSpy = vi
-          .spyOn(
-            client as unknown as {
-              startChat: (history?: unknown, source?: unknown) => Promise<void>;
-            },
-            'startChat',
-          )
-          .mockResolvedValue(undefined);
-        mockChat.tryCompress = vi.fn().mockResolvedValue({
-          originalTokenCount: 1000,
-          newTokenCount: 200,
-          compressionStatus: CompressionStatus.COMPRESSED,
-        });
-        mockChat.getHistoryShallow = vi.fn().mockReturnValue([]);
-        mockChat.setLastPromptTokenCount = vi.fn();
-
-        client['toolCallCount'] = 9;
-        client['userSteeredSinceReview'] = true;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(['run_shell_command']),
-        };
-
-        const info = await client.tryCompressChat('p1', true);
-        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-        expect(startChatSpy).toHaveBeenCalledWith(
-          [],
-          SessionStartSource.Compact,
-        );
-
-        // The LLM compression path restarts the chat but must not reset the
-        // review window: signals accumulated before compression stay live.
-        expect(client['toolCallCount']).toBe(9);
-        expect(client['userSteeredSinceReview']).toBe(true);
-        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
-
-        mockMemoryManager.scheduleSkillReview.mockReturnValue({
-          status: 'skipped',
-          skippedReason: 'below_threshold',
-        });
-        (
-          client as unknown as {
-            runManagedAutoMemoryBackgroundTasks: (
-              messageType: SendMessageType,
-            ) => void;
-          }
-        ).runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery);
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenLastCalledWith(
-          expect.objectContaining({
-            toolCallCount: 9,
-            experienceSignals: expect.objectContaining({
-              retryArc: true,
-              userSteer: true,
-            }),
-          }),
-        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
     });
 
@@ -9705,6 +9036,88 @@ hello
           file_path: '/project/.qwen/skills/my-skill.md',
         });
         expect(client['skillsModifiedInSession']).toBe(false);
+      });
+
+      it('ignores calls that never produced work', () => {
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'denied-edit',
+          status: 'error',
+          executionStatus: 'not_started',
+        });
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'cancelled-edit',
+          status: 'cancelled',
+          executionStatus: 'cancelled',
+        });
+
+        expect(client['toolCallCount']).toBe(0);
+        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
+          false,
+        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+      });
+
+      it('counts cancellation after completion without staging a retry outcome', () => {
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'completed-edit',
+          status: 'cancelled',
+          executionStatus: 'success',
+        });
+
+        expect(client['toolCallCount']).toBe(1);
+        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
+          true,
+        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+      });
+
+      it('stages reliable outcomes but treats an unknown shell exit as neutral', () => {
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'failed-edit',
+          status: 'error',
+          executionStatus: 'error',
+        });
+        client.recordCompletedToolCall('run_shell_command', undefined, {
+          callId: 'unknown-shell',
+          status: 'success',
+          executionStatus: 'success',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'unknown-shell',
+                name: 'run_shell_command',
+                response: { output: 'Exit Code: (none)\nSignal: (none)' },
+              },
+            },
+          ],
+        });
+
+        expect(client['pendingExperienceOutcomes'].get('failed-edit')).toEqual({
+          toolName: 'edit',
+          outcome: 'failure',
+        });
+        expect(client['pendingExperienceOutcomes'].has('unknown-shell')).toBe(
+          false,
+        );
+      });
+
+      it('consumes a late outcome already paired in history', () => {
+        client['chat'] = {
+          getHistoryFunctionResponseIds: vi
+            .fn()
+            .mockReturnValue(new Set(['late-edit'])),
+        } as unknown as GeminiChat;
+
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'late-edit',
+          status: 'error',
+          executionStatus: 'error',
+        });
+
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
     });
 

@@ -37,9 +37,6 @@ import {
   ToolConfirmationOutcome,
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
-  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-  PERMISSION_DECLINED_MESSAGE_PREFIX,
-  operationCancelledErrorMessage,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -5222,9 +5219,13 @@ describe('useGeminiStream', () => {
     // even though the wire-side submission is dropped. Regression guard:
     // an earlier version filtered deduped tools out of `geminiTools`
     // without recording, skipping the metric increment.
-    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
-      path: '/tmp/x.txt',
-    });
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      {
+        path: '/tmp/x.txt',
+      },
+      expect.objectContaining({ callId: 'call_race_A' }),
+    );
 
     // No follow-up submission: the synthetic in history already closes
     // the tool_use ↔ tool_result pair.
@@ -5232,49 +5233,12 @@ describe('useGeminiStream', () => {
   });
 
   it.each([
-    ['deduped cancellation', true, 'cancelled', undefined, 'cancelled', false],
-    [
-      'deduped cancellation after completion',
-      true,
-      'cancelled',
-      undefined,
-      operationCancelledErrorMessage(TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE),
-      true,
-    ],
-    [
-      'main-loop cancellation',
-      false,
-      'cancelled',
-      undefined,
-      'cancelled',
-      false,
-    ],
-    [
-      'main-loop cancellation after completion',
-      false,
-      'cancelled',
-      'success',
-      operationCancelledErrorMessage(TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE),
-      true,
-    ],
-    [
-      'never-started permission denial',
-      false,
-      'error',
-      'not_started',
-      `${PERMISSION_DECLINED_MESSAGE_PREFIX} "write_file", but that permission was declined.`,
-      false,
-    ],
+    ['deduped cancellation', true, 'cancelled', 'cancelled'],
+    ['main-loop cancellation after completion', false, 'cancelled', 'success'],
+    ['never-started permission denial', false, 'error', 'not_started'],
   ] as const)(
-    'records skill-review work correctly for %s',
-    async (
-      _name,
-      deduped,
-      status,
-      executionStatus,
-      errorMessage,
-      shouldRecord,
-    ) => {
+    'forwards structured skill-review outcome for %s',
+    async (_name, deduped, status, executionStatus) => {
       const callId = 'call_work_classification';
       const args = { file_path: '/tmp/file.txt', content: 'x' };
       const toolCall = {
@@ -5294,7 +5258,7 @@ describe('useGeminiStream', () => {
               functionResponse: {
                 id: callId,
                 name: 'write_file',
-                response: { error: errorMessage },
+                response: { error: 'result' },
               },
             },
           ],
@@ -5364,15 +5328,18 @@ describe('useGeminiStream', () => {
           expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([callId]);
         });
       }
-      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(
-        Number(shouldRecord),
+      expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+        'write_file',
+        args,
+        expect.objectContaining({
+          callId,
+          status,
+          executionStatus,
+          errorType:
+            status === 'error' ? ToolErrorType.EXECUTION_DENIED : undefined,
+        }),
       );
-      if (shouldRecord) {
-        expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
-          'write_file',
-          args,
-        );
-      }
     },
   );
 
@@ -5665,9 +5632,13 @@ describe('useGeminiStream', () => {
       'call_fast_after_stream',
     ]);
     expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
-    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
-      path: '/tmp/missing.txt',
-    });
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      {
+        path: '/tmp/missing.txt',
+      },
+      expect.objectContaining({ callId: 'call_fast_after_stream' }),
+    );
   });
 
   it('drops a fast tool result after cancellation even if the stale callback runs later', async () => {

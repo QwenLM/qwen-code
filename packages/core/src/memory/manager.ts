@@ -144,13 +144,11 @@ export interface ScheduleSkillReviewParams {
   history: Content[];
   toolCallCount: number;
   skillsModified: boolean;
-  /** Deterministic trial-and-error signals detected over the unreviewed
-   * history window. Required so every caller makes an explicit decision about
-   * what fed the gate. */
-  experienceSignals: ExperienceSignals;
+  experienceSignals?: ExperienceSignals;
   now?: Date;
   config?: Config;
   enabled?: boolean;
+  threshold?: number;
   maxTurns?: number;
   timeoutMs?: number;
   /** When true, stage created skills for user confirmation instead of
@@ -845,19 +843,14 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'skills_modified_in_session' };
     }
 
-    // Two trigger paths (see docs/design/2026-08-13-auto-skill-experience-trigger.md):
-    // a fast path for windows showing trial-and-error signals, and a count
-    // backstop that only fires after known write/execute work, so a pile of
-    // bare file reads never triggers.
-    const threshold = AUTO_SKILL_THRESHOLD;
-    const fastPath =
-      (params.experienceSignals.retryArc ||
-        params.experienceSignals.userSteer) &&
-      params.toolCallCount >= AUTO_SKILL_EXPERIENCE_FLOOR;
-    const backstop =
-      params.experienceSignals.hasSubstantiveWork &&
-      params.toolCallCount >= threshold;
-    if (!fastPath && !backstop) {
+    const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
+    const signals = params.experienceSignals;
+    const shouldSchedule = signals
+      ? ((signals.retryArc || signals.userSteer) &&
+          params.toolCallCount >= AUTO_SKILL_EXPERIENCE_FLOOR) ||
+        (signals.hasSubstantiveWork && params.toolCallCount >= threshold)
+      : params.toolCallCount >= threshold;
+    if (!shouldSchedule) {
       return { status: 'skipped', skippedReason: 'below_threshold' };
     }
 

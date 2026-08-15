@@ -115,13 +115,6 @@ import {
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
 } from './plan-mode-entry-policy.js';
 import {
-  HOOK_STOP_PREFIX,
-  operationCancelledErrorMessage,
-  PERMISSION_DECLINED_MESSAGE_PREFIX,
-  TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-  TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE,
-} from './tool-result-markers.js';
-import {
   applyAutoModeDecision,
   decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
@@ -306,6 +299,16 @@ const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
 const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
 
 const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
+
+// The cancellation notice handed to the model depends on whether the tool's
+// work actually finished. Claiming a tool "already completed" when it was
+// interrupted mid-flight makes the model skip work that never happened; the
+// converse makes it redo work whose side effects already landed. Both sites
+// that can cancel after `execute()` was entered must pick the right one.
+const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
+  'User cancelled tool execution.';
+const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
+  'The tool had already completed; its output was discarded.';
 
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
@@ -936,13 +939,7 @@ const createErrorResponse = (
       functionResponse: {
         id: request.callId,
         name: request.name,
-        response: {
-          error: error.message,
-          // Denial producers use a dozen different error wordings; carry the
-          // structured never-executed signal on the wire so history consumers
-          // can classify denials without text matching.
-          ...(executionStatus === 'not_started' ? { executionStatus } : {}),
-        },
+        response: { error: error.message },
       },
     },
   ],
@@ -963,7 +960,7 @@ const createCancelledResponse = (
   persistedOutputFiles?: string[],
   visionBridgeNotice?: string,
 ): CoreToolCallResponseInfo => {
-  const errorMessage = operationCancelledErrorMessage(reason);
+  const errorMessage = `[Operation Cancelled] Reason: ${reason}`;
   return {
     callId: request.callId,
     responseParts: [
@@ -1186,7 +1183,7 @@ function withPostToolBatchStop(
   // when the replaced response had no executionStatus, omit it here too.
   const { executionStatus: _es, ...baseResponse } = createErrorResponse(
     lastCall.request,
-    new Error(`${HOOK_STOP_PREFIX}${stopReason}`),
+    new Error(stopReason),
     ToolErrorType.EXECUTION_DENIED,
     executionStatus ?? 'not_started',
   );
@@ -1646,9 +1643,7 @@ export class CoreToolScheduler {
 
           const preservedResultDisplay =
             this.compactResultDisplayForInteractiveHistory(resultDisplay);
-          const errorMessage = operationCancelledErrorMessage(
-            String(auxiliaryData),
-          );
+          const errorMessage = `[Operation Cancelled] Reason: ${auxiliaryData}`;
           const response: CoreToolCallResponseInfo = isToolCallResponseInfo(
             auxiliaryData,
           )
@@ -2427,7 +2422,7 @@ export class CoreToolScheduler {
             const ruleInfo = matchingRule
               ? ` Matching deny rule: "${matchingRule}".`
               : '';
-            const permissionErrorMessage = `${PERMISSION_DECLINED_MESSAGE_PREFIX} "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
             newToolCalls.push({
               status: 'error',
               request: reqInfo,
@@ -2453,7 +2448,7 @@ export class CoreToolScheduler {
                   excludedTool.toLowerCase().trim() === normalizedToolName,
               );
               if (excludedMatch) {
-                const permissionErrorMessage = `${PERMISSION_DECLINED_MESSAGE_PREFIX} ${excludedMatch}, but that permission was declined.`;
+                const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
                 newToolCalls.push({
                   status: 'error',
                   request: reqInfo,
@@ -3202,7 +3197,7 @@ export class CoreToolScheduler {
               const errorMessage =
                 planShellDecision.classification === 'unknown'
                   ? planShellDecision.noApprovalMessage
-                  : `${PERMISSION_DECLINED_MESSAGE_PREFIX} "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+                  : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               if (planShellDecision.classification === 'unknown') {
                 rejectPlanShell(errorMessage);
                 continue;
@@ -5137,7 +5132,7 @@ export class CoreToolScheduler {
               postHookResult.stopReason || 'Execution stopped by hook';
             const errorResponse = createErrorResponse(
               scheduledCall.request,
-              new Error(`${HOOK_STOP_PREFIX}${stopMessage}`),
+              new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
               executionStatus,
             );

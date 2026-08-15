@@ -28,7 +28,6 @@ import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
 import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
 import { createOpenAIReasoningThoughtPart } from '../utils/thoughtUtils.js';
-import { DUPLICATE_PROVIDER_TOOL_CALL_PREFIX } from './tool-result-markers.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -115,11 +114,6 @@ describe('createDuplicateProviderToolCallResponse', () => {
     });
 
     expect(response.executionStatus).toBe('not_started');
-    expect(
-      response.responseParts[0]?.functionResponse?.response?.['error'],
-    ).toBe(
-      `${DUPLICATE_PROVIDER_TOOL_CALL_PREFIX}provider-call" was already handled. The duplicate tool call was ignored and not executed again.`,
-    );
   });
 });
 
