@@ -52,6 +52,22 @@ describe('listLanCandidates', () => {
     ]);
   });
 
+  it('rejects VPN adapters regardless of where "vpn" sits in the name', () => {
+    // Consumer VPN adapters end in or embed "vpn" without a token boundary
+    // (`OpenVPN Wintun`, `vpnkit`); a boundary requirement previously let
+    // them through and `selectLanAddress` would auto-advertise a
+    // reachable-only-through-VPN address.
+    expect(
+      listLanCandidates({
+        'OpenVPN Wintun': [ipv4('10.8.0.2')],
+        'OpenVPN Wintun Adapter': [ipv4('10.8.0.3')],
+        NordVPN: [ipv4('10.8.1.2')],
+        vpnkit: [ipv4('192.168.65.3')],
+        'Ethernet 3': [ipv4('192.168.7.10')],
+      }),
+    ).toEqual([{ interfaceName: 'Ethernet 3', address: '192.168.7.10' }]);
+  });
+
   it('keeps physical LAN bridges and only rejects virtual bridge shapes', () => {
     // `br0` (libvirt bridged-LAN host) and Windows "Network Bridge" are
     // physical bridges holding the machine's real LAN address; Docker's

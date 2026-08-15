@@ -7715,7 +7715,6 @@ async function runQwenServeImpl(
         const nextPort = attemptPort + 1;
         if (
           err.code === 'EADDRINUSE' &&
-          opts.strictPort !== true &&
           opts.port !== 0 &&
           nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1

@@ -34,6 +34,16 @@ function resolveLocalControlUrl(baseUrl: string, path: string): URL {
   return new URL(path.replace(/^\/+/, ''), base);
 }
 
+class LocalControlRequestError extends Error {
+  constructor(
+    message: string,
+    readonly payload?: LocalControlStatus,
+  ) {
+    super(message);
+    this.name = 'LocalControlRequestError';
+  }
+}
+
 async function requestLocalControl(
   baseUrl: string,
   token: string | undefined,
@@ -60,10 +70,11 @@ async function requestLocalControl(
     if (response.ok) throw new Error('Invalid Local Control response');
   }
   if (!response.ok) {
-    throw new Error(
+    throw new LocalControlRequestError(
       payload?.error?.trim() ||
         response.statusText ||
         `Local Control request failed (${response.status})`,
+      payload,
     );
   }
   return payload!;
@@ -138,6 +149,19 @@ export function LocalControlSettingsCard() {
       );
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      // The enable route attaches the fresh candidate list to 409s; reconcile
+      // from it so a selection that outlived a network change can recover
+      // without a page remount.
+      const recovered =
+        failure instanceof LocalControlRequestError
+          ? failure.payload?.interfaces
+          : undefined;
+      if (recovered) {
+        setStatus((prev) =>
+          prev ? { ...prev, interfaces: recovered } : prev,
+        );
+        setSelectedAddress((current) => reconcileSelection(recovered, current));
+      }
     } finally {
       setBusy(false);
     }

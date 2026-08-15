@@ -57,8 +57,6 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
-  /** Fail instead of retrying the next port when the requested port is busy. */
-  strictPort?: boolean;
   /**
    * Bearer token required on every request. Optional when bound to loopback
    * (developer convenience); required when bound beyond loopback (boot fails

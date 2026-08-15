@@ -36,6 +36,13 @@ function isLanIpv4(address: string): boolean {
 }
 
 function isSoftwareNetwork(interfaceName: string): boolean {
+  // `vpn` matches as a substring, deliberately looser than the bounded
+  // tokens below: consumer VPN adapter names almost always END in "VPN"
+  // (OpenVPN Wintun, NordVPN, ExpressVPN…) or embed it mid-word (vpnkit),
+  // and no physical adapter is realistically named with that run. A
+  // boundary requirement let `OpenVPN Wintun` escape — the `vpn` sits
+  // inside "openvpn" with no leading boundary.
+  if (/vpn/i.test(interfaceName)) return true;
   // Bridge tokens stay narrow on purpose: Docker user bridges are `br-<hex>`
   // (the ID may start with a letter, so the hex run is part of the token —
   // the shared boundary alone would let `br-fa5c…` escape) and macOS
@@ -43,7 +50,7 @@ function isSoftwareNetwork(interfaceName: string): boolean {
   // is the canonical libvirt bridged-LAN host interface and Windows names a
   // manual physical bridge "Network Bridge" — those carry the machine's real
   // LAN address and must stay eligible.
-  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt[a-z0-9]*|hamachi|nordlynx|proton|vpn|docker|veth|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br-[0-9a-f]+|bridge\d)(\d|[\s_.-]|$)/i.test(
+  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt[a-z0-9]*|hamachi|nordlynx|proton|wintun|docker|veth|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br-[0-9a-f]+|bridge\d)(\d|[\s_.-]|$)/i.test(
     interfaceName,
   );
 }

@@ -20,7 +20,6 @@ export {
   AmbiguousLanInterfaceError,
   listLanCandidates,
   NoLanInterfaceError,
-  selectLanAddress,
   UnknownLanInterfaceError,
   type LanCandidate,
 } from './lan-interfaces.js';
