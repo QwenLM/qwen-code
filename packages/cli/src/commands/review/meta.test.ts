@@ -109,8 +109,12 @@ describe('runMeta', () => {
     // The discovered host is applied as routing (the handler's flag/env
     // would win if set — neither is set here).
     expect(setGhHostMock).toHaveBeenLastCalledWith('ghe.example.com');
+    const authOrder = ensureAuthenticatedMock.mock.invocationCallOrder[0];
+    const repoViewOrder = ghMock.mock.invocationCallOrder[0];
     const hostOrder = setGhHostMock.mock.invocationCallOrder[0];
     const prViewOrder = ghMock.mock.invocationCallOrder[1];
+    expect(authOrder).toBeLessThan(repoViewOrder);
+    expect(authOrder).toBeLessThan(prViewOrder);
     expect(hostOrder).toBeLessThan(prViewOrder);
   });
 

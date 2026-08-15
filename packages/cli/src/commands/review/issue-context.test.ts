@@ -255,7 +255,9 @@ describe('runIssueContext', () => {
     mockIssue('five');
     runIssueContext({ ...ARGS, extraIssues: ex(555) });
     const written = writeFileSyncMock.mock.calls[0][1] as string;
-    expect(written).toContain('the closing set could not be checked');
+    expect(written).toContain(
+      'Additionally fetched issues (referenced by the PR context; the closing set could not be checked)',
+    );
     expect(written).not.toContain('NOT in the closing set');
   });
 
