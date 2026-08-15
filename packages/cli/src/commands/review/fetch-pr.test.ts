@@ -13,6 +13,7 @@ import {
   isCollapsedFromUpstream,
 } from './fetch-pr.js';
 import {
+  clearReviewWorktreeLease,
   createReviewWorktreeLease,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
@@ -222,6 +223,8 @@ const producerMocks = vi.hoisted(() => ({
   }),
   gh: vi.fn(),
   git: vi.fn(),
+  execFileSync: vi.fn(),
+  releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
   writeStderrLine: vi.fn(),
 }));
 
@@ -245,8 +248,8 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    default: { ...actual, execFileSync: vi.fn() },
-    execFileSync: vi.fn(),
+    default: { ...actual, execFileSync: producerMocks.execFileSync },
+    execFileSync: producerMocks.execFileSync,
   };
 });
 
@@ -256,6 +259,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
+  clearReviewWorktreeLease: vi.fn(),
   createReviewWorktreeLease: vi.fn(),
   readReviewWorktreeLease: vi.fn((): unknown => null),
   reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
@@ -274,7 +278,7 @@ vi.mock('./lib/git.js', () => ({
   gitOpt: vi.fn(() => null),
   gitRaw: vi.fn(() => Buffer.from('')),
   refExists: vi.fn(() => false),
-  releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
+  releaseWorktree: producerMocks.releaseWorktree,
 }));
 
 vi.mock('./lib/merge-base.js', () => ({
@@ -364,10 +368,18 @@ describe('fetch-pr report assembly', () => {
         'PR #42 is already being reviewed by another session ' +
           '(session session-other)',
       );
+      // The lock must consult THIS PR's lease: mockReturnValueOnce is
+      // argument-blind, so an unwired target leaves the race undetected.
+      expect(vi.mocked(readReviewWorktreeLease)).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+      );
       // Nothing was touched on the way out.
       expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
       expect(producerMocks.git).not.toHaveBeenCalled();
       expect(producerMocks.gh).not.toHaveBeenCalled();
+      expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
+      expect(producerMocks.execFileSync).not.toHaveBeenCalled();
       expect(producerMocks.writeFileSync).not.toHaveBeenCalled();
     });
 
@@ -377,6 +389,75 @@ describe('fetch-pr report assembly', () => {
 
       await expect(reportFor({})).rejects.toThrow(
         'qwen-review-lease-pr-42.json',
+      );
+    });
+
+    it('lets the holding session re-fetch its own lease', async () => {
+      // Ownership is per session, not per prompt: a later round re-fetches
+      // while its own earlier prompt's lease is still on disk.
+      vi.mocked(readReviewWorktreeLease).mockReturnValueOnce({
+        ...foreignLease,
+        sessionId: 'session-self',
+        promptId: 'prompt-earlier',
+      });
+      vi.mocked(reviewLeaseHeldByAnotherSession).mockReturnValueOnce(false);
+
+      await reportFor({});
+
+      expect(vi.mocked(createReviewWorktreeLease)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // A handled failure after the lease write must roll the lease back with the
+  // rest of the state: the lock refuses any later session that finds another
+  // session's lease, so one left behind blocks every later review of this PR
+  // until it is deleted by hand.
+  describe('lease rollback on failure', () => {
+    it('clears the lease when the PR fetch fails', async () => {
+      producerMocks.git.mockImplementation(() => {
+        throw new Error('network down');
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        'Failed to fetch PR #42 from remote "origin"',
+      );
+      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+      );
+    });
+
+    it('clears the lease when the metadata fetch fails', async () => {
+      producerMocks.gh.mockImplementation(() => {
+        throw new Error('gh unavailable');
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        'Failed to fetch PR #42 metadata',
+      );
+      expect(producerMocks.execFileSync).toHaveBeenCalledWith(
+        'git',
+        ['branch', '-D', 'qwen-review/pr-42'],
+        { stdio: 'pipe' },
+      );
+      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
+      );
+    });
+
+    it('clears the lease when the worktree add fails', async () => {
+      producerMocks.git.mockImplementation((...args: string[]) => {
+        if (args[0] === 'worktree') throw new Error('disk full');
+        return args[0] === 'rev-parse' ? 'f00df00d' : '';
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        'Failed to create worktree at',
+      );
+      expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
+        process.cwd(),
+        'pr-42',
       );
     });
   });

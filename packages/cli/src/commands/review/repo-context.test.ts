@@ -183,7 +183,29 @@ describe('repo-context providers and trust boundary', () => {
         },
         [],
       ),
-    ).toThrow('is missing — re-run `qwen review fetch-pr` to recreate it');
+    ).toThrow(
+      'is missing — recreate the review worktree ' +
+        '(for PR targets: re-run `qwen review fetch-pr`)',
+    );
+  });
+
+  it('keeps the precise error for a worktree path that is not a directory', () => {
+    // A regular file at --worktree is NOT a missing worktree: converting it
+    // to the "missing" remedy would point at a fix that cannot help.
+    const root = temp();
+    const planPath = planAt(root, { files: [] });
+    const notADirectory = join(root, 'worktree-file');
+    write(notADirectory, 'not a directory\n');
+    expect(() =>
+      runRepoContext(
+        {
+          plan: planPath,
+          worktree: notADirectory,
+          out: join(root, 'context.json'),
+        },
+        [],
+      ),
+    ).toThrow('worktree is not a directory');
   });
 
   it('passes sorted unique changed paths and local identity to a provider', () => {

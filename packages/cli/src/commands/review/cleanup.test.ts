@@ -161,6 +161,12 @@ describe('runCleanup', () => {
 
     runCleanup('pr-123');
 
+    // The skip must key on THIS target's lease: mockReturnValueOnce is
+    // argument-blind, so an unwired read consults another PR's lease.
+    expect(mocks.readReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
     expect(mocks.releaseWorktree).not.toHaveBeenCalled();
     expect(mocks.execFileSync).not.toHaveBeenCalled();
     expect(mocks.rmSync).not.toHaveBeenCalled();

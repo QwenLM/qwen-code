@@ -31,6 +31,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  clearReviewWorktreeLease,
   createReviewWorktreeLease,
   readReviewWorktreeLease,
   reviewLeaseHeldByAnotherSession,
@@ -233,6 +234,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   try {
     git('fetch', remote, `pull/${prNumber}/head:${ref}`);
   } catch (err) {
+    // Roll back the lease too: the lock above refuses any later session that
+    // finds another session's lease, so one left behind by a handled failure
+    // would block every later review of this PR until deleted by hand.
+    clearReviewWorktreeLease(process.cwd(), leaseTarget);
     throw new Error(
       `Failed to fetch PR #${prNumber} from remote "${remote}": ${(err as Error).message}`,
     );
@@ -254,10 +259,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     );
     meta = JSON.parse(json) as PrMetadata;
   } catch (err) {
-    // Roll back the fetched ref so the next run starts clean.
+    // Roll back the fetched ref and the lease so the next run starts clean.
     tryRemove(() =>
       execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
     );
+    clearReviewWorktreeLease(process.cwd(), leaseTarget);
     throw new Error(
       `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
     );
@@ -271,6 +277,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     tryRemove(() =>
       execFileSync('git', ['branch', '-D', ref], { stdio: 'pipe' }),
     );
+    clearReviewWorktreeLease(process.cwd(), leaseTarget);
     throw new Error(
       `Failed to create worktree at ${wt}: ${(err as Error).message}`,
     );

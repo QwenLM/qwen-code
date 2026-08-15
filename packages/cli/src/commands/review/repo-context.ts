@@ -375,9 +375,11 @@ export function runRepoContext(
     }
   } catch (err) {
     if (isAbsentError(err)) {
+      // fetch-pr only recreates a PR target's worktree; repo-context also
+      // runs for local and file-path reviews, so scope the remedy.
       throw new Error(
-        `repo-context: worktree ${worktreeRoot} is missing — re-run ` +
-          `\`qwen review fetch-pr\` to recreate it`,
+        `repo-context: worktree ${worktreeRoot} is missing — recreate the ` +
+          `review worktree (for PR targets: re-run \`qwen review fetch-pr\`)`,
       );
     }
     throw err;
