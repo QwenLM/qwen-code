@@ -1300,6 +1300,38 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body.split(FOOTER)).toHaveLength(2);
   });
 
+  it('renders the duplicate count from the entries, not a hardcode, in the Chinese fold', () => {
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({
+      suggestionsDroppedAsDuplicates: [
+        'R1-1 pin gap — already reported (comment 3788857375)',
+        'R1-2 loose pins — already reported (comment 3788857379)',
+      ],
+      planPath: coveredPlan(undefined, { han: true }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+    expect(r.body).toContain('本轮确认的 2 条建议级发现已在 PR 上报告过');
+  });
+
+  it('drops entries that normalize to nothing, so the count never overclaims the list', () => {
+    // A footer-only entry strips to '' and a whitespace-only entry trims to
+    // '': without the empty-entry filter they would still count toward S —
+    // flipping this clean run to COMMENT — and render a dangling empty list
+    // item. The sibling cannotTellCriticals path pins the same degenerate
+    // input.
+    for (const dropped of [[FOOTER], [' ']]) {
+      const r = composeReview(
+        base({ suggestionsDroppedAsDuplicates: dropped }),
+      );
+      expect(r.event).toBe('APPROVE');
+      expect(r.body).not.toContain('this review confirmed');
+    }
+  });
+
   it('rejects a non-string entry', () => {
     expect(() =>
       composeReview(

@@ -1483,10 +1483,9 @@ function composeReviewBody(
   // Clause 5 — blockers the review could neither confirm nor clear. They
   // survive every event shape: erasing one is how a review approves the
   // very thing it is asking about.
+  const pr = prIdentityFromPlan(input.planPath);
   const cannotTellBlock: Bi[] =
-    cannotTell.length === 0
-      ? []
-      : [formatCannotTell(cannotTell, prIdentityFromPlan(input.planPath))];
+    cannotTell.length === 0 ? [] : [formatCannotTell(cannotTell, pr)];
 
   // Model-written blockers: quoted as-is in both halves.
   const bodyCriticalBlock: Bi[] = bodyCriticals
@@ -1755,7 +1754,6 @@ function composeReviewBody(
   //     drop reason was duplication, the posted body said anchoring
   //     failed). Its own paragraph: entries are a list, not verdict prose.
   if (suggestionsDroppedAsDuplicates.length > 0) {
-    const pr = prIdentityFromPlan(input.planPath);
     clauses.push({
       en:
         `${suggestionsDroppedAsDuplicates.length} Suggestion-level ` +
