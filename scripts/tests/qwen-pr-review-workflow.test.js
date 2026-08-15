@@ -2517,3 +2517,48 @@ describe('bot comment markers', () => {
     expect(ackLine).toContain('"$RUN_URL"');
   });
 });
+
+describe('qwen pr review concurrency routing', () => {
+  // A PENDING run in a concurrency group is replaced by any newer run of the
+  // same group — cancel-in-progress does not protect it. On PR #9091 a push
+  // and three human review requests landed in the same minute: the
+  // synchronize run cancelled the in-flight review but queued behind it while
+  // it terminated, and the review_requested runs — guaranteed no-ops, since
+  // review-pr only runs when the bot itself is the requested reviewer —
+  // superseded it while pending. The sole survivor skipped review-pr, so the
+  // push was never reviewed. The fix routes non-bot review_requested runs to
+  // a per-run group where they can supersede nothing, while lifecycle events
+  // and bot-directed requests keep sharing the PR group so an explicit bot
+  // ask still coalesces with the automatic run for the same head.
+  const group = parse(workflow).concurrency.group;
+
+  it('keeps no-op review requests out of the shared PR group', () => {
+    // Verbatim, like the cancel-in-progress pin in the resolve suite: the
+    // shape IS the fix — `&&` binds tighter than `||`, so exactly the
+    // lifecycle actions and the bot-directed request reach the PR group, and
+    // every other review_requested (human or team reviewer) falls through to
+    // the per-run group. Moving the gate behind the fallback, or dropping the
+    // parentheses around the disjunction, silently re-ships the race.
+    expect(group).toBe(
+      "${{ github.event_name == 'pull_request_target' && " +
+        "(github.event.action != 'review_requested' || " +
+        "github.event.requested_reviewer.login == 'qwen-code-ci-bot') && " +
+        "format('qwen-pr-review-pr-{0}', github.event.pull_request.number) || " +
+        "format('qwen-pr-review-run-{0}', github.run_id) }}",
+    );
+  });
+
+  it('gates on the same bot login the workflow publishes', () => {
+    // The group expression cannot read review-config's bot_login output, so
+    // it carries the literal; pin it against the constant it mirrors so a
+    // rename of the bot cannot desync the two.
+    const botLogin = parse(workflow)
+      .jobs['review-config'].steps.find(
+        (s) => s.name === 'Set review constants',
+      )
+      .run.match(/bot_login=([a-zA-Z0-9-]+)/)[1];
+    expect(group).toContain(
+      `github.event.requested_reviewer.login == '${botLogin}'`,
+    );
+  });
+});
