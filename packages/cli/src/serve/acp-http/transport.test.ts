@@ -192,7 +192,6 @@ class FakeBridge {
     clientId?: string;
   }> = [];
   resumeRequests: string[] = [];
-  branchRequests: string[] = [];
   replaySnapshot: SessionReplaySnapshot | undefined;
   loadState: Record<string, unknown> = { replayed: true };
   loadPartial: true | undefined;
@@ -283,19 +282,6 @@ class FakeBridge {
       attached: true,
       clientId: 'client-resume',
       state: { resumed: true },
-    };
-  }
-
-  async branchSession(sessionId: string) {
-    this.branchRequests.push(sessionId);
-    return {
-      sessionId: 'forked-1',
-      workspaceCwd: TEST_WORKSPACE,
-      attached: false,
-      clientId: 'client-fork',
-      state: {},
-      displayName: 'Forked session',
-      forkedFrom: { sessionId, displayName: sessionId },
     };
   }
 
@@ -1526,7 +1512,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   it('removes an undelivered persistent fork when the connection closes', async () => {
     const connId = await initialize();
     await newSession(connId);
-    await writeStoredSession('forked-1');
+    await writeStoredSession('branch-1');
     const connStream = acpHandle?.registry.get(connId)?.connStream;
     connStream?.close();
 
@@ -1542,11 +1528,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       headers: { 'acp-connection-id': connId },
     });
 
-    await waitUntil(() => bridge.killed.includes('forked-1'));
+    await waitUntil(() => bridge.killed.includes('branch-1'));
     await waitUntil(
       async () =>
         (await new SessionService(TEST_WORKSPACE).getSessionLocation(
-          'forked-1',
+          'branch-1',
         )) === undefined,
     );
     expect(acpHandle?.registry.get(connId)).toBeUndefined();
