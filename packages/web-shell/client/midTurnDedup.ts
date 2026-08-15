@@ -7,6 +7,7 @@
 export interface MidTurnQueueItem {
   text: string;
   images?: unknown[];
+  files?: unknown[];
   midTurnState?: 'submitting' | 'queued';
   midTurnMessageId?: string;
 }
@@ -34,10 +35,10 @@ export interface MidTurnInjectedBatch {
  * no ids (older daemon), or a still-`submitting` row that hasn't received its id
  * yet. Matching stays count-based — one removal per injected message — so a
  * queue that holds the same text twice loses one entry per matching injection.
- * Entries carrying images are never matched: image messages aren't pushed
- * mid-turn (the drain channel carries plain strings), so they stay queued for
- * the next turn. An entry that already fell back to the ordinary path
- * (`midTurnState === undefined`) is never matched.
+ * Entries carrying images or file attachments are never matched: attachment
+ * messages aren't pushed mid-turn (the drain channel carries plain strings),
+ * so they stay queued for the next turn. An entry that already fell back to
+ * the ordinary path (`midTurnState === undefined`) is never matched.
  *
  * Text fallback skips batches from another originator so coincidentally equal
  * messages are not removed. In strict-id mode, an exact id still wins because
@@ -58,7 +59,8 @@ export function removeInjectedFromQueue<T extends MidTurnQueueItem>(
 ): T[] | null {
   const remaining = [...prompts];
   const isTextOnly = (prompt: T) =>
-    !prompt.images || prompt.images.length === 0;
+    (!prompt.images || prompt.images.length === 0) &&
+    (!prompt.files || prompt.files.length === 0);
   let changed = false;
   for (const batch of batches) {
     if (batch.sessionId !== sessionId) continue;

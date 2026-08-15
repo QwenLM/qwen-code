@@ -43,7 +43,7 @@ import {
   useIsTouchComposer,
 } from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import {
   useOptionalWorkspace,
   type UseDaemonFollowupSuggestionReturn,
@@ -100,10 +100,14 @@ import type {
 } from '../customization';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
-  extractImageTransfer,
+  dedupeAttachmentName,
+  extractFileTransfer,
   hasFileTransferPayload,
   MAX_IMAGE_ATTACHMENT_DATA_BYTES,
+  MAX_TEXT_ATTACHMENT_DATA_BYTES,
   readImageTransfer,
+  readTextTransfer,
+  sanitizeAttachmentName,
 } from '../utils/imageIngestion';
 
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
@@ -928,6 +932,7 @@ export interface EditorHandle extends WebShellComposerApi {
   hasInput(): boolean;
   retryLast(): void;
   restoreImages(images: readonly PromptImage[]): void;
+  restoreFiles(files: readonly PromptFile[]): void;
   restoreInputAnnotations?(
     inputAnnotations: readonly DaemonInputAnnotation[],
   ): void;
@@ -1081,6 +1086,7 @@ export interface UseComposerCoreOptions {
   onSubmit: (
     text: string,
     images?: PromptImage[],
+    files?: PromptFile[],
     commitAccepted?: ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
@@ -1331,6 +1337,8 @@ export interface UseComposerCoreReturn {
   handle: EditorHandle;
   pastedImages: PromptImage[];
   removeImage: (index: number) => void;
+  pastedFiles: PromptFile[];
+  removeFile: (index: number) => void;
   composerTags: WebShellComposerTag[];
   removeTopTag: (id: string) => void;
   addTags: (
@@ -1678,6 +1686,8 @@ export function useComposerCore(
   const searchDraftRef = useRef('');
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
+  const [pastedFiles, setPastedFiles] = useState<PromptFile[]>([]);
+  const pastedFilesRef = useRef<PromptFile[]>([]);
   const [pendingImageBatchCount, setPendingImageBatchCount] = useState(0);
   const [imageDragActive, setImageDragActive] = useState(false);
   const imageDragDepthRef = useRef(0);
@@ -1694,6 +1704,7 @@ export function useComposerCore(
       previousLane.generation + 1,
     );
     pastedImagesRef.current = [];
+    pastedFilesRef.current = [];
     for (const reader of previousLane.activeReaders) {
       reader.abort();
     }
@@ -1701,6 +1712,7 @@ export function useComposerCore(
     imageDragDepthRef.current = 0;
     if (updateState) {
       setPastedImages([]);
+      setPastedFiles([]);
       setPendingImageBatchCount(0);
       setImageDragActive(false);
     }
@@ -1724,7 +1736,7 @@ export function useComposerCore(
   );
   const enqueueImageTransfer = useCallback(
     (dataTransfer: DataTransfer, source: 'paste' | 'drop') => {
-      const transfer = extractImageTransfer(dataTransfer, source);
+      const transfer = extractFileTransfer(dataTransfer, source);
       if (!transfer.claimed) return false;
       if (disabledRef.current) return true;
 
@@ -1734,31 +1746,72 @@ export function useComposerCore(
       lane.tail = lane.tail
         .then(async () => {
           if (imageIngestionLaneRef.current !== lane) return;
-          const result = await readImageTransfer(transfer, {
-            onReaderCreated: (reader) => lane.activeReaders.add(reader),
-            onReaderSettled: (reader) => lane.activeReaders.delete(reader),
+          const readerLifecycle = {
+            onReaderCreated: (reader: FileReader) =>
+              lane.activeReaders.add(reader),
+            onReaderSettled: (reader: FileReader) =>
+              lane.activeReaders.delete(reader),
+          };
+          const imageResult = await readImageTransfer(
+            transfer.imageCandidates,
+            {
+              ...readerLifecycle,
+              maxEncodedBytes: Math.max(
+                0,
+                MAX_IMAGE_ATTACHMENT_DATA_BYTES -
+                  pastedImagesRef.current.reduce(
+                    (total, image) => total + image.data.length,
+                    0,
+                  ),
+              ),
+            },
+          );
+          if (imageIngestionLaneRef.current !== lane) return;
+          const textResult = await readTextTransfer(transfer.textCandidates, {
+            ...readerLifecycle,
             maxEncodedBytes: Math.max(
               0,
-              MAX_IMAGE_ATTACHMENT_DATA_BYTES -
-                pastedImagesRef.current.reduce(
-                  (total, image) => total + image.data.length,
+              MAX_TEXT_ATTACHMENT_DATA_BYTES -
+                pastedFilesRef.current.reduce(
+                  (total, file) => total + (file.size ?? file.text.length),
                   0,
                 ),
             ),
           });
           if (imageIngestionLaneRef.current !== lane) return;
-          if (result.accepted.length > 0) {
-            const next = [...pastedImagesRef.current, ...result.accepted];
+          if (imageResult.accepted.length > 0) {
+            const next = [...pastedImagesRef.current, ...imageResult.accepted];
             pastedImagesRef.current = next;
             setPastedImages(next);
           }
-          const skipped = result.rejected.filter(
+          if (textResult.accepted.length > 0) {
+            const taken = new Set(
+              pastedFilesRef.current.map((file) => file.name),
+            );
+            const named = textResult.accepted.map((file) => {
+              const name = dedupeAttachmentName(
+                sanitizeAttachmentName(file.name),
+                taken,
+              );
+              taken.add(name);
+              return { ...file, name };
+            });
+            const next = [...pastedFilesRef.current, ...named];
+            pastedFilesRef.current = next;
+            setPastedFiles(next);
+          }
+          const rejected = [
+            ...transfer.rejected,
+            ...imageResult.rejected,
+            ...textResult.rejected,
+          ];
+          const skipped = rejected.filter(
             ({ reason }) => reason !== 'read-failed' && reason !== 'too-large',
           ).length;
-          const tooLarge = result.rejected.filter(
+          const tooLarge = rejected.filter(
             ({ reason }) => reason === 'too-large',
           ).length;
-          const failed = result.rejected.filter(
+          const failed = rejected.filter(
             ({ reason }) => reason === 'read-failed',
           ).length;
           if (skipped > 0) {
@@ -2220,11 +2273,13 @@ export function useComposerCore(
       text.trim().length > 0 ||
         !!followupCompletion ||
         composerTags.length > 0 ||
-        pastedImages.length > 0,
+        pastedImages.length > 0 ||
+        pastedFiles.length > 0,
     );
   }, [
     composerTags,
     pastedImages,
+    pastedFiles,
     mobileText,
     followupState?.isVisible,
     followupState?.suggestion,
@@ -2449,11 +2504,13 @@ export function useComposerCore(
         : [];
     const tags = tagsOverride ?? composerTagsRef.current;
     const images = pastedImagesRef.current;
+    const files = pastedFilesRef.current;
     if (
       !rawText &&
       tags.length === 0 &&
       inlineTags.length === 0 &&
-      images.length === 0
+      images.length === 0 &&
+      files.length === 0
     ) {
       return true;
     }
@@ -2496,6 +2553,7 @@ export function useComposerCore(
     const mobileTextVersionAtSubmit = mobileTextVersionRef.current;
     const composerTagsAtSubmit = composerTagsRef.current;
     const pastedImagesAtSubmit = pastedImagesRef.current;
+    const pastedFilesAtSubmit = pastedFilesRef.current;
     const restoredInputAnnotationsAtSubmit =
       restoredInputAnnotationsRef.current;
     const shellModeAtSubmit = shellModeRef.current;
@@ -2544,6 +2602,7 @@ export function useComposerCore(
           : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
         composerTagsRef.current === composerTagsAtSubmit &&
         pastedImagesRef.current === pastedImagesAtSubmit &&
+        pastedFilesRef.current === pastedFilesAtSubmit &&
         restoredInputAnnotationsRef.current ===
           restoredInputAnnotationsAtSubmit &&
         shellModeRef.current === shellModeAtSubmit;
@@ -2559,8 +2618,10 @@ export function useComposerCore(
       clearPromptHistoryDraftTags();
       setComposerTags([]);
       pastedImagesRef.current = [];
+      pastedFilesRef.current = [];
       restoredInputAnnotationsRef.current = [];
       setPastedImages([]);
+      setPastedFiles([]);
       if (view) {
         view.dispatch({
           changes: { from: 0, to: view.state.doc.length, insert: '' },
@@ -2573,6 +2634,7 @@ export function useComposerCore(
     const accepted = onSubmitRef.current(
       promptText,
       images.length > 0 ? [...images] : undefined,
+      files.length > 0 ? [...files] : undefined,
       commitAccepted,
       inputAnnotations.length > 0 ? { inputAnnotations } : undefined,
     );
@@ -3159,7 +3221,8 @@ export function useComposerCore(
               text.trim().length > 0 ||
                 !!followupCompletion ||
                 composerTagsRef.current.length > 0 ||
-                pastedImagesRef.current.length > 0,
+                pastedImagesRef.current.length > 0 ||
+                pastedFilesRef.current.length > 0,
             );
           }
         }),
@@ -3234,7 +3297,8 @@ export function useComposerCore(
     updateHasContent(
       initialText.length > 0 ||
         composerTagsRef.current.length > 0 ||
-        pastedImagesRef.current.length > 0,
+        pastedImagesRef.current.length > 0 ||
+        pastedFilesRef.current.length > 0,
     );
 
     return () => {
@@ -3849,7 +3913,8 @@ export function useComposerCore(
     return (
       text.trim().length > 0 ||
       composerTagsRef.current.length > 0 ||
-      pastedImagesRef.current.length > 0
+      pastedImagesRef.current.length > 0 ||
+      pastedFilesRef.current.length > 0
     );
   }, [isTouchComposer]);
 
@@ -3860,7 +3925,8 @@ export function useComposerCore(
     return (
       inlineTags.length > 0 ||
       composerTagsRef.current.length > 0 ||
-      pastedImagesRef.current.length > 0
+      pastedImagesRef.current.length > 0 ||
+      pastedFilesRef.current.length > 0
     );
   }, []);
 
@@ -3905,8 +3971,10 @@ export function useComposerCore(
     const accepted = onSubmitRef.current(last);
     if (accepted === false) return;
     pastedImagesRef.current = [];
+    pastedFilesRef.current = [];
     restoredInputAnnotationsRef.current = [];
     setPastedImages([]);
+    setPastedFiles([]);
   }, []);
 
   const replaceEditorText = useCallback(
@@ -4083,9 +4151,11 @@ export function useComposerCore(
       const text = match.trim();
       if (!text) return;
       const images = pastedImagesRef.current;
+      const files = pastedFilesRef.current;
       const accepted = onSubmitRef.current(
         `!${text}`,
         images.length > 0 ? [...images] : undefined,
+        files.length > 0 ? [...files] : undefined,
       );
       if (accepted === false) {
         restoreSelectedHistoryMatch(match);
@@ -4095,8 +4165,10 @@ export function useComposerCore(
       shellHistoryActionsRef.current.push(text);
       shellHistoryActionsRef.current.reset();
       pastedImagesRef.current = [];
+      pastedFilesRef.current = [];
       restoredInputAnnotationsRef.current = [];
       setPastedImages([]);
+      setPastedFiles([]);
       replaceEditorText('');
     },
     [
@@ -4167,6 +4239,12 @@ export function useComposerCore(
     setPastedImages(next);
   }, []);
 
+  const removeFile = useCallback((index: number) => {
+    const next = pastedFilesRef.current.filter((_, idx) => idx !== index);
+    pastedFilesRef.current = next;
+    setPastedFiles(next);
+  }, []);
+
   // ---- Computed ----
 
   const canSubmit =
@@ -4187,6 +4265,20 @@ export function useComposerCore(
     const next = [...pastedImagesRef.current, ...images];
     pastedImagesRef.current = next;
     setPastedImages(next);
+  }, []);
+  const restoreFiles = useCallback((files: readonly PromptFile[]) => {
+    const taken = new Set(pastedFilesRef.current.map((file) => file.name));
+    const named = files.map((file) => {
+      const name = dedupeAttachmentName(
+        sanitizeAttachmentName(file.name),
+        taken,
+      );
+      taken.add(name);
+      return { ...file, name };
+    });
+    const next = [...pastedFilesRef.current, ...named];
+    pastedFilesRef.current = next;
+    setPastedFiles(next);
   }, []);
   const restoreInputAnnotations = useCallback(
     (inputAnnotations: readonly DaemonInputAnnotation[]) => {
@@ -4222,6 +4314,7 @@ export function useComposerCore(
       insertText,
       retryLast,
       restoreImages,
+      restoreFiles,
       restoreInputAnnotations,
       submit,
     };
@@ -4236,6 +4329,7 @@ export function useComposerCore(
     insertText,
     removeTopTag,
     restoreImages,
+    restoreFiles,
     restoreInputAnnotations,
     retryLast,
     setText,
@@ -4264,7 +4358,10 @@ export function useComposerCore(
     getText,
     hasInput,
     hasAttachments:
-      hasInlineTags || composerTags.length > 0 || pastedImages.length > 0,
+      hasInlineTags ||
+      composerTags.length > 0 ||
+      pastedImages.length > 0 ||
+      pastedFiles.length > 0,
     hasContent,
     canSubmit,
     pendingImageBatchCount,
@@ -4274,6 +4371,8 @@ export function useComposerCore(
     handle,
     pastedImages,
     removeImage,
+    pastedFiles,
+    removeFile,
     composerTags,
     removeTopTag,
     addTags,
