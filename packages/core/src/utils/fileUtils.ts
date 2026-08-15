@@ -1178,7 +1178,7 @@ export async function processSingleFileContent(
 
     const fileType = options.textFileHandle
       ? 'text'
-      : await detectFileType(filePath);
+      : (options.fileType ?? (await detectFileType(filePath)));
     const mediaMimeType =
       mime.getType(filePath) ??
       MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
