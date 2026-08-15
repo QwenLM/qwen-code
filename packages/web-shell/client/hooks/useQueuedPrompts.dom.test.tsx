@@ -240,21 +240,27 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     mount('responding', actions, true, false, false, true);
 
     act(() =>
-      latest.enqueuePrompt('inspect this file', undefined, undefined, [
-        {
-          type: 'reference',
-          start: 8,
-          end: 17,
-          text: 'this file',
-          reference: {
-            id: 'file-1',
-            kind: 'data-table',
-            label: 'File',
-            value: '/tmp/a.ts',
-            serialized: 'this file',
+      latest.enqueuePrompt(
+        'inspect this file',
+        undefined,
+        undefined,
+        undefined,
+        [
+          {
+            type: 'reference',
+            start: 8,
+            end: 17,
+            text: 'this file',
+            reference: {
+              id: 'file-1',
+              kind: 'data-table',
+              label: 'File',
+              value: '/tmp/a.ts',
+              serialized: 'this file',
+            },
           },
-        },
-      ]),
+        ],
+      ),
     );
     await act(async () => latest.insertQueuedPrompt(1));
 
@@ -621,6 +627,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       '',
       [{ data: 'Ym1w', mimeType: 'image/bmp' }],
       undefined,
+      undefined,
     );
     expect(latest.queuedPrompts).toMatchObject([
       {
@@ -670,6 +677,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       '',
       [{ data: 'c2Vjb25k', mimeType: 'image/png' }],
       undefined,
+      undefined,
     );
   });
 
@@ -708,6 +716,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'dGVybWluYWw=', mimeType: 'image/png' }],
+      undefined,
       undefined,
     );
   });
@@ -986,7 +995,13 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ];
 
     act(() =>
-      latest.enqueuePrompt('describe', images, undefined, inputAnnotations),
+      latest.enqueuePrompt(
+        'describe',
+        images,
+        undefined,
+        undefined,
+        inputAnnotations,
+      ),
     );
     await act(async () => {
       pendingSubmit.reject(new DaemonHttpError(413, undefined, 'Too large'));
@@ -1060,6 +1075,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     act(() =>
       latest.enqueuePrompt(
         '@file.ts\n\nfix it',
+        undefined,
         undefined,
         undefined,
         inputAnnotations,
@@ -1623,7 +1639,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     act(() => latest.enqueuePrompt('图片', [{ data: 'x', media_type: 'x' }]));
     act(() => latest.enqueuePrompt('/help'));
     act(() =>
-      latest.enqueuePrompt('@file.ts fix', undefined, undefined, [
+      latest.enqueuePrompt('@file.ts fix', undefined, undefined, undefined, [
         {
           type: 'reference',
           start: 0,

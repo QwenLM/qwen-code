@@ -56,6 +56,7 @@ import type {
   AddDaemonSessionNotice,
   DaemonConnectionState,
   DaemonNoticeOperation,
+  DaemonPromptFile,
   DaemonPromptStatus,
   DaemonSessionActions,
   SettledPrompt,
@@ -64,6 +65,17 @@ import type {
 
 interface RefBox<T> {
   current: T;
+}
+
+function normalizePromptFiles(
+  files: readonly DaemonPromptFile[] | undefined,
+): Array<{ name: string; text: string; mimeType: string }> {
+  return (files ?? []).map((file) => ({
+    name: file.name,
+    text: file.text,
+    mimeType:
+      file.mimeType || file.mediaType || file.media_type || 'text/plain',
+  }));
 }
 
 const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
@@ -494,6 +506,7 @@ export function createDaemonSessionActions({
           mimeType:
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
+        const normalizedFiles = normalizePromptFiles(options?.files);
         const inputAnnotations =
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
@@ -503,10 +516,15 @@ export function createDaemonSessionActions({
             text,
             normalizedImages,
             inputAnnotations ? { inputAnnotations } : undefined,
+            normalizedFiles,
           );
         }
         const promptRequest: Record<string, unknown> = {
-          prompt: toDaemonPromptContent(text, normalizedImages),
+          prompt: toDaemonPromptContent(
+            text,
+            normalizedImages,
+            normalizedFiles,
+          ),
         };
         if (inputAnnotations) {
           promptRequest['_meta'] = { inputAnnotations };
@@ -581,6 +599,7 @@ export function createDaemonSessionActions({
         data: img.data,
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
+      const normalizedFiles = normalizePromptFiles(options?.files);
       const inputAnnotations =
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations
@@ -590,10 +609,11 @@ export function createDaemonSessionActions({
           text,
           normalizedImages,
           inputAnnotations ? { inputAnnotations } : undefined,
+          normalizedFiles,
         );
       }
       const promptRequest: Record<string, unknown> = {
-        prompt: toDaemonPromptContent(text, normalizedImages),
+        prompt: toDaemonPromptContent(text, normalizedImages, normalizedFiles),
       };
       if (inputAnnotations) {
         promptRequest['_meta'] = { inputAnnotations };
