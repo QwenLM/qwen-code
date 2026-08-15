@@ -1322,6 +1322,24 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     expect(r.body.split(FOOTER)).toHaveLength(2);
   });
 
+  it('collapses a bare carriage return like a newline — CommonMark treats CR as a line ending', () => {
+    // A bare CR survived the `\n`-only collapsers and GFM renders it as a
+    // line break: the continuation leaked out of the list item, injecting
+    // a model-chosen line into the body. Every flattened exit collapses
+    // all three CommonMark line endings.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          'R1-1 pin gap — duplicate\r- R9-9 forged item',
+        ],
+        cannotTellCriticals: ['a.ts:1 — reason\r- injected line'],
+      }),
+    );
+    expect(r.body).not.toContain('\r');
+    expect(r.body).toContain('- R1-1 pin gap — duplicate - R9-9 forged item');
+    expect(r.body).toContain('a.ts:1 — reason - injected line');
+  });
+
   it('renders the duplicate count from the entries, not a hardcode, in the Chinese fold', () => {
     // Not base(): its planPath default runs coveredPlan() again on the same
     // path and would overwrite the han-stamped plan.
@@ -1409,6 +1427,31 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
     );
     expect(r.body).toContain('- R1-1 ');
     expect(r.body).toContain('…');
+  });
+
+  it('a cut landing inside a trailing comment ref drops the fragment — a truncated id never linkifies', () => {
+    // A 245-char entry puts the 240-char cut inside the 10-digit id,
+    // keeping a 6-digit prefix that satisfies the linkifier's `\d{6,}`
+    // floor. Before the strip the posted body anchored `[comment 378885]`
+    // — a comment that does not exist — in the paragraph whose stated
+    // purpose is a truthful account of where findings already live.
+    const r = composeReview({
+      suggestionsDroppedAsDuplicates: [
+        `R1-1 ${'x'.repeat(200)} — already reported (comment 3788857375)`,
+      ],
+      planPath: coveredPlan(undefined, {
+        ownerRepo: 'QwenLM/qwen-code',
+        prNumber: '9204',
+      }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('- R1-1 ');
+    expect(r.body).toContain('…');
+    // The fragment drops whole: neither the kept prefix nor the full id
+    // may ride an anchor.
+    expect(r.body).not.toContain('378885');
+    expect(r.body).not.toContain('discussion_r');
   });
 
   it('caps the rendered list at the deferred line cap and keeps the count truthful with an overflow item', () => {
@@ -5291,6 +5334,25 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     );
   });
 
+  it('bounds a one-line entry the way the deferred channel does — the body must not die at the 65,536 limit', () => {
+    // Same incident shape the duplicate-drop bound exists for: one ~70 KB
+    // one-line entry — nothing for a `\n` collapser to catch — composes a
+    // body past GitHub's 65,536-char limit, and `submit` posts
+    // all-or-nothing. The entry still renders, trimmed and ellipsized —
+    // nothing is dropped, the full entry lives in the run's state.
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [`subject ${'y'.repeat(70_000)} — reason`],
+      }),
+    );
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(r.body.length).toBeLessThan(65_536);
+    expect(r.body).toContain('Unresolved, please confirm:');
+    expect(r.body).toContain('subject y');
+    expect(r.body).toContain('…');
+  });
+
   it('collapses entries sharing the exact reason into one group that says it once', () => {
     const r = composeReview(
       base({
@@ -5417,6 +5479,19 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     expect(r.body).toContain('\n- **[Critical]** a.ts:1\n');
     expect(r.body).toContain('\n- **[Critical]** b.ts:2\n');
     expect(r.body).not.toContain('entries —');
+  });
+
+  it('a cut landing right after the separator stays reasonless and keeps the trim mark', () => {
+    // The bound strands the separator at the line's end (` — …`) the way
+    // a trailing-space entry strands it (` — `): both are reasonless, and
+    // the ellipsis still says the entry was cut.
+    const r = composeReview(
+      base({
+        cannotTellCriticals: [`${'x'.repeat(237)} — reason`],
+      }),
+    );
+    expect(r.body).toContain(`- **[Critical]** ${'x'.repeat(237)}…`);
+    expect(r.body).not.toContain('— …');
   });
 
   it('collapses embedded newlines so a multi-line entry stays one list item', () => {

@@ -102,11 +102,12 @@ export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
 
 /**
  * The deferred-suggestions list's rendered bounds, shared by the
- * duplicate-drop account. Module-scoped because two surfaces read the line
- * cap: the body renderer that applies it, and `verdictLine`, whose "(listed
- * in the body)" claim must turn cap-aware the moment the list overflows — a
- * verdict that counts 21 over a body that lists 20 is a false record
- * persisted into the archived report.
+ * duplicate-drop account; the cannot-tell account shares the char cap.
+ * Module-scoped because two surfaces read the line cap: the body renderer
+ * that applies it, and `verdictLine`, whose "(listed in the body)" claim
+ * must turn cap-aware the moment the list overflows — a verdict that counts
+ * 21 over a body that lists 20 is a false record persisted into the
+ * archived report.
  */
 const MAX_DEFERRED_SUGGESTION_LINES = 20;
 const MAX_DEFERRED_SUGGESTION_CHARS = 240;
@@ -173,21 +174,35 @@ export function renderDeferredEntry(entry: DeferredEntry): string {
 }
 
 /**
- * The per-entry bound every model-written list exit applies — deferred,
- * relocated, AND duplicate-dropped: collapse newlines, cap at
+ * One model-written entry flattened to a single line — every CommonMark
+ * line ending (`\n`, `\r\n`, or a bare `\r`) becomes a space. Split/join,
+ * not a whitespace-normalising regex replace: that backtracks quadratically
+ * on a long whitespace run with no line ending in it, and these entries are
+ * model-written with no length cap — one such entry stalled a measured
+ * probe for seconds at 80k characters.
+ */
+function collapseToLine(text: string): string {
+  return text
+    .split(/\r\n?|\n/)
+    .map((seg) => seg.trim())
+    .filter((seg) => seg !== '')
+    .join(' ');
+}
+
+/**
+ * The per-entry bound the deferred, relocated, duplicate-dropped, AND
+ * cannot-tell exits apply: collapse line endings, cap at
  * MAX_DEFERRED_SUGGESTION_CHARS
  * without splitting a surrogate pair, mark a trim with an ellipsis. The
  * relocation exit once bypassed all of it (round-9 finding): twenty-five
  * relocated 4,000-char titles spliced ~100 KB of unbounded model text into
  * the body — the whole review lost at GitHub's 65,536 limit, precisely what
- * the cap on the deferred exit was added to prevent.
+ * the cap on the deferred exit was added to prevent. The free-form
+ * bodyCriticals exit is the exception: its entries are the review's only
+ * copy of their Criticals, quoted as-is and left unbounded.
  */
 function boundDeferredLine(rendered: string): string {
-  const collapsed = rendered
-    .split('\n')
-    .map((seg) => seg.trim())
-    .filter((seg) => seg !== '')
-    .join(' ');
+  const collapsed = collapseToLine(rendered);
   let oneLine = collapsed.slice(0, MAX_DEFERRED_SUGGESTION_CHARS);
   // The cap slices UTF-16 code units; a cut landing inside a surrogate pair
   // leaves a lone high surrogate that serializes as U+FFFD into the posted
@@ -197,8 +212,14 @@ function boundDeferredLine(rendered: string): string {
     oneLine = oneLine.slice(0, -1);
   }
   // A trimmed entry must say so — a claim cut mid-sentence otherwise renders
-  // as a complete finding line on the PR record.
-  if (oneLine.length < collapsed.length) oneLine += '…';
+  // as a complete finding line on the PR record. A cut inside a trailing
+  // `comment <id>` ref drops the fragment first: the kept digit prefix
+  // still satisfies the linkifier's digit floor and would anchor a comment
+  // that does not exist.
+  if (oneLine.length < collapsed.length) {
+    oneLine =
+      oneLine.replace(/\s*\(?(?:issue-level )?comment(?: \d*)?$/i, '') + '…';
+  }
   return oneLine;
 }
 
@@ -615,23 +636,10 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  * A model-written entry flattened to one renderable list line, its `comment
  * <id>` refs linked to the PR's anchors. Entries render as one-line list
  * items: an unindented newline ends a list item (CommonMark), so an entry
- * spanning lines would leak its continuation out of the list. Collapsed by
- * split/join, not by a regex replace: a whitespace-normalising regex
- * backtracks quadratically on a long whitespace run with no newline in it,
- * and these entries are model-written with no length cap — one such entry
- * stalled a measured probe for seconds at 80k characters.
+ * spanning lines would leak its continuation out of the list.
  */
 function asListLine(text: string, pr: PrIdentity | null): string {
-  return linkifyCommentRefs(
-    text.includes('\n')
-      ? text
-          .split('\n')
-          .map((seg) => seg.trim())
-          .filter((seg) => seg !== '')
-          .join(' ')
-      : text,
-    pr,
-  );
+  return linkifyCommentRefs(collapseToLine(text), pr);
 }
 
 /**
@@ -651,15 +659,18 @@ function formatCannotTell(cannotTell: string[], pr: PrIdentity | null): Bi {
     const unmarked = raw.startsWith(CRITICAL_PREFIX)
       ? raw.slice(CRITICAL_PREFIX.length).trim()
       : raw;
-    const line = asListLine(unmarked, pr);
-    const idx = line.indexOf(' — ');
-    // `|| null`: a dangling ` — ` with nothing after it is reasonless — an
-    // empty-string reason would become a group key and render `2 entries — :`.
+    const line = asListLine(boundDeferredLine(unmarked), pr);
+    // A dangling ` — ` with nothing after it is reasonless — an empty-string
+    // reason would become a group key and render `2 entries — :`. The bound
+    // strands the separator the same way when a cut lands right after it.
+    const subject = line.replace(/ —\s*…$/, '…').replace(/ —$/, '');
+    const idx = subject.indexOf(' — ');
+    // `|| null`: reasonless entries never spawn the empty group key.
     return idx === -1
-      ? { head: line, reason: null }
+      ? { head: subject, reason: null }
       : {
-          head: line.slice(0, idx),
-          reason: line.slice(idx + 3).trim() || null,
+          head: subject.slice(0, idx),
+          reason: subject.slice(idx + 3).trim() || null,
         };
   });
   // Grouped on the exact reason text, in first-appearance order. A reasonless
