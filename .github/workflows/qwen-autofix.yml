@@ -4529,14 +4529,13 @@ jobs:
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           [[ "${NET_MEASURED}" != 'true' ]] &&
             echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
-          # The marker's window field is spelled `key=`, NOT `win=`, on
-          # purpose: three censuses (PRIOR_TIMEOUTS, the milestone WIN_HEADS,
-          # the breaker PRIOR_HEADS) attribute comments to windows by the
-          # WHOLE-BODY substring `win=<key> -->`, and this marker can
-          # legitimately carry a different window key than its comment's
-          # autofix-eval marker (a supersede-exempt conflict round reporting
-          # after a re-arm). Any token embedding "win=" would double-attribute
-          # that comment to both windows.
+          # The marker's window field is spelled `key=`, NOT `win=`: this
+          # marker can legitimately carry a different window key than its
+          # comment's autofix-eval marker (a supersede-exempt conflict round
+          # reporting after a re-arm). The window censuses attribute
+          # positionally (last-wins) over their own scan-parsed eval
+          # markers, and the distinct token stays as defense in depth for
+          # any future substring consumer.
           # A stale-base auto-update merges current main into the branch,
           # moving the merge base the nets are measured against: overlap
           # resolutions then shift the measurement with no agent push. An
@@ -4993,8 +4992,8 @@ jobs:
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
-                | select(((.body // "") | contains("win=" + $key + " -->"))
-                    or ($key == "none" and (((.body // "") | contains("win=")) | not)))
+                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                    | ($wins | length) > 0 and (($wins | last) == $key))
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
@@ -5229,6 +5228,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5348,6 +5351,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5415,7 +5422,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -5510,7 +5517,158 @@ jobs:
             exit 1
           fi
 
-          # Take this PAT-bearing step off every mutable host git surface —
+          # Shared by the pushed and no-op outcomes: a no-op round may
+          # resolve re-verified findings (verified_head is the unchanged,
+          # previously verified origin head) and must post its declines'
+          # replies — silence in still-open threads was a no-op-only gap.
+          resolve_and_reply_threads() {
+            CAN_RESOLVE_THREADS='false'
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+              LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
+              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
+              elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
+              elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
+                [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+                CAN_RESOLVE_THREADS='true'
+              else
+                echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+              fi
+            fi
+            # Resolve the review threads whose findings the agent actually
+            # IMPLEMENTED, so a human re-reviewing sees only what is still open
+            # instead of re-reading every thread to work out what was handled.
+            # The agent cannot do this itself - its sandbox carries no token -
+            # so it records the inline-comment ids it implemented and this step,
+            # which already holds the PAT, maps each to its thread. Findings it
+            # DECLINED or deferred are deliberately left open. Best-effort
+            # throughout: a resolve failure must never fail a good push.
+            # Both this resolve block and the reply block below map an
+            # inline-comment id to its review thread, so the threads are
+            # fetched once here and shared. Hoisted above both so a round that
+            # only replies (no resolved-comments.txt) still has them.
+            # first-100 page cap: a comment in a thread past this page is not
+            # mapped, and each block falls back to the id as given.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
+              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
+                query($owner:String!,$name:String!,$pr:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$pr){
+                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
+                    }
+                  }
+                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
+              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
+              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
+              fi
+            fi
+            if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
+              CONFIRMED_RESOLVED_N=0
+              read_thread_guard() {
+                gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
+                  query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
+                    repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
+                    node(id:$threadId){... on PullRequestReviewThread{isResolved}}
+                  }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
+              }
+              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
+                rc_id="${rc_id%$'\r'}"
+                rc_id="${rc_id#rc:}"
+                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
+                thread_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(.isResolved | not)
+                     | select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].id // ""' <<< "${THREADS_JSON}")"
+                if [[ -z "${thread_id}" ]]; then
+                  echo "::warning::comment ${rc_id} matched no open review thread"
+                  continue
+                fi
+                if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
+                  [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                  echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
+                  break
+                elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
+                  continue
+                elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
+                  echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
+                  break
+                fi
+                RESOLVE_SUCCEEDED='false'
+                if gh api graphql -f threadId="${thread_id}" -f query='
+                  mutation($threadId:ID!){
+                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
+                  }' > /dev/null 2>&1; then
+                  RESOLVE_SUCCEEDED='true'
+                fi
+                POST_GUARD_OK='false'
+                if IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null); then
+                  POST_GUARD_OK='true'
+                fi
+                if [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  if [[ "${RESOLVE_SUCCEEDED}" != 'true' ]]; then
+                    echo "::warning::comment ${rc_id} is resolved after an unsuccessful mutation command; another actor or a lost response may be responsible"
+                  fi
+                  CONFIRMED_RESOLVED_N=$(( CONFIRMED_RESOLVED_N + 1 ))
+                elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
+                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
+                else
+                  echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
+                  break
+                fi
+              done < "${WORKDIR}/resolved-comments.txt"
+              echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
+            fi
+            # The mirror of the resolve above: a finding the agent did NOT
+            # resolve keeps its thread open, and this answers it IN that thread.
+            # Without it the reason sits only in the round summary, so the
+            # reviewer who opens the still-open thread sees silence and cannot
+            # tell their finding was read. Same neutralisation as the summary
+            # body — a reply is model output posted verbatim under the bot
+            # identity, so it could otherwise smuggle a forged control marker.
+            # Best-effort: a reply failure must never fail a good push.
+            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
+              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
+              REPLIED_N=0
+              while IFS=$'\t' read -r rc_id reply_b64; do
+                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
+                # A finding cannot be both resolved and replied to; the resolve
+                # block above already closed anything in resolved-comments.txt,
+                # so skip it here rather than answer a thread we just resolved.
+                # Match tolerates the rc: prefix and a trailing CR, as the
+                # resolve block's own parsing does.
+                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
+                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
+                  grep -qxE "(rc:)?${rc_id}"; then
+                  continue
+                fi
+                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
+                [[ -n "${REPLY_BODY}" ]] || continue
+                # GitHub rejects a reply aimed at another reply ("Replies to
+                # replies are not supported"), and rc_id can itself be a reply
+                # id — the feedback step lists every review comment, replies
+                # included. Map to the thread's top-level comment (the one
+                # valid target), falling back to rc_id when the thread is past
+                # the first-100 page cap and so absent from THREADS_JSON.
+                root_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
+                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
+                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
+                  REPLIED_N=$(( REPLIED_N + 1 ))
+                else
+                  echo "::warning::could not reply to review comment ${rc_id}"
+                fi
+              done < <(jq -r '.[] | select(.id != null and .body != null)
+                | [(.id | tostring), (.body | @base64)] | @tsv' \
+                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
+              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
+            fi
+          }
+
+                    # Take this PAT-bearing step off every mutable host git surface —
           # both the shared config FILES and git's ENV channels — keep this
           # block byte-identical to its twin in 'Publish PR' (the contract
           # test pins them equal). File scopes: the pool shares one HOME
@@ -5662,150 +5820,7 @@ jobs:
                 PUSH_RACE_MERGED='true'
               fi
             done
-            CAN_RESOLVE_THREADS='false'
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
-              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
-                echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
-              elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-                echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
-              elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
-                [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
-                CAN_RESOLVE_THREADS='true'
-              else
-                echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
-              fi
-            fi
-            # Resolve the review threads whose findings the agent actually
-            # IMPLEMENTED, so a human re-reviewing sees only what is still open
-            # instead of re-reading every thread to work out what was handled.
-            # The agent cannot do this itself - its sandbox carries no token -
-            # so it records the inline-comment ids it implemented and this step,
-            # which already holds the PAT, maps each to its thread. Findings it
-            # DECLINED or deferred are deliberately left open. Best-effort
-            # throughout: a resolve failure must never fail a good push.
-            # Both this resolve block and the reply block below map an
-            # inline-comment id to its review thread, so the threads are
-            # fetched once here and shared. Hoisted above both so a round that
-            # only replies (no resolved-comments.txt) still has them.
-            # first-100 page cap: a comment in a thread past this page is not
-            # mapped, and each block falls back to the id as given.
-            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
-              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
-                query($owner:String!,$name:String!,$pr:Int!){
-                  repository(owner:$owner,name:$name){
-                    pullRequest(number:$pr){
-                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
-                    }
-                  }
-                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
-              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
-              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
-                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
-              fi
-            fi
-            if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
-              CONFIRMED_RESOLVED_N=0
-              read_thread_guard() {
-                gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
-                  query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
-                    repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
-                    node(id:$threadId){... on PullRequestReviewThread{isResolved}}
-                  }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
-              }
-              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
-                rc_id="${rc_id%$'\r'}"
-                rc_id="${rc_id#rc:}"
-                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
-                thread_id="$(jq -r --argjson id "${rc_id}" \
-                  'map(select(.isResolved | not)
-                     | select(any(.comments.nodes[]; .databaseId == $id)))
-                   | .[0].id // ""' <<< "${THREADS_JSON}")"
-                if [[ -z "${thread_id}" ]]; then
-                  echo "::warning::comment ${rc_id} matched no open review thread"
-                  continue
-                fi
-                if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
-                  [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-                  echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
-                  break
-                elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
-                  echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
-                  continue
-                elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
-                  echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
-                  break
-                fi
-                RESOLVE_SUCCEEDED='false'
-                if gh api graphql -f threadId="${thread_id}" -f query='
-                  mutation($threadId:ID!){
-                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
-                  }' > /dev/null 2>&1; then
-                  RESOLVE_SUCCEEDED='true'
-                fi
-                POST_GUARD_OK='false'
-                if IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null); then
-                  POST_GUARD_OK='true'
-                fi
-                if [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'true' ]]; then
-                  if [[ "${RESOLVE_SUCCEEDED}" != 'true' ]]; then
-                    echo "::warning::comment ${rc_id} is resolved after an unsuccessful mutation command; another actor or a lost response may be responsible"
-                  fi
-                  CONFIRMED_RESOLVED_N=$(( CONFIRMED_RESOLVED_N + 1 ))
-                elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
-                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
-                else
-                  echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
-                  break
-                fi
-              done < "${WORKDIR}/resolved-comments.txt"
-              echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
-            fi
-            # The mirror of the resolve above: a finding the agent did NOT
-            # resolve keeps its thread open, and this answers it IN that thread.
-            # Without it the reason sits only in the round summary, so the
-            # reviewer who opens the still-open thread sees silence and cannot
-            # tell their finding was read. Same neutralisation as the summary
-            # body — a reply is model output posted verbatim under the bot
-            # identity, so it could otherwise smuggle a forged control marker.
-            # Best-effort: a reply failure must never fail a good push.
-            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
-              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
-              REPLIED_N=0
-              while IFS=$'\t' read -r rc_id reply_b64; do
-                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
-                # A finding cannot be both resolved and replied to; the resolve
-                # block above already closed anything in resolved-comments.txt,
-                # so skip it here rather than answer a thread we just resolved.
-                # Match tolerates the rc: prefix and a trailing CR, as the
-                # resolve block's own parsing does.
-                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
-                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
-                  grep -qxE "(rc:)?${rc_id}"; then
-                  continue
-                fi
-                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
-                [[ -n "${REPLY_BODY}" ]] || continue
-                # GitHub rejects a reply aimed at another reply ("Replies to
-                # replies are not supported"), and rc_id can itself be a reply
-                # id — the feedback step lists every review comment, replies
-                # included. Map to the thread's top-level comment (the one
-                # valid target), falling back to rc_id when the thread is past
-                # the first-100 page cap and so absent from THREADS_JSON.
-                root_id="$(jq -r --argjson id "${rc_id}" \
-                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
-                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
-                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
-                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
-                  REPLIED_N=$(( REPLIED_N + 1 ))
-                else
-                  echo "::warning::could not reply to review comment ${rc_id}"
-                fi
-              done < <(jq -r '.[] | select(.id != null and .body != null)
-                | [(.id | tostring), (.body | @base64)] | @tsv' \
-                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
-              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
-            fi
+            resolve_and_reply_threads
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -5817,6 +5832,16 @@ jobs:
               # line, and jq scan() matches across newlines. The backslashes
               # render away in markdown, so the visible text is unchanged.
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
+              # Gate-authored advisories (e.g. "test coverage shrank") render
+              # AFTER the agent's summary: the summary carries the agent's
+              # justification, the advisory carries the machine measurement a
+              # maintainer checks it against. Escaped like every other
+              # embedded file — the advisory quotes file paths from the
+              # branch, which are model-influenced content.
+              if [[ -s "${WORKDIR}/gate-advisories.md" ]]; then
+                echo
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/gate-advisories.md"
+              fi
               if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
                 echo
                 sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
@@ -5845,6 +5870,10 @@ jobs:
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
+            # No push happened, so the verified head is the unchanged
+            # origin head; resolution's own live-head guards still apply.
+            PUSH_RACE_MERGED='false'
+            resolve_and_reply_threads
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
@@ -5928,8 +5957,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
               if [[ -z "${WIN_HEADS}" ]]; then
@@ -6401,8 +6430,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do

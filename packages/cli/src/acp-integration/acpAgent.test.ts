@@ -283,6 +283,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     WORKFLOW: 'workflow',
     CREATE_SUB_SESSION: 'create_sub_session',
     SEND_MESSAGE: 'send_message',
+    SHELL: 'run_shell_command',
+    MONITOR: 'monitor',
   },
   FORK_SUBAGENT_TYPE: 'fork',
   IMAGE_CAPABILITY: Object.freeze({
@@ -9036,7 +9038,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('rejects agent-backed workspace memory operations when the managed guard is required', async () => {
+  it('rejects agent-backed workspace memory operations when an external guard provider is attached', async () => {
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
       getProjectRoot: vi.fn().mockReturnValue('/workspace'),
@@ -9049,6 +9051,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       {
         privateParentCapability: 'expected-capability',
         externalToolGuardRequired: true,
+        externalToolGuardProviderAttached: true,
       },
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -9086,6 +9089,46 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toThrow('does not support agent-backed workspace memory dream');
     expect(mockRunManagedRememberByAgent).not.toHaveBeenCalled();
     expect(mockRunManagedAutoMemoryDream).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps agent-backed workspace memory available under the built-in guard alone', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        externalToolGuardRequired: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      extMethod: vi.fn(),
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+
+    await expect(
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceMemoryRememberAvailability,
+        {},
+      ),
+    ).resolves.toEqual({ available: true });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -9168,7 +9211,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('rejects /fork before starting a nested agent when the managed guard is required', async () => {
+  it('rejects /fork before starting a nested agent when an external guard provider is attached', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     const execute = vi.fn();
@@ -9194,6 +9237,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       {
         privateParentCapability: 'expected-capability',
         externalToolGuardRequired: true,
+        externalToolGuardProviderAttached: true,
       },
     );
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -9233,6 +9277,62 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         toolInvocationGuard: expect.any(Function),
       }),
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('allows /fork past the guard gate under the built-in guard alone', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const execute = vi.fn().mockResolvedValue({ llmContent: 'ok' });
+    const build = vi.fn().mockReturnValue({ execute });
+    Object.assign(innerConfig, {
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
+        addHistory: vi.fn(),
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(() => ({ build })),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        externalToolGuardRequired: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      extMethod: vi.fn(),
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionForkAgent, {
+        sessionId,
+        directive: 'review this branch',
+      }),
+    ).resolves.toMatchObject({ launched: true });
+    expect(build).toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -20597,11 +20697,58 @@ describe('createManagedExternalToolGuard', () => {
     });
   });
 
-  it('fails closed without a managed invocation context', async () => {
+  it('routes context-less shell calls with the scheduler session identity', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'pwd' },
+        signal: new AbortController().signal,
+        sessionId: 'session-9',
+      }),
+    ).resolves.toEqual({ allowed: true });
+
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-9',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: { command: 'pwd' },
+      },
+    );
+  });
+
+  it('fails closed when neither invocation context nor session id exists', async () => {
     const extMethod = vi.fn();
     const guard = createManagedExternalToolGuard({
       extMethod,
     } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'pwd' },
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow('requires a session identity');
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+
+  it('fails closed without a managed invocation context', async () => {
+    const extMethod = vi.fn();
+    const guard = createManagedExternalToolGuard(
+      {
+        extMethod,
+      } as unknown as AgentSideConnection,
+      { externalProviderAttached: true },
+    );
 
     await expect(
       guard({
@@ -20614,47 +20761,161 @@ describe('createManagedExternalToolGuard', () => {
     expect(extMethod).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ToolNames.AGENT,
-    ToolNames.WORKFLOW,
-    ToolNames.CREATE_SUB_SESSION,
-    ToolNames.SEND_MESSAGE,
-  ])(
-    'rejects unsupported nested executor %s without contacting the provider',
-    async (toolName) => {
-      const extMethod = vi.fn();
-      const guard = createManagedExternalToolGuard({
+  it('forwards nested executors to the daemon host guard when a provider is attached', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard(
+      {
         extMethod,
-      } as unknown as AgentSideConnection);
+      } as unknown as AgentSideConnection,
+      { externalProviderAttached: true },
+    );
 
-      await expect(
-        guard({
-          callId: 'call-1',
-          toolName,
-          args: {},
-          signal: new AbortController().signal,
-          invocationContext: {
-            version: 1,
-            sessionId: 'session-1',
-            promptId: 'prompt-1',
-          },
-        }),
-      ).resolves.toEqual({
-        allowed: false,
-        reason:
-          'Managed external tool guard v1 does not support nested or delegated agent execution.',
-      });
-      expect(extMethod).not.toHaveBeenCalled();
-    },
-  );
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: ToolNames.AGENT,
+        args: {},
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).toHaveBeenCalledOnce();
+  });
+
+  it('resolves non-shell tools locally when only the built-in guard is attached', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: ToolNames.AGENT,
+        args: {},
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      guard({
+        callId: 'call-2',
+        toolName: 'write_file',
+        args: {},
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).not.toHaveBeenCalled();
+  });
+
+  it('still routes shell commands to the daemon without an external provider', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'pwd' },
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).toHaveBeenCalledOnce();
+  });
+
+  // The only link between a worktree-pinned sub-agent's real execution
+  // directory and the daemon's containment check.
+  it('forwards the invocation directory to the daemon', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: 'run_shell_command',
+        args: { command: 'git status' },
+        signal: new AbortController().signal,
+        sessionId: 'session-1',
+        cwd: '/work/agent-worktree',
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: { command: 'git status' },
+        invocationCwd: '/work/agent-worktree',
+      },
+    );
+  });
+
+  // `monitor` spawns its `command` through the same shell, so the built-in
+  // daemon policy has to see it too.
+  it('routes monitor commands to the daemon without an external provider', async () => {
+    const extMethod = vi.fn().mockResolvedValue({ allowed: true });
+    const guard = createManagedExternalToolGuard({
+      extMethod,
+    } as unknown as AgentSideConnection);
+
+    await expect(
+      guard({
+        callId: 'call-1',
+        toolName: ToolNames.MONITOR,
+        args: { command: 'npm run build' },
+        signal: new AbortController().signal,
+        invocationContext: {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(extMethod).toHaveBeenCalledWith(
+      SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare,
+      {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: ToolNames.MONITOR,
+        arguments: { command: 'npm run build' },
+      },
+    );
+  });
 
   it('stops waiting when the tool invocation is cancelled', async () => {
     const extMethod = vi.fn(
       () => new Promise<Record<string, unknown>>(() => {}),
     );
-    const guard = createManagedExternalToolGuard({
-      extMethod,
-    } as unknown as AgentSideConnection);
+    const guard = createManagedExternalToolGuard(
+      {
+        extMethod,
+      } as unknown as AgentSideConnection,
+      { externalProviderAttached: true },
+    );
     const controller = new AbortController();
     const pending = guard({
       callId: 'call-1',
