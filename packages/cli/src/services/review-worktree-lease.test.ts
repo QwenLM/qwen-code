@@ -13,11 +13,15 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   cleanupReviewWorktreeLeases,
   clearReviewWorktreeLease,
   createReviewWorktreeLease,
+  readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession,
+  reviewLeasePath,
+  type ReviewWorktreeLease,
 } from './review-worktree-lease.js';
 
 const roots: string[] = [];
@@ -359,5 +363,86 @@ describe('review worktree leases', () => {
         { encoding: 'utf8' },
       ).trim(),
     ).toContain('qwen-review/pr-1');
+  });
+});
+
+describe('readReviewWorktreeLease', () => {
+  it('returns the lease createReviewWorktreeLease wrote', () => {
+    const root = createRepository();
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: join(root, '.qwen', 'tmp', 'review-pr-1'),
+      branch: 'qwen-review/pr-1',
+    });
+
+    const lease = readReviewWorktreeLease(root, 'pr-1');
+    expect(lease?.sessionId).toBe('session-a');
+    expect(lease?.promptId).toBe('prompt-parent');
+    expect(lease?.worktreePath).toBe(join(root, '.qwen', 'tmp', 'review-pr-1'));
+    expect(reviewLeasePath(root, 'pr-1')).toBe(
+      join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json'),
+    );
+  });
+
+  it('returns null for a missing lease and for non-PR targets', () => {
+    const root = createRepository();
+    expect(readReviewWorktreeLease(root, 'pr-1')).toBeNull();
+    expect(readReviewWorktreeLease(root, '../../evil')).toBeNull();
+    expect(readReviewWorktreeLease(root, 'local')).toBeNull();
+  });
+});
+
+describe('reviewLeaseHeldByAnotherSession', () => {
+  const lease: ReviewWorktreeLease = {
+    sessionId: 'session-a',
+    promptId: 'prompt-parent',
+    target: 'pr-1',
+    repositoryRoot: '/repo',
+    worktreePath: '/repo/.qwen/tmp/review-pr-1',
+    branch: 'qwen-review/pr-1',
+  };
+  let savedSessionId: string | undefined;
+
+  beforeEach(() => {
+    savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
+  });
+
+  afterEach(() => {
+    if (savedSessionId === undefined) {
+      delete process.env['QWEN_CODE_SESSION_ID'];
+    } else {
+      process.env['QWEN_CODE_SESSION_ID'] = savedSessionId;
+    }
+  });
+
+  it('returns false when there is no lease', () => {
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    expect(reviewLeaseHeldByAnotherSession(null)).toBe(false);
+  });
+
+  it('lets the owning session pass regardless of prompt', () => {
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    expect(reviewLeaseHeldByAnotherSession(lease)).toBe(false);
+    // One session reviews a PR across several prompts (rounds, drift
+    // restarts); a later prompt of the holder must not be locked out.
+    expect(
+      reviewLeaseHeldByAnotherSession({
+        ...lease,
+        promptId: 'prompt-later',
+      }),
+    ).toBe(false);
+  });
+
+  it('blocks another session', () => {
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    expect(reviewLeaseHeldByAnotherSession(lease)).toBe(true);
+  });
+
+  it('blocks a process that has no session id to prove ownership', () => {
+    delete process.env['QWEN_CODE_SESSION_ID'];
+    expect(reviewLeaseHeldByAnotherSession(lease)).toBe(true);
   });
 });

@@ -12,6 +12,11 @@ import {
   isEmptyDiff,
   isCollapsedFromUpstream,
 } from './fetch-pr.js';
+import {
+  createReviewWorktreeLease,
+  readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession,
+} from '../../services/review-worktree-lease.js';
 import { classifyHeavy } from './lib/heavy.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
@@ -252,6 +257,10 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
   createReviewWorktreeLease: vi.fn(),
+  readReviewWorktreeLease: vi.fn((): unknown => null),
+  reviewLeaseHeldByAnotherSession: vi.fn((): boolean => false),
+  reviewLeasePath: (repositoryRoot: string, target: string) =>
+    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
 }));
 
 vi.mock('./lib/gh.js', () => ({
@@ -332,6 +341,44 @@ describe('fetch-pr report assembly', () => {
   it('carries --host into the report for the cleanup audit to reuse', async () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
+  });
+
+  // The lease is also a lock (#9205): a concurrent same-PR fetch-pr used to
+  // stale-clean the holder's worktree before failing on, destroying it. The
+  // refusal must precede every destructive step, including the lease write.
+  describe('lease lock', () => {
+    const foreignLease = {
+      sessionId: 'session-other',
+      promptId: 'prompt-other',
+      target: 'pr-42',
+      repositoryRoot: process.cwd(),
+      worktreePath: '.qwen/tmp/review-pr-42',
+      branch: 'qwen-review/pr-42',
+    };
+
+    it('refuses with an actionable error when another session holds the lease', async () => {
+      vi.mocked(readReviewWorktreeLease).mockReturnValueOnce(foreignLease);
+      vi.mocked(reviewLeaseHeldByAnotherSession).mockReturnValueOnce(true);
+
+      await expect(reportFor({})).rejects.toThrow(
+        'PR #42 is already being reviewed by another session ' +
+          '(session session-other)',
+      );
+      // Nothing was touched on the way out.
+      expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(producerMocks.git).not.toHaveBeenCalled();
+      expect(producerMocks.gh).not.toHaveBeenCalled();
+      expect(producerMocks.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('names the lease file to delete when the holder session is gone', async () => {
+      vi.mocked(readReviewWorktreeLease).mockReturnValueOnce(foreignLease);
+      vi.mocked(reviewLeaseHeldByAnotherSession).mockReturnValueOnce(true);
+
+      await expect(reportFor({})).rejects.toThrow(
+        'qwen-review-lease-pr-42.json',
+      );
+    });
   });
 
   it('preserves the earliest window opening across drift restarts of the same PR', async () => {

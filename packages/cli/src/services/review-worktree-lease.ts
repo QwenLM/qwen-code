@@ -33,7 +33,7 @@ function validTarget(target: string): boolean {
   return /^pr-\d+$/.test(target);
 }
 
-interface ReviewWorktreeLease {
+export interface ReviewWorktreeLease {
   sessionId: string;
   promptId: string;
   target: string;
@@ -48,6 +48,14 @@ function leaseDirectory(repositoryRoot: string): string {
 
 function leasePath(repositoryRoot: string, target: string): string {
   return join(leaseDirectory(repositoryRoot), `${LEASE_PREFIX}${target}.json`);
+}
+
+/** Absolute path of the lease file recording who holds a review target. */
+export function reviewLeasePath(
+  repositoryRoot: string,
+  target: string,
+): string {
+  return leasePath(resolve(repositoryRoot), target);
 }
 
 export function clearReviewWorktreeLease(
@@ -105,6 +113,36 @@ function readLease(path: string): ReviewWorktreeLease | null {
     debugLogger.debug(`Failed to read review lease ${path}:`, error);
     return null;
   }
+}
+
+/** The lease currently registered for a review target, or null. */
+export function readReviewWorktreeLease(
+  repositoryRoot: string,
+  target: string,
+): ReviewWorktreeLease | null {
+  if (!validTarget(target)) return null;
+  return readLease(reviewLeasePath(repositoryRoot, target));
+}
+
+/**
+ * Whether a lease blocks THIS process from taking the target over.
+ *
+ * The review worktree path is fixed per PR number, so two reviews of the same
+ * PR run on top of each other: whichever runs `fetch-pr`'s stale-clean or
+ * `cleanup` next removes the other's worktree, branch, and side files mid-run
+ * (#9205). The lease doubles as the lock against that — holders compare by
+ * SESSION, not prompt: one session reviews a PR across several prompts
+ * (rounds, drift restarts), and a later prompt of the same session must be
+ * able to re-take what its own earlier prompt leased. A process with no
+ * session id cannot prove ownership of anything, so any existing lease blocks
+ * it — a bare-terminal `cleanup` must not delete a live session's state.
+ */
+export function reviewLeaseHeldByAnotherSession(
+  lease: ReviewWorktreeLease | null,
+): lease is ReviewWorktreeLease {
+  if (!lease) return false;
+  const sessionId = process.env['QWEN_CODE_SESSION_ID']?.trim();
+  return !sessionId || lease.sessionId !== sessionId;
 }
 
 function removeLeaseWorktree(

@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   writeStdoutLine: vi.fn(),
   writeStderrLine: vi.fn(),
   clearReviewWorktreeLease: vi.fn(),
+  readReviewWorktreeLease: vi.fn((): unknown => null),
+  reviewLeaseHeldByAnotherSession: vi.fn((_lease: unknown): boolean => false),
   refExists: vi.fn(() => true),
   // The parameter is declared so `mock.calls` is typed `[string][]` rather than
   // `[][]` — the paths it was asked to free are the assertion in the sweep test.
@@ -62,6 +64,10 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
   clearReviewWorktreeLease: mocks.clearReviewWorktreeLease,
+  readReviewWorktreeLease: mocks.readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession: mocks.reviewLeaseHeldByAnotherSession,
+  reviewLeasePath: (repositoryRoot: string, target: string) =>
+    `${repositoryRoot}/.qwen/tmp/qwen-review-lease-${target}.json`,
 }));
 
 vi.mock('./lib/git.js', () => ({
@@ -130,6 +136,60 @@ describe('runCleanup', () => {
 
     runCleanup('pr-123');
 
+    expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
+      process.cwd(),
+      'pr-123',
+    );
+  });
+
+  it('skips the whole target when another session holds the lease (#9205)', () => {
+    // The incident shape: session B cleans up while session A is mid-review.
+    // Nothing of A's may be touched — worktree, siblings, branch, side files,
+    // audit window, or the lease itself.
+    const lease = {
+      sessionId: 'session-a',
+      promptId: 'prompt-a',
+      target: 'pr-123',
+      repositoryRoot: '/repo',
+      worktreePath: '/repo/.qwen/tmp/review-pr-123',
+      branch: 'qwen-review/pr-123',
+    };
+    mocks.readReviewWorktreeLease.mockReturnValueOnce(lease);
+    mocks.reviewLeaseHeldByAnotherSession.mockImplementationOnce(
+      (l: unknown) => l === lease,
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.execFileSync).not.toHaveBeenCalled();
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    expect(mocks.ghApiAll).not.toHaveBeenCalled();
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('skipped cleanup for "pr-123"'),
+    );
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('session-a'),
+    );
+  });
+
+  it('proceeds when the lease belongs to this session', () => {
+    const lease = {
+      sessionId: 'session-b',
+      promptId: 'prompt-b',
+      target: 'pr-123',
+      repositoryRoot: '/repo',
+      worktreePath: '/repo/.qwen/tmp/review-pr-123',
+      branch: 'qwen-review/pr-123',
+    };
+    mocks.readReviewWorktreeLease.mockReturnValueOnce(lease);
+    mocks.reviewLeaseHeldByAnotherSession.mockReturnValueOnce(false);
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+
+    runCleanup('pr-123');
+
+    expect(mocks.releaseWorktree).toHaveBeenCalledTimes(3);
     expect(mocks.clearReviewWorktreeLease).toHaveBeenCalledWith(
       process.cwd(),
       'pr-123',

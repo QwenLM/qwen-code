@@ -168,6 +168,24 @@ describe('repo-context providers and trust boundary', () => {
     expect(readJson(planPath)).not.toHaveProperty('repositoryContext');
   });
 
+  it('fails actionably when the worktree vanished mid-review (#9205)', () => {
+    // A concurrent same-PR cleanup (or any delete) removes the worktree a
+    // review is running on; the bare `ENOENT … lstat` realpathSync produced
+    // named neither the cause nor the remedy.
+    const root = temp();
+    const planPath = planAt(root, { files: [] });
+    expect(() =>
+      runRepoContext(
+        {
+          plan: planPath,
+          worktree: join(root, 'missing-worktree'),
+          out: join(root, 'context.json'),
+        },
+        [],
+      ),
+    ).toThrow('is missing — re-run `qwen review fetch-pr` to recreate it');
+  });
+
   it('passes sorted unique changed paths and local identity to a provider', () => {
     const root = temp();
     const worktree = join(root, 'worktree');

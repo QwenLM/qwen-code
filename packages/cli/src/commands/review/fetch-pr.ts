@@ -30,7 +30,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
+import {
+  createReviewWorktreeLease,
+  readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession,
+  reviewLeasePath,
+} from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import type { ReviewEffort } from './parse-args.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
@@ -189,10 +194,33 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
+
+  // The lease is also a lock. The worktree path is fixed per PR number, so
+  // the stale-clean below would remove a worktree ANOTHER session is actively
+  // reviewing — that is precisely how #9205 destroyed a round-4 review mid-run.
+  // Refuse before touching anything; the refusal must precede both the lease
+  // write and `cleanStale`, because a fetch-pr that fails AFTER either one
+  // has still clobbered the holder's lease and state. Same-session re-fetches
+  // (drift restarts, later rounds of a multi-prompt review) pass: ownership
+  // is per session, not per prompt.
+  const leaseTarget = `pr-${prNumber}`;
+  const holder = readReviewWorktreeLease(process.cwd(), leaseTarget);
+  if (reviewLeaseHeldByAnotherSession(holder)) {
+    throw new Error(
+      `PR #${prNumber} is already being reviewed by another session ` +
+        `(session ${holder.sessionId}). Same-PR reviews share one worktree ` +
+        `path and cannot run concurrently, so this run refuses rather than ` +
+        `destroy the other session's state. Wait for that session to finish ` +
+        `— its cleanup releases the lease — or, only if that session is ` +
+        `gone, delete ${reviewLeasePath(process.cwd(), leaseTarget)} and ` +
+        `re-run.`,
+    );
+  }
+
   createReviewWorktreeLease({
     sessionId: process.env['QWEN_CODE_SESSION_ID'],
     promptId: process.env['QWEN_CODE_PROMPT_ID'],
-    target: `pr-${prNumber}`,
+    target: leaseTarget,
     repositoryRoot: process.cwd(),
     worktreePath: wt,
     branch: ref,

@@ -362,9 +362,25 @@ export function runRepoContext(
   if (sameFile(planPath, outPath)) {
     throw new Error('repo-context: --out must differ from --plan');
   }
-  const worktree = realpathSync(resolve(args.worktree));
-  if (!statSync(worktree).isDirectory()) {
-    throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
+  // A worktree removed after fetch-pr created it — the #9205 shape, a
+  // concurrent same-PR cleanup mid-review, or a plain manual delete — used to
+  // surface as a bare `ENOENT … lstat '<path>'` from `realpathSync`, which
+  // names neither the cause nor the remedy. Name both.
+  const worktreeRoot = resolve(args.worktree);
+  let worktree: string;
+  try {
+    worktree = realpathSync(worktreeRoot);
+    if (!statSync(worktree).isDirectory()) {
+      throw new Error(`repo-context: worktree is not a directory: ${worktree}`);
+    }
+  } catch (err) {
+    if (isAbsentError(err)) {
+      throw new Error(
+        `repo-context: worktree ${worktreeRoot} is missing — re-run ` +
+          `\`qwen review fetch-pr\` to recreate it`,
+      );
+    }
+    throw err;
   }
 
   const plan = readPlan(planPath);

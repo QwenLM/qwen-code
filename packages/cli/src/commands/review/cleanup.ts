@@ -17,7 +17,12 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
+import {
+  clearReviewWorktreeLease,
+  readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession,
+  reviewLeasePath,
+} from '../../services/review-worktree-lease.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
@@ -384,6 +389,25 @@ export function runCleanup(target: string): void {
   const prMatch = /^pr-(\d+)$/.exec(target);
   if (prMatch) {
     const prNumber = prMatch[1];
+
+    // The lease is also a lock (#9205). The worktree path, the side files,
+    // and the fetch report carrying the audit window are all fixed per PR
+    // number, so cleaning while ANOTHER session reviews the same PR deletes
+    // its worktree, diff, and plan mid-run — and audits ITS window against
+    // receipts it never wrote. Skip the whole target: worktree, siblings,
+    // branch, side files, audit, and the lease itself all belong to the
+    // holder until its own cleanup releases them.
+    const holder = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holder)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — another review session ` +
+          `(session ${holder.sessionId}) still holds the worktree lease at ` +
+          `${reviewLeasePath(process.cwd(), target)}. Its own cleanup ` +
+          `releases the lease when it finishes; if that session is gone, ` +
+          `delete the lease file and re-run to force cleanup.`,
+      );
+      return;
+    }
 
     // Before the sweep below deletes the fetch report (the audit window's
     // carrier), check the PR for writes that bypassed `qwen review submit`.
