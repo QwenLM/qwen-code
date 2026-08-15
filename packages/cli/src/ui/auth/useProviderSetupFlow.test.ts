@@ -963,6 +963,103 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.apiKey).toBe('sk-second');
   });
 
+  it('restores saved models when submitting a custom endpoint', async () => {
+    const firstUrl = 'https://first.example/v1';
+    const secondUrl = 'https://second.example/v1';
+    const onSubmit = vi.fn(async () => undefined);
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        customProvider,
+        AuthType.USE_OPENAI,
+        {
+          [generateCustomEnvKey(AuthType.USE_OPENAI, firstUrl)]: 'sk-first',
+          [generateCustomEnvKey(AuthType.USE_OPENAI, secondUrl)]: 'sk-second',
+        },
+        ['first-custom'],
+        firstUrl,
+        undefined,
+        new Map([
+          [firstUrl, ['first-custom']],
+          [secondUrl, ['second-custom']],
+        ]),
+      );
+      result.current.changeBaseUrl(secondUrl);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    expect(result.current.state.modelIds).toBe('second-custom');
+    expect(result.current.state.apiKey).toBe('sk-second');
+
+    await act(async () => {
+      result.current.submit();
+    });
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      customProvider,
+      expect.objectContaining({
+        baseUrl: secondUrl,
+        apiKey: 'sk-second',
+        modelIds: ['second-custom'],
+      }),
+    );
+
+    act(() => {
+      result.current.changeBaseUrl(`${firstUrl}/`);
+    });
+    act(() => {
+      expect(result.current.submitBaseUrl()).toBe(true);
+    });
+    expect(result.current.state.modelIds).toBe('first-custom');
+    expect(result.current.state.apiKey).toBe('sk-first');
+  });
+
+  it('passes exact preserved model objects through submit', async () => {
+    const baseUrl = 'https://api.deepseek.com';
+    const proxyCustom = {
+      id: 'proxy-custom',
+      name: '[DeepSeek] proxy-custom',
+      baseUrl: 'https://corp-proxy.example/v1',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const provider: ProviderConfig = {
+      id: 'non-merge-provider',
+      label: 'Non-merge Provider',
+      description: 'Provider with provider-wide replacement semantics',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl,
+      envKey: 'DEEPSEEK_API_KEY',
+      models: [{ id: 'default-model' }],
+      modelsEditable: true,
+      modelNamePrefix: 'DeepSeek',
+    };
+    const onSubmit = vi.fn(async () => undefined);
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        provider,
+        undefined,
+        { DEEPSEEK_API_KEY: 'sk-test' },
+        [],
+        baseUrl,
+        undefined,
+        undefined,
+        [proxyCustom],
+      );
+    });
+    await act(async () => {
+      result.current.submit();
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      provider,
+      expect.objectContaining({ preserveModels: [proxyCustom] }),
+    );
+  });
+
   it('keeps a promoted protocol default endpoint in its protocol draft', () => {
     const provider: ProviderConfig = {
       id: 'fresh-custom-provider',

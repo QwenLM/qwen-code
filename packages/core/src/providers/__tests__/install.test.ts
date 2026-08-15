@@ -422,6 +422,70 @@ describe('applyProviderInstallPlan', () => {
     ]);
   });
 
+  it('selects the installed region when its credential replaces a sibling key', async () => {
+    const chinaUrl = 'https://api.moonshot.cn/v1';
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const chinaModels = buildProviderTemplate(kimiProvider, chinaUrl);
+    const intlModels = buildProviderTemplate(kimiProvider, intlUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [...chinaModels, ...intlModels],
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === 'model.name') return 'kimi-k3';
+      if (key === 'model.baseUrl') return chinaUrl;
+      return '';
+    });
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: intlUrl,
+      apiKey: 'intl-key',
+      modelIds: intlModels.map((model) => model.id),
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[KIMI_API_ENV_KEY];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'kimi-k3');
+    expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', intlUrl);
+  });
+
+  it('selects the installed region for an id-only shared-key selection', async () => {
+    const chinaUrl = 'https://api.moonshot.cn/v1';
+    const intlUrl = 'https://api.moonshot.ai/v1';
+    const chinaModels = buildProviderTemplate(kimiProvider, chinaUrl);
+    const intlModels = buildProviderTemplate(kimiProvider, intlUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [...chinaModels, ...intlModels],
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === 'model.name') return 'kimi-k3';
+      if (key === 'model.baseUrl') return '';
+      return '';
+    });
+    const plan = buildInstallPlan(kimiProvider, {
+      baseUrl: intlUrl,
+      apiKey: 'intl-key',
+      modelIds: intlModels.map((model) => model.id),
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[KIMI_API_ENV_KEY];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('model.name', 'kimi-k3');
+    expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', intlUrl);
+  });
+
   it('does not let another provider suppress a new provider selection', async () => {
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [

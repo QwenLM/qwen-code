@@ -265,16 +265,35 @@ export async function applyProviderInstallPlan(
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
       const currentBaseUrl = settings.getValue('model.baseUrl') as
-        string | undefined;
+        | string
+        | undefined;
       const retainAcrossEndpoints = (plan.modelProviders ?? []).filter(
         (patch) => patch.retainCurrentModelAcrossEndpoints,
       );
+      const installedModels = (plan.modelProviders ?? []).flatMap(
+        (patch) => patch.models,
+      );
+      const overwrittenEnvKeys = new Set(Object.keys(plan.env ?? {}));
       const offeredModels = retainAcrossEndpoints.length
-        ? (updatedModelProviders[plan.authType] ?? []).filter((model) =>
-            retainAcrossEndpoints.some((patch) =>
+        ? (updatedModelProviders[plan.authType] ?? []).filter((model) => {
+            // A sibling that shares a credential being replaced by this plan
+            // is no longer a valid offer for the old endpoint. Only models in
+            // the selected patch may retain the active selection in that case.
+            const ownedAcrossEndpoints = retainAcrossEndpoints.some((patch) =>
               patch.ownsModelAcrossEndpoints?.(model),
-            ),
-          )
+            );
+            if (!ownedAcrossEndpoints) return false;
+            if (
+              !model.envKey ||
+              !overwrittenEnvKeys.has(model.envKey) ||
+              installedModels.some((installed) =>
+                isSameModelIdentity(installed, model),
+              )
+            ) {
+              return true;
+            }
+            return false;
+          })
         : (plan.modelProviders ?? []).flatMap((patch) => patch.models);
       const planOffersCurrentModel =
         typeof currentModelId === 'string' &&
@@ -287,7 +306,19 @@ export async function applyProviderInstallPlan(
                 model,
               ),
         );
-      if (planOffersCurrentModel) {
+      const invalidatedIdOnlySibling =
+        typeof currentModelId === 'string' &&
+        (currentBaseUrl === '' || currentBaseUrl === undefined) &&
+        (updatedModelProviders[plan.authType] ?? []).some(
+          (model) =>
+            model.id === currentModelId &&
+            model.envKey !== undefined &&
+            overwrittenEnvKeys.has(model.envKey) &&
+            !installedModels.some((installed) =>
+              isSameModelIdentity(installed, model),
+            ),
+        );
+      if (planOffersCurrentModel && !invalidatedIdOnlySibling) {
         effectiveModelSelection = undefined;
       }
     }

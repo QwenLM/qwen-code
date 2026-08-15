@@ -454,22 +454,25 @@ function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
 
 /**
  * Find the model entries a user has already saved for `config` under the
- * `modelProviders` map in settings. Returns the first protocol (in the
- * provider's own preference order) that owns stored models, or `undefined`
- * when none are saved. Used to pre-fill the auth wizard / connect form with
- * existing model IDs instead of resetting to the provider's built-in defaults.
+ * `modelProviders` map in settings. When `selectedProtocol` is provided, only
+ * that bucket is inspected; otherwise the first protocol in the provider's
+ * preference order that owns stored models is returned. Used to pre-fill the
+ * auth wizard / connect form without crossing protocol-specific model state.
  */
 export function findExistingProviderModels(
   config: ProviderConfig,
   modelProviders: Record<string, unknown> | undefined,
+  selectedProtocol?: ProviderConfig['protocol'],
 ):
   | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
   | undefined {
   const ownsModel = resolveOwnsModel(config);
   if (!ownsModel || !modelProviders) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
+  const protocols = selectedProtocol
+    ? [selectedProtocol]
+    : config.protocolOptions?.length
+      ? config.protocolOptions
+      : [config.protocol];
   for (const protocol of protocols) {
     const raw = modelProviders[protocol];
     if (!Array.isArray(raw)) continue;

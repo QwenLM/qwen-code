@@ -20,6 +20,7 @@ import {
   getDefaultModelIds,
   normalizeBaseUrlForMatching,
   type ProviderConfig,
+  type ProviderModelConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
 } from '@qwen-code/qwen-code-core';
@@ -42,7 +43,8 @@ export class AuthMessageHandler extends BaseMessageHandler {
     currentConversationId: string | null,
     sendToWebView: (message: unknown) => void,
     private readonly getModelProviders: () =>
-      Record<string, unknown> | undefined = () => undefined,
+      | Record<string, unknown>
+      | undefined = () => undefined,
   ) {
     super(
       agentManager,
@@ -370,13 +372,22 @@ export class AuthMessageHandler extends BaseMessageHandler {
 
     // Step 3: Model selection (if needed)
     let modelIds: string[];
+    let preserveModels: ProviderModelConfig[] | undefined;
     if (shouldShowStep(provider, 'models')) {
       const defaults = getDefaultModelIds(provider, baseUrl);
       const existing = findExistingProviderModels(
         provider,
         this.getModelProviders(),
+        protocol,
       );
       const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
+      preserveModels = provider.mergeModelsByIdentity
+        ? undefined
+        : existing?.models.filter(
+            (model) =>
+              model.baseUrl !== undefined &&
+              normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint,
+          );
       const restoredIds =
         existing?.models
           .filter((model) => {
@@ -466,6 +477,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
       baseUrl,
       apiKey,
       modelIds,
+      ...(preserveModels && preserveModels.length > 0
+        ? { preserveModels }
+        : {}),
       advancedConfig,
     });
   }

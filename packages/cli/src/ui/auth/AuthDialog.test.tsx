@@ -487,11 +487,55 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           name: '[DeepSeek] legacy-custom',
           envKey: 'DEEPSEEK_API_KEY',
         },
+        {
+          id: 'proxy-custom',
+          name: '[DeepSeek] proxy-custom',
+          baseUrl: 'https://corp-proxy.example/v1',
+          envKey: 'DEEPSEEK_API_KEY',
+          generationConfig: { contextWindowSize: 12345 },
+        },
       ],
     });
 
     expect(setup.customModelIds).toContain('legacy-custom');
+    expect(setup.customModelIds).not.toContain('proxy-custom');
+    expect(setup.preserveModels).toEqual([
+      {
+        id: 'proxy-custom',
+        name: '[DeepSeek] proxy-custom',
+        baseUrl: 'https://corp-proxy.example/v1',
+        envKey: 'DEEPSEEK_API_KEY',
+        generationConfig: { contextWindowSize: 12345 },
+      },
+    ]);
     expect(setup.initialBaseUrl).toBe('https://api.deepseek.com');
+  });
+
+  it('preserves a stamped proxy model when the first saved model is legacy', () => {
+    const deepseek = findProviderById('deepseek');
+    expect(deepseek).toBeDefined();
+    const proxyCustom = {
+      id: 'proxy-custom',
+      name: '[DeepSeek] proxy-custom',
+      baseUrl: 'https://corp-proxy.example/v1',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+
+    const setup = getExistingProviderSetup(deepseek!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'legacy-custom',
+          name: '[DeepSeek] legacy-custom',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+        proxyCustom,
+      ],
+    });
+
+    expect(setup.initialBaseUrl).toBe('https://api.deepseek.com');
+    expect(setup.customModelIds).toEqual(['legacy-custom']);
+    expect(setup.preserveModels).toEqual([proxyCustom]);
   });
 
   it('seeds no trims or customs for a provider without saved models', () => {

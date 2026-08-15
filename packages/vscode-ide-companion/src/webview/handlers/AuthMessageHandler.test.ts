@@ -108,6 +108,51 @@ describe('AuthMessageHandler', () => {
     expect(sendToWebView).not.toHaveBeenCalledWith({ type: 'authCancelled' });
   });
 
+  it('restores proxy custom models for a non-merge provider', async () => {
+    const seeded = ['deepseek-v4-pro', 'deepseek-v4-flash'];
+    const proxyCustom = {
+      id: 'proxy-custom',
+      name: '[DeepSeek] proxy-custom',
+      baseUrl: 'https://corp-proxy.example/v1',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    mockShowQuickPick.mockResolvedValueOnce({ value: 'deepseek' });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-deepseek')
+      .mockResolvedValueOnce(seeded.join(','));
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+      () => ({
+        openai: [
+          {
+            id: 'deepseek-v4-flash',
+            name: '[DeepSeek] deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.com',
+            envKey: 'DEEPSEEK_API_KEY',
+          },
+          proxyCustom,
+        ],
+      }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ value: seeded.join(',') }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({ preserveModels: [proxyCustom] }),
+    );
+  });
+
   it('sends authError and aborts when validateApiKey rejects the key', async () => {
     // coding-plan validateApiKey requires keys starting with sk-sp-
     mockShowQuickPick
@@ -286,6 +331,7 @@ describe('AuthMessageHandler', () => {
   // comma-split model IDs + empty-input guard, and advanced config.
 
   it('drives custom provider through protocol + url + key + models + advanced', async () => {
+    const customUrl = 'https://my-proxy.example.com/v1';
     // 1) Provider pick → custom (custom-openai-compatible)
     // 2) Protocol pick → Anthropic
     // 3) Advanced config pick → modality-only (no thinking)
@@ -295,7 +341,7 @@ describe('AuthMessageHandler', () => {
       .mockResolvedValueOnce({ value: 'no' });
     // URL → API key → model IDs (advanced is a separate pick already mocked)
     mockShowInputBox
-      .mockResolvedValueOnce('https://my-proxy.example.com/v1')
+      .mockResolvedValueOnce(customUrl)
       .mockResolvedValueOnce('sk-custom-anthropic')
       .mockResolvedValueOnce('claude-3-opus, claude-3-sonnet');
 
@@ -305,6 +351,22 @@ describe('AuthMessageHandler', () => {
       {} as never,
       null,
       sendToWebView,
+      () => ({
+        openai: [
+          {
+            id: 'openai-saved',
+            baseUrl: customUrl,
+            envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'anthropic-saved',
+            baseUrl: customUrl,
+            envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+          },
+        ],
+      }),
     );
     const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
     handler.setAuthInteractiveHandler(authInteractiveHandler);
@@ -312,12 +374,15 @@ describe('AuthMessageHandler', () => {
     await handler.handle({ type: 'auth' });
 
     expect(authInteractiveHandler).toHaveBeenCalledTimes(1);
+    expect(mockShowInputBox.mock.calls[2]?.[0]).toEqual(
+      expect.objectContaining({ value: 'anthropic-saved' }),
+    );
     const [providerConfig, inputs] = authInteractiveHandler.mock.calls[0]!;
     expect(providerConfig.id).toBe('custom-openai-compatible');
     expect(inputs).toMatchObject({
       // Protocol from the picker is threaded through.
       protocol: 'anthropic',
-      baseUrl: 'https://my-proxy.example.com/v1',
+      baseUrl: customUrl,
       apiKey: 'sk-custom-anthropic',
       modelIds: ['claude-3-opus', 'claude-3-sonnet'],
     });

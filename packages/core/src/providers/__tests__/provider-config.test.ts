@@ -474,6 +474,29 @@ describe('findExistingProviderModels', () => {
     expect(result?.protocol).toBe(AuthType.USE_ANTHROPIC);
     expect(result?.models.map((m) => m.id)).toEqual(['anthropic-model']);
   });
+
+  it('scopes restored models to an explicitly selected protocol', () => {
+    const multiProtocol = makeConfig({
+      modelNamePrefix: '',
+      envKey: 'TEST_API_KEY',
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+    });
+    const result = findExistingProviderModels(
+      multiProtocol,
+      {
+        [AuthType.USE_OPENAI]: [{ id: 'openai-model', envKey: 'TEST_API_KEY' }],
+        [AuthType.USE_ANTHROPIC]: [
+          { id: 'anthropic-model', envKey: 'TEST_API_KEY' },
+        ],
+      },
+      AuthType.USE_ANTHROPIC,
+    );
+
+    expect(result).toEqual({
+      protocol: AuthType.USE_ANTHROPIC,
+      models: [{ id: 'anthropic-model', envKey: 'TEST_API_KEY' }],
+    });
+  });
 });
 
 describe('shouldShowStep', () => {

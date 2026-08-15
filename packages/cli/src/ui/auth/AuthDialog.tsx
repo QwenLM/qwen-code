@@ -27,6 +27,7 @@ import {
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
   type ProviderConfig,
+  type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -36,10 +37,15 @@ import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
-  'main' | 'alibaba-select' | 'thirdparty-select' | 'provider-setup';
+  | 'main'
+  | 'alibaba-select'
+  | 'thirdparty-select'
+  | 'provider-setup';
 
 type MainOption =
-  'ALIBABA_MODELSTUDIO' | 'THIRD_PARTY_PROVIDERS' | 'CUSTOM_PROVIDER';
+  | 'ALIBABA_MODELSTUDIO'
+  | 'THIRD_PARTY_PROVIDERS'
+  | 'CUSTOM_PROVIDER';
 
 // ---------------------------------------------------------------------------
 // Static data
@@ -152,9 +158,15 @@ export function getExistingProviderSetup(
   customModelIds: string[];
   trimmedDefaultModelIds: string[];
   modelIdsByBaseUrl: ReadonlyMap<string, readonly string[]>;
+  preserveModels?: ProviderModelConfig[];
 } {
   const saved = findExistingProviderModels(providerConfig, modelProviders);
-  const initialBaseUrl = saved?.models[0]?.baseUrl;
+  const savedBaseUrl = saved?.models[0]?.baseUrl;
+  const initialBaseUrl = saved
+    ? typeof providerConfig.baseUrl === 'string' || savedBaseUrl === undefined
+      ? resolveBaseUrl(providerConfig, savedBaseUrl)
+      : savedBaseUrl
+    : undefined;
   const modelIdsByBaseUrl = new Map<string, string[]>();
   for (const model of saved?.models ?? []) {
     const modelBaseUrl = model.baseUrl ?? initialBaseUrl;
@@ -182,18 +194,26 @@ export function getExistingProviderSetup(
             normalizeBaseUrlForMatching(initialBaseUrl),
       )
       .map((model) => model.id) ?? [];
+  const restoredEndpoint = normalizeBaseUrlForMatching(initialBaseUrl);
+  const preserveModels = providerConfig.mergeModelsByIdentity
+    ? []
+    : (saved?.models ?? []).filter(
+        (model) =>
+          model.baseUrl !== undefined &&
+          normalizeBaseUrlForMatching(model.baseUrl) !== restoredEndpoint,
+      );
   const restoredModelIdSet = new Set(restoredModelIds);
   return {
     initialProtocol: saved?.protocol,
     initialBaseUrl,
     // The form restores the first saved model's endpoint, so seed only that
-    // endpoint's custom models; siblings belong to their own endpoints and
-    // would be reinstalled under the restored baseUrl/envKey on submit.
+    // endpoint's custom models; siblings are retained as exact model objects.
     customModelIds: restoredModelIds.filter((id) => !builtinIds.has(id)),
     trimmedDefaultModelIds: saved
       ? [...builtinIds].filter((id) => !restoredModelIdSet.has(id))
       : [],
     modelIdsByBaseUrl,
+    ...(preserveModels.length > 0 ? { preserveModels } : {}),
   };
 }
 
@@ -276,6 +296,7 @@ export function AuthDialog({
       existingSetup.initialBaseUrl,
       existingSetup.trimmedDefaultModelIds,
       existingSetup.modelIdsByBaseUrl,
+      existingSetup.preserveModels,
     );
     pushView('provider-setup');
   };
@@ -353,6 +374,7 @@ export function AuthDialog({
           existingSetup.initialBaseUrl,
           existingSetup.trimmedDefaultModelIds,
           existingSetup.modelIdsByBaseUrl,
+          existingSetup.preserveModels,
         );
         pushView('provider-setup');
         break;
