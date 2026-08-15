@@ -17238,90 +17238,139 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/branch', () => {
-    it.each([
-      ['removes', true, 1],
-      ['preserves', false, 0],
-    ])(
-      '%s the persisted branch when generation cleanup kills=%s',
-      async (_label, killed, expectedRemovals) => {
-        const runtimeDir = await fsp.mkdtemp(
-          path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
-        );
-        const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
-        const chatsDir = path.join(
-          new Storage(WS_BOUND, runtimeDir).getProjectDir(),
-          'chats',
-        );
-        await fsp.mkdir(chatsDir, { recursive: true });
-        await fsp.writeFile(
-          path.join(chatsDir, `${staleBranchId}.jsonl`),
-          `${JSON.stringify({
-            uuid: `${staleBranchId}-user-1`,
-            parentUuid: null,
-            sessionId: staleBranchId,
-            timestamp: '2026-07-29T00:00:00.000Z',
-            type: 'user',
-            message: { role: 'user', parts: [{ text: 'hello' }] },
-            cwd: WS_BOUND,
-          })}\n`,
-          'utf8',
-        );
-        const generationGuard = createWorkspaceGenerationGuard();
-        const bridge = fakeBridge();
-        bridge.branchSession = vi.fn(async (sessionId) => {
-          generationGuard.close();
-          return {
-            sessionId: staleBranchId,
-            workspaceCwd: WS_BOUND,
-            attached: false,
-            clientId: 'stale-client',
-            state: {},
-            displayName: 'Stale branch',
-            forkedFrom: { sessionId, displayName: 'Source' },
-          };
+    it('forwards the durable checkpoint id to the bridge', async () => {
+      const bridge = fakeBridge();
+      const atRecordId = '11111111-1111-4111-8111-111111111111';
+      const branchSession = vi.fn(async () => ({
+        sessionId: 'branch-session',
+        displayName: 'Branch',
+        forkedFrom: { sessionId: 'session-A', displayName: 'Source' },
+      }));
+      bridge.branchSession = branchSession;
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId });
+
+      expect(res.status).toBe(201);
+      expect(branchSession).toHaveBeenCalledWith(
+        'session-A',
+        { name: undefined, atRecordId },
+        { clientId: undefined },
+      );
+    });
+
+    it('returns 409 when the checkpoint is no longer active', async () => {
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async () => {
+        throw Object.assign(new Error('Invalid or inactive branch point'), {
+          data: { errorKind: 'branch_point_invalid' },
         });
-        const killSpy = vi
-          .spyOn(bridge, 'killSession')
-          .mockResolvedValue(killed);
-        const removeSpy = vi
-          .spyOn(SessionService.prototype, 'removeSession')
-          .mockResolvedValue();
-        const runtime = makeWorkspaceRuntimeForTest({
-          workspaceId: 'branch-primary',
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId: '11111111-1111-4111-8111-111111111111' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'branch_point_invalid',
+        errorKind: 'branch_point_invalid',
+      });
+    });
+
+    it('rejects a non-string checkpoint id before calling the bridge', async () => {
+      const bridge = fakeBridge();
+      const branchSession = vi.fn();
+      bridge.branchSession = branchSession;
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId: 42 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('branch_point_invalid');
+      expect(branchSession).not.toHaveBeenCalled();
+    });
+
+    it('returns a committed branch even if the runtime generation closes afterward', async () => {
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
+      );
+      const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
+      const chatsDir = path.join(
+        new Storage(WS_BOUND, runtimeDir).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${staleBranchId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${staleBranchId}-user-1`,
+          parentUuid: null,
+          sessionId: staleBranchId,
+          timestamp: '2026-07-29T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: WS_BOUND,
+        })}\n`,
+        'utf8',
+      );
+      const generationGuard = createWorkspaceGenerationGuard();
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async (sessionId) => {
+        generationGuard.close();
+        return {
+          sessionId: staleBranchId,
           workspaceCwd: WS_BOUND,
-          sessionRuntimeBaseDir: runtimeDir,
-          primary: true,
-          bridge,
-          generationGuard,
-        });
-        const app = createServeApp(
-          { ...baseOpts, workspace: WS_BOUND },
-          undefined,
-          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
-        );
+          attached: false,
+          clientId: 'branch-client',
+          state: {},
+          displayName: 'Stale branch',
+          forkedFrom: { sessionId, displayName: 'Source' },
+        };
+      });
+      const killSpy = vi.spyOn(bridge, 'killSession').mockResolvedValue(true);
+      const removeSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue();
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'branch-primary',
+        workspaceCwd: WS_BOUND,
+        sessionRuntimeBaseDir: runtimeDir,
+        primary: true,
+        bridge,
+        generationGuard,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
 
-        try {
-          const res = await request(app)
-            .post('/session/source-session/branch')
-            .set('Host', `127.0.0.1:${baseOpts.port}`)
-            .send({});
+      try {
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
 
-          expect(res.status).toBe(503);
-          expect(res.body.code).toBe('workspace_runtime_unavailable');
-          expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
-            requireZeroAttaches: true,
-          });
-          expect(removeSpy).toHaveBeenCalledTimes(expectedRemovals);
-          if (killed) {
-            expect(removeSpy).toHaveBeenCalledWith(staleBranchId);
-          }
-        } finally {
-          killSpy.mockRestore();
-          removeSpy.mockRestore();
-          await fsp.rm(runtimeDir, { recursive: true, force: true });
-        }
-      },
-    );
+        expect(res.status).toBe(201);
+        expect(res.body.sessionId).toBe(staleBranchId);
+        expect(res.body.clientId).toBe('branch-client');
+        expect(killSpy).not.toHaveBeenCalled();
+        expect(removeSpy).not.toHaveBeenCalled();
+      } finally {
+        killSpy.mockRestore();
+        removeSpy.mockRestore();
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('POST /session/:id/fork', () => {

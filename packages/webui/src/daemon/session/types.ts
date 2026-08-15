@@ -473,7 +473,12 @@ export interface DaemonSessionActions {
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
-  ): Promise<{ sessionId: string; displayName: string }>;
+    atRecordId?: string,
+  ): Promise<{
+    sessionId: string;
+    displayName: string;
+    switchStarted: boolean;
+  }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
