@@ -34,19 +34,16 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { fileLineCount, gitOpt, gitRaw } from './lib/git.js';
-import {
-  LITERAL_PATHSPECS,
-  PINNED_DIFF_CONFIG,
-  PINNED_DIFF_FLAGS,
-} from './lib/diff-flags.js';
+import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   buildDiffPlan,
   parseDiff,
+  sliceDiffByLines,
   DEFAULT_MAX_CHUNK_LINES,
   READ_FILE_CHAR_CAP,
 } from './lib/diff-plan.js';
@@ -81,6 +78,7 @@ interface FetchedPlan {
   fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   diffPath?: unknown;
+  diffPathAbsolute?: unknown;
   files?: unknown;
   incremental?: unknown;
 }
@@ -143,6 +141,25 @@ function runRescope(args: RescopeArgs): void {
       RESCOPE_EXIT_FULL_RANGE,
       'rescope: the plan carries no usable `files[]` (missing, malformed, or ' +
         'empty) — cannot widen safely. Continue with the full-range plan.',
+    );
+    return;
+  }
+  const planFiles = planFilesRaw as Array<{
+    path?: unknown;
+    kind?: unknown;
+    binary?: unknown;
+  }>;
+  const allPaths = planFiles
+    .filter((f): f is { path: string } => !!f && typeof f?.path === 'string')
+    .map((f) => f.path);
+  if (allPaths.length === 0) {
+    // A NON-EMPTY files[] whose entries carry no usable path is the same
+    // truncated-plan shape as an empty one — and worse downstream, where
+    // "zero files compared" must never read as "nothing changed".
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      "rescope: the plan's `files[]` has no entry with a usable path — " +
+        'cannot widen safely. Continue with the full-range plan.',
     );
     return;
   }
@@ -233,11 +250,6 @@ function runRescope(args: RescopeArgs): void {
   // dependents stay out: re-running tests is `build-test`'s job, and prose
   // does not call functions. Reads come from the worktree — the post-change
   // state is the state whose interactions are in question.
-  const planFiles = planFilesRaw as Array<{
-    path?: unknown;
-    kind?: unknown;
-    binary?: unknown;
-  }>;
   const candidates = planFiles
     .filter(
       (f): f is { path: string; kind: string; binary?: boolean } =>
@@ -266,31 +278,58 @@ function runRescope(args: RescopeArgs): void {
     packages,
   );
 
-  // ONE capture, full-range, scoped to delta ∪ interaction: every hunk in
-  // the composite is a hunk of the PR's own diff, so downstream comment
-  // anchoring can never produce a line GitHub refuses.
-  let composite: Buffer;
+  // The composite is a BYTE-SLICE of the fetched full-range diff, not a
+  // pathspec-scoped re-capture. Two invariants ride on that: every hunk is
+  // byte-identical to a hunk of the PR's own diff (comment anchoring can
+  // never produce a line GitHub refuses), and RENAME sections stay paired —
+  // a pathspec-scoped `git diff` cannot see the rename source, un-pairs the
+  // rename, and renders the file as a whole-file add whose hunks exist
+  // nowhere in the original diff.
+  const origDiffPath =
+    typeof plan.diffPathAbsolute === 'string'
+      ? plan.diffPathAbsolute
+      : typeof plan.diffPath === 'string'
+        ? resolve(plan.diffPath)
+        : null;
+  let origDiff: Buffer;
   try {
-    composite = gitRaw(
-      '-C',
-      worktreePath,
-      LITERAL_PATHSPECS,
-      ...PINNED_DIFF_CONFIG,
-      'diff',
-      ...PINNED_DIFF_FLAGS,
-      `${mergeBaseSha}..${fetchedSha}`,
-      '--',
-      ...deltaFiles,
-      ...interaction.keys(),
-    );
+    if (origDiffPath === null) throw new Error('the plan names no diff file');
+    origDiff = readFileSync(origDiffPath);
   } catch (err) {
     fail(
       RESCOPE_EXIT_FULL_RANGE,
-      `rescope: could not capture the scoped files' diff: ` +
-        `${(err as Error).message}. Continue with the full-range plan.`,
+      `rescope: cannot read the fetched diff (${(err as Error).message}). ` +
+        `Continue with the full-range plan.`,
     );
     return;
   }
+  const scoped = new Set([...delta, ...interaction.keys()]);
+  const sections = parseDiff(origDiff.toString('utf8')).files.filter((f) =>
+    scoped.has(f.path),
+  );
+  if (sections.length === 0) {
+    // Changed since the anchor, but present in no section of the PR's own
+    // diff — every delta file was restored to its merge-base state. There
+    // is nothing of the PR left to re-review.
+    fail(
+      RESCOPE_EXIT_NOTHING_NEW,
+      `rescope: the files changed since ${args.anchor} carry no section of ` +
+        `the PR's own diff (restored to the merge-base state) — nothing new ` +
+        `to review.`,
+    );
+    return;
+  }
+  const composite = sliceDiffByLines(
+    origDiff,
+    sections.map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
+  );
+  // Reconcile the reported delta with what the composite actually holds: a
+  // file restored to its merge-base state is in the interdiff but has no
+  // hunks here, and a plan naming delta files with zero hunks sends agents
+  // hunting for scope that does not exist. (The WIDENING above still used
+  // the full changed set — a restoration still moves its importers' seams.)
+  const sectionPaths = new Set(sections.map((f) => f.path));
+  const deltaReported = deltaFiles.filter((p) => sectionPaths.has(p));
   let diffPlan;
   try {
     diffPlan = buildDiffPlan(composite.toString('utf8'), args.maxChunkLines);
@@ -310,7 +349,7 @@ function runRescope(args: RescopeArgs): void {
   const diffRel = tmpFile(target, 'diff-incremental.txt');
   const incremental: IncrementalScope = {
     anchor: anchorFull,
-    deltaFiles,
+    deltaFiles: deltaReported,
     interaction: [...interaction.entries()].map(([path, importsChanged]) => ({
       path,
       importsChanged,
@@ -335,14 +374,24 @@ function runRescope(args: RescopeArgs): void {
     incremental,
   };
 
-  mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-  atomicWriteFileSync(diffRel, composite);
   const out = args.out ?? args.plan;
-  atomicWriteFileSync(out, stringifyPlanReport(result));
+  try {
+    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+    atomicWriteFileSync(diffRel, composite);
+    mkdirSync(dirname(resolve(out)), { recursive: true });
+    atomicWriteFileSync(out, stringifyPlanReport(result));
+  } catch (err) {
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      `rescope: could not write the rescoped plan (${(err as Error).message}). ` +
+        `Continue with the full-range plan.`,
+    );
+    return;
+  }
   writeStdoutLine(`Wrote incremental plan to ${out}`);
   writeStderrLine(
     `Incremental scope since ${anchorFull.slice(0, 12)}: ` +
-      `${deltaFiles.length} changed file(s), ${interaction.size} ` +
+      `${deltaReported.length} changed file(s), ${interaction.size} ` +
       `interaction file(s) (one import hop), ` +
       `${incremental.contextFileCount} clean file(s) left out of scope; ` +
       `${diffPlan.diffLines} diff line(s) -> ${diffPlan.chunks.length} chunk(s).`,

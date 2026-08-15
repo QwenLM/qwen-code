@@ -118,6 +118,34 @@ describe('resolveSpecifier', () => {
     ).toBe('packages/cli/src/ui/App.tsx');
   });
 
+  it('resolves .cjs to .cts — every EXT_MAP row has a resolution pin', () => {
+    expect(resolveSpecifier('a.ts', './f.cjs', new Set(['f.cts']))).toBe(
+      'f.cts',
+    );
+  });
+
+  it('dist deep-imports resolve under BOTH emit layouts', () => {
+    const pkgs = [{ name: '@qwen/core', dir: 'packages/core' }];
+    // dist/src/… layout (this repo): strip dist, keep the rest.
+    expect(
+      resolveSpecifier(
+        'a.ts',
+        '@qwen/core/dist/src/utils/x.js',
+        new Set(['packages/core/src/utils/x.ts']),
+        pkgs,
+      ),
+    ).toBe('packages/core/src/utils/x.ts');
+    // flat dist/… layout: strip dist, add src.
+    expect(
+      resolveSpecifier(
+        'a.ts',
+        '@qwen/core/dist/utils/x.js',
+        new Set(['packages/core/src/utils/x.ts']),
+        pkgs,
+      ),
+    ).toBe('packages/core/src/utils/x.ts');
+  });
+
   it('resolves .mjs to .mts and root-package (dir: "") specifiers', () => {
     const rootFiles = new Set(['src/index.ts', 'src/util/x.ts', 'mod.mts']);
     const rootPkg = [{ name: 'root', dir: '' }];

@@ -158,6 +158,14 @@ interface IncrementalScope {
  * the plan's own `incremental` block remains the complete record.
  */
 const SCOPE_LIST_CAP = 30;
+/** Edge lists are capped per entry too — the entry cap alone still let one
+ *  interaction row carry hundreds of imports into every brief. */
+const SCOPE_EDGE_CAP = 8;
+function cappedEdges(edges: readonly string[]): string {
+  const shown = edges.slice(0, SCOPE_EDGE_CAP).map(inertPath);
+  const rest = edges.length - SCOPE_EDGE_CAP;
+  return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+}
 function scopeFileLists(incremental: IncrementalScope): string[] {
   const cap = <T>(items: T[], render: (item: T) => string): string => {
     const shown = items.slice(0, SCOPE_LIST_CAP).map(render);
@@ -177,7 +185,7 @@ function scopeFileLists(incremental: IncrementalScope): string[] {
         `imports): ${cap(
           incremental.interaction,
           (e) =>
-            `${inertPath(e.path)} (imports ${e.importsChanged.map(inertPath).join(', ')})`,
+            `${inertPath(e.path)} (imports ${cappedEdges(e.importsChanged)})`,
         )}.`,
     );
   }
@@ -195,7 +203,9 @@ function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
     | null;
   if (!raw || typeof raw.anchor !== 'string' || raw.anchor === '') return null;
   const strings = (v: unknown): string[] =>
-    Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+    Array.isArray(v)
+      ? v.filter((s): s is string => typeof s === 'string' && s.length > 0)
+      : [];
   const interaction = Array.isArray(raw.interaction)
     ? raw.interaction
         .filter(
@@ -627,7 +637,7 @@ export function buildChunkAgentPrompt(
     const lines = [
       '',
       `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
-        `previous clean review round (anchor \`${incremental.anchor.slice(0, 12)}\`), ` +
+        `previous clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), ` +
         `plus still-clean files one import hop from a change. Your files' scopes:`,
     ];
     if (deltaHere.length > 0) {
@@ -635,7 +645,7 @@ export function buildChunkAgentPrompt(
         ...deltaHere.map(
           (p) =>
             `- ${inertPath(p)} — **changed since the last round**: its hunks here are ` +
-            `its full change against the PR base (the previous round's clean verdict ` +
+            `its full change against the review's base (the previous round's clean verdict ` +
             `no longer covers this file); review them in full, as usual.`,
         ),
       );
@@ -645,7 +655,7 @@ export function buildChunkAgentPrompt(
         ...seamHere.map(
           (e) =>
             `- ${inertPath(e.path)} — **unchanged, cleared by the previous round**, back in ` +
-            `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}, which ` +
+            `scope because it imports ${cappedEdges(e.importsChanged)}, which ` +
             `changed. Review the INTERACTION only: do this file's uses of what it imports ` +
             `still hold — signatures, argument contracts, invariants, error behaviour — ` +
             `now that the imported side moved? Read the changed side from the worktree to ` +
@@ -665,7 +675,10 @@ export function buildChunkAgentPrompt(
           `applies only to its interaction surface with what changed.`,
       );
     }
-    parts.push(...lines);
+    // A frame with a header and no scope bullets tells the agent nothing and
+    // implies its files are out of scope — render it only when at least one
+    // of this chunk's files actually carries a class.
+    if (deltaHere.length > 0 || seamHere.length > 0) parts.push(...lines);
   }
 
   parts.push(
@@ -982,12 +995,17 @@ function diffReadingBlock(
     ...(incremental
       ? [
           `**Incremental round.** This diff is scoped to what changed since the previous ` +
-            `clean review round (anchor \`${incremental.anchor.slice(0, 12)}\`), plus ` +
+            `clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), plus ` +
             `still-clean files one import hop from a change — each of those is in scope ` +
-            `only for its interaction with what it imports. The rest of the PR was ` +
+            `only for its interaction with what it imports. The rest of the change was ` +
             `reviewed clean last round and is deliberately absent; do not go find it. ` +
             `A defect in absent code is reportable only when a change IN this diff is ` +
-            `what makes it wrong now.`,
+            `what makes it wrong now. Where the sweep duties below (walk every ` +
+            `hunk, audit every deletion, own every dimension) conflict with a ` +
+            `file's scope class, the scope class WINS: for an interaction file ` +
+            `every duty applies only to its interaction surface with what ` +
+            `changed — its other hunks were cleared last round and re-reporting ` +
+            `them is the cost this scoping exists to prevent.`,
           '',
           // A whole-diff reader must know WHICH file carries which scope —
           // told only that the two classes coexist, it cannot tell the file
