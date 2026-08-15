@@ -25,6 +25,15 @@ describe('Electron desktop state', () => {
     });
   });
 
+  it('restores only a supported desktop link preference', () => {
+    expect(normalizeDesktopState({ linkOpenPreference: 'external' })).toEqual({
+      linkOpenPreference: 'external',
+    });
+    expect(normalizeDesktopState({ linkOpenPreference: 'invalid' })).toEqual(
+      {},
+    );
+  });
+
   it('migrates the first legacy chat window into the single window', () => {
     expect(
       normalizeDesktopState({

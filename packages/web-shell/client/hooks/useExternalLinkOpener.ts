@@ -8,6 +8,7 @@ import {
   isExternalOpenUrl,
   openExternalUrl,
 } from '../utils/externalOpen';
+import { getDesktopLinkApi } from '../utils/desktopBrowser';
 
 /**
  * Opens external link clicks through the shell's explicit desktop opener.
@@ -22,7 +23,21 @@ export function useExternalLinkOpener() {
   const { t } = useI18n();
   return useCallback(
     (event: MouseEvent<HTMLAnchorElement>, url: string | undefined) => {
-      if (!url || !isExternalOpenUrl(url) || !isDesktopShell()) return;
+      if (!url || !isExternalOpenUrl(url)) return;
+      const desktopLinks = getDesktopLinkApi();
+      if (desktopLinks) {
+        event.preventDefault();
+        desktopLinks
+          .open(url, { forceExternal: event.metaKey || event.ctrlKey })
+          .catch((error: unknown) => {
+            requestToast(
+              'error',
+              t('common.openFailed', { message: extractErrorDetail(error) }),
+            );
+          });
+        return;
+      }
+      if (!isDesktopShell()) return;
       event.preventDefault();
       openExternalUrl(url).catch((error: unknown) => {
         requestToast(

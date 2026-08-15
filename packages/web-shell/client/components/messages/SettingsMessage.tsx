@@ -41,6 +41,10 @@ import {
   type WebShellTheme,
 } from '../../themeContext';
 import {
+  getDesktopLinkApi,
+  type DesktopLinkOpenPreference,
+} from '../../utils/desktopBrowser';
+import {
   ModelManagementSection,
   type ModelManagementProps,
 } from './ModelManagementSection';
@@ -245,8 +249,10 @@ interface CategoryGroup {
 
 type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' }
+  | { type: 'local'; localKey: LocalSettingKey }
   | { type: 'live' };
+
+type LocalSettingKey = 'chatWidth' | 'desktopLinkOpenPreference';
 
 interface SettingsPageCategory {
   id: string;
@@ -388,7 +394,7 @@ function SettingInput({
 export type FlatRow =
   | { type: 'header'; category: string }
   | { type: 'setting'; setting: DaemonSettingDescriptor }
-  | { type: 'local'; localKey: 'chatWidth' };
+  | { type: 'local'; localKey: LocalSettingKey };
 
 /* Wraps around at both ends (matching the native CLI) while skipping
    category-header rows. Exported for tests. */
@@ -419,6 +425,7 @@ export function SettingsMessage({
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
+  const desktopLinks = getDesktopLinkApi();
   const { status, settings, loading, error, reload, setValue, liveSetup } =
     settingsState;
   const [scope, setScope] = useState<Scope>('workspace');
@@ -426,6 +433,26 @@ export function SettingsMessage({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  const [desktopLinkOpenPreference, setDesktopLinkOpenPreference] =
+    useState<DesktopLinkOpenPreference>('in-app');
+
+  useEffect(() => {
+    if (!desktopLinks) return;
+    let active = true;
+    desktopLinks
+      .getPreference()
+      .then((preference) => {
+        if (active) setDesktopLinkOpenPreference(preference);
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setMessage(reason instanceof Error ? reason.message : String(reason));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [desktopLinks]);
 
   const showInitialLoading = loading && !status;
   const categories = useMemo(() => {
@@ -444,10 +471,18 @@ export function SettingsMessage({
         })),
       }),
     );
-    const localItem = {
-      type: 'local' as const,
-      localKey: 'chatWidth' as const,
-    };
+    const localItems: SettingsPageItem[] = [
+      {
+        type: 'local' as const,
+        localKey: 'chatWidth' as const,
+      },
+    ];
+    if (desktopLinks) {
+      localItems.push({
+        type: 'local',
+        localKey: 'desktopLinkOpenPreference',
+      });
+    }
     const themeGroup = groups.find((group) =>
       group.items.some(
         (item) =>
@@ -459,12 +494,12 @@ export function SettingsMessage({
         (item) =>
           item.type === 'setting' && item.setting.key === THEME_SETTING_KEY,
       );
-      themeGroup.items.splice(themeIndex + 1, 0, localItem);
+      themeGroup.items.splice(themeIndex + 1, 0, ...localItems);
     } else {
       groups.push({
         id: 'UI',
         label: formatSettingCategory('UI', t),
-        items: [localItem],
+        items: localItems,
       });
     }
     if (liveSetup?.supported) {
@@ -480,7 +515,7 @@ export function SettingsMessage({
       }
     }
     return groups;
-  }, [liveSetup, settings, t]);
+  }, [desktopLinks, liveSetup, settings, t]);
 
   useEffect(() => {
     if (categories.length === 0) return;
@@ -664,6 +699,67 @@ export function SettingsMessage({
     );
   };
 
+  const renderLocalSetting = (localKey: LocalSettingKey) => {
+    if (localKey === 'chatWidth') {
+      return (
+        <SettingsRow
+          title={t('settings.label.ui.chatWidth')}
+          description={t('settings.description.ui.chatWidth')}
+          control={renderSelect(
+            chatWidthMode,
+            (next) => onChatWidthModeChange(next as ChatWidthMode),
+            [
+              {
+                value: '1000',
+                label: t('settings.option.ui.chatWidth.1000'),
+              },
+              {
+                value: 'wide',
+                label: t('settings.option.ui.chatWidth.wide'),
+              },
+            ],
+            t('settings.label.ui.chatWidth'),
+          )}
+        />
+      );
+    }
+    return (
+      <SettingsRow
+        title={t('settings.label.ui.desktopLinkOpenPreference')}
+        description={t('settings.description.ui.desktopLinkOpenPreference')}
+        control={renderSelect(
+          desktopLinkOpenPreference,
+          (next) => {
+            if (!desktopLinks) return;
+            const preference = next as DesktopLinkOpenPreference;
+            setBusyKey(localKey);
+            desktopLinks
+              .setPreference(preference)
+              .then(() => setDesktopLinkOpenPreference(preference))
+              .catch((reason: unknown) =>
+                setMessage(
+                  reason instanceof Error ? reason.message : String(reason),
+                ),
+              )
+              .finally(() => setBusyKey(null));
+          },
+          [
+            {
+              value: 'in-app',
+              label: t('settings.option.ui.desktopLinkOpenPreference.inApp'),
+            },
+            {
+              value: 'external',
+              label: t('settings.option.ui.desktopLinkOpenPreference.external'),
+            },
+          ],
+          t('settings.label.ui.desktopLinkOpenPreference'),
+          busyKey === localKey,
+        )}
+      />
+    );
+  };
+
   return (
     <div
       className={
@@ -777,35 +873,7 @@ export function SettingsMessage({
                           return (
                             <div key={item.localKey}>
                               {separator}
-                              <SettingsRow
-                                title={t('settings.label.ui.chatWidth')}
-                                description={t(
-                                  'settings.description.ui.chatWidth',
-                                )}
-                                control={renderSelect(
-                                  chatWidthMode,
-                                  (next) =>
-                                    onChatWidthModeChange(
-                                      next as ChatWidthMode,
-                                    ),
-                                  [
-                                    {
-                                      value: '1000',
-                                      label: t(
-                                        'settings.option.ui.chatWidth.1000',
-                                      ),
-                                    },
-                                    {
-                                      value: 'wide',
-                                      label: t(
-                                        'settings.option.ui.chatWidth.wide',
-                                      ),
-                                    },
-                                  ],
-                                  t('settings.label.ui.chatWidth'),
-                                  false,
-                                )}
-                              />
+                              {renderLocalSetting(item.localKey)}
                             </div>
                           );
                         }

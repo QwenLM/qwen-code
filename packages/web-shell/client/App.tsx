@@ -173,6 +173,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { Button } from './components/ui/button';
+import { DesktopBrowserPanel } from './components/desktop/DesktopBrowserPanel';
 import {
   isPluginShadowPanel,
   installWebShellShadowStyles,
@@ -12707,6 +12708,7 @@ export function App({
                 </div>,
                 artifactPanelSlotEl,
               )}
+            <DesktopBrowserPanel />
           </div>
         </div>
         </WebShellPortalRootContext.Provider>

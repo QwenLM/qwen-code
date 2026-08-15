@@ -13,9 +13,10 @@ import {
   Menu,
   nativeTheme,
   screen,
-  shell,
 } from 'electron';
 import { DesktopRuntime } from './runtime';
+import { BrowserPanelController } from './browser-panel';
+import type { DesktopLinkOpenPreference } from '../shared/browser-panel';
 import {
   captureWindowState,
   initialWindowBounds,
@@ -32,6 +33,11 @@ let statePath = '';
 let hostLogPath = '';
 let stateTimer: NodeJS.Timeout | undefined;
 let quitting = false;
+const browserPanel = new BrowserPanelController(
+  () => mainWindow,
+  () => desktopState.linkOpenPreference ?? 'in-app',
+  setLinkOpenPreference,
+);
 
 const MACOS_TITLE_BAR_CSS = `
   [data-web-shell-root] {
@@ -81,6 +87,7 @@ app.on('before-quit', () => {
   try {
     flushDesktopState();
   } finally {
+    browserPanel.close();
     runtime?.stop();
     runtime = undefined;
   }
@@ -105,6 +112,7 @@ async function startApplication(): Promise<void> {
   statePath = path.join(app.getPath('userData'), 'desktop-state.json');
   hostLogPath = path.join(app.getPath('logs'), 'desktop-host.log');
   desktopState = readDesktopState(statePath);
+  browserPanel.registerIpc();
 
   const workspace = await resolveWorkspace();
   if (!workspace) {
@@ -173,6 +181,7 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
     title: 'Qwen Code',
     titleBarStyle: process.platform === 'darwin' ? 'hidden' : 'default',
     webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -194,23 +203,29 @@ function createMainWindow(savedBounds?: WindowState): BrowserWindow {
   window.webContents.once('did-finish-load', () => {
     appendHostLog(`web shell ready at ${runtime?.baseUrl ?? 'unknown'}`);
   });
+  window.webContents.on(
+    'did-start-navigation',
+    (_event, url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace && isRuntimeUrl(url)) browserPanel.close();
+    },
+  );
+  window.webContents.on('render-process-gone', () => browserPanel.close());
   window.on('move', scheduleDesktopStateSave);
   window.on('resize', scheduleDesktopStateSave);
   window.on('maximize', scheduleDesktopStateSave);
   window.on('unmaximize', scheduleDesktopStateSave);
   window.on('close', flushDesktopState);
   window.on('closed', () => {
+    browserPanel.close();
     if (mainWindow === window) mainWindow = undefined;
   });
   window.webContents.on('will-navigate', (event, url) => {
     if (isRuntimeUrl(url)) return;
     event.preventDefault();
-    if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    openDesktopLink(url);
   });
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (!isRuntimeUrl(url) && isSafeExternalUrl(url)) {
-      void shell.openExternal(url);
-    }
+    if (!isRuntimeUrl(url)) openDesktopLink(url);
     return { action: 'deny' };
   });
   return window;
@@ -311,13 +326,18 @@ function isRuntimeUrl(raw: string): boolean {
   }
 }
 
-function isSafeExternalUrl(raw: string): boolean {
-  try {
-    const protocol = new URL(raw).protocol;
-    return protocol === 'https:' || protocol === 'http:';
-  } catch {
-    return false;
-  }
+function openDesktopLink(url: string): void {
+  void browserPanel.openLink(url).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    appendHostLog(`failed to open desktop link: ${message}`);
+  });
+}
+
+function setLinkOpenPreference(preference: DesktopLinkOpenPreference): void {
+  if (desktopState.linkOpenPreference === preference) return;
+  const nextState = { ...desktopState, linkOpenPreference: preference };
+  if (statePath) saveDesktopState(statePath, nextState);
+  desktopState = nextState;
 }
 
 function failStartup(error: unknown): void {

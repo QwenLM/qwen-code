@@ -7,6 +7,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserWindow, Rectangle } from 'electron';
+import {
+  normalizeDesktopLinkOpenPreference,
+  type DesktopLinkOpenPreference,
+} from '../shared/browser-panel';
 
 const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 820;
@@ -14,6 +18,7 @@ const MIN_WIDTH = 900;
 const MIN_HEIGHT = 600;
 
 export interface DesktopState {
+  linkOpenPreference?: DesktopLinkOpenPreference;
   window?: WindowState;
   workspace?: string;
 }
@@ -38,6 +43,9 @@ export function normalizeDesktopState(value: unknown): DesktopState {
     typeof candidate['workspace'] === 'string'
       ? candidate['workspace']
       : undefined;
+  const linkOpenPreference = normalizeDesktopLinkOpenPreference(
+    candidate['linkOpenPreference'],
+  );
   const legacyWindows = Array.isArray(candidate['chatWindows'])
     ? candidate['chatWindows']
     : [];
@@ -46,6 +54,7 @@ export function normalizeDesktopState(value: unknown): DesktopState {
     normalizeWindowState(legacyWindows[0]);
   return {
     ...(workspace ? { workspace } : {}),
+    ...(linkOpenPreference ? { linkOpenPreference } : {}),
     ...(window ? { window } : {}),
   };
 }

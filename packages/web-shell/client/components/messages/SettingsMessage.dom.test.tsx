@@ -27,6 +27,8 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  delete window.qwenCodeDesktop;
+  vi.restoreAllMocks();
 });
 
 function render(node: ReactNode): HTMLElement {
@@ -392,6 +394,46 @@ describe('SettingsMessage user-scope editing', () => {
     );
     expect(labels).toContain('UI');
     expect(labels).not.toContain('settings.category.UI');
+    expect(container.textContent).not.toContain('Open web links');
+  });
+
+  it('shows and persists the Electron link-opening preference', async () => {
+    const links = {
+      open: vi.fn().mockResolvedValue(undefined),
+      getPreference: vi.fn().mockResolvedValue('external' as const),
+      setPreference: vi.fn().mockResolvedValue(undefined),
+    };
+    window.qwenCodeDesktop = { links };
+    const setValue = vi.fn(() =>
+      Promise.resolve({} as DaemonSettingUpdateResult),
+    );
+    const container = renderPanel(makeState([boolSetting()], setValue));
+
+    const uiCategory = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.includes('UI'));
+    await act(async () => {
+      await Promise.resolve();
+      uiCategory?.click();
+    });
+    const trigger = container.querySelector<HTMLElement>(
+      '[aria-label="Open web links"]',
+    );
+    expect(trigger?.textContent).toContain('Default browser');
+
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'In app');
+    await act(async () => {
+      option?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(links.setPreference).toHaveBeenCalledWith('in-app');
+    expect(setValue).not.toHaveBeenCalled();
   });
 
   it('renders the model-management block inside the Model category', () => {

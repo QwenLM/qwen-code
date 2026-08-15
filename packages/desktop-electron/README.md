@@ -22,13 +22,18 @@ The main process also follows Web Shell's standard `theme-color` metadata so
 the operating-system appearance and window background switch between light and
 dark with the page. On macOS, Electron keeps the native traffic-light controls
 over a host-owned drag strip whose background comes directly from Web Shell's
-sidebar theme token. The page remains sandboxed and does not receive Electron
-APIs, a preload bridge, or desktop-owned theme state.
+sidebar theme token. The page remains sandboxed and receives only a narrow
+preload bridge for the in-app browser panel and link-opening preference. It
+does not receive raw Electron APIs or desktop-owned theme state.
 
-The preview intentionally provides one Web Shell window only. It does not add
-an embedded browser, Voice overlay, additional chat windows, renderer IPC, or
-a preload bridge. Safe external HTTP(S) links are handed to the operating
-system browser.
+The preview provides one Web Shell window and one optional browser panel in
+that window. Web Shell renders the trusted toolbar and resizable panel layout;
+Electron renders the untrusted page in an isolated `WebContentsView`. Voice
+overlay and additional chat windows remain out of scope.
+
+Normal HTTP(S) clicks open in that panel by default. Settings > UI can switch
+the app-wide default to the operating-system browser; Cmd/Ctrl-click,
+`mailto:`, and the panel's external-open button always use the system.
 
 ## Local development
 

@@ -1,5 +1,9 @@
 # Electron Web Shell Desktop
 
+> The in-app browser exception to this preview's original single-surface and
+> no-preload constraints is defined in
+> `docs/design/2026-08-14-electron-in-app-browser.md`.
+
 ## Summary
 
 Add an isolated Electron application in `packages/desktop-electron` alongside
@@ -26,8 +30,8 @@ providers, and routes displayed by both desktop hosts.
 
 - Rebuilding Web Shell screens from UI primitives.
 - Styling Web Shell from an Electron-owned stylesheet.
-- Adding an embedded browser, Voice overlay, or multiple chat windows.
-- Moving daemon APIs to Electron IPC or exposing a preload bridge.
+- Adding Voice overlay or multiple chat windows.
+- Moving daemon APIs to Electron IPC or exposing raw Electron IPC.
 - Importing the legacy Electron implementation under `packages/desktop`.
 - Changing shared Core, CLI, daemon, ACP, or Tauri behavior.
 
@@ -84,23 +88,26 @@ Electron.
 - `nodeIntegration: false`
 - `contextIsolation: true`
 - `sandbox: true`
-- no preload script, raw IPC, or Electron APIs in the page
+- one narrow preload bridge for browser-panel and link-opening commands; no raw
+  IPC
 - the main process maps Web Shell's standard `theme-color` metadata to
   Electron's native theme and window background
 - on macOS, native traffic-light controls remain visible over a host drag strip
   colored by Web Shell's sidebar theme token
 - navigation restricted to the active daemon origin
 - new windows denied
-- safe external HTTP(S) links opened by the operating system browser
+- safe external HTTP(S) links routed by the persisted in-app/system preference;
+  `mailto:` and Cmd/Ctrl-click always use the system
 - daemon bound to `127.0.0.1` with bearer authentication
 
 ## Runtime and lifecycle
 
 The main process starts a private Node runtime and bundled Qwen distribution,
 waits for deep authenticated health, loads Web Shell, captures logs, and stops
-the full process group during application quit. Desktop state stores only the
-workspace and one window's normal bounds. Older multi-window state migrates by
-retaining the first saved window and discarding removed surfaces.
+the full process group during application quit. Desktop state stores the
+workspace, one window's normal bounds, and the link-opening preference. Older
+multi-window state migrates by retaining the first saved window and discarding
+removed surfaces.
 
 ## Packaging and release isolation
 
@@ -112,8 +119,8 @@ workflow remains unchanged.
 
 ## Acceptance criteria
 
-- Electron contains one Web Shell window and no embedded browser, Voice
-  overlay, additional chat window action, renderer IPC, or preload bridge.
+- Electron contains one Web Shell window, one optional browser panel, and no
+  Voice overlay or additional chat window action.
 - The loaded page URL uses the authenticated loopback daemon origin.
 - The packaged page is `lib/web-shell/index.html` from the selected Qwen build.
 - No Electron-owned renderer HTML, React entry, Tailwind/Vite build, theme

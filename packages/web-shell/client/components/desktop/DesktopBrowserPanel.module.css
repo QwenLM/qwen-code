@@ -1,0 +1,74 @@
+.panel {
+  display: flex;
+  flex: 0 0 var(--desktop-browser-width);
+  width: var(--desktop-browser-width);
+  min-width: 0;
+  min-height: 0;
+  background: var(--background);
+}
+
+.resizeHandle {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 8px;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resizeHandle::after {
+  position: absolute;
+  inset: 0 3px;
+  background: var(--border);
+  content: '';
+}
+
+.surface {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  flex: 0 0 42px;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar-background, var(--background));
+}
+
+.addressForm {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.content {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  background: #fff;
+}
+
+.loadingIcon {
+  animation: desktopBrowserSpin 800ms linear infinite;
+}
+
+@keyframes desktopBrowserSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
+}
