@@ -93,6 +93,20 @@ const SHA_RE = /^[0-9a-f]{7,64}$/;
  */
 export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
 
+/**
+ * Prefix-anchored readback of a carried id off the claim line: the write side
+ * guarantees the id leads the line right after the severity marker, so the
+ * read sides key on that same position. Shared WHOLESALE — terminator
+ * included — by compose-review's ledger builder and presubmit's re-post
+ * extractor, so the tolerated terminator set cannot drift on one end only
+ * (#9212 review). The earlier `\b`-bounded whole-body scan also matched
+ * cross-references ("see R3-2 for context") and ids embedded in longer
+ * hyphen runs, exempting a re-post under an unrelated thread.
+ */
+export const LEDGER_ID_READBACK = new RegExp(
+  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+);
+
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
  *  the serializer so the write side is bounded, the parser so a hand-edited

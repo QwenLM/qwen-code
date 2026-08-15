@@ -911,12 +911,16 @@ describe('presubmitCommand', () => {
       );
       expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.existingComments.byBucket.repost).toBe(0);
+      // The report names the author: an authorship-refused exemption must be
+      // self-explanatory next to a drop line whose visible id matches.
+      expect(result.existingComments.overlap[0].user).toBe('maintainer-dev');
     });
 
-    it('extracts the carried id from a claim line longer than the 80-char summary slice', async () => {
-      // The summary slice caps `CommentSummary.body` at 80 chars; extraction
-      // must read the FULL body. A realistic carried body leads with the id
-      // right after the severity marker and runs long after it.
+    it('extracts the carried id from a carried body longer than the 80-char report excerpt', async () => {
+      // The report's `CommentSummary.body` is an 80-char excerpt, but
+      // extraction reads the FULL body. A carried id leads the claim line
+      // right after the severity marker by construction, so it extracts
+      // however long the claim runs after it.
       const longClaim = 'x'.repeat(90);
       const result = await presubmitWithComments(
         [
@@ -927,6 +931,43 @@ describe('presubmitCommand', () => {
         ],
         [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
       );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('keeps the id-less fallback off when the only id token sits past the 80-char summary slice (#9212)', async () => {
+      // The no-token check reads the FULL body, not the 80-char
+      // `CommentSummary.body` excerpt: a long id-less claim whose one
+      // id-shaped cross-reference lands past char 80 is still not a truly
+      // id-less original, and the fallback must stay off.
+      const longClaim = 'x'.repeat(90);
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: `**[Critical]** ${longClaim} (see R3-2 for context) _— model via Qwen Code /review_`,
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('extracts the carried id from a Suggestion-severity re-post (#9212)', async () => {
+      // Both severity markers must strip: every other carried body in the
+      // suite leads with **[Critical]**, which left the Suggestion half of
+      // the marker strip invisible.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Suggestion]** R3-2: eq-form rescue asymmetry _— model via Qwen Code /review_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
       expect(result.existingComments.byBucket.repost).toBe(1);
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
@@ -1046,8 +1087,11 @@ describe('presubmitCommand', () => {
     it('keeps the id-less exemption off when the current user login is unknown (#9212)', async () => {
       // With no authenticated login the authorship gate cannot vouch for ANY
       // comment, so the exemption must stay off even at an unambiguous
-      // location — the drop still applies and stays visible. The body keeps
-      // its footer so the comment IS recognized; only the gate can block.
+      // location — the drop still applies and stays visible. The bodies keep
+      // their footer so the comments ARE recognized; only the gate can
+      // block. The second comment covers the author-less shape (`user`
+      // absent, e.g. a deleted account): with the login unknown it must not
+      // be counted as own-account and ride the fallback either.
       currentUserMock.mockReturnValue('');
       const result = await presubmitWithComments(
         [
@@ -1055,10 +1099,16 @@ describe('presubmitCommand', () => {
             ...CARRIED_COMMENT,
             body: '**[Critical]** some claim without an id _— model via Qwen Code /review_',
           },
+          {
+            ...CARRIED_COMMENT,
+            id: 8,
+            user: undefined,
+            body: '**[Critical]** author-less claim without an id _— model via Qwen Code /review_',
+          },
         ],
         [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
       );
-      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.overlap).toBe(2);
       expect(result.existingComments.byBucket.repost).toBe(0);
     });
 

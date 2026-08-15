@@ -21,8 +21,12 @@ import {
   ensureAuthenticated,
   setGhHost,
 } from './lib/gh.js';
-import { severityOf } from './lib/inline-counts.js';
-import { LEDGER_ID_TOKEN } from './lib/ledger.js';
+import {
+  CRITICAL_PREFIX,
+  SUGGESTION_PREFIX,
+  severityOf,
+} from './lib/inline-counts.js';
+import { LEDGER_ID_READBACK, LEDGER_ID_TOKEN } from './lib/ledger.js';
 
 interface FindingAnchor {
   path: string;
@@ -67,30 +71,18 @@ interface CommentSummary {
 
 /** Exact-shape check for ids read from the --new-findings file. */
 const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
-/**
- * Prefix-anchored readback, mirroring compose-review's `CARRIED_ID_RE`: the
- * write side guarantees a carried id leads the claim line right after the
- * severity marker, so the read side keys on that same position. The earlier
- * `\b`-bounded whole-body scan also matched cross-references ("see R3-2 for
- * context") and ids embedded in longer hyphen runs, exempting a re-post under
- * an unrelated thread (#9212 review).
- */
-const CARRIED_ID_PREFIX = new RegExp(
-  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
-);
-// Literal spelling of the two severity markers compose-review posts ahead of
-// the claim line (CRITICAL_PREFIX / SUGGESTION_PREFIX in inline-counts.ts);
-// spelled out because their `*[` characters are regex syntax.
-const SEVERITY_MARKER = /^\*\*\[(?:Critical|Suggestion)\]\*\*\s*/;
-
 /** The carried id this comment's claim line leads with, if any. */
 function extractCarriedIds(body: string): string[] {
-  const rest = body
-    .trimStart()
-    .replace(SEVERITY_MARKER, '')
-    .replace(/^:?\s*/, '');
+  // Marker strip mirrors buildLedger's slice sequence (severityOf + the
+  // shared prefix constants): a hand-spelled marker regex is the drift the
+  // shared LEDGER_ID_READBACK removes for the id half (#9212 review).
+  const sev = severityOf({ body });
+  const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+  let rest = body.trimStart();
+  if (sev) rest = rest.slice(marker.length);
+  rest = rest.replace(/^:?\s*/, '');
   const line = rest.split('\n')[0].trim();
-  const carried = CARRIED_ID_PREFIX.exec(line);
+  const carried = LEDGER_ID_READBACK.exec(line);
   return carried ? [carried[1]] : [];
 }
 
