@@ -224,6 +224,20 @@ export function parseLedger(body: string | undefined): Ledger | null {
       (f): f is LedgerFinding =>
         !!f &&
         typeof f.id === 'string' &&
+        // An id claiming a FUTURE round is a squat, not a finding. The
+        // pipeline's own ids obey `id round <= marker round` by construction —
+        // a round stamps its new findings `R<round>-<n>` and carries older ids
+        // forward — so a legitimate marker can never violate this. A foreign
+        // one can, and recovery now reads foreign markers: a marker at round N
+        // carrying `R<N+1>-*` ids would pre-claim exactly the prefix the next
+        // compose stamps, splitting one claim across two ids and renumbering
+        // every genuinely new finding past the squatted block. Read-side only,
+        // deliberately: the writer cannot produce the violation, so there is
+        // nothing to mirror.
+        !(() => {
+          const m = /^R(\d+)-/.exec(f.id);
+          return m !== null && Number(m[1]) > raw.round;
+        })() &&
         (f.sev === 'C' || f.sev === 'S') &&
         typeof f.file === 'string' &&
         typeof f.title === 'string' &&

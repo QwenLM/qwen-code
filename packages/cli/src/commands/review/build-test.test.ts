@@ -207,6 +207,9 @@ describe('runBuildTest', () => {
     });
     expect(rep).toEqual({
       toolchain: 'unsupported',
+      // The identity a future --resume verifies rides every adapter-routed
+      // report; this plan carries no sha, so only the root does.
+      run: { root },
       affected: [],
       buildSet: [],
       widenedWith: [],
@@ -2747,8 +2750,9 @@ describe('runBuildTest', () => {
         exec: expect.any(Function),
       }),
     );
-    // And the report runBuildTest returns IS the adapter's report.
-    expect(rep).toBe(runSpy.mock.results[0]?.value);
+    // And the report runBuildTest returns is the adapter's report with
+    // exactly one addition: the run identity a future --resume verifies.
+    expect(rep).toEqual({ ...runSpy.mock.results[0]?.value, run: { root } });
     runSpy.mockRestore();
   });
 
@@ -2772,6 +2776,7 @@ describe('runBuildTest', () => {
         receivedExec = args.exec;
         return {
           toolchain: 'npm',
+          run: { root },
           affected: [],
           buildSet: [],
           widenedWith: [],
@@ -2910,6 +2915,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a', 'packages/b'],
           widenedWith: [],
@@ -2985,6 +2991,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           widenedWith: [],
@@ -3034,6 +3041,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           notBuilt: ['packages/a'],
@@ -3106,6 +3114,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],
@@ -3164,6 +3173,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           widenedWith: [],
@@ -3225,6 +3235,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],
@@ -3288,6 +3299,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core', 'packages/a'],
           widenedWith: [],
@@ -3350,6 +3362,97 @@ describe('runBuildTest', () => {
           }),
         ).toThrow(/is not one/);
       }
+    });
+
+    it("refuses to continue another run's report — identity, not just shape", () => {
+      // The out path is stable across review rounds and nothing sweeps it on
+      // an interrupted round, so a stale report is exactly what an interrupted
+      // round leaves behind. Resuming it would keep the old commit's passing
+      // entries on the new round's tree — certifying old-commit passes for the
+      // new commit — and skip the install the fresh worktree never had.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const base = {
+        toolchain: 'npm',
+        affected: ['packages/core'],
+        buildSet: ['packages/core'],
+        widenedWith: [],
+        install: null,
+        build: [okResult('npm run build --workspace="packages/core"')],
+        test: [okResult('npm test --workspace="packages/core"')],
+        ok: true,
+        timedOut: [],
+        note: 'in flight',
+        testScope: { workspaces: ['packages/core'], notRun: ['packages/a'] },
+      };
+      const attempt = (): unknown =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        });
+
+      // No identity at all: it predates the stamp or something else wrote it —
+      // the safe reading is the same as a mismatch.
+      writeFileSync(outPath, JSON.stringify(base));
+      expect(attempt).toThrow(/records no run identity/);
+
+      // Another tree's report.
+      writeFileSync(
+        outPath,
+        JSON.stringify({ ...base, run: { root: '/somewhere/else' } }),
+      );
+      expect(attempt).toThrow(/from a different\s+run/);
+
+      // Another COMMIT's report — the interrupted-round shape itself. The
+      // current plan carries no sha, so a sha-stamped report cannot be this
+      // run's.
+      writeFileSync(
+        outPath,
+        JSON.stringify({ ...base, run: { root, sha: 'aaaa1111' } }),
+      );
+      expect(attempt).toThrow(/certify another round's results/);
+    });
+
+    it('stamps the run identity a future resume will verify', () => {
+      // The guard above can only work if every fresh report carries what it
+      // checks. Plan sha rides when the plan has one; the root always does.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      const shaPlan = join(root, 'plan-sha.json');
+      writeFileSync(
+        shaPlan,
+        JSON.stringify({
+          diffPathAbsolute: '/dev/null',
+          fetchedSha: 'feedbeef2222',
+          files: [{ path: 'packages/core/src/a.ts', kind: 'source' }],
+        }),
+      );
+      const rep = runBuildTest({
+        plan: shaPlan,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: false,
+        exec: okResult,
+      });
+      expect(rep.run).toEqual({ root, sha: 'feedbeef2222' });
+      // And the round trip: write it, resume it, no refusal.
+      writeFileSync(outPath, JSON.stringify(rep));
+      const resumed = runBuildTest({
+        plan: shaPlan,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: okResult,
+      });
+      expect(resumed.run).toEqual({ root, sha: 'feedbeef2222' });
     });
 
     it('refuses a corrupt report with a named fix, never a stack trace', () => {
@@ -3416,6 +3519,7 @@ describe('runBuildTest', () => {
         const outPath = join(root, 'report.json');
         const inFlight = {
           toolchain: 'npm',
+          run: { root: bare },
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],
@@ -3454,6 +3558,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'unsupported',
+          run: { root },
           affected: [],
           buildSet: [],
           widenedWith: [],
@@ -3489,6 +3594,7 @@ describe('runBuildTest', () => {
         outPath,
         JSON.stringify({
           toolchain: 'npm',
+          run: { root },
           affected: ['packages/core'],
           buildSet: ['packages/core'],
           widenedWith: [],

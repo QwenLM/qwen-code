@@ -150,6 +150,21 @@ export interface BuildTestReport {
   timedOut: string[];
   /** Why the run did what it did, in one line — rendered into the agent's report. */
   note: string;
+  /**
+   * The run this report belongs to: the tree it ran in, and the commit the
+   * plan fetched (absent for a local review, whose plan carries no sha).
+   *
+   * This is what `--resume` verifies, because the report's PATH is not an
+   * identity: `--out` is stable per PR across review rounds, `fetch-pr`'s
+   * stale-sweep removes only the worktree and branch ref, and the review's
+   * own cleanup runs post-review — so a round that dies between the report
+   * write and cleanup (the interrupted state `--resume` exists for) leaves a
+   * well-shaped report behind for the NEXT round to find. Resuming it would
+   * keep the old commit's passing entries on the new round's tree —
+   * certifying old-commit passes for the new commit — and skip the install
+   * the fresh worktree never had.
+   */
+  run?: { sha?: string; root: string };
 }
 
 /** Output kept per command: the head and tail, which is where a failure names itself. */
@@ -347,6 +362,22 @@ interface BuildTestArgs {
   exec?: (command: string, cwd: string, timeoutMs: number) => CommandResult;
 }
 
+/** The plan's fetched commit, when it has one — a local plan does not. */
+function planShaFrom(planPath: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      fetchedSha?: unknown;
+    };
+    return typeof parsed?.fetchedSha === 'string' && parsed.fetchedSha
+      ? parsed.fetchedSha
+      : undefined;
+  } catch {
+    // changedFilesFrom throws the descriptive error for an unreadable plan;
+    // this reader must not race it to a worse one.
+    return undefined;
+  }
+}
+
 /** The changed files, from whichever plan report produced them. */
 function changedFilesFrom(planPath: string): string[] {
   let parsed: unknown;
@@ -468,10 +499,40 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   }
   const root = resolve(args.worktree);
   const changedFiles = changedFilesFrom(args.plan);
+  const runIdentity: { sha?: string; root: string } = {
+    ...((sha) => (sha ? { sha } : {}))(planShaFrom(args.plan)),
+    root,
+  };
   // A resumed call continues a report; without one there is nothing to
   // continue, and silently starting a fresh run would re-install and re-build
   // inside a budget the caller sized for suites alone. Fail loudly instead.
   const previous = args.resume ? previousReport(args.out) : undefined;
+  if (previous) {
+    // The report must be THIS run's, not merely well-shaped: the out path is
+    // stable across rounds and nothing sweeps it on an interrupted round, so a
+    // stale report is exactly what an interrupted round leaves behind. A
+    // report with no identity at all cannot prove it belongs here — it
+    // predates the stamp, or something else wrote it — and the safe reading
+    // is the same as a mismatch.
+    const prev = previous.run;
+    if (
+      !prev ||
+      prev.root !== runIdentity.root ||
+      (prev.sha ?? null) !== (runIdentity.sha ?? null)
+    ) {
+      throw new Error(
+        `build-test: --resume found a report at ${args.out} from a different ` +
+          `run (${
+            prev
+              ? `it ran in ${prev.root}${prev.sha ? ` at ${prev.sha}` : ''}`
+              : 'it records no run identity'
+          }; this run is in ${runIdentity.root}${
+            runIdentity.sha ? ` at ${runIdentity.sha}` : ''
+          }). Continuing it would certify another round's results for this ` +
+          `one. Run build-test without --resume first.`,
+      );
+    }
+  }
   const runArgs = {
     root,
     changedFiles,
@@ -533,7 +594,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     // unsupported report before executing any command on every root where
     // applies() is false.
     if (existsSync(join(root, 'package.json'))) {
-      return npmToolchainAdapter.run(runArgs);
+      return { ...npmToolchainAdapter.run(runArgs), run: runIdentity };
     }
     return {
       toolchain: 'unsupported',
@@ -551,7 +612,7 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
         'and give each command a deadline it can actually meet.',
     };
   }
-  return adapter.run(runArgs);
+  return { ...adapter.run(runArgs), run: runIdentity };
 }
 
 export const buildTestCommand: CommandModule = {
