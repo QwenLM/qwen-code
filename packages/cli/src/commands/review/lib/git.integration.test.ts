@@ -221,10 +221,47 @@ describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
       expect(gitProbe('-C', repo, 'cat-file', '-e', '0000000').status).toBe(
         128,
       );
-      // The predicate's own no, and its yes.
+      // The predicate's own yes, its no, and its error — all three, from
+      // real git. `--is-ancestor` is the one probe whose three answers the
+      // reason taxonomy splits three ways, and this describe is the only
+      // consumer of a REAL status anywhere (every fetch-pr test mocks
+      // `./lib/git.js`), so a wrapper change that surfaced the predicate's
+      // NO as an error status would rename every deterministic
+      // `not-an-ancestor` refusal to the retryable `capture-failed` with
+      // nothing red.
+      writeFileSync(join(repo, 'f.txt'), 'y\n');
+      execFileSync('git', ['-C', repo, 'add', 'f.txt'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'commit', '-qm', 'two'], {
+        stdio: 'pipe',
+      });
+      const newer = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+
+      // 0: yes — a commit is its own ancestor, and the older is the newer's.
       expect(
         gitProbe('-C', repo, 'merge-base', '--is-ancestor', head, head).status,
       ).toBe(0);
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', head, newer).status,
+      ).toBe(0);
+      // 1: no — the newer commit is not an ancestor of the older.
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', newer, head).status,
+      ).toBe(1);
+      // 128: not a valid object name — an ERROR, not a no. This is the
+      // status `commitExists`/`resolveCommit` must settle before ancestry is
+      // ever asked, since the predicate cannot answer it.
+      expect(
+        gitProbe(
+          '-C',
+          repo,
+          'merge-base',
+          '--is-ancestor',
+          '0'.repeat(40),
+          head,
+        ).status,
+      ).toBe(128);
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }

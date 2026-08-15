@@ -13,11 +13,11 @@ import {
   isEmptyDiff,
   isCollapsedFromUpstream,
   resolveIncrementalAnchor,
-  hunksContainedIn,
   containmentRuling,
   type AnchorProbe,
 } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
+import { buildRoleBrief } from './agent-prompt.js';
 import { PARSE_ARGS_REPORT } from './lib/paths.js';
 
 describe('classifyHeavy', () => {
@@ -889,6 +889,112 @@ describe('fetch-pr report assembly', () => {
     }
   });
 
+  it('splits each probe exit three ways — 0, deterministic, and the surface', async () => {
+    // The shared shim answers `out === null ? 1 : 0`, so it can only ever
+    // produce statuses 0 and 1: the `128` arms and the `status: null` arm
+    // (a timeout kill) are unreachable from every non-spy fixture in this
+    // file, and mutants collapsing them survived the whole suite. Each row
+    // drives ONE probe to a status only real git produces.
+    const cases: Array<{
+      what: string;
+      probe: string;
+      answer: { out: string | null; status: number | null };
+      reason: string;
+    }> = [
+      // "not a valid object name" — an over-long hex that names nothing, the
+      // shape a SHA-256 marker sha has when read against SHA-1 history.
+      // Deterministic absence, so it must never be retried.
+      {
+        what: 'cat-file 128 is the object absent',
+        probe: 'cat-file',
+        answer: { out: null, status: 128 },
+        reason: 'unknown-commit',
+      },
+      // 128 from `rev-parse <sha>^{commit}` is "this is not a commit" — a
+      // blob or tree sha in a cache or marker.
+      {
+        what: 'rev-parse 128 is not-a-commit',
+        probe: 'rev-parse',
+        answer: { out: null, status: 128 },
+        reason: 'unknown-commit',
+      },
+      // A kill leaves no exit code at all: `{status: null}`. That is the
+      // surface failing, which IS retried — the opposite disposition to the
+      // two rows above, from the same probe.
+      {
+        what: 'a signalled probe is the surface',
+        probe: 'cat-file',
+        answer: { out: null, status: null },
+        reason: 'capture-failed',
+      },
+    ];
+
+    const mod = await import('./lib/git.js');
+    for (const { what, probe, answer, reason } of cases) {
+      vi.clearAllMocks();
+      anchorIsValid();
+      producerMocks.resolveMergeBase.mockReturnValue({
+        sha: BASE,
+        baseFetchFailed: false,
+      });
+      servesBothRanges();
+      const spy = vi
+        .spyOn(mod, 'gitProbe')
+        .mockImplementation((...args: string[]) =>
+          args[0] === probe
+            ? (answer as { out: string | null; status: number })
+            : args[0] === 'rev-parse'
+              ? { out: ANCHOR, status: 0 }
+              : { out: '', status: 0 },
+        );
+      try {
+        const report = await reportFor({ since: ANCHOR });
+        expect({ what, ...report.incremental }).toEqual({
+          what,
+          since: ANCHOR,
+          effective: false,
+          reason,
+        });
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it("welds Agent 7's --base to the anchor the producer stamped", async () => {
+    // The only test that crosses the producer→consumer seam. This file never
+    // mentions `buildRoleBrief` and agent-prompt's own tests hand-build every
+    // report, so an asymmetric rename of `diffBase` — or a consumer guard
+    // that stops matching — ships with both suites green while Agent 7
+    // silently falls back to the merge base: its test-efficacy probe then
+    // recomputes `base..HEAD`, spending the round's budget reversing hunks an
+    // earlier round already reviewed and reporting survivors outside this
+    // round's diff. The PR's own comment concedes the reversion "left the
+    // whole suite green".
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: true,
+      diffBase: ANCHOR,
+    });
+    // The REAL brief builder, over the REAL report the handler just wrote.
+    // The probe block is gated on a PR number and a plan path — the shape
+    // Agent 7 is actually launched with.
+    const brief = buildRoleBrief(
+      report as Parameters<typeof buildRoleBrief>[0],
+      '7',
+      { planPath: '/tmp/plan.json' },
+    );
+    expect(brief).toContain(`--base ${ANCHOR}`);
+    expect(brief).not.toContain(`--base ${BASE}`);
+  });
+
   it('ignores a value-less --since instead of blaming the anchor', async () => {
     // yargs parses a bare `--since` (and `--since ""`) to the empty string;
     // reporting `unknown-commit` would assert this history never held a sha
@@ -1114,6 +1220,115 @@ describe('fetch-pr report assembly', () => {
       effective: false,
       reason: 'partition-failed',
     });
+  });
+
+  it('calls a failed rescue WRITE a capture fault, not a tiling one', async () => {
+    // The rescue tiled and only its write failed. `partition-failed` is
+    // declared deterministic-for-the-same-sha and is never retried, so
+    // labelling a transient tmp-volume fault that way loses the anchor's
+    // scope permanently instead of retrying it. The ENOSPC fixture above
+    // fails the FIRST write, which ends the round before a rescue exists, so
+    // this branch was unreachable and an always-`partition-failed` mutant
+    // left the suite green.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
+      if (text === DELTA_DIFF) throw new Error('chunks do not tile the diff');
+      return producerMocks.actualBuildDiffPlan(text, 400);
+    });
+    // Write 1 is the delta publish and succeeds; write 2 is the rescue.
+    let diffWrites = 0;
+    producerMocks.writeFileSync.mockImplementation((path: unknown) => {
+      if (String(path).endsWith('diff.txt') && ++diffWrites === 2) {
+        throw Object.assign(new Error('ENOSPC: no space left on device'), {
+          code: 'ENOSPC',
+        });
+      }
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.diffPath).toBeNull();
+    expect(report.diffPathAbsolute).toBeNull();
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'capture-failed',
+    });
+    // Nothing was rescued, so nothing may announce a full review.
+    const said = producerMocks.writeStderrLine.mock.calls.map((c) =>
+      String(c[0]),
+    );
+    expect(said.some((l) => l.includes('Retried the partition'))).toBe(false);
+  });
+
+  it('survives a partition failure when NO base ever resolved', async () => {
+    // The rescue reads `fullText`, which is null when the base branch was
+    // deleted or renamed — the state the blessed "scopes a valid anchor when
+    // NO base resolved" test establishes, here combined with a partitioner
+    // that refuses. Without the null guard, `null.trim()` throws inside the
+    // partition catch itself — outside the nested try — so `runFetchPr` dies
+    // after the worktree exists and before any report is written, which is
+    // precisely what that catch exists to prevent.
+    anchorIsValid();
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: null,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
+      if (typeof text === 'string' && text.trim() !== '') {
+        throw new Error('chunks do not tile the diff');
+      }
+      return producerMocks.actualBuildDiffPlan(text, 400);
+    });
+    const report = await reportFor({ since: ANCHOR });
+    expect(report.diffPath).toBeNull();
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'partition-failed',
+    });
+  });
+
+  it('names the partitioner, not the capture, when a REFUSED anchor ends planless', async () => {
+    // The refusal reason and the planless cause are different facts. An
+    // anchor refused on its own merits whose full range then fails to tile
+    // keeps that reason — so a status line that infers the cause from the
+    // reason announced "no diff could be captured" moments after the capture
+    // succeeded and the partitioner warned, sending whoever diagnoses the
+    // round at git and the network instead of at the partitioner.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      // `merge-base` answers null → exit 1 → the predicate's NO.
+      args[0] === 'cat-file' ? '' : args[0] === 'rev-parse' ? ANCHOR : null,
+    );
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: BASE,
+      baseFetchFailed: false,
+    });
+    servesBothRanges();
+    producerMocks.buildDiffPlan.mockImplementation((text: unknown) => {
+      if (typeof text === 'string' && text.trim() !== '') {
+        throw new Error('chunks do not tile the diff');
+      }
+      return producerMocks.actualBuildDiffPlan(text, 400);
+    });
+    const report = await reportFor({ since: ANCHOR });
+    // The anchor keeps its own cause…
+    expect(report.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'not-an-ancestor',
+    });
+    expect(report.diffPath).toBeNull();
+    // …and the narration names what actually left the round planless.
+    const line = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.includes('Incremental anchor'));
+    expect(line).toContain('could not be partitioned');
+    expect(line).not.toContain('no diff could be captured');
   });
 
   it('ends planless only when BOTH ranges refuse to tile', async () => {
@@ -1528,6 +1743,23 @@ describe('resolveIncrementalAnchor', () => {
     });
   });
 
+  it('accepts a 64-character SHA-256 anchor', () => {
+    // The allowlist's `{7,64}` ceiling is what admits a SHA-256 object id,
+    // and this module reads one: its own comment names "a SHA-256 marker sha
+    // read against SHA-1 history". Every other valid anchor here is 40 chars,
+    // so a mutant tightening the bound to `{7,40}` refused a real anchor —
+    // before any probe, as the never-retried `unknown-commit` — while the
+    // whole suite stayed green.
+    const sha256 = 'a'.repeat(64);
+    const r = resolveIncrementalAnchor(
+      sha256,
+      HEAD,
+      probe({ resolveCommit: (sha) => sha }),
+    );
+    expect(r.incremental).toEqual({ since: sha256, effective: true });
+    expect(r.diffBase).toBe(sha256);
+  });
+
   it('never hands a flag-shaped or non-hex anchor to git', () => {
     // The anchor arrives from a cache file or a posted marker; the hex
     // allowlist runs BEFORE any probe so nothing flag-shaped reaches git.
@@ -1537,6 +1769,7 @@ describe('resolveIncrementalAnchor', () => {
       'refs/heads/main',
       '$(rm -rf /)',
       'abc123', // 6 chars — below the 7-char abbreviation floor
+      'f'.repeat(65), // 65 chars — one past the SHA-256 ceiling
     ]) {
       let probed = false;
       const r = resolveIncrementalAnchor(bad, HEAD, {
@@ -1553,6 +1786,58 @@ describe('resolveIncrementalAnchor', () => {
         reason: 'unknown-commit',
       });
     }
+  });
+
+  it('settles commit-ness BEFORE asking about ancestry', () => {
+    // Order is the whole finding. A blob or tree sha passes `cat-file -e`;
+    // asking `merge-base --is-ancestor` about it exits 128, which this
+    // module's probe turns into `GitUnavailable` → the retryable
+    // `capture-failed` → SKILL re-running the same never-resolvable anchor
+    // every round, forever. Resolving commit-ness first ends it at the
+    // deterministic `unknown-commit`, which is never retried.
+    //
+    // The other `resolveCommit: () => null` cases pair with a constant-true
+    // `isAncestor`, so a block-swap mutant is observationally identical
+    // there — and it survived the entire review suite. This probe gives
+    // ancestry an error channel and asserts it is never reached.
+    let ancestryAsked = false;
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({
+        resolveCommit: () => null,
+        isAncestor: () => {
+          ancestryAsked = true;
+          throw new Error('ancestry asked about an unresolved anchor');
+        },
+      }),
+    );
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'unknown-commit',
+    });
+    expect(ancestryAsked).toBe(false);
+  });
+
+  it('rules a rebased-away anchor even when the base fetch failed', () => {
+    // Both refusals are live in one round: a force-push retires the cached
+    // anchor while the base branch cannot be fetched (deleted or renamed).
+    // Ancestry needs only the fetched PR history, so the deterministic answer
+    // exists — and it must win, because `base-untrusted` is re-run with the
+    // SAME sha, so ordering the base check first re-refuses a dead anchor
+    // every round instead of ending it in round one.
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({ isAncestor: () => false }),
+      { sha: 'c'.repeat(40), fetchFailed: true },
+    );
+    expect(r.incremental).toEqual({
+      since: ANCHOR,
+      effective: false,
+      reason: 'not-an-ancestor',
+    });
   });
 
   it('treats an anchor rev-parse cannot name as unknown, not as a full-range effective', () => {
@@ -1573,7 +1858,12 @@ describe('resolveIncrementalAnchor', () => {
   });
 });
 
-describe('hunksContainedIn — the containment oracle', () => {
+describe('containmentRuling — the containment oracle', () => {
+  // The battery below reads the `ok` fact. `unverified` — the other half of
+  // the ruling — is asserted directly, in the cases that produce it.
+  const contained = (inner: string, outer: string) =>
+    containmentRuling(inner, outer).ok;
+
   const sec = (file: string, hunks: Array<[number, number]>) =>
     [
       `diff --git a/${file} b/${file}`,
@@ -1590,10 +1880,34 @@ describe('hunksContainedIn — the containment oracle', () => {
       '',
     ].join('\n');
 
+  /**
+   * A covering section that ALSO deletes `deleted`.
+   *
+   * `sec` emits pure additions, so it deletes nothing, and a delta carrying a
+   * deletion is refused by the content rule before its ranges are ever
+   * compared. Tests that mean to measure the range arithmetic on a deletion
+   * hunk need an outer that performs the same deletion — which is also the
+   * only shape in which the PR's diff displays that line at all.
+   */
+  const secDeleting = (
+    file: string,
+    [start, count]: [number, number],
+    deleted: string[],
+  ) =>
+    [
+      `diff --git a/${file} b/${file}`,
+      `--- a/${file}`,
+      `+++ b/${file}`,
+      `@@ -${start},${deleted.length} +${start},${count} @@`,
+      ...deleted.map((d) => `-${d}`),
+      ...Array.from({ length: count }, (_, i) => `+line ${start + i}`),
+      '',
+    ].join('\n');
+
   it('accepts a delta whose hunks sit inside the PR diff, per file', () => {
-    expect(
-      hunksContainedIn(sec('a.ts', [[10, 3]]), sec('a.ts', [[1, 100]])),
-    ).toBe(true);
+    expect(contained(sec('a.ts', [[10, 3]]), sec('a.ts', [[1, 100]]))).toBe(
+      true,
+    );
   });
 
   it('discriminates BOTH boundary directions', () => {
@@ -1602,17 +1916,23 @@ describe('hunksContainedIn — the containment oracle', () => {
     // comment anchored there 422s the whole review.
     const outer = sec('a.ts', [[10, 10]]); // covers [10, 19]
     // starts BELOW the covering hunk
-    expect(hunksContainedIn(sec('a.ts', [[1, 3]]), outer)).toBe(false);
+    expect(contained(sec('a.ts', [[1, 3]]), outer)).toBe(false);
+    // …including by exactly one line. The far-below fixture above kills a
+    // FLIPPED comparison but not a widened one: `s - 1 <= start` survived the
+    // whole suite, and a delta hunk starting one line above the covering hunk
+    // touches a line GitHub's PR diff does not display.
+    expect(contained(sec('a.ts', [[9, 2]]), outer)).toBe(false);
+    expect(contained(sec('a.ts', [[10, 2]]), outer)).toBe(true);
     // starts inside, ends PAST it
-    expect(hunksContainedIn(sec('a.ts', [[12, 50]]), outer)).toBe(false);
+    expect(contained(sec('a.ts', [[12, 50]]), outer)).toBe(false);
     // …including by exactly one line: a delta hunk whose last line sits one
     // past the covering hunk is a line GitHub's PR diff does not display,
     // and an anchored comment there 422s the entire review. Shared
     // deletions need no slack — both captures share the head tree, so an
     // identical junction is covered at equality.
     // (`sec` takes [start, COUNT]: 12+9-1 = 20 is one past the outer's 19.)
-    expect(hunksContainedIn(sec('a.ts', [[12, 9]]), outer)).toBe(false);
-    expect(hunksContainedIn(sec('a.ts', [[12, 8]]), outer)).toBe(true);
+    expect(contained(sec('a.ts', [[12, 9]]), outer)).toBe(false);
+    expect(contained(sec('a.ts', [[12, 8]]), outer)).toBe(true);
   });
 
   it('records EVERY hunk of a section, not just the first', () => {
@@ -1622,8 +1942,8 @@ describe('hunksContainedIn — the containment oracle', () => {
       [10, 3],
       [50, 2],
     ]);
-    expect(hunksContainedIn(two, sec('a.ts', [[10, 3]]))).toBe(false);
-    expect(hunksContainedIn(two, sec('a.ts', [[1, 100]]))).toBe(true);
+    expect(contained(two, sec('a.ts', [[10, 3]]))).toBe(false);
+    expect(contained(two, sec('a.ts', [[1, 100]]))).toBe(true);
   });
 
   it('consumes the no-newline marker without spending a body line', () => {
@@ -1648,8 +1968,14 @@ describe('hunksContainedIn — the containment oracle', () => {
       '',
     ].join('\n');
     // Both hunks are seen: covered by a wide outer, refused by a narrow one.
-    expect(hunksContainedIn(withMarker, sec('a.ts', [[1, 100]]))).toBe(true);
-    expect(hunksContainedIn(withMarker, sec('a.ts', [[1, 10]]))).toBe(false);
+    // The outer shares the `-old` deletion, so what is measured here is the
+    // marker's effect on hunk boundaries and not the content rule.
+    expect(contained(withMarker, secDeleting('a.ts', [1, 100], ['old']))).toBe(
+      true,
+    );
+    expect(contained(withMarker, secDeleting('a.ts', [1, 10], ['old']))).toBe(
+      false,
+    );
   });
 
   it('checks EVERY section of the delta, not just the first', () => {
@@ -1657,9 +1983,9 @@ describe('hunksContainedIn — the containment oracle', () => {
     // was unconstrained — a mutant reading only the first section accepts a
     // delta whose SECOND file is absent from the PR's diff.
     const twoFiles = `${sec('a.ts', [[10, 3]])}${sec('b.ts', [[10, 3]])}`;
-    expect(hunksContainedIn(twoFiles, sec('a.ts', [[1, 100]]))).toBe(false);
+    expect(contained(twoFiles, sec('a.ts', [[1, 100]]))).toBe(false);
     expect(
-      hunksContainedIn(
+      contained(
         twoFiles,
         `${sec('a.ts', [[1, 100]])}${sec('b.ts', [[1, 100]])}`,
       ),
@@ -1673,16 +1999,16 @@ describe('hunksContainedIn — the containment oracle', () => {
       [1, 5],
       [100, 20],
     ]);
-    expect(hunksContainedIn(sec('a.ts', [[105, 3]]), outer)).toBe(true);
-    expect(hunksContainedIn(sec('a.ts', [[50, 3]]), outer)).toBe(false);
+    expect(contained(sec('a.ts', [[105, 3]]), outer)).toBe(true);
+    expect(contained(sec('a.ts', [[50, 3]]), outer)).toBe(false);
   });
 
   it('keys coverage per FILE — a numerically-inside range in another file is not covered', () => {
     // A pooled-ranges mutant (dropping the file key) accepts this shape: the
     // delta's b.ts hunk falls numerically inside a.ts's full-range hunk.
-    expect(
-      hunksContainedIn(sec('b.ts', [[10, 3]]), sec('a.ts', [[1, 100]])),
-    ).toBe(false);
+    expect(contained(sec('b.ts', [[10, 3]]), sec('a.ts', [[1, 100]]))).toBe(
+      false,
+    );
   });
 
   it('does not read added CONTENT as diff structure', () => {
@@ -1709,9 +2035,48 @@ describe('hunksContainedIn — the containment oracle', () => {
     ].join('\n');
     // Both hunks belong to x.ts, so a PR diff that only touches big.ts
     // cannot cover them however wide its range is.
-    expect(hunksContainedIn(spoofing, sec('big.ts', [[1, 2000]]))).toBe(false);
+    expect(contained(spoofing, sec('big.ts', [[1, 2000]]))).toBe(false);
     // …and against x.ts's own wide hunk they are covered.
-    expect(hunksContainedIn(spoofing, sec('x.ts', [[1, 200]]))).toBe(true);
+    expect(contained(spoofing, sec('x.ts', [[1, 200]]))).toBe(true);
+  });
+
+  it('refuses a deletion the PR diff does not itself perform', () => {
+    // New-side ranges cannot see a deletion: what survives it on the new side
+    // is context, which a covering hunk contains for free. So a delta that
+    // removes a line the PR introduced after the merge base — the "undo per
+    // feedback" round — passed the range check outright, and the review scope
+    // became a diff whose content GitHub displays on neither side.
+    const deletes = (file: string, at: number, what: string[]) =>
+      [
+        `diff --git a/${file} b/${file}`,
+        `--- a/${file}`,
+        `+++ b/${file}`,
+        // Context on both sides, the shape `--unified=3` actually emits: the
+        // hunk is NOT `newCount === 0`, so a rule keyed on pure-deletion
+        // hunks never sees it.
+        `@@ -${at},${what.length + 2} +${at},2 @@`,
+        ' ctx before',
+        ...what.map((w) => `-${w}`),
+        ' ctx after',
+        '',
+      ].join('\n');
+
+    const delta = deletes('a.ts', 6, ['X1']);
+    // Same file, and a range wide enough to cover — only the deletion differs.
+    expect(contained(delta, secDeleting('a.ts', [1, 100], ['X1']))).toBe(true);
+    expect(contained(delta, secDeleting('a.ts', [1, 100], ['unrelated']))).toBe(
+      false,
+    );
+    // A PR diff that only adds lines deletes nothing, so it displays nothing
+    // to anchor a comment on.
+    expect(contained(delta, sec('a.ts', [[1, 100]]))).toBe(false);
+    // Every deleted line must be matched, not just one of them.
+    expect(
+      contained(
+        deletes('a.ts', 6, ['X1', 'X2']),
+        secDeleting('a.ts', [1, 100], ['X1']),
+      ),
+    ).toBe(false);
   });
 
   it('pins the deletion junction in BOTH directions — no slack', () => {
@@ -1728,15 +2093,14 @@ describe('hunksContainedIn — the containment oracle', () => {
         '-gone2',
         '',
       ].join('\n');
+    // The outer performs the same deletion — otherwise the content rule
+    // refuses first and the junction arithmetic goes unmeasured.
+    const outer = secDeleting('a.ts', [1, 19], ['gone', 'gone2']);
     // covering hunk [1,19]: a junction AT its end is contained…
-    expect(hunksContainedIn(deletionAt(19), sec('a.ts', [[1, 19]]))).toBe(true);
+    expect(contained(deletionAt(19), outer)).toBe(true);
     // …one past it is not, and neither is two past.
-    expect(hunksContainedIn(deletionAt(20), sec('a.ts', [[1, 19]]))).toBe(
-      false,
-    );
-    expect(hunksContainedIn(deletionAt(21), sec('a.ts', [[1, 19]]))).toBe(
-      false,
-    );
+    expect(contained(deletionAt(20), outer)).toBe(false);
+    expect(contained(deletionAt(21), outer)).toBe(false);
   });
 
   it('refuses a deletion the PR diff does not share', () => {
@@ -1754,8 +2118,8 @@ describe('hunksContainedIn — the containment oracle', () => {
       '-and here',
       '',
     ].join('\n');
-    expect(hunksContainedIn(deletion, sec('a.ts', [[1, 100]]))).toBe(false);
-    expect(hunksContainedIn(deletion, deletion)).toBe(true);
+    expect(contained(deletion, sec('a.ts', [[1, 100]]))).toBe(false);
+    expect(contained(deletion, deletion)).toBe(true);
   });
 
   it('refuses hunk-less sections — mode, binary and rename', () => {
@@ -1780,9 +2144,9 @@ describe('hunksContainedIn — the containment oracle', () => {
       '',
     ].join('\n');
     for (const delta of [modeOnly, binary, rename]) {
-      expect(hunksContainedIn(delta, sec('a.ts', [[1, 100]]))).toBe(false);
+      expect(contained(delta, sec('a.ts', [[1, 100]]))).toBe(false);
       // …and the same section in the PR's own diff is contained.
-      expect(hunksContainedIn(delta, delta)).toBe(true);
+      expect(contained(delta, delta)).toBe(true);
     }
   });
 
@@ -1792,9 +2156,7 @@ describe('hunksContainedIn — the containment oracle', () => {
     // quoted, it cannot name the section and every --since round on a PR
     // touching the file would refuse as `containment-unverified`.
     const unquoted = sec('docs/架构.md', [[1, 3]]);
-    expect(hunksContainedIn(unquoted, sec('docs/架构.md', [[1, 100]]))).toBe(
-      true,
-    );
+    expect(contained(unquoted, sec('docs/架构.md', [[1, 100]]))).toBe(true);
     const quoted = [
       'diff --git "a/docs/\\346\\236\\266\\346\\236\\204.md" "b/docs/\\346\\236\\266\\346\\236\\204.md"',
       '--- "a/docs/\\346\\236\\266\\346\\236\\204.md"',
@@ -1808,7 +2170,7 @@ describe('hunksContainedIn — the containment oracle', () => {
     // control character, so the oracle unquotes rather than trusting the
     // capture's config. The pin still matters (it keeps the common
     // non-ASCII case unquoted end to end) and is asserted in diff-flags.
-    expect(hunksContainedIn(quoted, quoted)).toBe(true);
+    expect(contained(quoted, quoted)).toBe(true);
   });
 
   it('keys quote-bearing paths apart, not onto one shared bucket', () => {
@@ -1831,8 +2193,8 @@ describe('hunksContainedIn — the containment oracle', () => {
       ...Array.from({ length: 50 }, (_, i) => `+line ${i}`),
       '',
     ].join('\n');
-    expect(hunksContainedIn(inner, outer)).toBe(false);
-    expect(hunksContainedIn(inner, inner)).toBe(true);
+    expect(contained(inner, outer)).toBe(false);
+    expect(contained(inner, inner)).toBe(true);
   });
 
   it('names paths the shared parser can name — including a space and a quote', () => {
@@ -1847,7 +2209,7 @@ describe('hunksContainedIn — the containment oracle', () => {
       '+x',
       '',
     ].join('\n');
-    expect(hunksContainedIn(spacey, spacey)).toBe(true);
+    expect(contained(spacey, spacey)).toBe(true);
   });
 
   it('fails closed on a payload that is not a diff at all', () => {
@@ -1856,6 +2218,21 @@ describe('hunksContainedIn — the containment oracle', () => {
     // cannot read its input must not vouch for a scope.
     const notADiff = 'fatal: bad revision\nsome other noise\n';
     expect(containmentRuling(notADiff, notADiff)).toEqual({
+      ok: false,
+      unverified: true,
+    });
+    // Each side, alone. Feeding the garbage to BOTH arguments leaves the
+    // OUTER null-check pinned by nothing: a mutant dropping it survives, and
+    // the day it regressed `sectionsContained(inner, null)` would throw a
+    // TypeError out of `runFetchPr` — after the worktree exists and before
+    // any report is written — instead of degrading to
+    // `containment-unverified`.
+    const real = sec('a.ts', [[1, 3]]);
+    expect(containmentRuling(real, notADiff)).toEqual({
+      ok: false,
+      unverified: true,
+    });
+    expect(containmentRuling(notADiff, real)).toEqual({
       ok: false,
       unverified: true,
     });

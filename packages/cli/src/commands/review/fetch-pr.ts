@@ -353,9 +353,20 @@ function fileLineCount(ref: string, path: string): number {
 }
 
 /**
- * The containment ruling as the caller needs it: DISPROVED containment and an
- * oracle that could not rule are different facts, and only the first is what
- * `hunks-outside-pr-diff` asserts.
+ * Does every hunk of `inner` fall inside `outer`, per file?
+ *
+ * This is the containment an ancestry clamp cannot give. An anchor can be a
+ * proper ancestor of the head and still produce a delta whose hunks are absent
+ * from the PR's own diff: an "undo per feedback" commit reverts some of the
+ * previous round's lines back to base content, so those lines are changed in
+ * `anchor..head` and unchanged in `base..head`. A comment anchored on such a
+ * hunk 422s the whole Create Review call.
+ *
+ * The result is TWO facts, not one: DISPROVED containment and an oracle that
+ * could not rule are different, and only the first is what
+ * `hunks-outside-pr-diff` asserts. A boolean wrapper over this used to exist
+ * for the tests' convenience; it collapsed exactly the split the refusal enum
+ * pays to keep, so callers take the pair.
  *
  * The grammar is NOT re-implemented here. Three rounds of review found a new
  * shape-tolerance defect in a hand-rolled parser every time — count-less
@@ -381,64 +392,100 @@ export function containmentRuling(
 }
 
 /**
- * Every hunk of `inner` falls inside a hunk of `outer`, per file, on the NEW
- * side — both diffs end at the same head commit, so their post-image line
- * numbers are directly comparable.
+ * What one file contributes to a ruling.
  *
- * This is the containment an ancestry clamp cannot give. An anchor can be a
- * proper ancestor of the head and still produce a delta whose hunks are
- * absent from the PR's own diff: an "undo per feedback" commit reverts some
- * of the previous round's lines back to base content, so those lines are
- * changed in `anchor..head` and unchanged in `base..head`. A comment
- * anchored on such a hunk 422s the whole Create Review call.
+ * Two facts, because the two sides of a diff are comparable in different ways.
+ * The captures share a head tree, so their NEW-side line numbers name the same
+ * lines and compare as numbers. Their OLD sides are different trees — the
+ * anchor and the merge base — so old-side line numbers name nothing in common
+ * and deletions compare only by CONTENT.
  */
-export function hunksContainedIn(inner: string, outer: string): boolean {
-  return containmentRuling(inner, outer).ok;
+interface FileSection {
+  /** New-side ranges, one per hunk. */
+  ranges: Array<[number, number]>;
+  /** Contents of the hunk bodies' `-` lines, marker stripped. */
+  deletions: string[];
 }
 
-/** `path -> new-side ranges`, via the shared parser. Null if it found nothing
- *  in a non-empty diff, which is the "could not rule" state. */
-function sectionsOf(
-  diffText: string,
-): Map<string, Array<[number, number]>> | null {
+/** `path -> section`, via the shared parser. Null if it found nothing in a
+ *  non-empty diff, which is the "could not rule" state. */
+function sectionsOf(diffText: string): Map<string, FileSection> | null {
   const { files } = parseDiff(diffText);
   if (diffText.trim() !== '' && files.length === 0) return null;
-  const out = new Map<string, Array<[number, number]>>();
+  // Split once: `containmentRuling` runs on every incremental capture, and
+  // re-splitting per hunk made it quadratic in the diff size.
+  const lines = diffText.split('\n');
+  const out = new Map<string, FileSection>();
   for (const f of files) {
     // A section with no hunk at all — a mode change, a binary replacement, a
-    // pure rename — carries no range to compare, and a deletion carries none
-    // on the new side. They enter as an EMPTY list so the path check still
-    // runs: each used to pass vacuously, which is how a delta whose only
-    // content is a file the PR's own diff never mentions became the scope.
-    const ranges = out.get(f.path) ?? [];
+    // pure rename — carries nothing to compare. It enters EMPTY so the path
+    // check still runs: each used to pass vacuously, which is how a delta
+    // whose only content is a file the PR's own diff never mentions became
+    // the scope.
+    const section = out.get(f.path) ?? { ranges: [], deletions: [] };
     for (const h of f.hunks) {
       // A pure deletion (`newCount === 0`) sits BETWEEN two post-image lines;
       // `parseDiff` already clamps its range to the junction, and comparing
       // that junction against a covering hunk is what keeps a deletion the
       // PR's own diff performs from being refused.
-      ranges.push([h.newStart, h.newEnd]);
+      section.ranges.push([h.newStart, h.newEnd]);
+      // Body lines only. `diffStart` is the `@@` header's own 1-based line
+      // number, so the body begins at that index and ends at `diffEnd - 1`;
+      // starting at the header would read `---` file metadata as a deletion.
+      for (let i = h.diffStart; i < h.diffEnd; i++) {
+        const line = lines[i];
+        if (line !== undefined && line.startsWith('-')) {
+          section.deletions.push(line.slice(1));
+        }
+      }
     }
-    out.set(f.path, ranges);
+    out.set(f.path, section);
   }
   return out;
 }
 
 /** The containment loop over already-parsed sections. */
 function sectionsContained(
-  inner: Map<string, Array<[number, number]>>,
-  outer: Map<string, Array<[number, number]>>,
+  inner: Map<string, FileSection>,
+  outer: Map<string, FileSection>,
 ): boolean {
-  for (const [file, hunks] of inner) {
+  for (const [file, section] of inner) {
     const covering = outer.get(file);
     if (!covering) return false;
-    for (const [start, end] of hunks) {
+    for (const [start, end] of section.ranges) {
       // Strict containment, no slack. Both captures share the head tree, so
       // a deletion the PR's own diff performs yields an identical junction
       // range and is covered at equality; slack for it bought nothing and
       // accepted a delta hunk one line past the covering hunk — a line
       // GitHub's PR diff does not display, where an anchored comment 422s
       // the entire all-or-nothing Create Review call.
-      if (!covering.some(([s, e]) => s <= start && end <= e)) return false;
+      if (!covering.ranges.some(([s, e]) => s <= start && end <= e)) {
+        return false;
+      }
+    }
+    // Deleted lines occupy NO new-side line, so the range check above is
+    // blind to them: what survives a deletion hunk on the new side is its
+    // context, which the covering hunk contains for free. A delta that
+    // deletes a line the PR's own diff never displays passed the range check
+    // outright.
+    //
+    // The discriminator is where the line came from. `-X` in the delta means
+    // X stood at the anchor and is gone at head. If X also stood at the merge
+    // base then the PR — which ends at that same head — must delete it too,
+    // so `-X` appears in the full capture as well. So the converse is the
+    // refusal: `-X` absent from the full capture means the PR introduced X
+    // after the base and then took it back out, and GitHub's PR diff shows
+    // that line on neither side. An inline comment anchored there 422s the
+    // entire all-or-nothing Create Review call.
+    //
+    // Content, not position: the two captures' old sides are different trees,
+    // so old-side line numbers are not comparable at all. This does let two
+    // textually identical deletions in one file stand in for each other —
+    // narrower than the blanket blindness it replaces, and it fails in the
+    // accepting direction only when the same text is deleted twice.
+    const displayed = new Set(covering.deletions);
+    for (const deleted of section.deletions) {
+      if (!displayed.has(deleted)) return false;
     }
   }
   return true;
@@ -818,9 +865,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   let plan;
   /** The rescue tiled but its write failed — a capture fault, not a tiling one. */
   let rescueWriteFailed = false;
+  /**
+   * The partitioner refused. Tracked, not inferred from the refusal reason:
+   * an anchor refused for its own cause (`not-an-ancestor`, say) whose
+   * full-range diff then fails to tile keeps THAT reason, so reading the
+   * reason to narrate the planless round told the operator "no diff could be
+   * captured" moments after the capture succeeded and the partitioner warned.
+   */
+  let partitionFailed = false;
   try {
     plan = buildDiffPlan(diffText, args.maxChunkLines);
   } catch (err) {
+    partitionFailed = true;
     writeStderrLine(
       `WARNING: could not partition the diff (${(err as Error).message}). ` +
         `Falling back to a diff-less report; coverage will be partial.`,
@@ -898,7 +954,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           : `Incremental anchor ${inc.since.slice(0, 10)} refused (${inc.reason}); ${
               diffPath !== null
                 ? 'reviewing the full diff.'
-                : inc.reason === 'partition-failed'
+                : // `rescueWriteFailed` means the full range DID tile and only
+                  // its write failed, so the partitioner is not what left the
+                  // round planless — the write is.
+                  partitionFailed && !rescueWriteFailed
                   ? 'the diff could not be partitioned — coverage will be partial.'
                   : 'no diff could be captured — coverage will be partial.'
             }`,
