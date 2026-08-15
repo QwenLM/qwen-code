@@ -24,6 +24,12 @@ import {
   PROTOCOL_VERSION,
   RequestError,
 } from '@agentclientprotocol/sdk';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import { Writable, Readable } from 'node:stream';
 
 // Protect the stdout NDJSON pipe — any console method that writes to
@@ -40,14 +46,37 @@ const delayMs = parseInt(process.env.MOCK_ACP_PROMPT_DELAY_MS || '100', 10);
 const emitChunks = parseInt(process.env.MOCK_ACP_EMIT_CHUNKS || '3', 10);
 let sessionCounter = 0;
 
+// Mirror the real child (acpAgent.ts): `qwen serve` requires the guard ack
+// in the initialize response, and the markers are consumed + deleted before
+// anything else can inherit them.
+const externalToolGuardMarker = process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
+const externalToolGuardRequired =
+  externalToolGuardMarker === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
+
 new AgentSideConnection(
   (connection) => ({
     async initialize() {
+      // Build ONE meta record and attach `_meta` once, exactly like the
+      // real child (acpAgent.ts), so a future conditional meta source
+      // merges instead of clobbering the guard ack via duplicate keys.
+      const responseMeta = {
+        ...(externalToolGuardRequired
+          ? {
+              [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+                EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+            }
+          : {}),
+      };
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: 'mock-acp', version: '0.0.1' },
         authMethods: [],
         agentCapabilities: {},
+        ...(Object.keys(responseMeta).length > 0
+          ? { _meta: responseMeta }
+          : {}),
       };
     },
 
