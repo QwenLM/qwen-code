@@ -51,6 +51,14 @@ const serveDynamicImportPatterns = [
   String.raw`^(?:\.\x2f+|\.\.\x2f+)+(?:[^\x2f]+\x2f+)+serve(?:\x2f|$)`,
 ];
 
+// Computed dynamic-import sources cannot be statically checked against the
+// serve/ boundary. Distinct from the boundary message on purpose: a
+// developer hitting this did not necessarily import serve/.
+const FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE =
+  'Dynamically computed import sources cannot be checked against the serve/ ' +
+  'boundary. Use a string-literal specifier so the boundary rule can see ' +
+  'the target (#8084, #9146).';
+
 const restrictedServeDynamicImports = (message) => [
   ...serveDynamicImportPatterns.flatMap((pattern) => [
     {
@@ -62,20 +70,28 @@ const restrictedServeDynamicImports = (message) => [
       message,
     },
     {
-      selector: `TSImportType[argument.value=/${pattern}/]`,
+      // @typescript-eslint wraps the specifier in a TSLiteralType: the string
+      // lives at argument.literal.value, NOT argument.value (probe-verified;
+      // the old path was dead code).
+      selector: `TSImportType[argument.literal.value=/${pattern}/]`,
       message,
     },
   ]),
-  // Fail-closed: concatenation, `new URL(...)`, and other computed sources
-  // cannot be proven safe statically (see R4-1 entrances).
+  // Fail-closed: concatenation, `new URL(...)`, template literals containing
+  // expressions, and any other computed source cannot be proven safe
+  // statically (rounds 2-6 each demonstrated a new entrance). Pure template
+  // literals (no expressions) are fully described by their first quasi and
+  // stay covered by the pattern selectors above. These hits get their own
+  // message: the policy is "computed sources cannot be checked", not "you
+  // imported serve/".
   {
     selector:
       'ImportExpression:not([source.type="Literal"]):not([source.type="TemplateLiteral"])',
-    message,
+    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
   },
   {
-    selector: 'TSImportType:not([argument.type="Literal"])',
-    message,
+    selector: 'ImportExpression[source.type="TemplateLiteral"][source.expressions.0]',
+    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
   },
 ];
 

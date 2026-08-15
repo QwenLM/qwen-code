@@ -133,6 +133,47 @@ describe('eslint cli serve boundary rules', () => {
     );
   });
 
+  // Round 6: the depth-enumeration loop must stay pinned beyond depth 1 —
+  // real acp-integration files reach serve via `../../serve/...` (depth 2),
+  // so a fixture at that depth turns a regressed loop bound red.
+  it('rejects static serve imports from a depth-2 guarded file', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/acp-integration/session/boundary-fixture.ts',
+      "import '../../serve/index.js';",
+    );
+  });
+
+  // Round 6: type-level imports wrap the specifier in a TSLiteralType; the
+  // selector must read argument.literal.value. Legitimate type imports of
+  // third-party modules must stay clean.
+  it('flags serve type imports but allows legitimate typeof imports', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/runtime/boundary-fixture.ts',
+      'export type Leak = import("../serve/live/types.js").Leak;',
+    );
+
+    const [result] = await lintCliFile(
+      'packages/cli/src/runtime/boundary-fixture.ts',
+      "export type UndiciModule = typeof import('undici');",
+    );
+    expect(result.messages).toEqual([]);
+  });
+
+  // Round 6: template literals containing expressions are computed sources
+  // and are rejected fail-closed (the pure-literal template form is caught
+  // by the quasis pattern selectors instead).
+  it('rejects computed template-literal dynamic imports fail-closed', async () => {
+    const [result] = await lintCliFile(
+      'packages/cli/src/runtime/boundary-fixture.ts',
+      'export async function load(base: string) { await import(`${base}/serve/x.js`); }',
+    );
+    expect(result.messages.map((message) => message.message)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('computed import sources cannot be checked'),
+      ]),
+    );
+  });
+
   // R5-7: third-party packages whose name contains `serve` must not be
   // caught by the boundary (the old `**/serve*` globs matched them).
   it('allows third-party serve-named packages', async () => {
