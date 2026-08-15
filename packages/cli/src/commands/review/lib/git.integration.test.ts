@@ -18,7 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitRawTolerateDiff, releaseWorktree } from './git.js';
+import { gitProbe, gitRawTolerateDiff, releaseWorktree } from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
@@ -185,5 +185,48 @@ describe('gitRawTolerateDiff', () => {
         'subdir',
       ),
     ).toThrow();
+  });
+});
+
+describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
+  // Every fetch-pr test mocks this module, so nothing else consumes the real
+  // `status`. A rewrite returning `{status: 1}` for every failure, or
+  // dropping the field, would reclassify every deterministic anchor refusal
+  // as retryable infrastructure (and vice versa) with the whole suite green.
+  it('reports 0, the predicate NO, and an error apart from each other', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gitprobe-'));
+    try {
+      execFileSync('git', ['init', '-q', repo], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'config', 'user.email', 'a@b.c']);
+      execFileSync('git', ['-C', repo, 'config', 'user.name', 'a']);
+      writeFileSync(join(repo, 'f.txt'), 'x\n');
+      execFileSync('git', ['-C', repo, 'add', 'f.txt'], { stdio: 'pipe' });
+      execFileSync('git', ['-C', repo, 'commit', '-qm', 'one'], {
+        stdio: 'pipe',
+      });
+      const head = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      }).trim();
+
+      // 0: the object is here.
+      expect(gitProbe('-C', repo, 'cat-file', '-e', head).status).toBe(0);
+      // 1: a well-formed FULL sha this history does not hold — the
+      // definitive no.
+      expect(
+        gitProbe('-C', repo, 'cat-file', '-e', '0'.repeat(40)).status,
+      ).toBe(1);
+      // 128: not a valid object NAME — what git says for an abbreviation
+      // that resolves to nothing. Deterministic too, which is why
+      // `commitExists` treats it as absence rather than as a failure.
+      expect(gitProbe('-C', repo, 'cat-file', '-e', '0000000').status).toBe(
+        128,
+      );
+      // The predicate's own no, and its yes.
+      expect(
+        gitProbe('-C', repo, 'merge-base', '--is-ancestor', head, head).status,
+      ).toBe(0);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });

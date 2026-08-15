@@ -231,7 +231,12 @@ class GitUnavailable extends Error {}
 
 /** The git questions the anchor ruling asks, injectable for tests. */
 export interface AnchorProbe {
-  /** `git cat-file -e <sha>^{commit}` — does this history hold the anchor? */
+  /**
+   * `git cat-file -e <sha>` — does this history hold that object? Bare, with
+   * no `^{commit}` peel: peeling makes git answer 128 for a well-formed but
+   * unknown sha, which is indistinguishable from the surface failing.
+   * Commit-ness is `resolveCommit`'s job.
+   */
   commitExists(sha: string): boolean;
   /** `git merge-base --is-ancestor <a> <b>` — is it behind the fetched head? */
   isAncestor(a: string, b: string): boolean;
@@ -249,25 +254,35 @@ export interface AnchorProbe {
  * `diffBase` is the full sha to scope the diff from, null when the diff must
  * stay full-range (anchor refused, or already at the head).
  *
- * `mergeBase`, when available, is the clamp: an anchor that is an ancestor
- * of the head but OLDER than the merge base would scope a range strictly
+ * `mergeBase`'s `sha`, when one was resolved, is the clamp: an anchor that is
+ * an ancestor of the head but OLDER than the merge base would scope a range
+ * strictly
  * WIDER than the PR's own diff (`anchor..head` = the PR plus a slice of base
  * history) — re-reviewing already-landed hunks whose comments fall outside
  * every hunk of GitHub's PR diff, where a single one 422s the whole Create
  * Review call. Reachable non-adversarially: commits from the PR branch
  * landing in the base between rounds move the merge base past the cached
  * anchor. A null `sha` skips the clamp, consistent with the capture path's
- * base-free design — but a `fetchFailed` base REFUSES the anchor: the clamp
- * would then be ruling on a base resolved from a possibly stale local ref,
- * and every sibling guard here (`isEmptyDiff`, `isCollapsedFromUpstream`)
- * declines to rule in that state rather than ruling on it.
+ * base-free design — but a `fetchFailed` base that DID resolve a sha refuses
+ * the anchor: the clamp would then be ruling on a base resolved from a
+ * possibly stale local ref, and every sibling guard here (`isEmptyDiff`,
+ * `isCollapsedFromUpstream`) declines to rule in that state rather than
+ * ruling on it. `{fetchFailed: true, sha: null}` is not that state — there
+ * is no clamp to rule at all, and the delta range needs no base.
  */
 export function resolveIncrementalAnchor(
-  since: string,
+  rawSince: string,
   fetchedSha: string,
   probe: AnchorProbe,
   mergeBase: { sha: string | null; fetchFailed: boolean } | null = null,
 ): { incremental: IncrementalDecision; diffBase: string | null } {
+  // git resolves hex case-insensitively, and an operator pasting an
+  // uppercase sha (some UIs render them that way) was refused before any
+  // probe ran, under a reason asserting the history never held it — and the
+  // cased value was echoed back, so a recovery flow re-deriving the anchor
+  // from the report was refused again every round. Normalise once, here, so
+  // the CLI path and the marker path still share one predicate.
+  const since = rawSince.toLowerCase();
   // The SAME shape predicate the ledger marker applies, imported rather than
   // restated: an anchor the marker will not carry must not be one the fetch
   // accepts, or the cache path and the marker path drift apart.
@@ -277,16 +292,14 @@ export function resolveIncrementalAnchor(
       diffBase: null,
     };
   }
-  if (!probe.isAncestor(since, fetchedSha)) {
-    return {
-      incremental: { since, effective: false, reason: 'not-an-ancestor' },
-      diffBase: null,
-    };
-  }
+  // Commit-ness BEFORE ancestry. An existing non-commit object (a blob sha
+  // in a cache or marker) passes `cat-file -e`, and asking `merge-base
+  // --is-ancestor` about it is an ERROR, not a "no" — which the ancestry
+  // probe reports as an unavailable git surface, so the anchor was called
+  // transient and retried forever. Resolving first turns that whole class
+  // into what it is: an anchor this history holds no commit for.
   const resolved = probe.resolveCommit(since);
   if (resolved === null) {
-    // cat-file saw it but rev-parse cannot name it — treat as unknown rather
-    // than let an effective:true ride a full-range diff and misstate scope.
     return {
       incremental: { since, effective: false, reason: 'unknown-commit' },
       diffBase: null,
@@ -295,6 +308,14 @@ export function resolveIncrementalAnchor(
   if (resolved === fetchedSha) {
     return {
       incremental: { since, effective: true, upToDate: true },
+      diffBase: null,
+    };
+  }
+  // Ancestry is asked about the RESOLVED commit, so a non-commit can no
+  // longer reach it and an error here really is the git surface.
+  if (!probe.isAncestor(resolved, fetchedSha)) {
+    return {
+      incremental: { since, effective: false, reason: 'not-an-ancestor' },
       diffBase: null,
     };
   }
@@ -520,11 +541,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   mkdirSync(REVIEW_TMP_DIR, { recursive: true });
 
-  // 5. Capture the diff to a file and partition it. Written as UTF-8 text
-  //    decoded from the capture (an invalid byte sequence becomes U+FFFD):
-  //    the decode performs no CRLF normalisation — that would rewrite every
-  //    hunk of a CRLF file — and the diff keeps its trailing newline so it
-  //    stays a valid patch.
+  // 5. Capture the diff to a file and partition it. The capture is decoded
+  //    to UTF-8 text and written back as text, so a byte sequence that is
+  //    not valid UTF-8 becomes U+FFFD — this file is READ, never applied:
+  //    chunk agents read ranges out of it and `diffHashOf` hashes it. What
+  //    the round trip does not do is normalise CRLF (that would rewrite
+  //    every hunk of a CRLF file) or drop the trailing newline.
   const { sha: mergeBaseSha, baseFetchFailed } = resolveMergeBase(
     remote,
     meta.baseRefName,
@@ -631,18 +653,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // git surface being unavailable — reported as such rather than as
           // a verdict about the anchor, because the two lead to opposite
           // recovery flows (retry the transient one, never the deterministic).
+          // No `^{commit}` peel here: with it, real git answers a
+          // well-formed but unknown sha with 128, so the definitive-absent
+          // branch was unreachable and every unknown anchor was reported as
+          // a transient failure the recovery flow retries forever. The
+          // hex allowlist already keeps the value flag-safe, and commit-ness
+          // is `resolveCommit`'s job, which now runs before ancestry.
           commitExists: (sha) => {
-            // No `^{commit}` peel: with it, real git answers a well-formed
-            // but unknown sha with exit 128, not 1, so the definitive-absent
-            // branch was unreachable and every unknown anchor was reported
-            // as a transient failure the recovery flow retries forever.
-            // Bare, the three exits mean present / absent / surface failure;
-            // the hex allowlist already keeps the value flag-safe, and "is
-            // it a commit" stays covered by `resolveCommit`, whose null maps
-            // to `unknown-commit`.
             const { status } = gitExit('cat-file', '-e', sha);
             if (status === 0) return true;
-            if (status === 1) return false;
+            // 1 = "no such object"; 128 = "not a valid object name", which
+            // is what git says for an abbreviation or an over-long hex that
+            // names nothing (a SHA-256 marker read against SHA-1 history).
+            // Both are the object's absence — deterministic, never retried.
+            // Only a spawn failure or a signal is the surface failing.
+            if (status === 1 || status === 128) return false;
             throw new GitUnavailable();
           },
           isAncestor: (a, b) => {
@@ -651,7 +676,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             if (status === 1) return false;
             throw new GitUnavailable();
           },
-          resolveCommit: (sha) => gitOpt('rev-parse', `${sha}^{commit}`),
+          // Same three-way split as its siblings: this is the only probe
+          // that used to fold a transient git failure into a verdict about
+          // the anchor, because `gitOpt` returns null for every non-zero
+          // exit. 128 means "not a commit" (a blob, a tree, a name this
+          // history cannot resolve); anything else is the surface.
+          resolveCommit: (sha) => {
+            const { out, status } = gitExit('rev-parse', `${sha}^{commit}`);
+            if (status === 0) return out;
+            if (status === 128) return null;
+            throw new GitUnavailable();
+          },
         },
         { sha: mergeBaseSha, fetchFailed: baseFetchFailed },
       );
@@ -781,6 +816,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // written. Degrade to the documented `diffPath: null` path instead, which
   // tells the skill to fall back and warn the user that coverage is partial.
   let plan;
+  /** The rescue tiled but its write failed — a capture fault, not a tiling one. */
+  let rescueWriteFailed = false;
   try {
     plan = buildDiffPlan(diffText, args.maxChunkLines);
   } catch (err) {
@@ -806,11 +843,18 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         if (publish(fullText)) {
           plan = rescued;
           scopedDelta = false;
+          writeStderrLine(
+            'Retried the partition over the full range, which tiled; the ' +
+              'round is a full review.',
+          );
+        } else {
+          // The rescue tiled but could not be written. Nothing was rescued:
+          // the plan stays empty and `diffPath` stays null, so announcing a
+          // full review — and, below, calling this a partition failure —
+          // would both name the wrong thing. The write failure is the cause,
+          // and it is the retryable one.
+          rescueWriteFailed = true;
         }
-        writeStderrLine(
-          'Retried the partition over the full range, which tiled; the ' +
-            'round is a full review.',
-        );
       } catch {
         // Both ranges refuse to tile — keep the diff-less report.
       }
@@ -825,7 +869,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // never carries one. Stripping it published "the anchor is invalid" for
     // an anchor that IS the head.
     if (anchor?.incremental.effective && !anchor.incremental.upToDate) {
-      demote('partition-failed');
+      demote(rescueWriteFailed ? 'capture-failed' : 'partition-failed');
     }
   }
   // Every refusal that ends with NO diff at all reports the planless reason,
@@ -854,7 +898,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           : `Incremental anchor ${inc.since.slice(0, 10)} refused (${inc.reason}); ${
               diffPath !== null
                 ? 'reviewing the full diff.'
-                : 'no diff could be captured — coverage will be partial.'
+                : inc.reason === 'partition-failed'
+                  ? 'the diff could not be partitioned — coverage will be partial.'
+                  : 'no diff could be captured — coverage will be partial.'
             }`,
     );
   }

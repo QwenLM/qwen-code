@@ -72,14 +72,18 @@ export function gitOpt(...args: string[]): string | null {
 /**
  * `gitOpt` with the exit status kept, because for a PREDICATE command the
  * difference matters: `merge-base --is-ancestor` and `cat-file -e` answer
- * "no" with exit 1 and "I could not tell you" with anything above it (128,
- * or a timeout kill). Collapsing both to `null` made a transient I/O failure
+ * "no" with exit 1 and "I could not tell you" with anything above it (128)
+ * or with no status at all (a timeout kill, a spawn failure). Collapsing both to `null` made a transient I/O failure
  * indistinguishable from a definitive refusal, and the incremental anchor
  * ruling then reported a rebase that never happened — a reason its recovery
  * flow treats as deterministic, so the anchor was never retried.
  *
  * `status` is null when the command could not be run at all (spawn failure)
- * or was killed by a signal.
+ * or was killed by a signal — which is what the 120s timeout in `gitOpts()`
+ * produces: Node sends SIGTERM and `execFileSync` throws with
+ * `{status: null, signal: 'SIGTERM'}`. A timeout is therefore a null status,
+ * not a high one; both route to the same "surface unavailable" handling, but
+ * the distinction matters to anyone reading this to predict a value.
  */
 export function gitProbe(...args: string[]): {
   out: string | null;

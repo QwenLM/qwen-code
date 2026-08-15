@@ -863,11 +863,20 @@ describe('fetch-pr report assembly', () => {
       baseFetchFailed: false,
     });
     servesBothRanges();
-    // Override the probe to report an ERROR exit rather than a clean "no".
+    // The fault must land on ANCESTRY: a blanket error makes `cat-file`
+    // answer first, and 128 there is the object's absence (deterministic),
+    // not the surface failing. This is the probe whose error classification
+    // the comment above describes.
     const mod = await import('./lib/git.js');
     const spy = vi
       .spyOn(mod, 'gitProbe')
-      .mockReturnValue({ out: null, status: 128 });
+      .mockImplementation((...args: string[]) =>
+        args[0] === 'merge-base'
+          ? { out: null, status: 128 }
+          : args[0] === 'rev-parse'
+            ? { out: ANCHOR, status: 0 }
+            : { out: '', status: 0 },
+      );
     try {
       const report = await reportFor({ since: ANCHOR });
       expect(report.incremental).toEqual({
@@ -973,6 +982,10 @@ describe('fetch-pr report assembly', () => {
     // The report exists — that is the whole point — and discloses the gap.
     expect(report.diffPath).toBeNull();
     expect(report.diffPathAbsolute).toBeNull();
+    // …and `emptyDiff` still reads `fullText`, which was captured and is
+    // NOT empty: a mutant computing it from the published round state sees
+    // an empty published diff here and would recommend closing a live PR.
+    expect(report.emptyDiff).toBeUndefined();
     expect(report.incremental).toEqual({
       since: ANCHOR,
       effective: false,
@@ -1421,12 +1434,25 @@ describe('resolveIncrementalAnchor', () => {
     // `base-untrusted` is about an untrustworthy clamp, not a missing one:
     // with no base there is nothing to clamp, and the delta range needs
     // none — a deleted or renamed base branch must not cost the scope.
-    const r = resolveIncrementalAnchor(ANCHOR, HEAD, probe(), {
-      sha: null,
-      fetchFailed: true,
-    });
+    // Pinned on the CALL, not just the outcome: a constant-true isAncestor
+    // makes a dropped `sha != null` guard invisible, so record what the
+    // clamp asked and assert it never asked about a null base.
+    const asked: Array<[string, string]> = [];
+    const r = resolveIncrementalAnchor(
+      ANCHOR,
+      HEAD,
+      probe({
+        isAncestor: (a, b) => {
+          asked.push([a, b]);
+          return true;
+        },
+      }),
+      { sha: null, fetchFailed: true },
+    );
     expect(r.incremental).toEqual({ since: ANCHOR, effective: true });
     expect(r.diffBase).toBe(ANCHOR);
+    // Only the head-ancestry question, never a clamp against `null`.
+    expect(asked).toEqual([[ANCHOR, HEAD]]);
   });
 
   it('rules base-untrusted BEFORE the clamp — an unverifiable base cannot be clamped against', () => {
@@ -1520,7 +1546,9 @@ describe('resolveIncrementalAnchor', () => {
       });
       expect(probed).toBe(false);
       expect(r.incremental).toEqual({
-        since: bad,
+        // Echoed normalised: a recovery flow re-deriving the anchor from
+        // the report must get the value the next round will judge.
+        since: bad.toLowerCase(),
         effective: false,
         reason: 'unknown-commit',
       });
@@ -1624,6 +1652,20 @@ describe('hunksContainedIn — the containment oracle', () => {
     expect(hunksContainedIn(withMarker, sec('a.ts', [[1, 10]]))).toBe(false);
   });
 
+  it('checks EVERY section of the delta, not just the first', () => {
+    // Every other fixture is single-file, so the loop over inner sections
+    // was unconstrained — a mutant reading only the first section accepts a
+    // delta whose SECOND file is absent from the PR's diff.
+    const twoFiles = `${sec('a.ts', [[10, 3]])}${sec('b.ts', [[10, 3]])}`;
+    expect(hunksContainedIn(twoFiles, sec('a.ts', [[1, 100]]))).toBe(false);
+    expect(
+      hunksContainedIn(
+        twoFiles,
+        `${sec('a.ts', [[1, 100]])}${sec('b.ts', [[1, 100]])}`,
+      ),
+    ).toBe(true);
+  });
+
   it('scans EVERY covering hunk, not just the first', () => {
     // A mutant testing only `covering[0]` survives while every outer is
     // single-hunk; a real PR diff is many hunks per file.
@@ -1670,6 +1712,31 @@ describe('hunksContainedIn — the containment oracle', () => {
     expect(hunksContainedIn(spoofing, sec('big.ts', [[1, 2000]]))).toBe(false);
     // …and against x.ts's own wide hunk they are covered.
     expect(hunksContainedIn(spoofing, sec('x.ts', [[1, 200]]))).toBe(true);
+  });
+
+  it('pins the deletion junction in BOTH directions — no slack', () => {
+    // The junction is where deleted text used to sit. A slack constant here
+    // was invisible to the suite for two rounds: `end <= e`, `e + 1` and
+    // `e + 2` were all green. These two fix that in both directions.
+    const deletionAt = (line: number) =>
+      [
+        'diff --git a/a.ts b/a.ts',
+        '--- a/a.ts',
+        '+++ b/a.ts',
+        `@@ -${line},2 +${line},0 @@`,
+        '-gone',
+        '-gone2',
+        '',
+      ].join('\n');
+    // covering hunk [1,19]: a junction AT its end is contained…
+    expect(hunksContainedIn(deletionAt(19), sec('a.ts', [[1, 19]]))).toBe(true);
+    // …one past it is not, and neither is two past.
+    expect(hunksContainedIn(deletionAt(20), sec('a.ts', [[1, 19]]))).toBe(
+      false,
+    );
+    expect(hunksContainedIn(deletionAt(21), sec('a.ts', [[1, 19]]))).toBe(
+      false,
+    );
   });
 
   it('refuses a deletion the PR diff does not share', () => {
@@ -1742,6 +1809,30 @@ describe('hunksContainedIn — the containment oracle', () => {
     // capture's config. The pin still matters (it keeps the common
     // non-ASCII case unquoted end to end) and is asserted in diff-flags.
     expect(hunksContainedIn(quoted, quoted)).toBe(true);
+  });
+
+  it('keys quote-bearing paths apart, not onto one shared bucket', () => {
+    // Two DIFFERENT files whose names both carry a quote: a keying
+    // regression that collapsed them onto one bucket would rule this
+    // contained and publish an unchecked scope.
+    const inner = [
+      'diff --git "a/we\\"ird.ts" "b/we\\"ird.ts"',
+      '--- "a/we\\"ird.ts"',
+      '+++ "b/we\\"ird.ts"',
+      '@@ -1,0 +1,1 @@',
+      '+x',
+      '',
+    ].join('\n');
+    const outer = [
+      'diff --git "a/oth\\"er.ts" "b/oth\\"er.ts"',
+      '--- "a/oth\\"er.ts"',
+      '+++ "b/oth\\"er.ts"',
+      '@@ -1,0 +1,50 @@',
+      ...Array.from({ length: 50 }, (_, i) => `+line ${i}`),
+      '',
+    ].join('\n');
+    expect(hunksContainedIn(inner, outer)).toBe(false);
+    expect(hunksContainedIn(inner, inner)).toBe(true);
   });
 
   it('names paths the shared parser can name — including a space and a quote', () => {

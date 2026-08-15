@@ -45,10 +45,26 @@ describe('the pinned diff config', () => {
     // defaults make the plan come back with zero chunks (colour), emit
     // something that is not a unified diff (external/textconv), or rename
     // the `a/`/`b/` prefixes the path stripper depends on.
-    expect(PINNED_DIFF_FLAGS).toContain('--no-color');
-    expect(PINNED_DIFF_FLAGS).toContain('--no-ext-diff');
-    expect(PINNED_DIFF_FLAGS).toContain('--no-textconv');
-    expect(PINNED_DIFF_FLAGS).toContain('--src-prefix=a/');
-    expect(PINNED_DIFF_FLAGS).toContain('--dst-prefix=b/');
+    // Every one of them, not a sample: the header promises pins are
+    // asserted where they are declared, and each of these is documented in
+    // diff-flags.ts as plan-breaking on its own (without `--no-relative` a
+    // subdirectory capture strips the repo prefix from every path, so the
+    // chunk plan, the anchors and the containment oracle stop naming real
+    // files; without `--ignore-submodules=none` a user config hides a
+    // changed gitlink entirely).
+    for (const flag of [
+      '--no-ext-diff',
+      '--no-textconv',
+      '--no-color',
+      '--unified=3',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      '--find-renames',
+      '--no-relative',
+      '--ignore-submodules=none',
+      '--submodule=short',
+    ]) {
+      expect(PINNED_DIFF_FLAGS).toContain(flag);
+    }
   });
 });
