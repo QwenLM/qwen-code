@@ -1753,6 +1753,69 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'discloses a REFUSED prior subagent directory, not just an absent one',
+    () => {
+      // The accessor refuses the directory, so the listing never runs and the
+      // fault-disclosing catch below it is unreachable for this shape. Before
+      // this, the chat still billed and the summary still announced the
+      // session as included while every one of its agents was missing.
+      const { plan, project, env } = fixture();
+      writeFileSync(
+        join(project, 'chats', 'S0.jsonl'),
+        event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+      );
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      dirs.push(elsewhere);
+      symlinkSync(elsewhere, join(project, 'subagents', 'S0'));
+      runLedger(plan, project);
+
+      const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let ledger;
+      let printed: string;
+      try {
+        ledger = computeLedger(plan, env);
+      } finally {
+        printed = err.mock.calls.map((c) => String(c[0])).join('');
+        err.mockRestore();
+      }
+
+      expect(ledger.missingStreams).toBeGreaterThan(0);
+      expect(printed).toContain('not contained in the harness tree');
+      expect(printed).toContain('S0');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'discloses a REFUSED session ledger rather than billing as if alone',
+    () => {
+      // The refusal empties the prior iteration at its source, so none of the
+      // per-session disclosures can fire: without this the review's whole
+      // cost reads as the current session's, with no floor mark and no
+      // warning — and spent money cannot be re-owed.
+      const { plan, project, env } = fixture();
+      runLedger(plan, project);
+      const ledgerPath = join(project, 'plan-prompts', 'run-sessions.json');
+      rmSync(ledgerPath);
+      execFileSync('mkfifo', [ledgerPath]);
+
+      const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let ledger;
+      let printed: string;
+      try {
+        ledger = computeLedger(plan, env);
+      } finally {
+        printed = err.mock.calls.map((c) => String(c[0])).join('');
+        err.mockRestore();
+      }
+
+      expect(ledger.missingStreams).toBeGreaterThan(0);
+      expect(printed).toContain('session ledger');
+      expect(printed).toContain('contained regular file');
+    },
+    5000,
+  );
+
   it("folds the interrupted attempt's main loop and agents into the totals", () => {
     const { plan, env, project } = fixture();
     runLedger(plan);

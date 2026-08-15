@@ -50,7 +50,12 @@ import {
   containedRoot,
   readContainedFile,
 } from './lib/contained-read.js';
-import { currentSessionEntry, priorSessionEntries } from './lib/run-ledger.js';
+import {
+  currentSessionEntry,
+  priorSessionEntries,
+  runSessionsPath,
+  sessionLedgerRefused,
+} from './lib/run-ledger.js';
 
 interface CostLedgerArgs {
   plan: string;
@@ -487,6 +492,20 @@ export function computeLedger(
   const priorDirs = new Map(
     priorSessionDirs(planPath, env).map((p) => [p.sessionId, p]),
   );
+  // A refused ledger empties the iteration below at its source: no entries,
+  // so none of the per-session disclosures downstream can fire, and the
+  // summary would present a current-session-only figure as the whole review's
+  // cost. It also drops the billing floor back to the plan's mtime, which
+  // bills the session's pre-review turns.
+  if (sessionLedgerRefused(planPath, env)) {
+    missingStreams++;
+    writeStderrLineSafe(
+      `WARNING: this run's session ledger at ${runSessionsPath(planPath)} ` +
+        `could not be read as a contained regular file; any earlier attempt ` +
+        `of this review is missing from this ledger, and the billing floor ` +
+        `falls back to the plan's own timestamp.`,
+    );
+  }
   for (const entry of priorSessionEntries(planPath, env)) {
     const paths = priorDirs.get(entry.sessionId);
     let contributed = 0;
@@ -539,6 +558,20 @@ export function computeLedger(
     }
     let priorAgentEvents: UsageEvent[] = [];
     const priorDir = paths?.dir ?? null;
+    if (priorDir === null && paths?.dirRefused === true) {
+      // The accessor refused the directory, so the listing below never runs
+      // and the catch that discloses a listing fault is unreachable for this
+      // shape. Without this, the summary announces the attempt as included
+      // while every one of its agents is missing from the total — the exact
+      // shape `missingStreams` exists to prevent, on the one input that is
+      // adversarial rather than accidental.
+      missingStreams++;
+      writeStderrLineSafe(
+        `WARNING: the prior attempt ${entry.sessionId}'s subagent directory ` +
+          `is not contained in the harness tree; that attempt's agent cost ` +
+          `is missing from this ledger.`,
+      );
+    }
     if (priorDir !== null) {
       const before = agentEvents.length;
       try {

@@ -36,6 +36,7 @@ import {
   atomicWriteFileSync,
   sanitizeFilenameComponent,
 } from '@qwen-code/qwen-code-core';
+import type { ContainedReadError } from './contained-read.js';
 import {
   ContainedReadError,
   MAX_LEDGER_BYTES,
@@ -265,9 +266,52 @@ function healPlant(path: string, occ: LedgerOccupant): void {
   }
 }
 
-function readLedgerFile(planPath: string, path: string): string | null {
+/**
+ * A ledger read that keeps ABSENT and REFUSED apart.
+ *
+ * Both produce no entries, and for the evidence gates that is the same
+ * answer: invisible evidence re-owes the work. The ACCOUNTING layer is where
+ * they differ. A refused ledger empties the prior-session iteration at its
+ * source, so the cost ledger prints a current-session-only figure as the
+ * review's complete cost — no "totals include N earlier sessions", no floor
+ * mark, no warning — and spent money, unlike owed work, cannot be re-owed.
+ */
+type LedgerRead =
+  | { kind: 'ok'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'refused' };
+
+function readLedgerFileResult(planPath: string, path: string): LedgerRead {
   const occ = ledgerOccupant(planPath, path);
-  return occ.kind === 'ok' ? occ.text : null;
+  if (occ.kind === 'ok') return { kind: 'ok', text: occ.text };
+  if (occ.kind === 'absent') return { kind: 'absent' };
+  // A plant reads as refused here: whatever entries ever existed are not
+  // where this process may read them. The WRITERS still see the plant kind
+  // and heal it; the accounting side must only know the entries are gone.
+  return { kind: 'refused' };
+}
+
+function readLedgerFile(planPath: string, path: string): string | null {
+  const res = readLedgerFileResult(planPath, path);
+  return res.kind === 'ok' ? res.text : null;
+}
+
+/**
+ * Was this run's session ledger present but unreadable?
+ *
+ * For the consumer that spends rather than certifies. `false` covers both a
+ * healthy ledger and a run that never wrote one; `true` means the entries
+ * exist somewhere this process may not follow, so every prior attempt is
+ * missing from any total computed here.
+ */
+export function sessionLedgerRefused(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  void env;
+  return (
+    readLedgerFileResult(planPath, runSessionsPath(planPath)).kind === 'refused'
+  );
 }
 
 /**

@@ -150,7 +150,13 @@ export function readContainedFile(
      * so without it, the loop that keeps a half-flushed transcript from
      * being reported with an uninitialized buffer tail is unpinnable.
      */
-    read?: typeof readSync;
+    read?: (
+      fd: number,
+      buffer: NodeJS.ArrayBufferView,
+      offset: number,
+      length: number,
+      position: number | null,
+    ) => number;
   } = {},
 ): ContainedFile {
   let fd: number;

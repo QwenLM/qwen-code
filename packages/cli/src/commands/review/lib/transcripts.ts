@@ -631,6 +631,18 @@ export function priorSessionDirs(
    */
   dir: string | null;
   /**
+   * Why `dir` is null: true when a directory IS there and was refused, false
+   * when there is simply none.
+   *
+   * The two must not collapse. An attempt that never launched an agent owes
+   * nothing and costs nothing; a REDIRECTED one is the fabrication event this
+   * machinery exists to detect, and its agents' cost is real money the ledger
+   * would otherwise omit from a total it still presents as complete. The
+   * consumers disclose on this flag — without it the detection path is the
+   * one path that says nothing.
+   */
+  dirRefused: boolean;
+  /**
    * The attempt's chat stream, or null when `chats/` is not a contained
    * directory. Null means "do not read this session's chat", and callers must
    * not rebuild the path themselves — a locally re-joined pathname is exactly
@@ -644,6 +656,7 @@ export function priorSessionDirs(
   const out: Array<{
     sessionId: string;
     dir: string | null;
+    dirRefused: boolean;
     chatFile: string | null;
     endsAtMs: number | null;
   }> = [];
@@ -680,9 +693,12 @@ export function priorSessionDirs(
     // A failure here nulls the DIRECTORY and keeps the session: the two facts
     // are independent, and folding them lost the chat of every attempt that
     // died before its first agent launch.
+    const verdict = containedDir(root, dir);
     out.push({
       sessionId,
-      dir: containedDir(root, dir).ok ? dir : null,
+      dir: verdict.ok ? dir : null,
+      // ABSENT is not a refusal — the attempt simply never launched an agent.
+      dirRefused: !verdict.ok && verdict.reason !== 'missing',
       chatFile: chatsOk ? join(chatsDir, `${sessionId}.jsonl`) : null,
       endsAtMs,
     });
@@ -755,9 +771,22 @@ export function readRunTranscripts(
     out = [];
   }
   for (const prior of priors) {
-    // No directory (never launched an agent, or not contained) means no
-    // transcripts to union — the cost ledger still reads that session's chat.
-    if (prior.dir === null) continue;
+    if (prior.dir === null) {
+      // A REFUSED directory is the detection this machinery exists for, and
+      // it used to be the one path that said nothing: the listing never runs,
+      // so the fault-disclosing catch below could only fire inside a TOCTOU
+      // race between the accessor's walk and its own. Absent stays silent —
+      // an attempt that launched no agent owes nothing.
+      if (prior.dirRefused) {
+        writeStderrLineSafe(
+          `WARNING: the prior attempt ${prior.sessionId}'s subagent ` +
+            `directory is not contained in the harness tree; that attempt's ` +
+            `evidence is not visible to this run, so its work is required ` +
+            `again.`,
+        );
+      }
+      continue;
+    }
     const priorDir = prior.dir;
     let names: string[];
     try {

@@ -10,7 +10,7 @@
 // that is not a transcript at all — and the reader must degrade to "this is not
 // evidence" rather than throw and take the whole coverage check down.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   chmodSync,
   mkdtempSync,
@@ -552,6 +552,34 @@ describe('readRunTranscripts — the run across its sessions', () => {
       } finally {
         rmSync(elsewhere, { recursive: true, force: true });
       }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'discloses a REFUSED prior directory on the ordinary detection path',
+    () => {
+      // The refusal is found by the accessor's walk, so the listing — and the
+      // catch that discloses a listing fault — never runs. Without a
+      // disclosure here, the one path this machinery exists to detect is the
+      // one path that says nothing, and every gate silently re-demands the
+      // redirected attempt's chunks.
+      const plan = planWithLedger('S0', 'S1');
+      const outside = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      file('agent-a1.jsonl', transcript('a1'));
+      const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let printed: string;
+      try {
+        writeFileSync(join(outside, 'agent-foreign.jsonl'), transcript('x'));
+        symlinkSync(outside, join(dir, 'subagents', 'S0'));
+        readRunTranscripts(plan, undefined, ENV);
+      } finally {
+        printed = err.mock.calls.map((c) => String(c[0])).join('');
+        err.mockRestore();
+        rmSync(outside, { recursive: true, force: true });
+      }
+
+      expect(printed).toContain('S0');
+      expect(printed).toContain('not contained in the harness tree');
     },
   );
 
