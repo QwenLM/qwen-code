@@ -50,6 +50,7 @@ import type {
   CronTaskDelivery,
   InvocationContextV1,
   WorkflowApproval,
+  BranchPoint,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -133,6 +134,9 @@ import {
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
+  addAgentInputMessageAttributes,
+  AgentOutputMessageCapture,
+  getActiveInteractionSpan,
   withInteractionSpan,
   SessionWriterError,
   startToolSpan,
@@ -182,6 +186,8 @@ import {
   runWithInvocationContext,
   truncateNotificationLabel,
   buildBackgroundEntryLabel,
+  collectSessionTurnState,
+  computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -297,12 +303,12 @@ import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
-import {
-  MessageEmitter,
-  buildGoalStateUpdate,
-  buildGoalStatusUpdate,
-} from './emitters/MessageEmitter.js';
+import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type { HistoryItemGoalStatus } from '../../ui/types.js';
+import {
+  goalPublicationKey,
+  renderPreparedGoalUpdate,
+} from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
@@ -573,6 +579,8 @@ type QueueToolResultRecord = (
   record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
 ) => void;
 
+type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
+
 export type DaemonToolLoopState = {
   totalToolCalls: number;
   invalidToolParamErrors: Map<string, number>;
@@ -581,6 +589,7 @@ export type DaemonToolLoopState = {
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
+  loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
 };
@@ -593,6 +602,8 @@ const LOOP_DETECTED_SKIP_MESSAGE =
   'Skipped because loop detection stopped the current turn before this tool call could run.';
 const LOOP_DETECTED_CONTEXT_MESSAGE =
   'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
+export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
+  'Tool-call loop protection stopped this turn. The session is still available; send a more specific instruction to continue.';
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
@@ -698,6 +709,7 @@ function recordDaemonLoopDetected(
 ): true {
   if (!loopState.loopDetected) {
     loopState.loopDetected = true;
+    loopState.loopType = loopType;
     debugLogger.warn(message);
     try {
       logLoopDetected(
@@ -713,6 +725,35 @@ function recordDaemonLoopDetected(
     }
   }
   return true;
+}
+
+function createLoopDetectedTurnError(
+  loopState: DaemonToolLoopState,
+): RequestError {
+  return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
+    code: 'LOOP_DETECTED',
+    errorKind: 'loop_detected',
+    ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+  });
+}
+
+// Cancellation takes precedence when it races a loop-detected stop.
+function cancelledOrThrowLoopDetected(
+  signal: AbortSignal,
+  loopState: DaemonToolLoopState,
+): 'cancelled' {
+  if (signal.aborted) return 'cancelled';
+  throw createLoopDetectedTurnError(loopState);
+}
+
+function isLoopDetectedTurnError(error: unknown): boolean {
+  if (!(error instanceof RequestError)) return false;
+  const data = error.data;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { code?: unknown }).code === 'LOOP_DETECTED'
+  );
 }
 
 function recordDaemonToolCalls(
@@ -1168,25 +1209,30 @@ interface PromptChannelDelivery {
   target: CronTaskDelivery['target'];
 }
 
-interface ChannelDeliveryCapture {
-  finalText: string;
+interface AgentResponseCapture {
+  channelDelivery?: {
+    finalText: string;
+  };
+  agentOutput: AgentOutputMessageCapture;
 }
 
 function beginChannelDeliveryResponseBlock(
-  capture: ChannelDeliveryCapture | undefined,
+  capture: AgentResponseCapture | undefined,
 ): string[] | undefined {
-  if (!capture) return undefined;
-  capture.finalText = '';
+  capture?.agentOutput.beginResponse();
+  if (!capture?.channelDelivery) return undefined;
+  capture.channelDelivery.finalText = '';
   return [];
 }
 
 function commitChannelDeliveryResponseBlock(
-  capture: ChannelDeliveryCapture | undefined,
+  capture: AgentResponseCapture | undefined,
   responseBlock: string[] | undefined,
   hasFunctionCalls: boolean,
 ): void {
-  if (capture && responseBlock && !hasFunctionCalls) {
-    capture.finalText = responseBlock.join('');
+  capture?.agentOutput.commitResponse(hasFunctionCalls);
+  if (capture?.channelDelivery && responseBlock && !hasFunctionCalls) {
+    capture.channelDelivery.finalText = responseBlock.join('');
   }
 }
 
@@ -1271,30 +1317,7 @@ export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
 ): number {
-  let maxPromptTurn = 0;
-  let userMessageCount = 0;
-  const promptIdPrefix = `${sessionId}########`;
-
-  for (const record of records) {
-    if (record.sessionId === sessionId && isUserPromptRecord(record)) {
-      userMessageCount += 1;
-    }
-
-    for (const promptId of getRecordPromptIds(record)) {
-      if (!promptId.startsWith(promptIdPrefix)) {
-        continue;
-      }
-
-      const suffix = promptId.slice(promptIdPrefix.length);
-      if (!/^\d+$/.test(suffix)) {
-        continue;
-      }
-
-      maxPromptTurn = Math.max(maxPromptTurn, Number(suffix));
-    }
-  }
-
-  return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+  return computeInitialTurnFromHistoryCore(records, sessionId);
 }
 
 export async function fireSessionPermissionDeniedForAutoMode(
@@ -1327,42 +1350,6 @@ export async function fireSessionPermissionDeniedForAutoMode(
       );
     }
   }
-}
-
-function getRecordPromptIds(record: ChatRecord): string[] {
-  const promptIds: string[] = [];
-  const recordPromptId = (record as { promptId?: unknown }).promptId;
-  if (typeof recordPromptId === 'string') {
-    promptIds.push(recordPromptId);
-  }
-  const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
-  if (telemetryPromptId) {
-    promptIds.push(telemetryPromptId);
-  }
-  return promptIds;
-}
-
-function readTelemetryPromptId(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object' || !('uiEvent' in payload)) {
-    return undefined;
-  }
-  const uiEvent = (payload as { uiEvent?: unknown }).uiEvent;
-  if (!uiEvent || typeof uiEvent !== 'object' || !('prompt_id' in uiEvent)) {
-    return undefined;
-  }
-  const promptId = (uiEvent as { prompt_id?: unknown }).prompt_id;
-  return typeof promptId === 'string' ? promptId : undefined;
-}
-
-function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user' || record.subtype === 'realtime_message') {
-    return false;
-  }
-  return (
-    record.message?.parts?.some(
-      (part) => typeof part.text === 'string' && part.text.trim().length > 0,
-    ) ?? false
-  );
 }
 
 const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
@@ -1619,6 +1606,7 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
@@ -1633,6 +1621,9 @@ export class Session implements SessionContext {
   private goalRuntimeUnsubscribe?: () => void;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
+  // Set only when runtime recovery selected a Goal that initial replay hid.
+  // Keep that Goal private through activation and later progress updates.
+  private suppressedRecoveredGoalId?: string;
   private goalPublicationTail: Promise<void> = Promise.resolve();
 
   // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
@@ -1642,12 +1633,14 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private historyMutationActive = false;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -1694,6 +1687,9 @@ export class Session implements SessionContext {
     readonly config: Config,
     private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
+    private readonly runExclusiveAutomaticHistoryMutation: HistoryMutationRunner = (
+      operation,
+    ) => operation(),
     /**
      * Invoked whenever work this Session owns may have started or finished.
      * The owner (one reporter per ACP channel) coalesces these and republishes
@@ -1811,6 +1807,7 @@ export class Session implements SessionContext {
     this.goalHostUnbind = undefined;
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
+    this.suppressedRecoveredGoalId = undefined;
     this.#bindGoalRuntime();
   }
 
@@ -1853,53 +1850,46 @@ export class Session implements SessionContext {
     await this.#queueGoalState(runtime.getSnapshot(), cause);
   }
 
-  /**
-   * Render the recovered-Goal cards instead of streaming them.
-   *
-   * The bulk load-replay path (`historyReplay: 'response'`) does not stream
-   * its replay: `loadSession` collects the page into the `LOAD_REPLAY`
-   * envelope and the bridge seeds those updates onto the session's event bus
-   * *after* the ACP `session/load` call returns. A card streamed from inside
-   * that call therefore lands on the bus **before** the replayed
-   * pre-migration `set` card — the reverse of the ordering
-   * {@link publishRecoveredGoalState} exists to produce, leaving the phantom
-   * running goal exactly as it was. Returning the cards lets the caller
-   * append them to the envelope, after the replay page.
-   *
-   * Appending after a truncated page (`hasMore`) is still correct: paging
-   * drops the oldest records, so the authoritative state belongs last either
-   * way.
-   *
-   * Marks the publication as delivered, so the runtime subscription cannot
-   * emit a duplicate card for the same `(cause, snapshot)` once the session
-   * goes live.
-   */
   async renderRecoveredGoalUpdates(
     replayedRecords?: readonly ChatRecord[],
   ): Promise<SessionUpdate[]> {
     if (this.disposed || this.closing) return [];
-    let runtime;
-    try {
-      runtime = await this.config.getGoalRuntimeReady();
-    } catch (error) {
-      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
-      const status = this.#unrestorableGoalStatus(replayedRecords);
-      return status ? [buildGoalStatusUpdate(status)] : [];
+    const rendered = await renderPreparedGoalUpdate(
+      () => this.config.getGoalRuntimeReady(),
+      {
+        ...(replayedRecords ? { replayedRecords } : {}),
+        previousGoal: this.lastGoalSnapshot?.goal ?? null,
+      },
+    );
+    if (
+      rendered.publicationKey &&
+      rendered.publicationKey === this.lastGoalPublicationKey
+    ) {
+      return [];
     }
-    const cause = runtime.getRecoveryCause?.();
-    // Nothing was recovered, so the replay already told the whole story.
-    if (!cause) return [];
-    const snapshot = runtime.getSnapshot();
-    const publicationKey = this.#goalPublicationKey(snapshot, cause);
-    if (publicationKey === this.lastGoalPublicationKey) return [];
-    this.lastGoalPublicationKey = publicationKey;
-    return [
-      buildGoalStateUpdate(
-        snapshot,
-        cause,
-        this.lastGoalSnapshot?.goal ?? null,
-      ),
-    ];
+    this.primeRecoveredGoalPublication(rendered.publicationKey);
+    return rendered.updates;
+  }
+
+  primeRecoveredGoalPublication(
+    publicationKey: string | undefined,
+    suppressedGoalId?: string,
+  ): void {
+    if (publicationKey) this.lastGoalPublicationKey = publicationKey;
+    this.suppressedRecoveredGoalId = suppressedGoalId;
+  }
+
+  #suppressRecoveredGoalUpdate(snapshot: GoalSnapshotV2): boolean {
+    const suppressedGoalId = this.suppressedRecoveredGoalId;
+    if (!suppressedGoalId) return false;
+    const goal = snapshot.goal;
+    if (goal?.goalId === suppressedGoalId) return true;
+    if (goal === null) {
+      this.suppressedRecoveredGoalId = undefined;
+      return true;
+    }
+    this.suppressedRecoveredGoalId = undefined;
+    return false;
   }
 
   /**
@@ -1940,19 +1930,13 @@ export class Session implements SessionContext {
     };
   }
 
-  #goalPublicationKey(
-    snapshot: GoalSnapshotV2,
-    cause?: GoalStateCause,
-  ): string | undefined {
-    return cause ? `${cause}:${JSON.stringify(snapshot)}` : undefined;
-  }
-
   async #publishGoalState(
     snapshot: GoalSnapshotV2,
     cause?: GoalStateCause,
     previousGoal: GoalRecord | null = this.lastGoalSnapshot?.goal ?? null,
   ): Promise<void> {
-    const publicationKey = this.#goalPublicationKey(snapshot, cause);
+    if (this.#suppressRecoveredGoalUpdate(snapshot)) return;
+    const publicationKey = goalPublicationKey(snapshot, cause);
     if (publicationKey && publicationKey === this.lastGoalPublicationKey) {
       return;
     }
@@ -1973,6 +1957,13 @@ export class Session implements SessionContext {
   }
 
   async #drainGoalQueue(): Promise<void> {
+    if (this.goalQueue.length === 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainGoalQueueExclusive(),
+    );
+  }
+
+  async #drainGoalQueueExclusive(): Promise<void> {
     if (
       this.disposed ||
       this.closing ||
@@ -2897,6 +2888,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     try {
       await this.config.assertCanStartTurn();
     } catch (error) {
@@ -2910,14 +2907,20 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
+  }
+
+  isTurnIdle(): boolean {
+    return !this.closing && !this.#hasActiveTurn();
   }
 
   isIdle(): boolean {
-    return (
-      !this.closing &&
-      !this.#hasActiveTurn() &&
-      this.collectActiveWorkHolds().length === 0
-    );
+    return this.isTurnIdle() && this.collectActiveWorkHolds().length === 0;
   }
 
   /**
@@ -2961,6 +2964,13 @@ export class Session implements SessionContext {
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
     }
+    const shellActive =
+      this.config.getBackgroundShellRegistry().hasRunningEntries() ||
+      this.notificationQueue.some((item) => item.kind === 'shell') ||
+      this.currentShellNotificationActive;
+    if (shellActive) {
+      holds.push({ category: 'shell', id: 'background-shells' });
+    }
     return holds;
   }
 
@@ -2971,6 +2981,7 @@ export class Session implements SessionContext {
   #hasActiveTurn(): boolean {
     return Boolean(
       this.pendingPrompt ||
+        this.historyMutationActive ||
         this.pendingPromptCompletion ||
         this.goalProcessing ||
         this.cronProcessing ||
@@ -2980,6 +2991,27 @@ export class Session implements SessionContext {
         this.notificationAbortController ||
         this.notificationCompletion,
     );
+  }
+
+  beginHistoryMutation(): () => void {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.#hasActiveTurn()) {
+      throw new RequestError(-32602, 'Session is busy processing a turn', {
+        errorKind: 'session_busy',
+      });
+    }
+    this.historyMutationActive = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.historyMutationActive = false;
+      if (this.disposed) return;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
   }
 
   beginClose(): () => void {
@@ -3116,7 +3148,12 @@ export class Session implements SessionContext {
       this.#statusChangeCallback = undefined;
     }
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
-    this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    shellRegistry.setNotificationCallback(undefined);
+    if (this.#shellStatusChangeCallback) {
+      shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
+      this.#shellStatusChangeCallback = undefined;
+    }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
@@ -3148,30 +3185,34 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   primeTurnFromHistory(records: ChatRecord[]): void {
-    for (const record of records) {
-      if (record.subtype !== 'notification') continue;
-      const backgroundTask = (
-        record.systemPayload as
-          | { backgroundTask?: { taskId?: unknown } }
-          | undefined
-      )?.backgroundTask;
-      if (typeof backgroundTask?.taskId === 'string') {
-        this.persistedBackgroundNotificationTaskIds.add(backgroundTask.taskId);
-      }
-    }
-    this.turn = Math.max(
-      this.turn,
-      computeInitialTurnFromHistory(records, this.config.getSessionId()),
+    const turnState = collectSessionTurnState(
+      records,
+      this.config.getSessionId(),
     );
+    this.primeTurnState(
+      turnState.initialTurn,
+      turnState.backgroundNotificationTaskIds,
+    );
+  }
+
+  primeTurnState(
+    initialTurn: number,
+    backgroundNotificationTaskIds: readonly string[],
+  ): void {
+    for (const taskId of backgroundNotificationTaskIds) {
+      this.persistedBackgroundNotificationTaskIds.add(taskId);
+    }
+    this.turn = Math.max(this.turn, initialTurn);
   }
 
   async replayHistory(
     records: ChatRecord[],
     gaps?: HistoryGap[],
+    options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
     try {
-      await this.historyReplayer.replay(records, gaps);
+      await this.historyReplayer.replay(records, gaps, options);
     } finally {
       // Replayed plan updates re-stamp the revision via sendUpdate, but they
       // belong to finished cycles; only live updates may bind the next
@@ -3436,6 +3477,12 @@ export class Session implements SessionContext {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
+    }
     if (modelPrompt !== undefined && invocationContext === undefined) {
       throw RequestError.invalidParams(
         undefined,
@@ -3458,6 +3505,12 @@ export class Session implements SessionContext {
     }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (this.historyMutationActive) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session history mutation is in progress',
+      );
     }
     if (admissionCancellation?.aborted) {
       return { stopReason: 'cancelled' };
@@ -3621,6 +3674,16 @@ export class Session implements SessionContext {
       return { stopReason: 'cancelled' };
     }
 
+    const channelPromptTurn =
+      (params as { _meta?: Record<string, unknown> })._meta?.[
+        CHANNEL_PROMPT_META_KEY
+      ] === true;
+    const recording = this.config.getChatRecordingService();
+    const branchCheckpointCursor =
+      scheduledGoalTurn === undefined && !channelPromptTurn
+        ? recording?.getBranchCheckpointCursor()
+        : undefined;
+
     if (todoStopGuardPreparation.startsWorkChain) {
       this.#clearTodoStopGuardQueuedPromptWait();
       this.todoStopGuard.startOrdinaryPrompt();
@@ -3629,9 +3692,19 @@ export class Session implements SessionContext {
 
     this.duplicateProviderToolCallResponseIds.clear();
     const channelDelivery = parsePromptChannelDelivery(params);
-    const channelDeliveryCapture = channelDelivery
-      ? { finalText: '' }
-      : undefined;
+    const responseCapture: AgentResponseCapture = {
+      ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
+      agentOutput: new AgentOutputMessageCapture(this.config),
+    };
+    // One server-side channel classification, consumed by both the
+    // rejection gate below and the guard-mode selection in
+    // #executePromptInner. Only the authenticated channel-prompt marker
+    // classifies a turn: the delivery meta is a caller-requested side
+    // effect (the response is still delivered on end_turn below), and
+    // letting it classify would let any caller opt its own turn out of
+    // loop-detected rejection and the repeated-failure guard. The ACP
+    // boundary strips the channel-prompt key from untrusted callers, so
+    // both decisions see only trusted values.
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -3639,36 +3712,74 @@ export class Session implements SessionContext {
       resolveCompletion = resolve;
     });
 
+    let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
     let promptFailed = false;
     try {
       const result = await this.#executePrompt(
         params,
         pendingSend,
-        channelDeliveryCapture,
+        responseCapture,
         invocationContext,
         modelPrompt,
+        // Channel turns are non-interactive deliveries: like cron,
+        // background-notification, and goal turns they keep the graceful
+        // end-turn handling so the collected response text is still
+        // delivered. Only the authenticated CHANNEL_PROMPT_META_KEY turns
+        // sent by the channel bridges qualify; the delivery meta alone
+        // schedules the delivery but keeps the foreground rejection. Goal
+        // turns bypass the bridge entirely, so a rejection there would
+        // settle the turn as failed and pause the goal without any
+        // turn_error ever being published.
+        !channelPromptTurn && goalTurn === undefined,
         goalTurn,
+        channelPromptTurn,
       );
-      promptResult = result;
+      let branchPoint: BranchPoint | undefined;
+      if (recording && branchCheckpointCursor) {
+        try {
+          branchPoint = await recording.recordBranchCheckpointTransaction({
+            cursor: branchCheckpointCursor,
+            stopReason: result.stopReason,
+          });
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to record branch checkpoint; completing the turn without a branch point',
+            error,
+          );
+        }
+      }
+      const completedResult: PromptResponse = branchPoint
+        ? {
+            ...result,
+            _meta: {
+              ...result._meta,
+              'qwen.branchPoint': {
+                assistantRecordUuid: branchPoint.assistantRecordUuid,
+                checkpointUuid: branchPoint.checkpointUuid,
+              },
+            },
+          }
+        : result;
+      promptResult = completedResult;
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
-      this.#maybeEmitFollowupSuggestion(result);
-      if (channelDelivery && result.stopReason === 'end_turn') {
+      this.#maybeEmitFollowupSuggestion(completedResult);
+      if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
           sessionId: this.sessionId,
           deliveryId: channelDelivery.deliveryId,
           source: 'prompt',
           target: channelDelivery.target,
           text: normalizeChannelDeliveryText(
-            channelDeliveryCapture?.finalText ?? '',
+            responseCapture.channelDelivery?.finalText ?? '',
           ),
           promptId: channelDelivery.deliveryId,
         });
       }
-      return result;
+      return completedResult;
     } catch (error) {
       promptFailed = true;
       if (error instanceof SessionWriterError) {
@@ -3676,11 +3787,16 @@ export class Session implements SessionContext {
           errorKind: error.errorKind,
         });
       }
+      rejectedByLoopProtection = isLoopDetectedTurnError(error);
       throw error;
     } finally {
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
       releasePendingSend();
       const shouldDrainAutomaticQueues =
+        // Loop-detected turns resolved end_turn (and drained) before loop
+        // stops became rejections; keep that invariant on the new path so
+        // queued cron/notification work is not stranded.
+        rejectedByLoopProtection ||
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
         this.todoStopGuardDrainAutomaticQueuesWhenIdle ||
         this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -3872,10 +3988,12 @@ export class Session implements SessionContext {
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture: AgentResponseCapture,
     invocationContext?: InvocationContextV1,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -3897,9 +4015,11 @@ export class Session implements SessionContext {
           this.#executePromptInner(
             params,
             pendingSend,
-            channelDeliveryCapture,
+            responseCapture,
             modelPrompt,
+            rejectOnLoopDetected,
             goalTurn,
+            channelTurn,
           ),
         ),
       );
@@ -3911,9 +4031,11 @@ export class Session implements SessionContext {
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture: AgentResponseCapture,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -4002,6 +4124,16 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_CONTINUE_META_KEY
               ] === true;
+            if (!isRetry && !isContinue && goalTurn?.origin !== 'runtime') {
+              const interactionSpan = getActiveInteractionSpan();
+              if (interactionSpan) {
+                addAgentInputMessageAttributes(
+                  this.config,
+                  interactionSpan,
+                  promptDisplayText ?? promptText,
+                );
+              }
+            }
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -4308,9 +4440,7 @@ export class Session implements SessionContext {
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState(
-              promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
-                ? 'off'
-                : this.repeatedToolFailureGuardMode,
+              channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
 
             // conversation_finished must fire on every terminal path of the
@@ -4341,6 +4471,7 @@ export class Session implements SessionContext {
                   pendingSend.signal,
                 );
                 let channelDeliveryResponseBlock: string[] | undefined;
+                let channelDeliveryCheckpoint = 0;
 
                 try {
                   // Set where the model request is actually issued, not at
@@ -4378,8 +4509,8 @@ export class Session implements SessionContext {
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
-                    beginChannelDeliveryResponseBlock(channelDeliveryCapture);
-                  const channelDeliveryCheckpoint =
+                    beginChannelDeliveryResponseBlock(responseCapture);
+                  channelDeliveryCheckpoint =
                     channelDeliveryResponseBlock?.length ?? 0;
 
                   let streamFailed = false;
@@ -4407,10 +4538,14 @@ export class Session implements SessionContext {
                             part.thought,
                           );
                           if (!part.thought) {
+                            responseCapture.agentOutput.appendText(part.text);
                             channelDeliveryResponseBlock?.push(part.text);
                             messageDisplay?.addChunk(part.text);
                           }
                         }
+                        responseCapture.agentOutput.observeFinishReason(
+                          candidate.finishReason,
+                        );
                       }
 
                       if (
@@ -4431,6 +4566,10 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.RETRY ||
                         resp.type === StreamEventType.MODEL_FALLBACK
                       ) {
+                        responseCapture.agentOutput.restartAttempt(
+                          resp.type === StreamEventType.RETRY &&
+                            resp.isContinuation === true,
+                        );
                         if (
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
@@ -4533,7 +4672,7 @@ export class Session implements SessionContext {
                 }
 
                 commitChannelDeliveryResponseBlock(
-                  channelDeliveryCapture,
+                  responseCapture,
                   channelDeliveryResponseBlock,
                   functionCalls.length > 0,
                 );
@@ -4587,13 +4726,17 @@ export class Session implements SessionContext {
                       promptId,
                       toolLoopState,
                       onFullTurnModel,
+                      rejectOnLoopDetected,
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                   if (toolRun.loopDetected) {
@@ -4603,9 +4746,12 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                     return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                 }
@@ -4618,15 +4764,22 @@ export class Session implements SessionContext {
 
               // Fire Stop hook loop (aligned with core path in client.ts)
               // This is triggered after model response completes with no pending tool calls
-              return await this.#handleStopHookLoop(
+              const result = await this.#handleStopHookLoop(
                 pendingSend,
                 promptId,
                 hooksEnabled,
                 messageBus,
                 true,
                 fullTurnModelOverride,
-                channelDeliveryCapture,
+                responseCapture,
+                rejectOnLoopDetected,
               );
+              if (result.stopReason !== 'cancelled') {
+                responseCapture.agentOutput.writeToSpan(
+                  getActiveInteractionSpan(),
+                );
+              }
+              return result;
             } finally {
               logConversationFinishedEvent(
                 this.config,
@@ -4664,7 +4817,8 @@ export class Session implements SessionContext {
     messageBus: MessageBus | undefined,
     allowExternalHooks = true,
     modelOverride?: string,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture?: AgentResponseCapture,
+    rejectOnLoopDetected = false,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -4729,7 +4883,8 @@ export class Session implements SessionContext {
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
-              channelDeliveryCapture,
+              responseCapture,
+              rejectOnLoopDetected,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -4828,7 +4983,8 @@ export class Session implements SessionContext {
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
-                channelDeliveryCapture,
+                responseCapture,
+                rejectOnLoopDetected,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -4962,7 +5118,8 @@ export class Session implements SessionContext {
             : {}),
           onFullTurnModel,
           getModelOverride: () => modelOverride,
-          channelDeliveryCapture,
+          responseCapture,
+          rejectOnLoopDetected,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -4987,7 +5144,8 @@ export class Session implements SessionContext {
       onAutomaticContinuationValidated?: () => Promise<void>;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
-      channelDeliveryCapture?: ChannelDeliveryCapture;
+      responseCapture?: AgentResponseCapture;
+      rejectOnLoopDetected?: boolean;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -5058,6 +5216,7 @@ export class Session implements SessionContext {
         pendingSend.signal,
       );
       let channelDeliveryResponseBlock: string[] | undefined;
+      let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
 
@@ -5356,10 +5515,9 @@ export class Session implements SessionContext {
         const responseStream = sendResult.responseStream;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
-          options.channelDeliveryCapture,
+          options.responseCapture,
         );
-        const channelDeliveryCheckpoint =
-          channelDeliveryResponseBlock?.length ?? 0;
+        channelDeliveryCheckpoint = channelDeliveryResponseBlock?.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -5399,10 +5557,14 @@ export class Session implements SessionContext {
                 part.thought,
               );
               if (!part.thought) {
+                options.responseCapture?.agentOutput.appendText(part.text);
                 channelDeliveryResponseBlock?.push(part.text);
                 messageDisplay?.addChunk(part.text);
               }
             }
+            options.responseCapture?.agentOutput.observeFinishReason(
+              candidate.finishReason,
+            );
           }
 
           if (
@@ -5422,6 +5584,10 @@ export class Session implements SessionContext {
             response.type === StreamEventType.RETRY ||
             response.type === StreamEventType.MODEL_FALLBACK
           ) {
+            options.responseCapture?.agentOutput.restartAttempt(
+              response.type === StreamEventType.RETRY &&
+                response.isContinuation === true,
+            );
             if (
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
@@ -5505,7 +5671,7 @@ export class Session implements SessionContext {
       }
 
       commitChannelDeliveryResponseBlock(
-        options.channelDeliveryCapture,
+        options.responseCapture,
         channelDeliveryResponseBlock,
         functionCalls.length > 0,
       );
@@ -5532,16 +5698,28 @@ export class Session implements SessionContext {
               options.onFullTurnModel,
             ),
         );
-        if (
-          toolRun.stopAfterPermissionCancel ||
-          toolRun.loopDetected ||
-          pendingSend.signal.aborted
-        ) {
+        if (toolRun.stopAfterPermissionCancel || pendingSend.signal.aborted) {
           this.todoStopGuard.suspend();
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
             kind: 'terminal',
             stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
+        if (toolRun.loopDetected) {
+          this.todoStopGuard.suspend();
+          await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+          return {
+            kind: 'terminal',
+            // Only the foreground chain rejects a loop-detected stop; cron
+            // and background-notification turns keep the graceful end-turn
+            // handling they had before loop stops became rejections.
+            stopReason: options.rejectOnLoopDetected
+              ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
+              : getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -5553,6 +5731,7 @@ export class Session implements SessionContext {
           toolPromptId,
           toolLoopState,
           options.onFullTurnModel,
+          options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.hadMidTurnUserInput) {
@@ -5994,6 +6173,7 @@ export class Session implements SessionContext {
     promptId: string,
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
+    rejectOnLoopDetected = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -6087,14 +6267,19 @@ export class Session implements SessionContext {
         toolLoopState,
         { recordToQwenLogger: false },
       );
-      try {
-        await this.messageEmitter.emitAgentMessage(
-          REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
-        );
+      if (!rejectOnLoopDetected) {
+        // Rejecting turns publish the structured turn_error as the
+        // user-visible explanation; graceful (non-interactive) stops have
+        // no replacement, so keep the transcript stop message for them.
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
+          );
+        }
       }
       return {
         message: null,
@@ -6576,6 +6761,16 @@ export class Session implements SessionContext {
     if (this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainCronQueueExclusive(),
+    );
+  }
+
+  async #drainCronQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.pendingPrompt || this.notificationProcessing) return;
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.#nextCronQueueIndex() < 0) return;
     try {
       await this.assertCanStartTurn();
     } catch (error) {
@@ -6696,9 +6891,10 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
         let cronCompleted = false;
-        const channelDeliveryCapture = item.delivery
-          ? { finalText: '' }
-          : undefined;
+        const responseCapture: AgentResponseCapture = {
+          ...(item.delivery ? { channelDelivery: { finalText: '' } } : {}),
+          agentOutput: new AgentOutputMessageCapture(this.config),
+        };
         await withInteractionSpan(
           this.config,
           {
@@ -6875,7 +7071,6 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
-
                 const sendResult =
                   await this.#sendMessageStreamWithAutoCompression(
                     promptId,
@@ -6895,7 +7090,7 @@ export class Session implements SessionContext {
                 }
                 const responseStream = sendResult.responseStream;
                 const channelDeliveryResponseBlock =
-                  beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                  beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.length ?? 0;
                 if (loopTick && turnCount === 1) {
@@ -6932,10 +7127,14 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
+                          responseCapture.agentOutput.appendText(part.text);
                           channelDeliveryResponseBlock?.push(part.text);
                           messageDisplay?.addChunk(part.text);
                         }
                       }
+                      responseCapture.agentOutput.observeFinishReason(
+                        candidate.finishReason,
+                      );
                     }
 
                     if (
@@ -6956,6 +7155,10 @@ export class Session implements SessionContext {
                       resp.type === StreamEventType.RETRY ||
                       resp.type === StreamEventType.MODEL_FALLBACK
                     ) {
+                      responseCapture.agentOutput.restartAttempt(
+                        resp.type === StreamEventType.RETRY &&
+                          resp.isContinuation === true,
+                      );
                       if (
                         resp.type === StreamEventType.MODEL_FALLBACK ||
                         !resp.isContinuation
@@ -6991,7 +7194,7 @@ export class Session implements SessionContext {
                 }
 
                 commitChannelDeliveryResponseBlock(
-                  channelDeliveryCapture,
+                  responseCapture,
                   channelDeliveryResponseBlock,
                   functionCalls.length > 0,
                 );
@@ -7045,7 +7248,7 @@ export class Session implements SessionContext {
                   undefined,
                   false,
                   undefined,
-                  channelDeliveryCapture,
+                  responseCapture,
                 );
                 stopReason = guardStop.stopReason;
                 if (guardStop.stopReason === 'max_tokens') {
@@ -7082,6 +7285,11 @@ export class Session implements SessionContext {
                 ),
               );
             }
+            if (!ac.signal.aborted && !cronHadError) {
+              responseCapture.agentOutput.writeToSpan(
+                getActiveInteractionSpan(),
+              );
+            }
           },
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
@@ -7098,7 +7306,7 @@ export class Session implements SessionContext {
             source: 'scheduled',
             target: item.delivery.target,
             text: normalizeChannelDeliveryText(
-              channelDeliveryCapture?.finalText ?? '',
+              responseCapture.channelDelivery?.finalText ?? '',
             ),
             taskId: item.taskId,
             firedAt: item.firedAt,
@@ -7188,6 +7396,10 @@ export class Session implements SessionContext {
     });
 
     const shellRegistry = this.config.getBackgroundShellRegistry();
+    this.#shellStatusChangeCallback = () => {
+      this.#activeWorkChanged();
+    };
+    shellRegistry.setStatusChangeCallback(this.#shellStatusChangeCallback);
     shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
       const entry = shellRegistry.get(meta.shellId);
       this.#enqueueBackgroundNotification({
@@ -7364,6 +7576,20 @@ export class Session implements SessionContext {
     if (this.notificationQueue.length === 0) return;
     if (this.#nextNotificationQueueIndex() < 0) return;
 
+    await this.runExclusiveAutomaticHistoryMutation(() =>
+      this.#drainNotificationQueueExclusive(),
+    );
+  }
+
+  async #drainNotificationQueueExclusive(): Promise<void> {
+    if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
+    if (this.notificationQueue.length === 0) return;
+    if (this.#nextNotificationQueueIndex() < 0) return;
+
     try {
       await this.assertCanStartTurn();
     } catch (error) {
@@ -7412,6 +7638,7 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
           await runWithInvocationContext(undefined, () =>
@@ -7421,6 +7648,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }
       }
@@ -10024,6 +10252,13 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                // Same identity and execution scope `CoreToolScheduler`
+                // supplies. This is the path daemon ACP sessions actually
+                // take, so without them a host policy that falls back to the
+                // session — or reasons about where the tool runs — sees
+                // neither on every call made here.
+                sessionId: this.config.getSessionId(),
+                cwd: this.config.getTargetDir(),
                 ...(invocationContext ? { invocationContext } : {}),
               },
             );

@@ -25,7 +25,7 @@ import request from 'supertest';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
 import {
-  createServeApp,
+  createServeApp as createServeAppImpl,
   computeKeepaliveIntervalMs,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
@@ -44,7 +44,10 @@ import {
   registerChannelWorkerPromptAuthorization,
   revokeChannelWorkerPromptAuthorization,
 } from './channel-worker-prompt-authorization.js';
-import { CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/channel-base';
+import {
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
 import {
   resolveWebShellDir,
   isDocumentNavigation,
@@ -180,7 +183,7 @@ import {
   createVirtualSubagentSessionId,
   VirtualSubagentSessions,
 } from './virtual-subagent-sessions.js';
-import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
 import type { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import {
@@ -292,6 +295,38 @@ const baseOpts: ServeOptions = {
   mode: 'http-bridge',
 };
 
+// Direct app tests bypass runQwenServe's reconciler cleanup.
+const createdApps = new Set<ReturnType<typeof createServeAppImpl>>();
+
+function createServeApp(...args: Parameters<typeof createServeAppImpl>) {
+  const app = createServeAppImpl(...args);
+  createdApps.add(app);
+  return app;
+}
+
+function stopCreatedApps() {
+  for (const app of createdApps) {
+    (
+      app.locals as { stopExtensionGenerationReconciler?: () => void }
+    ).stopExtensionGenerationReconciler?.();
+  }
+  createdApps.clear();
+}
+
+afterEach(stopCreatedApps);
+
+it('stops extension generation reconcilers for direct app tests', () => {
+  const stopExtensionGenerationReconciler = vi.fn();
+  createdApps.add({
+    locals: { stopExtensionGenerationReconciler },
+  } as ReturnType<typeof createServeAppImpl>);
+
+  stopCreatedApps();
+
+  expect(stopExtensionGenerationReconciler).toHaveBeenCalledOnce();
+  expect(createdApps.size).toBe(0);
+});
+
 function fakeDaemonLog(): DaemonLogger {
   return {
     info: vi.fn(),
@@ -364,7 +399,11 @@ afterAll(async () => {
   restoreEnv('QWEN_HOME', previousServerTestQwenHome);
   restoreEnv('QWEN_RUNTIME_DIR', previousServerTestRuntimeDir);
   resetHomeEnvBootstrapForTesting();
-  await fsp.rm(serverTestEnvironmentRoot, { recursive: true, force: true });
+  await fsp.rm(serverTestEnvironmentRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+  });
 });
 
 function deferred<T = void>(): {
@@ -11602,6 +11641,90 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('passes the requested live replay mode to load', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-summary',
+          workspaceCwd: WS_BOUND,
+          historyReplay: 'response',
+          liveReplayMode: 'summary',
+        },
+      ]);
+    });
+
+    it('rejects an invalid live replay mode', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.loadCalls).toEqual([]);
+    });
+
+    it('rejects an invalid live replay mode on resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-invalid/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'compact' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_live_replay_mode');
+      expect(bridge.resumeCalls).toEqual([]);
+    });
+
+    it('does not forward a valid live replay mode to resume', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/persisted-summary-resume/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ liveReplayMode: 'summary' });
+
+      expect(res.status).toBe(200);
+      // Resume always restores with the full journal; the load-only field
+      // is validated but never forwarded to the bridge.
+      expect(bridge.resumeCalls).toEqual([
+        {
+          sessionId: 'persisted-summary-resume',
+          workspaceCwd: WS_BOUND,
+        },
+      ]);
+    });
+
     it('does not restore through a closed runtime generation', async () => {
       const generationGuard = createWorkspaceGenerationGuard();
       generationGuard.close();
@@ -12524,6 +12647,61 @@ describe('createServeApp', () => {
           );
           expect(call.req._meta ?? {}).not.toHaveProperty(
             CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+          );
+        }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('accepts channel-prompt classification only from the workspace worker', async () => {
+      // `qwen.channel.prompt` opts a turn out of loop-detected rejection;
+      // a forged key from an unauthorized caller must be dropped at the
+      // route (and again at the bridge admission strip), never reaching
+      // the trusted prompt context.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const workspace = realpathSync(process.cwd());
+      const token = 'channel-worker-classification-token';
+      registerChannelWorkerPromptAuthorization(token, workspace);
+      try {
+        const forged = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          });
+        const forgedWithBadToken = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+        const trusted = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+
+        expect(forged.status).toBe(202);
+        expect(forgedWithBadToken.status).toBe(202);
+        expect(trusted.status).toBe(202);
+        expect(bridge.promptCalls[0]?.context?.channelPrompt).toBeUndefined();
+        expect(bridge.promptCalls[1]?.context?.channelPrompt).toBeUndefined();
+        expect(bridge.promptCalls[2]?.context?.channelPrompt).toBe(true);
+        for (const call of bridge.promptCalls) {
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_PROMPT_META_KEY,
           );
         }
       } finally {
@@ -17060,90 +17238,139 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/branch', () => {
-    it.each([
-      ['removes', true, 1],
-      ['preserves', false, 0],
-    ])(
-      '%s the persisted branch when generation cleanup kills=%s',
-      async (_label, killed, expectedRemovals) => {
-        const runtimeDir = await fsp.mkdtemp(
-          path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
-        );
-        const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
-        const chatsDir = path.join(
-          new Storage(WS_BOUND, runtimeDir).getProjectDir(),
-          'chats',
-        );
-        await fsp.mkdir(chatsDir, { recursive: true });
-        await fsp.writeFile(
-          path.join(chatsDir, `${staleBranchId}.jsonl`),
-          `${JSON.stringify({
-            uuid: `${staleBranchId}-user-1`,
-            parentUuid: null,
-            sessionId: staleBranchId,
-            timestamp: '2026-07-29T00:00:00.000Z',
-            type: 'user',
-            message: { role: 'user', parts: [{ text: 'hello' }] },
-            cwd: WS_BOUND,
-          })}\n`,
-          'utf8',
-        );
-        const generationGuard = createWorkspaceGenerationGuard();
-        const bridge = fakeBridge();
-        bridge.branchSession = vi.fn(async (sessionId) => {
-          generationGuard.close();
-          return {
-            sessionId: staleBranchId,
-            workspaceCwd: WS_BOUND,
-            attached: false,
-            clientId: 'stale-client',
-            state: {},
-            displayName: 'Stale branch',
-            forkedFrom: { sessionId, displayName: 'Source' },
-          };
+    it('forwards the durable checkpoint id to the bridge', async () => {
+      const bridge = fakeBridge();
+      const atRecordId = '11111111-1111-4111-8111-111111111111';
+      const branchSession = vi.fn(async () => ({
+        sessionId: 'branch-session',
+        displayName: 'Branch',
+        forkedFrom: { sessionId: 'session-A', displayName: 'Source' },
+      }));
+      bridge.branchSession = branchSession;
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId });
+
+      expect(res.status).toBe(201);
+      expect(branchSession).toHaveBeenCalledWith(
+        'session-A',
+        { name: undefined, atRecordId },
+        { clientId: undefined },
+      );
+    });
+
+    it('returns 409 when the checkpoint is no longer active', async () => {
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async () => {
+        throw Object.assign(new Error('Invalid or inactive branch point'), {
+          data: { errorKind: 'branch_point_invalid' },
         });
-        const killSpy = vi
-          .spyOn(bridge, 'killSession')
-          .mockResolvedValue(killed);
-        const removeSpy = vi
-          .spyOn(SessionService.prototype, 'removeSession')
-          .mockResolvedValue();
-        const runtime = makeWorkspaceRuntimeForTest({
-          workspaceId: 'branch-primary',
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId: '11111111-1111-4111-8111-111111111111' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'branch_point_invalid',
+        errorKind: 'branch_point_invalid',
+      });
+    });
+
+    it('rejects a non-string checkpoint id before calling the bridge', async () => {
+      const bridge = fakeBridge();
+      const branchSession = vi.fn();
+      bridge.branchSession = branchSession;
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/branch')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ atRecordId: 42 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('branch_point_invalid');
+      expect(branchSession).not.toHaveBeenCalled();
+    });
+
+    it('returns a committed branch even if the runtime generation closes afterward', async () => {
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-cleanup-'),
+      );
+      const staleBranchId = '550e8400-e29b-41d4-a716-446655440125';
+      const chatsDir = path.join(
+        new Storage(WS_BOUND, runtimeDir).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(chatsDir, `${staleBranchId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${staleBranchId}-user-1`,
+          parentUuid: null,
+          sessionId: staleBranchId,
+          timestamp: '2026-07-29T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: WS_BOUND,
+        })}\n`,
+        'utf8',
+      );
+      const generationGuard = createWorkspaceGenerationGuard();
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async (sessionId) => {
+        generationGuard.close();
+        return {
+          sessionId: staleBranchId,
           workspaceCwd: WS_BOUND,
-          sessionRuntimeBaseDir: runtimeDir,
-          primary: true,
-          bridge,
-          generationGuard,
-        });
-        const app = createServeApp(
-          { ...baseOpts, workspace: WS_BOUND },
-          undefined,
-          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
-        );
+          attached: false,
+          clientId: 'branch-client',
+          state: {},
+          displayName: 'Stale branch',
+          forkedFrom: { sessionId, displayName: 'Source' },
+        };
+      });
+      const killSpy = vi.spyOn(bridge, 'killSession').mockResolvedValue(true);
+      const removeSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue();
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'branch-primary',
+        workspaceCwd: WS_BOUND,
+        sessionRuntimeBaseDir: runtimeDir,
+        primary: true,
+        bridge,
+        generationGuard,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
 
-        try {
-          const res = await request(app)
-            .post('/session/source-session/branch')
-            .set('Host', `127.0.0.1:${baseOpts.port}`)
-            .send({});
+      try {
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
 
-          expect(res.status).toBe(503);
-          expect(res.body.code).toBe('workspace_runtime_unavailable');
-          expect(killSpy).toHaveBeenCalledWith(staleBranchId, {
-            requireZeroAttaches: true,
-          });
-          expect(removeSpy).toHaveBeenCalledTimes(expectedRemovals);
-          if (killed) {
-            expect(removeSpy).toHaveBeenCalledWith(staleBranchId);
-          }
-        } finally {
-          killSpy.mockRestore();
-          removeSpy.mockRestore();
-          await fsp.rm(runtimeDir, { recursive: true, force: true });
-        }
-      },
-    );
+        expect(res.status).toBe(201);
+        expect(res.body.sessionId).toBe(staleBranchId);
+        expect(res.body.clientId).toBe('branch-client');
+        expect(killSpy).not.toHaveBeenCalled();
+        expect(removeSpy).not.toHaveBeenCalled();
+      } finally {
+        killSpy.mockRestore();
+        removeSpy.mockRestore();
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('POST /session/:id/fork', () => {
@@ -26868,7 +27095,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   }
 
   it('parks a single-workspace registry on app.locals for the canonical primary workspace', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26909,7 +27135,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26931,7 +27156,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected fsFactory verbatim when supplied', async () => {
-    const { createServeApp } = await import('./server.js');
     const sentinel = { forRequest: vi.fn(() => ({ marker: 'injected' })) };
     const app = createServeApp(
       {
@@ -26954,7 +27178,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads production-style primary trust into the default runtime metadata', async () => {
-    const { createServeApp } = await import('./server.js');
     const app = createServeApp(
       {
         port: 0,
@@ -26970,7 +27193,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('threads primary runtime env metadata into the default registry runtime', async () => {
-    const { createServeApp } = await import('./server.js');
     const primaryRuntimeEnv = {
       mode: 'runtime-overlay',
       overlayKeys: ['OPENAI_API_KEY'],
@@ -26992,7 +27214,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses an injected workspace registry as the primary runtime source', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27065,7 +27286,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('accepts matching runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27089,8 +27309,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires the Voice coordinator paired with runtime removal', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -27107,8 +27325,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('requires a live bridge provider when runtime generations can change', async () => {
-    const { createServeApp } = await import('./server.js');
-
     expect(() =>
       createServeApp(
         {
@@ -27125,7 +27341,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('uses the injected registry sender when client-MCP over WS is enabled', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27181,7 +27396,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('rejects conflicting runtime deps when a workspace registry is injected', async () => {
-    const { createServeApp } = await import('./server.js');
     const runtime = makeInjectedWorkspaceRuntime();
     const registry = createWorkspaceRegistry([runtime]);
 
@@ -27305,7 +27519,6 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
   });
 
   it('default fsFactory is built with trusted=false (writes refused)', async () => {
-    const { createServeApp } = await import('./server.js');
     const { isFsError } = await import('./fs/index.js');
     const os = await import('node:os');
     const tmp = await import('node:fs').then((m) =>
@@ -29324,7 +29537,7 @@ describe('Live conversation runtime lifecycle', () => {
         async (sessionId: string) =>
           `${root.canonicalRoot}/conversation-${sessionId}`,
       ),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveBridge = fakeBridge(liveBridgeOptions);
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
@@ -29532,6 +29745,53 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('shares the boot publication with a concurrent Live Host bind', async () => {
+    const restoreLiveSettings = await enableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    try {
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      const coordinator = setup.app.locals[
+        'liveCoordinator'
+      ] as LiveHostCoordinator;
+      const socket = new FakeLiveHostSocket();
+      coordinator.attachHost(
+        socket as unknown as WebSocket,
+        coordinator.daemonInstanceNonce,
+      );
+      socket.hello('host_live_runtime_concurrent_0001');
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+
+      setup.resolveCreation();
+      await vi.waitFor(() => {
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+      });
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+      expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+      expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+    } finally {
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+      await restoreLiveSettings();
+    }
+  });
+
   it('hot-enables and disables the Live runtime without restarting the daemon', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29715,6 +29975,74 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it.each(['task', 'speech'] as const)(
+    'rolls back a partial Live bind after a %s handler failure and retries without republishing',
+    async (failedChannel) => {
+      const restoreLiveSettings = await disableLiveVoiceAtBoot();
+      const setup = setupLiveRuntime();
+      const failedSetter =
+        failedChannel === 'task'
+          ? vi.spyOn(setup.liveBridge, 'setLiveTaskToolRequestHandler')
+          : vi.spyOn(setup.liveBridge, 'setLiveSpeakToUserHandler');
+      failedSetter.mockImplementationOnce(() => {
+        throw new Error(`${failedChannel} handler bind failed`);
+      });
+      try {
+        const setEnabled = setup.app.locals['setLiveVoiceEnabled'] as
+          | ((enabled: boolean) => Promise<void>)
+          | undefined;
+        if (!setEnabled) throw new Error('Live hot-toggle hook missing.');
+        const capabilitiesBefore = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesBefore.body.workspaces).not.toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
+
+        const firstEnable = setEnabled(true);
+        await vi.waitFor(() => {
+          expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+        });
+        setup.resolveCreation();
+        await expect(firstEnable).rejects.toThrow(
+          `${failedChannel} handler bind failed`,
+        );
+
+        expect(setup.registry.getByWorkspaceCwd(setup.root.canonicalRoot)).toBe(
+          setup.liveRuntime,
+        );
+        expect(setup.liveBridge.liveScreenContextHandler).toBeUndefined();
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toBeUndefined();
+        expect(setup.liveBridge.liveSpeakToUserHandler).toBeUndefined();
+        expect(failedSetter).toHaveBeenCalledTimes(2);
+        const capabilitiesAfter = await request(setup.app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilitiesAfter.body.workspaces).toContainEqual(
+          expect.objectContaining({ cwd: setup.root.canonicalRoot }),
+        );
+
+        await expect(setEnabled(true)).resolves.toBeUndefined();
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+        expect(setup.liveBridge.liveScreenContextHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveTaskToolRequestHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(setup.liveBridge.liveSpeakToUserHandler).toEqual(
+          expect.any(Function),
+        );
+        expect(failedSetter.mock.calls.length).toBeGreaterThanOrEqual(3);
+      } finally {
+        await (
+          setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+        )();
+        await restoreLiveSettings();
+      }
+    },
+  );
+
   it('shutdown waits for the in-flight boot publication', async () => {
     const restoreLiveSettings = await enableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
@@ -29850,7 +30178,7 @@ describe('Live Appshot server integration', () => {
         return root;
       }),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const coordinator = new LiveHostCoordinator({
       daemonInstanceNonce: 'daemon_live_appshot_nonce_0001',
       getProviderReadiness: () => ({ state: 'ready' }),
@@ -29982,7 +30310,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-disabled-conversations',
@@ -30087,7 +30415,7 @@ describe('Live Appshot server integration', () => {
     const conversationWorkspace = {
       revalidate: vi.fn(async () => root),
       assertExactRoot: vi.fn(async () => root),
-    } as unknown as LiveConversationWorkspace;
+    } as unknown as ConversationWorkspace;
     const liveRuntime: WorkspaceRuntime = {
       ...makeWorkspaceRuntimeForTest({
         workspaceId: 'live-acp-disabled-conversations',
@@ -30268,6 +30596,7 @@ describe('Live Appshot server integration', () => {
       await shutdown;
       expect(settled).toBe(true);
       expect(setup.captureHandler).toBeUndefined();
+      expect(setup.speakHandler).toBeUndefined();
       expect(setup.getWorkspaceToolsStatus).not.toHaveBeenCalled();
     } finally {
       channelGate.resolve(undefined);

@@ -246,6 +246,7 @@ export {
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
 export * from './services/chatRecordingService.js';
+export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
 export type {
   CronTaskDelivery,
@@ -295,6 +296,10 @@ export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/session-reference-service.js';
 export * from './services/sessionService.js';
+export {
+  collectSessionTurnState,
+  computeInitialTurnFromHistory,
+} from './services/session-turn-state.js';
 export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
@@ -315,6 +320,12 @@ export {
   SessionTranscriptTooLargeError,
 } from './services/session-transcript-reader.js';
 export type {
+  SelectiveSessionRestoreOptions,
+  SessionLiveRestoreProjection,
+  SessionRestoreProjection,
+  SessionRestoreReplayPage,
+  SessionRestoreReplaySelection,
+  SessionRuntimeResumeState,
   SessionTranscriptCursorState,
   SessionTranscriptReadPageOptions,
   SessionTranscriptRecordPage,

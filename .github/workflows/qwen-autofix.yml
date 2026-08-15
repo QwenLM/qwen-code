@@ -165,6 +165,15 @@ env:
   # value falls back to its default at the read site.
   GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
   GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'
+  # Non-convergence handoff: once the growth brake has been over budget for
+  # this many PRIOR rounds in the window AND the diff has not shrunk from the
+  # most recent over-budget round, the round is DIVERGING (the fixes keep
+  # growing the diff, so
+  # Critical-only — which only trims non-Criticals — cannot help). At that
+  # point the round escalates to a maintainer-decision handoff (split / accept
+  # core + track the tail / redesign) instead of patching again. Same tunable
+  # contract as the budgets above (malformed → default at the read site).
+  GROWTH_DIVERGENCE_ROUNDS: '${{ vars.QWEN_AUTOFIX_GROWTH_DIVERGENCE_ROUNDS || 2 }}'
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
@@ -336,6 +345,7 @@ jobs:
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
       retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
+      review_sender: '${{ github.event.review.user.login }}'
     steps:
       - name: 'Decide phases'
         id: 'decide'
@@ -2178,6 +2188,7 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
+          REVIEW_SENDER: '${{ needs.route.outputs.review_sender }}'
           DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
           # Every lane that reaches this scan is supposed to hold the PAT:
@@ -2573,6 +2584,21 @@ jobs:
             fi
           fi
 
+          # Review-workflow id, resolved ONCE per scan for the review-in-flight
+          # gate below (#8888): during qwen-code-pr-review.yml's 10-minute
+          # delay-automatic-review wait the review-pr JOB (and thus its
+          # check-run in statusCheckRollup) does not exist yet, so the rollup
+          # alone misses a just-triggered review; the runs API sees the run
+          # by head SHA before its job starts. Empty on lookup failure — the
+          # gate then degrades to the rollup check only (fail-open, like
+          # BUSY_PRS).
+          REVIEW_WF_ID="$(gh api "repos/${REPO}/actions/workflows/qwen-code-pr-review.yml" --jq '.id' 2> /dev/null || echo '')"
+          REVIEW_RUNS_JSON='{"workflow_runs":[]}'
+          if [[ -n "${REVIEW_WF_ID}" ]] \
+            && ! REVIEW_RUNS_JSON="$(gh api "repos/${REPO}/actions/workflows/${REVIEW_WF_ID}/runs?per_page=100" 2> /dev/null)"; then
+            REVIEW_RUNS_JSON='{"workflow_runs":[]}'
+          fi
+
           # PRs whose review-address is already RUNNING OR QUEUED in any live
           # autofix run must not be re-targeted. Schedule/dispatch runs execute
           # against main's SHA, so their matrix jobs never appear in the PR's
@@ -2717,6 +2743,52 @@ jobs:
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
             PR_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
 
+            # Review-in-flight gate (#8888): NON_BLOCKING_CHECKS keeps an
+            # in-flight review-pr from blocking the FEEDBACK gate (its
+            # conclusion carries nothing the loop acts on — #7416), but every
+            # head mutation this scan can make (a stale-base update-branch,
+            # infra rerun, or address push later) is a synchronize event that
+            # cancels the in-flight review via qwen-code-pr-review.yml's
+            # cancel-in-progress, discarding up to ~3h of review work — the
+            # self-reinforcing cancellation loop of #8830 (three killed runs
+            # in one PR, two by merge-main). Its findings are also the very
+            # feedback the next round should batch with, so deferring the
+            # WHOLE round until the review lands loses nothing: the watermark
+            # is not advanced on a skip, so the feedback stays visible. This
+            # is deliberately SEPARATE from HAS_PENDING_CHECKS rather than a
+            # NON_BLOCKING_CHECKS revert: that gate ages checks out after
+            # PENDING_STALE_MIN and would also re-block on the review's
+            # conclusion, reintroducing #7416's median-49-minute wait.
+            REVIEW_PR_LIVE="$(jq -r '
+              [ .[]
+                | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
+              | length > 0
+            ' <<< "${CHECKS_JSON}")"
+            REVIEW_RUN_STARTED_AT=""
+            if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
+              # Delay-window fallback: a review run parked BEFORE its job
+              # starts (the 10-minute environment wait) has no review-pr
+              # check-run yet, but a push now would still cancel it via
+              # synchronize. Only pull_request_target runs are cancelable —
+              # comment/review-triggered runs use per-run concurrency groups
+              # that a synchronize never cancels, so holding the round for
+              # one would defer autofix for nothing (R2-1). The scan fetched
+              # the newest run page once above; match by immutable head SHA or
+              # PR number, never by fork-controlled bare branch name.
+              REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" '
+                [ .workflow_runs[]?
+                  | select((.workflow_id | tostring) == $wf)
+                  | select((.event // "") == "pull_request_target")
+                  | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
+                  | select(((.head_sha // "") == $head) or any(.pull_requests[]?; (.number | tostring) == $pr))
+                  | (.run_started_at // .created_at // "") ]
+                | map(select(. != "")) | sort | last // ""
+              ' <<< "${REVIEW_RUNS_JSON}")"
+              if [[ -n "${REVIEW_RUN_STARTED_AT}" ]]; then
+                REVIEW_PR_LIVE="true"
+              fi
+            fi
+
             # Auto-rerun a check that died on INFRASTRUCTURE, not the code (see
             # INFRA_FAILURE_SIGNATURES). Only reached when the PR has a FAILED
             # check; then, for each, we read its annotations and — if they carry
@@ -2726,7 +2798,7 @@ jobs:
             # marker needed; the attempt counter is the guard, and after a rerun
             # the attempt increments so the next scan skips it. Any API failure
             # here is fail-safe: it just means no rerun.
-            if [[ -n "${PR_HEAD_OID}" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
+            if [[ -n "${PR_HEAD_OID}" && "${REVIEW_PR_LIVE}" != "true" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
               RERAN_INFRA=false
               # Failed check-runs on this head, with their run id and annotation
               # count — fetched once. External statuses (no check-run) are absent
@@ -2781,6 +2853,50 @@ jobs:
               echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
               fleet_row "${PR}" 'waiting' 'active checks in flight'
               continue
+            fi
+            if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
+              echo "🔍 #${PR}: review-pr in flight on this head — holding this round so the push cannot cancel it (#8888)"
+              fleet_row "${PR}" 'review-in-flight' 'review-pr live on head; round deferred'
+              # Ack-on-defer (#8888): a real-time human review routed this
+              # scan straight here, but the gate holds every mutation — from
+              # the human's seat the bot read their review and then did
+              # nothing. Say so once per in-flight review (the marker embeds
+              # the review-pr check's startedAt, so a NEW review re-arms the
+              # ack). The feedback itself needs no ack: the watermark is not
+              # advanced on this skip, so the next scan after the review
+              # lands still sees and addresses it. Cron scans stay silent —
+              # nothing arrived in them that a human is waiting on, and the
+              # fleet table already shows the deferral.
+              if [[ "${EVENT_NAME}" == 'pull_request_review' && "${DRY_RUN}" != "true" && "${REVIEW_SENDER}" != "${REVIEW_BOT}" ]]; then
+                REVIEW_STARTED_AT="$(jq -r '
+                  [ .[]
+                    | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review")))
+                    | (.startedAt // "")
+                    | select(. != "") ] | first // ""' <<< "${CHECKS_JSON}")"
+                [[ -z "${REVIEW_STARTED_AT}" ]] && REVIEW_STARTED_AT="${REVIEW_RUN_STARTED_AT}"
+                # An empty key (a queued check with no startedAt yet) would
+                # make the marker match EVERY future deferral — skip the ack
+                # this scan rather than arm a permanently-dead dedup.
+                if [[ -z "${REVIEW_STARTED_AT}" ]]; then
+                  echo "🕐 #${PR}: deferred-review ack skipped: live review-pr check has no startedAt yet (queued); a later scan acks once it starts"
+                else
+                  DEFER_ACKS="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                    | jq -r --arg ab "${AUTOFIX_BOT}" '.[] | select((.user.login // "") == $ab) | .body // ""' 2> /dev/null || true)"
+                  if grep -qF "<!-- autofix-review-deferred ${REVIEW_STARTED_AT} -->" <<< "${DEFER_ACKS}"; then
+                    echo "🕐 #${PR}: deferred-review ack already posted for this review run"
+                  else
+                    if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                      SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                    fi
+                    if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                      echo "::warning::#${PR}: deferred-review ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                    else
+                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🕐 Review received — an automatic review of the current head is still running, so this round is held until it lands (a push now would cancel it and discard its work, #8888). Your feedback stays queued for the next eligible round.\n\n<details>\n<summary>中文说明</summary>\n\n🕐 已收到评审 —— 当前 head 上仍有一轮自动 review 在运行，本轮暂缓（现在推送会取消该 review 并丢弃其工作，#8888）。反馈保持排队，等待下一次可运行的轮次处理。\n\n</details>\n\n<!-- autofix-review-deferred %s -->' "${REVIEW_STARTED_AT}")" > /dev/null 2>&1 \
+                        || echo "::warning::#${PR}: deferred-review ack failed — the dedup marker is NOT posted (a later scan may ack again)"
+                    fi
+                  fi
+                fi
+              fi
             fi
             # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
             # cannot predate the PR, and unlike the head commit date this never
@@ -3079,6 +3195,9 @@ jobs:
                   fi
                 fi
               fi
+              continue
+            fi
+            if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
               continue
             fi
             # Auto-update a PR that is red ONLY because of a stale base (see the
@@ -4410,14 +4529,13 @@ jobs:
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           [[ "${NET_MEASURED}" != 'true' ]] &&
             echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
-          # The marker's window field is spelled `key=`, NOT `win=`, on
-          # purpose: three censuses (PRIOR_TIMEOUTS, the milestone WIN_HEADS,
-          # the breaker PRIOR_HEADS) attribute comments to windows by the
-          # WHOLE-BODY substring `win=<key> -->`, and this marker can
-          # legitimately carry a different window key than its comment's
-          # autofix-eval marker (a supersede-exempt conflict round reporting
-          # after a re-arm). Any token embedding "win=" would double-attribute
-          # that comment to both windows.
+          # The marker's window field is spelled `key=`, NOT `win=`: this
+          # marker can legitimately carry a different window key than its
+          # comment's autofix-eval marker (a supersede-exempt conflict round
+          # reporting after a re-arm). The window censuses attribute
+          # positionally (last-wins) over their own scan-parsed eval
+          # markers, and the distinct token stays as defense in depth for
+          # any future substring consumer.
           # A stale-base auto-update merges current main into the branch,
           # moving the merge base the nets are measured against: overlap
           # resolutions then shift the measurement with no agent push. An
@@ -4463,6 +4581,11 @@ jobs:
             # round's pushed growth would escape the budget for the rest of
             # the live window.
             echo "growth_base_win=${LIVE_REARM_KEY}"
+            # The round's own growth + over-budget flag, so the report step can
+            # write this round's autofix-growth-now marker (the per-round
+            # history the divergence read above consumes).
+            echo "growth_src=${GROWTH_SRC}"
+            echo "growth_test=${GROWTH_TEST}"
           } >> "${GITHUB_OUTPUT}"
           echo "📏 net diff src ${NET_SRC} / test ${NET_TEST} lines (window baseline ${BASE_SRC}/${BASE_TEST}, growth ${GROWTH_SRC}/${GROWTH_TEST}, budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES})"
 
@@ -4477,6 +4600,74 @@ jobs:
             CRITICAL_ONLY='true'
             CRITICAL_ONLY_GROWTH='true'
           fi
+          # Divergence: Critical-only only trims non-Criticals, so when the
+          # GROWTH that trips the brake is Critical-driven the diff keeps
+          # climbing anyway. Read this window's prior per-round growth markers
+          # (written by the report step): count the rounds that were over
+          # budget, and take the MOST RECENT prior over-budget run's growth
+          # SUM (highest run_id — see below; NOT the window-wide max, which a
+          # one-off spike would raise forever). The round is DIVERGING when it
+          # is over budget now, the brake has already fired for
+          # >= GROWTH_DIVERGENCE_ROUNDS prior rounds, and the diff has NOT
+          # shrunk from that most-recent sum — the fixes are not converging, so
+          # the round must escalate to a human decision instead of patching
+          # again. A diff that is over budget but SHRINKING (agent removing
+          # code) or a one-off overshoot stays in ordinary Critical-only.
+          if [[ ! "${GROWTH_DIVERGENCE_ROUNDS}" =~ ^([1-9][0-9]{0,3})$ ]]; then
+            echo "::warning::GROWTH_DIVERGENCE_ROUNDS='${GROWTH_DIVERGENCE_ROUNDS}' is not a positive count; using 2"
+            GROWTH_DIVERGENCE_ROUNDS=2
+          fi
+          # Count runs whenever the net is measured (not only over budget), so
+          # the trajectory clause below is accurate even on a round that pulled
+          # back under budget. markers:
+          # <!-- autofix-growth-now src=N test=N over=BOOL round=N run=ID key=W -->
+          # Deduped and ordered by run=GITHUB_RUN_ID, the per-workflow-run id:
+          # the report post's bounded retry re-posts one run's marker (same
+          # run_id → collapses to the LATEST by created_at, so a re-run's
+          # fresher attempt wins over its own stale first post), while every
+          # distinct address run has a fresh, monotonically increasing run_id. round=/eval-watermark are NOT a
+          # safe identity — a state-triggered lane (a persistent merge conflict
+          # selects the PR every scan with no new evaluable feedback) freezes
+          # both NEWEST and ROUND, so distinct over-budget runs would share them
+          # and collapse, stalling the count. Filtered to markers AFTER any
+          # mid-window base update (BASE_UPD_AT) — the same re-anchoring the
+          # growth-base read guards against. The "not shrinking" test compares
+          # against the MOST RECENT prior over-budget run's sum (highest
+          # run_id), not the window-wide max: a single transient spike would
+          # otherwise raise the bar forever and a genuine plateau-over-budget
+          # runaway (the exact case to escalate) would never clear it. The
+          # CURRENT run's own markers are excluded (run != GITHUB_RUN_ID): a
+          # re-run of a failed job keeps the same run id and its failed
+          # attempt already posted a marker, so counting it would over-report
+          # the round's own attempt as a PRIOR one.
+          GROWTH_DIVERGED='false'
+          OVER_ROUNDS_PRIOR=0
+          PREV_SUM=0
+          if [[ "${NET_MEASURED}" == 'true' ]]; then
+            read -r OVER_ROUNDS_PRIOR PREV_SUM < <(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" --arg curr "${GITHUB_RUN_ID}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-growth-now src=(-?[0-9]+) test=(-?[0-9]+) over=([a-z]+) round=([0-9]+) run=([0-9]+) key=([^ ]+) -->") ] | .[]
+                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), win: .[5], at: ($c.created_at // "")} ]
+              | map(select(.win == $key and .over == "true"))
+              | map(select(.run != ($curr | tonumber)))
+              | map(select($baseupd == "" or (.at > $baseupd)))
+              | group_by(.run) | map(max_by(.at))
+              | sort_by(.run)
+              | "\(length) \((last.sum) // 0)"' "${WORKDIR}/ic.json" 2> /dev/null || echo "0 0")
+            [[ "${OVER_ROUNDS_PRIOR}" =~ ^[0-9]+$ ]] || OVER_ROUNDS_PRIOR=0
+            [[ "${PREV_SUM}" =~ ^-?[0-9]+$ ]] || PREV_SUM=0
+            if [[ "${CRITICAL_ONLY_GROWTH}" == 'true' \
+                  && "${OVER_ROUNDS_PRIOR}" -ge "${GROWTH_DIVERGENCE_ROUNDS}" \
+                  && $(( GROWTH_SRC + GROWTH_TEST )) -ge "${PREV_SUM}" ]]; then
+              GROWTH_DIVERGED='true'
+            fi
+          fi
+          # The over-budget flag feeds the report's per-round marker; the
+          # handoff itself is enforced by the feedback.md text below, so
+          # GROWTH_DIVERGED needs no step output.
+          echo "critical_only_growth=${CRITICAL_ONLY_GROWTH}" >> "${GITHUB_OUTPUT}"
+          [[ "${GROWTH_DIVERGED}" == 'true' ]] &&
+            echo "🛑 diff not converging: over budget now, ${OVER_ROUNDS_PRIOR} prior over-budget round(s) in this window, growth not shrinking — escalating to a maintainer decision instead of patching."
           # Which trusted humans have exhausted their per-window regular
           # feedback budget (see CRITICAL_ONLY_HUMAN_BATCHES). A batch is
           # COUNTED only when a Critical-only round actually consumed it:
@@ -4655,6 +4846,26 @@ jobs:
             echo "Only feedback newer than the last evaluation (${WATERMARK}) from"
             echo "trusted maintainers or the automated reviewer is listed."
             echo
+            # Diff-growth trajectory: the agent sees how big this PR has grown
+            # so it can prefer minimal/subtractive fixes and recognise a
+            # non-converging spiral, rather than reflexively adding code for
+            # every finding.
+            if [[ "${NET_MEASURED}" == 'true' ]]; then
+              echo "## Diff growth this window"
+              echo
+              echo "Net diff vs this counting window's baseline: source ${GROWTH_SRC} / test ${GROWTH_TEST} lines (budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}; ${OVER_ROUNDS_PRIOR} prior round(s) already over budget). Prefer minimal, root-cause, subtractive fixes. If closing a finding would grow the diff materially AND the same class of gap keeps reappearing on code earlier rounds added, that is a signal to escalate for a split — not to keep adding guards."
+              echo
+            fi
+            # Non-convergence handoff (the diff keeps growing past budget across
+            # rounds): a maintainer-decision item the agent must NOT settle by
+            # patching. Framed as defer-to-human so the address run stops with a
+            # handoff (SKILL: "Stop BLOCKED when any defer-to-human item remains").
+            if [[ "${GROWTH_DIVERGED}" == 'true' ]]; then
+              echo "## Needs a maintainer's decision — this PR is not converging"
+              echo
+              echo "This PR's diff has stayed over the growth budget for ${OVER_ROUNDS_PRIOR}+ rounds in this window and is still not shrinking (source ${GROWTH_SRC} / test ${GROWTH_TEST} net lines vs budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}). The review findings are themselves driving the growth, so continuing to patch will not converge — Critical-only mode cannot help because the Criticals are the growth. Do NOT apply more code fixes this round. Treat this as a \`defer-to-human\` item: STOP with a handoff that names the decision and lays out the options — split the PR (land the core, track the remaining findings as follow-up issues), redesign the approach, or accept the current state with the tail deferred — plus your recommendation. Leave the call to the maintainer; declining or implementing one direction yourself IS deciding."
+              echo
+            fi
             echo "## Reviews"
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
@@ -4781,8 +4992,8 @@ jobs:
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
-                | select(((.body // "") | contains("win=" + $key + " -->"))
-                    or ($key == "none" and (((.body // "") | contains("win=")) | not)))
+                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                    | ($wins | length) > 0 and (($wins | last) == $key))
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
@@ -5017,6 +5228,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5136,6 +5351,10 @@ jobs:
         env:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
+          # step (the agent runs branch code on the host) must not be able
+          # to downgrade a repo-variable 'reject' back to 'advisory'.
+          FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5203,7 +5422,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -5251,6 +5470,12 @@ jobs:
           # can report under a stale WINDOW after a re-arm; the marker must
           # land under the key later reads will use.
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
+          # This round's own growth + over-budget flag, written as the
+          # per-round autofix-growth-now marker so later rounds can measure
+          # divergence (growth still climbing over budget = not converging).
+          GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'
+          GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
+          CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
         run: |-
           # gh has its own $GITHUB_ENV-injectable channels: pin the host and
           # drop any planted token BEFORE the identity check below, so a
@@ -5292,7 +5517,158 @@ jobs:
             exit 1
           fi
 
-          # Take this PAT-bearing step off every mutable host git surface —
+          # Shared by the pushed and no-op outcomes: a no-op round may
+          # resolve re-verified findings (verified_head is the unchanged,
+          # previously verified origin head) and must post its declines'
+          # replies — silence in still-open threads was a no-op-only gap.
+          resolve_and_reply_threads() {
+            CAN_RESOLVE_THREADS='false'
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+              LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
+              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
+              elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
+              elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
+                [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+                CAN_RESOLVE_THREADS='true'
+              else
+                echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+              fi
+            fi
+            # Resolve the review threads whose findings the agent actually
+            # IMPLEMENTED, so a human re-reviewing sees only what is still open
+            # instead of re-reading every thread to work out what was handled.
+            # The agent cannot do this itself - its sandbox carries no token -
+            # so it records the inline-comment ids it implemented and this step,
+            # which already holds the PAT, maps each to its thread. Findings it
+            # DECLINED or deferred are deliberately left open. Best-effort
+            # throughout: a resolve failure must never fail a good push.
+            # Both this resolve block and the reply block below map an
+            # inline-comment id to its review thread, so the threads are
+            # fetched once here and shared. Hoisted above both so a round that
+            # only replies (no resolved-comments.txt) still has them.
+            # first-100 page cap: a comment in a thread past this page is not
+            # mapped, and each block falls back to the id as given.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
+              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
+                query($owner:String!,$name:String!,$pr:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$pr){
+                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
+                    }
+                  }
+                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
+              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
+              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
+              fi
+            fi
+            if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
+              CONFIRMED_RESOLVED_N=0
+              read_thread_guard() {
+                gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
+                  query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
+                    repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
+                    node(id:$threadId){... on PullRequestReviewThread{isResolved}}
+                  }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
+              }
+              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
+                rc_id="${rc_id%$'\r'}"
+                rc_id="${rc_id#rc:}"
+                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
+                thread_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(.isResolved | not)
+                     | select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].id // ""' <<< "${THREADS_JSON}")"
+                if [[ -z "${thread_id}" ]]; then
+                  echo "::warning::comment ${rc_id} matched no open review thread"
+                  continue
+                fi
+                if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
+                  [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+                  echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
+                  break
+                elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
+                  continue
+                elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
+                  echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
+                  break
+                fi
+                RESOLVE_SUCCEEDED='false'
+                if gh api graphql -f threadId="${thread_id}" -f query='
+                  mutation($threadId:ID!){
+                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
+                  }' > /dev/null 2>&1; then
+                  RESOLVE_SUCCEEDED='true'
+                fi
+                POST_GUARD_OK='false'
+                if IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null); then
+                  POST_GUARD_OK='true'
+                fi
+                if [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+                  if [[ "${RESOLVE_SUCCEEDED}" != 'true' ]]; then
+                    echo "::warning::comment ${rc_id} is resolved after an unsuccessful mutation command; another actor or a lost response may be responsible"
+                  fi
+                  CONFIRMED_RESOLVED_N=$(( CONFIRMED_RESOLVED_N + 1 ))
+                elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
+                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
+                else
+                  echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
+                  break
+                fi
+              done < "${WORKDIR}/resolved-comments.txt"
+              echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
+            fi
+            # The mirror of the resolve above: a finding the agent did NOT
+            # resolve keeps its thread open, and this answers it IN that thread.
+            # Without it the reason sits only in the round summary, so the
+            # reviewer who opens the still-open thread sees silence and cannot
+            # tell their finding was read. Same neutralisation as the summary
+            # body — a reply is model output posted verbatim under the bot
+            # identity, so it could otherwise smuggle a forged control marker.
+            # Best-effort: a reply failure must never fail a good push.
+            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
+              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
+              REPLIED_N=0
+              while IFS=$'\t' read -r rc_id reply_b64; do
+                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
+                # A finding cannot be both resolved and replied to; the resolve
+                # block above already closed anything in resolved-comments.txt,
+                # so skip it here rather than answer a thread we just resolved.
+                # Match tolerates the rc: prefix and a trailing CR, as the
+                # resolve block's own parsing does.
+                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
+                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
+                  grep -qxE "(rc:)?${rc_id}"; then
+                  continue
+                fi
+                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
+                [[ -n "${REPLY_BODY}" ]] || continue
+                # GitHub rejects a reply aimed at another reply ("Replies to
+                # replies are not supported"), and rc_id can itself be a reply
+                # id — the feedback step lists every review comment, replies
+                # included. Map to the thread's top-level comment (the one
+                # valid target), falling back to rc_id when the thread is past
+                # the first-100 page cap and so absent from THREADS_JSON.
+                root_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
+                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
+                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
+                  REPLIED_N=$(( REPLIED_N + 1 ))
+                else
+                  echo "::warning::could not reply to review comment ${rc_id}"
+                fi
+              done < <(jq -r '.[] | select(.id != null and .body != null)
+                | [(.id | tostring), (.body | @base64)] | @tsv' \
+                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
+              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
+            fi
+          }
+
+                    # Take this PAT-bearing step off every mutable host git surface —
           # both the shared config FILES and git's ENV channels — keep this
           # block byte-identical to its twin in 'Publish PR' (the contract
           # test pins them equal). File scopes: the pool shares one HOME
@@ -5444,150 +5820,7 @@ jobs:
                 PUSH_RACE_MERGED='true'
               fi
             done
-            CAN_RESOLVE_THREADS='false'
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
-              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
-                echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
-              elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-                echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
-              elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
-                [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
-                CAN_RESOLVE_THREADS='true'
-              else
-                echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
-              fi
-            fi
-            # Resolve the review threads whose findings the agent actually
-            # IMPLEMENTED, so a human re-reviewing sees only what is still open
-            # instead of re-reading every thread to work out what was handled.
-            # The agent cannot do this itself - its sandbox carries no token -
-            # so it records the inline-comment ids it implemented and this step,
-            # which already holds the PAT, maps each to its thread. Findings it
-            # DECLINED or deferred are deliberately left open. Best-effort
-            # throughout: a resolve failure must never fail a good push.
-            # Both this resolve block and the reply block below map an
-            # inline-comment id to its review thread, so the threads are
-            # fetched once here and shared. Hoisted above both so a round that
-            # only replies (no resolved-comments.txt) still has them.
-            # first-100 page cap: a comment in a thread past this page is not
-            # mapped, and each block falls back to the id as given.
-            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
-              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
-                query($owner:String!,$name:String!,$pr:Int!){
-                  repository(owner:$owner,name:$name){
-                    pullRequest(number:$pr){
-                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
-                    }
-                  }
-                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
-              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
-              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
-                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
-              fi
-            fi
-            if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
-              CONFIRMED_RESOLVED_N=0
-              read_thread_guard() {
-                gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
-                  query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
-                    repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
-                    node(id:$threadId){... on PullRequestReviewThread{isResolved}}
-                  }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
-              }
-              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
-                rc_id="${rc_id%$'\r'}"
-                rc_id="${rc_id#rc:}"
-                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
-                thread_id="$(jq -r --argjson id "${rc_id}" \
-                  'map(select(.isResolved | not)
-                     | select(any(.comments.nodes[]; .databaseId == $id)))
-                   | .[0].id // ""' <<< "${THREADS_JSON}")"
-                if [[ -z "${thread_id}" ]]; then
-                  echo "::warning::comment ${rc_id} matched no open review thread"
-                  continue
-                fi
-                if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
-                  [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-                  echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
-                  break
-                elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
-                  echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
-                  continue
-                elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
-                  echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
-                  break
-                fi
-                RESOLVE_SUCCEEDED='false'
-                if gh api graphql -f threadId="${thread_id}" -f query='
-                  mutation($threadId:ID!){
-                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
-                  }' > /dev/null 2>&1; then
-                  RESOLVE_SUCCEEDED='true'
-                fi
-                POST_GUARD_OK='false'
-                if IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null); then
-                  POST_GUARD_OK='true'
-                fi
-                if [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'true' ]]; then
-                  if [[ "${RESOLVE_SUCCEEDED}" != 'true' ]]; then
-                    echo "::warning::comment ${rc_id} is resolved after an unsuccessful mutation command; another actor or a lost response may be responsible"
-                  fi
-                  CONFIRMED_RESOLVED_N=$(( CONFIRMED_RESOLVED_N + 1 ))
-                elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
-                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
-                else
-                  echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
-                  break
-                fi
-              done < "${WORKDIR}/resolved-comments.txt"
-              echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
-            fi
-            # The mirror of the resolve above: a finding the agent did NOT
-            # resolve keeps its thread open, and this answers it IN that thread.
-            # Without it the reason sits only in the round summary, so the
-            # reviewer who opens the still-open thread sees silence and cannot
-            # tell their finding was read. Same neutralisation as the summary
-            # body — a reply is model output posted verbatim under the bot
-            # identity, so it could otherwise smuggle a forged control marker.
-            # Best-effort: a reply failure must never fail a good push.
-            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
-              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
-              REPLIED_N=0
-              while IFS=$'\t' read -r rc_id reply_b64; do
-                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
-                # A finding cannot be both resolved and replied to; the resolve
-                # block above already closed anything in resolved-comments.txt,
-                # so skip it here rather than answer a thread we just resolved.
-                # Match tolerates the rc: prefix and a trailing CR, as the
-                # resolve block's own parsing does.
-                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
-                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
-                  grep -qxE "(rc:)?${rc_id}"; then
-                  continue
-                fi
-                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
-                [[ -n "${REPLY_BODY}" ]] || continue
-                # GitHub rejects a reply aimed at another reply ("Replies to
-                # replies are not supported"), and rc_id can itself be a reply
-                # id — the feedback step lists every review comment, replies
-                # included. Map to the thread's top-level comment (the one
-                # valid target), falling back to rc_id when the thread is past
-                # the first-100 page cap and so absent from THREADS_JSON.
-                root_id="$(jq -r --argjson id "${rc_id}" \
-                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
-                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
-                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
-                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
-                  REPLIED_N=$(( REPLIED_N + 1 ))
-                else
-                  echo "::warning::could not reply to review comment ${rc_id}"
-                fi
-              done < <(jq -r '.[] | select(.id != null and .body != null)
-                | [(.id | tostring), (.body | @base64)] | @tsv' \
-                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
-              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
-            fi
+            resolve_and_reply_threads
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
@@ -5599,6 +5832,16 @@ jobs:
               # line, and jq scan() matches across newlines. The backslashes
               # render away in markdown, so the visible text is unchanged.
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
+              # Gate-authored advisories (e.g. "test coverage shrank") render
+              # AFTER the agent's summary: the summary carries the agent's
+              # justification, the advisory carries the machine measurement a
+              # maintainer checks it against. Escaped like every other
+              # embedded file — the advisory quotes file paths from the
+              # branch, which are model-influenced content.
+              if [[ -s "${WORKDIR}/gate-advisories.md" ]]; then
+                echo
+                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/gate-advisories.md"
+              fi
               if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
                 echo
                 sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
@@ -5620,9 +5863,17 @@ jobs:
               if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
+              # Per-round growth history the next round's divergence read
+              # counts; run=GITHUB_RUN_ID is the dedup+order identity (a retry
+              # re-posts the same run, distinct runs get fresh run ids).
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
+            # No push happened, so the verified head is the unchanged
+            # origin head; resolution's own live-head guards still apply.
+            PUSH_RACE_MERGED='false'
+            resolve_and_reply_threads
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
@@ -5644,6 +5895,10 @@ jobs:
               if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
                 echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               fi
+              # Per-round growth history the next round's divergence read
+              # counts; run=GITHUB_RUN_ID is the dedup+order identity (a retry
+              # re-posts the same run, distinct runs get fresh run ids).
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
@@ -5702,8 +5957,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
               if [[ -z "${WIN_HEADS}" ]]; then
@@ -5790,6 +6045,16 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
+          # This step also posts a round report (timeout / gate-rejection /
+          # abort), so it writes the per-round growth-now marker too — else an
+          # over-budget round that never reaches 'Push and report' leaves a
+          # history gap and the divergence count under-reports. Empty outputs
+          # (prepare never ran) fall through the :-0/:-false marker fallbacks
+          # to an inert over=false entry.
+          GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'
+          GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
+          CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
+          GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
         run: |-
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
@@ -6165,8 +6430,8 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ((.body // "") | contains("win=" + $win + " -->"))
-                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
@@ -6295,6 +6560,11 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
+              # Per-round growth history the divergence read counts — same
+              # marker the push/no-op report paths write, so an over-budget
+              # round that timed out or was gate-rejected is not a gap. run=
+              # (per-workflow-run) is the dedup/order identity.
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               # A sentinel ts means the agent evaluated NOTHING (crash, API
               # error, gate crash) and the next scan must retry. Recording a
               # judged head here would make RED_HEAD == LIVE_HEAD, so the

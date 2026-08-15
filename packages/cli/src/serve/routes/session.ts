@@ -31,12 +31,16 @@ import {
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { DAEMON_PROMPT_DISPLAY_TEXT_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  CHANNEL_PROMPT_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  type BridgeBranchedSession,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
   isReservedLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../live/session-source.js';
+} from '../conversations/session-source.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
@@ -355,6 +359,22 @@ function parseHistoryPageSize(
     return null;
   }
   return value as number;
+}
+
+function parseLiveReplayMode(
+  body: Record<string, unknown>,
+  res: Response,
+): 'full' | 'summary' | undefined | null {
+  const value = body['liveReplayMode'];
+  if (value === undefined) return undefined;
+  if (value !== 'full' && value !== 'summary') {
+    res.status(400).json({
+      error: '`liveReplayMode` must be `full` or `summary`',
+      code: 'invalid_live_replay_mode',
+    });
+    return null;
+  }
+  return value;
 }
 
 function workspaceTranscriptCursorExceedsLimit(
@@ -2111,6 +2131,8 @@ export function registerSessionRoutes(
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
       if (historyPageSize === null) return;
+      const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
+      if (liveReplayMode === null) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       let sessionIdReservation: RequestedSessionIdReservation;
@@ -2173,6 +2195,7 @@ export function registerSessionRoutes(
                     ...(historyPageSize !== undefined
                       ? { historyPageSize }
                       : {}),
+                    ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
@@ -2536,53 +2559,43 @@ export function registerSessionRoutes(
             name = name.slice(0, 200);
           }
         }
+        const atRecordId = body?.['atRecordId'];
+        if (atRecordId !== undefined && typeof atRecordId !== 'string') {
+          res.status(400).json({
+            error: '`atRecordId` must be a string',
+            code: 'branch_point_invalid',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const result = await runtime.bridge.branchSession(
           sessionId,
-          { name },
+          {
+            name,
+            ...(atRecordId !== undefined ? { atRecordId } : {}),
+          },
           { clientId },
         );
-        try {
-          runtime.generationGuard?.assertOpen();
-        } catch (error) {
-          if (!result.attached) {
-            await runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => false);
-          } else {
+        if (atRecordId === undefined) {
+          const restored = result as BridgeBranchedSession;
+          const releaseLiveBranch = async () => {
+            if (restored.attached) {
+              await runtime.bridge
+                .detachClient(restored.sessionId, restored.clientId)
+                .catch(() => {});
+              return;
+            }
             await runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {});
+              .killSession(restored.sessionId, { requireZeroAttaches: true })
+              .catch(() => false);
+          };
+          if (!res.writable) {
+            void releaseLiveBranch();
+            return;
           }
-          throw error;
         }
-        if (!res.writable) {
-          if (!result.attached) {
-            void runWithWorkspaceRuntimeStorage(runtime, () =>
-              deleteDaemonSessionIfOrphan({
-                sessionId: result.sessionId,
-                service: createWorkspaceRuntimeSessionService(runtime),
-                bridge: runtime.bridge,
-                coordinator: archiveCoordinator,
-              }),
-            ).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
-          } else {
-            runtime.bridge
-              .detachClient(result.sessionId, result.clientId)
-              .catch(() => {
-                // Best-effort cleanup; channel.exited will eventually reap.
-              });
-          }
-          return;
-        }
+        if (!res.writable) return;
         res.status(201).json(result);
       },
     ),
@@ -3367,23 +3380,31 @@ export function registerSessionRoutes(
           forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
         const promptDisplayText =
           forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+        const channelPrompt = forwardedMeta?.[CHANNEL_PROMPT_META_KEY];
         if (forwardedMeta) {
           delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
           delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+          delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
           if (Object.keys(forwardedMeta).length > 0) {
             forwardedBody['_meta'] = forwardedMeta;
           } else {
             delete forwardedBody['_meta'];
           }
         }
+        const channelWorkerAuthorized = isChannelWorkerPromptAuthorized(
+          promptAuthorization,
+          runtime.workspaceCwd,
+        );
         const trustedPromptDisplayText =
-          typeof promptDisplayText === 'string' &&
-          isChannelWorkerPromptAuthorized(
-            promptAuthorization,
-            runtime.workspaceCwd,
-          )
+          typeof promptDisplayText === 'string' && channelWorkerAuthorized
             ? promptDisplayText
             : undefined;
+        // Channel classification opts the turn out of loop-detected
+        // rejection, so it rides the same worker authorization as the
+        // display projection; a forged key from any other caller is dropped
+        // here and again at the bridge admission strip.
+        const trustedChannelPrompt =
+          channelWorkerAuthorized && channelPrompt === true;
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
@@ -3433,6 +3454,7 @@ export function registerSessionRoutes(
               ...(trustedPromptDisplayText !== undefined
                 ? { promptDisplayText: trustedPromptDisplayText }
                 : {}),
+              ...(trustedChannelPrompt ? { channelPrompt: true } : {}),
               ...(delivery !== undefined
                 ? {
                     channelDelivery: {

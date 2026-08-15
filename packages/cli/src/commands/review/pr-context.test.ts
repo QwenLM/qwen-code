@@ -10,6 +10,46 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Argv, CommandModule } from 'yargs';
+
+const {
+  ghMock,
+  ghApiAllMock,
+  currentUserMock,
+  ensureAuthenticatedMock,
+  setGhHostMock,
+  writeFileSyncMock,
+  mkdirSyncMock,
+} = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+  ghApiAllMock: vi.fn(),
+  currentUserMock: vi.fn(),
+  ensureAuthenticatedMock: vi.fn(),
+  setGhHostMock: vi.fn(),
+  writeFileSyncMock: vi.fn(),
+  mkdirSyncMock: vi.fn(),
+}));
+
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    gh: ghMock,
+    ghApiAll: ghApiAllMock,
+    currentUser: currentUserMock,
+    ensureAuthenticated: ensureAuthenticatedMock,
+    setGhHost: setGhHostMock,
+  };
+});
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const mock = {
+    ...actual,
+    mkdirSync: mkdirSyncMock,
+    writeFileSync: writeFileSyncMock,
+  };
+  return { ...mock, default: mock };
+});
 import {
   prContextCommand,
   anyRootCarriesCriticalMarker,
@@ -25,30 +65,11 @@ import {
   fullCommentBody,
   type PrMetadata,
   type RawComment,
+  type RawReview,
   latestOwnLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
-
-// The handler-level identity tests drive `runPrContext` through the command
-// with the gh layer mocked — everything else in this file tests pure
-// functions and never reaches it.
-const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
-const ghApiAllMock = vi.hoisted(() =>
-  vi.fn((..._args: string[]): unknown[] => []),
-);
-const currentUserMock = vi.hoisted(() => vi.fn(() => 'review-bot'));
-vi.mock('./lib/gh.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./lib/gh.js')>();
-  return {
-    ...actual,
-    gh: ghMock,
-    ghApiAll: ghApiAllMock,
-    currentUser: currentUserMock,
-    ensureAuthenticated: vi.fn(),
-    setGhHost: vi.fn(),
-  };
-});
 
 // Guards the recognition of legacy suggestion-summary comments. This is what
 // decides which issue comment is excluded from the "Already discussed" list.
@@ -191,7 +212,7 @@ describe('fullBody', () => {
     const long = 'x'.repeat(9000);
     const got = fullBody(long, 42);
     expect(got).toContain('truncated at 8000 chars');
-    expect(got).toContain('/reviews/42');
+    expect(got).toContain('comment-body 42 --kind review');
     expect(got).toContain('cannot tell');
   });
 });
@@ -200,7 +221,7 @@ describe('fullCommentBody', () => {
   it('caps long comment bodies and names the comment id for the tail', () => {
     const got = fullCommentBody('y'.repeat(9000), 314);
     expect(got).toContain('truncated at 8000 chars');
-    expect(got).toContain('pulls/comments/314');
+    expect(got).toContain('comment-body 314 --kind inline');
     expect(got).toContain('cannot tell');
   });
 });
@@ -333,7 +354,7 @@ describe('buildMarkdown — review bodies and replied Criticals', () => {
     expect(md).toContain('THE-TAIL-SURVIVES');
     expect(md).toContain('(comment 11)');
     // The reply snippet is cut, and the cut names the fetch for the rest.
-    expect(md).toContain('pulls/comments/12');
+    expect(md).toContain('comment-body 12 --kind inline');
   });
 });
 
@@ -375,8 +396,14 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
     );
     // A markerless blocker past the snippet cap is recoverable only through
     // the named fetch — and the emitted command must not need filling in.
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/comments/21');
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/issues/comments/31');
+    // The full prefix is pinned too: without `"${QWEN_CODE_CLI:-qwen}" review`
+    // the emitted text is an unrunnable bare subcommand name.
+    expect(md).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review comment-body 21 --kind inline --repo QwenLM/qwen-code',
+    );
+    expect(md).toContain(
+      'comment-body 31 --kind issue --repo QwenLM/qwen-code',
+    );
     expect(md).not.toContain('{owner}');
   });
 
@@ -396,7 +423,9 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
         },
       ],
     );
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/pulls/6711/reviews/7');
+    expect(md).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo QwenLM/qwen-code',
+    );
   });
 
   it('a settled replied thread cut past the snippet cap names both comment ids', () => {
@@ -416,8 +445,8 @@ describe('buildMarkdown — truncation refs are copy-runnable with real coordina
       },
     ];
     const md = buildMarkdown('1', 'o/r', meta, inline, [], []);
-    expect(md).toContain('gh api repos/o/r/pulls/comments/41');
-    expect(md).toContain('gh api repos/o/r/pulls/comments/42');
+    expect(md).toContain('comment-body 41 --kind inline --repo o/r');
+    expect(md).toContain('comment-body 42 --kind inline --repo o/r');
   });
 });
 
@@ -901,7 +930,7 @@ describe('blockerSection — both channels, and the budget', () => {
     }
     // The one past the budget is a snippet, and it names the exact fetch.
     expect(md).toContain('section budget spent');
-    expect(md).toContain('gh api repos/QwenLM/qwen-code/issues/comments/3');
+    expect(md).toContain('comment-body 3 --kind issue --repo QwenLM/qwen-code');
   });
 
   it('renders the bodies that fit in FULL and only degrades past the budget', () => {
@@ -1459,6 +1488,7 @@ describe('prContextCommand handler — identity fail-closed', () => {
     ghApiAllMock.mockReturnValue([]);
     currentUserMock.mockClear();
     currentUserMock.mockReturnValue('review-bot');
+    writeFileSyncMock.mockClear();
   });
   afterEach(() => rmSync(outDir, { recursive: true, force: true }));
 
@@ -1508,7 +1538,10 @@ describe('prContextCommand handler — identity fail-closed', () => {
     });
     const out = join(outDir, 'context.md');
     await run(out);
-    expect(readFileSync(out, 'utf8')).toContain('## Open inline comments');
+    // The fs layer is mocked file-wide: observe the context through the
+    // write call, the way this file's other handler suites do.
+    const written = writeFileSyncMock.mock.calls[0]?.[1] as string;
+    expect(written).toContain('## Open inline comments');
   });
 
   it('proceeds best-effort when identity fails and only a reply carries a marker', async () => {
@@ -1540,18 +1573,187 @@ describe('prContextCommand handler — identity fail-closed', () => {
     const out = join(outDir, 'context.md');
     await run(out);
     // Not refused: the replied thread renders under "Already discussed".
-    expect(readFileSync(out, 'utf8')).toContain('plain root prose');
+    const written = writeFileSyncMock.mock.calls[0]?.[1] as string;
+    expect(written).toContain('plain root prose');
   });
 
   it('promotes the marker comment into the re-check section when identity resolves', async () => {
     withMarkerPosted();
     const out = join(outDir, 'context.md');
     await run(out);
-    const md = readFileSync(out, 'utf8');
+    const md = writeFileSyncMock.mock.calls[0]?.[1] as string;
     const section = md.indexOf('## Blockers to re-check');
     expect(section).toBeGreaterThanOrEqual(0);
     expect(md.indexOf('the guard checks the wrong variable')).toBeGreaterThan(
       section,
     );
+  });
+});
+
+describe('buildMarkdown host baking', () => {
+  const meta = {
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  } as PrMetadata;
+
+  const longReview: RawReview = {
+    id: 7,
+    user: { login: 'r' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'x'.repeat(9000),
+  };
+
+  it('bakes --host into the emitted refetch command when a host is set', () => {
+    const md = buildMarkdown(
+      '6711',
+      'o/r',
+      meta,
+      [],
+      [],
+      [longReview],
+      null,
+      undefined,
+      'ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
+    );
+  });
+
+  it('emits no --host flag when no host is set', () => {
+    const md = buildMarkdown('6711', 'o/r', meta, [], [], [longReview]);
+    expect(md).toContain('comment-body 7 --kind review --pr 6711 --repo o/r');
+    expect(md).not.toContain('--host');
+  });
+
+  it('bakes --host for inline and issue kinds too, not just reviews', () => {
+    // The long-body surfaces are mostly inline/issue comments (snippet cuts,
+    // budget-degraded blockers) — a "kinds differ" refactor must not strand
+    // their refetch commands on the default host.
+    const inline = [
+      {
+        id: 21,
+        user: { login: 'r' },
+        body: `**[Critical]** ${'y'.repeat(9000)}`,
+        path: 'a.ts',
+        line: 1,
+      },
+    ];
+    const issue = [
+      {
+        id: 31,
+        user: { login: 'r' },
+        body: 'z'.repeat(9000),
+      },
+    ];
+    const md = buildMarkdown(
+      '6711',
+      'o/r',
+      meta,
+      inline,
+      issue,
+      [],
+      null,
+      undefined,
+      'ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 21 --kind inline --repo o/r --host ghe.example.com',
+    );
+    expect(md).toContain(
+      'comment-body 31 --kind issue --repo o/r --host ghe.example.com',
+    );
+  });
+});
+
+describe('runPrContext host baking (handler level)', () => {
+  const metaJson = JSON.stringify({
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'f',
+    headRefOid: 'abc',
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    state: 'OPEN',
+  });
+  const longReview = {
+    id: 7,
+    user: { login: 'rev' },
+    state: 'COMMENTED',
+    submitted_at: '2026-08-01',
+    body: 'x'.repeat(9000),
+  };
+
+  let savedGhHost: string | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    currentUserMock.mockReturnValue('someone-else');
+    ghMock.mockReturnValue(metaJson);
+    ghApiAllMock.mockReset();
+    ghApiAllMock
+      .mockReturnValueOnce([]) // inline
+      .mockReturnValueOnce([]) // issue comments
+      .mockReturnValueOnce([longReview]); // reviews
+    process.exitCode = undefined;
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+
+  afterEach(() => {
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+  });
+
+  async function runHandler(extra: Record<string, unknown>) {
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '6711',
+      owner_repo: 'o/r',
+      out: '/tmp/ctx.md',
+      ...extra,
+    });
+    return writeFileSyncMock.mock.calls[0][1] as string;
+  }
+
+  it('bakes --host into the emitted refetch commands when passed', async () => {
+    const written = await runHandler({ host: 'ghe.example.com' });
+    expect(written).toContain(
+      'comment-body 7 --kind review --pr 6711 --repo o/r --host ghe.example.com',
+    );
+    // The routing half is pinned alongside the baking half: pr-context's own
+    // gh calls must run at the flag's host, not github.com's same-named repo.
+    expect(setGhHostMock).toHaveBeenCalledWith('ghe.example.com');
+  });
+
+  it('bakes an operator-exported GH_HOST when no flag is passed', async () => {
+    process.env['GH_HOST'] = 'ghe.example.com';
+    const written = await runHandler({});
+    expect(written).toContain('--host ghe.example.com');
+    // No flag → setGhHost(undefined): the gh calls inherit the exported
+    // GH_HOST from the parent env rather than being pinned to github.com.
+    expect(setGhHostMock).toHaveBeenCalledWith(undefined);
+  });
+
+  it('does not bake a host gh tolerates but the refetch validator rejects', async () => {
+    // gh accepts underscore aliases; comment-body's setGhHost rejects them —
+    // baking one would strand every refetch on an exit-2 validation error.
+    process.env['GH_HOST'] = 'my_ghe';
+    const written = await runHandler({});
+    expect(written).not.toContain('--host');
   });
 });

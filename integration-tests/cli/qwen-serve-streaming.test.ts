@@ -955,6 +955,78 @@ describePOSIX('qwen serve — Last-Event-ID resume', () => {
   }, 60_000);
 });
 
+describePOSIX('qwen serve — historical Assistant response branch', () => {
+  it('creates, opens, and continues a branch through the real daemon', async () => {
+    const source = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    const first = await client.prompt(source.sessionId, {
+      prompt: [{ type: 'text', text: 'historical branch turn one' }],
+    });
+    expect(first.branchPoint).toBeDefined();
+    if (!first.branchPoint) return;
+
+    await client.prompt(source.sessionId, {
+      prompt: [{ type: 'text', text: 'historical branch turn two' }],
+    });
+    await client.prompt(source.sessionId, {
+      prompt: [{ type: 'text', text: 'historical branch turn three' }],
+    });
+
+    const branched = await client.branchSession(source.sessionId, {
+      atRecordId: first.branchPoint.checkpointUuid,
+    });
+    const branchBeforeContinue = await client.getSessionTranscriptPage(
+      branched.sessionId,
+      { limit: 500 },
+    );
+    const branchBeforeText = JSON.stringify(branchBeforeContinue.events);
+    expect(branchBeforeText).toContain('historical branch turn one');
+    expect(branchBeforeText).not.toContain('historical branch turn two');
+    expect(branchBeforeText).not.toContain('historical branch turn three');
+
+    const sourceAfterBranch = await client.getSessionTranscriptPage(
+      source.sessionId,
+      { limit: 500 },
+    );
+    const sourceText = JSON.stringify(sourceAfterBranch.events);
+    expect(sourceText).toContain('historical branch turn one');
+    expect(sourceText).toContain('historical branch turn two');
+    expect(sourceText).toContain('historical branch turn three');
+
+    const loadedBranch = await client.loadSession(branched.sessionId);
+    await client.prompt(
+      branched.sessionId,
+      {
+        prompt: [{ type: 'text', text: 'continue the historical branch' }],
+      },
+      undefined,
+      loadedBranch.clientId,
+    );
+    const branchAfterContinue = await client.getSessionTranscriptPage(
+      branched.sessionId,
+      { limit: 500 },
+    );
+    expect(JSON.stringify(branchAfterContinue.events)).toContain(
+      'continue the historical branch',
+    );
+
+    // The source session must stay untouched by the fork's continuation.
+    const sourceAfterContinue = await client.getSessionTranscriptPage(
+      source.sessionId,
+      { limit: 500 },
+    );
+    const sourceAfterContinueText = JSON.stringify(sourceAfterContinue.events);
+    expect(sourceAfterContinueText).not.toContain(
+      'continue the historical branch',
+    );
+    expect(sourceAfterContinueText).toContain('historical branch turn one');
+    expect(sourceAfterContinueText).toContain('historical branch turn two');
+    expect(sourceAfterContinueText).toContain('historical branch turn three');
+  }, 90_000);
+});
+
 describePOSIX('qwen serve — daemon Todo Stop Guard replay', () => {
   it('continues after prompt admission without an SSE client and replays the bounded attempts', async () => {
     const session = await client.createOrAttachSession({

@@ -58,7 +58,11 @@ import {
   findingsSection,
   agentPromptCommand,
 } from './agent-prompt.js';
-import { BRIEFS, MODELED_SYSTEM_EXECUTION_LENS } from './lib/agent-briefs.js';
+import {
+  BRIEFS,
+  ENUMERATION_TRAP_LENS,
+  MODELED_SYSTEM_EXECUTION_LENS,
+} from './lib/agent-briefs.js';
 import {
   MODELED_SYSTEM_DOMAIN,
   SHELL_MODEL_LAYERS,
@@ -161,6 +165,21 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     const p = buildChunkAgentPrompt(PLAN, 15);
     expect(p).toContain('Uncoverable: chunk 15');
     expect(p).not.toContain('Covered: chunk 15');
+  });
+
+  it('gives an unreachable chunk only the Uncoverable receipt — no review block or shape lens', () => {
+    // R4-1: an unreachable chunk's one instruction is to return the Uncoverable
+    // line; carrying the dimension review, the shape lens, or the finding format
+    // beside it is the two-masters contradiction the modeled/budget blocks already
+    // guard against. It returns after the receipt.
+    const p = buildChunkAgentPrompt(PLAN, 15);
+    expect(p).not.toContain(ENUMERATION_TRAP_LENS);
+    expect(p).not.toContain('## What to review');
+    // The finding-format / severity / exclusions blocks are the rest of the
+    // two-masters contract; none may reach an unreachable chunk either (R5-177).
+    expect(p).not.toContain('Format each finding');
+    expect(p).not.toContain('Apply the severity definitions');
+    expect(p).not.toContain('What is NOT a finding');
   });
 
   it('drops a malformed files[] entry instead of rendering "undefined"', () => {
@@ -284,6 +303,39 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     expect(
       buildChunkAgentPrompt(chunkPlan([MODELED_SYSTEM_DOMAIN], 10_000_000), 1),
     ).not.toContain('Modeled-executable-system lens — your territory');
+  });
+
+  it('carries the enumeration-trap lens — with its operational clauses — into both the 3b brief (3A) and the chunk brief (3B)', () => {
+    // Delivery: one exported constant reaches both paths. A cleanup that drops the
+    // lens from either the whole-diff 3b brief or buildChunkAgentPrompt must fail —
+    // otherwise a large chunked PR (the 3B path, where the bloat lives) silently
+    // stops filing the class-closing shape finding.
+    expect(BRIEFS['3b'].brief).toContain(ENUMERATION_TRAP_LENS);
+    expect(buildChunkAgentPrompt(PLAN, 13)).toContain(ENUMERATION_TRAP_LENS);
+    // Content: the delivery assertions above are `toContain(constant)`, so they
+    // pass even if the constant is emptied or its operational clauses paraphrased
+    // away (both sites update together). Pin the load-bearing text literally, so a
+    // weakened lens fails independently of where it is delivered.
+    expect(ENUMERATION_TRAP_LENS).toContain('has **no last corner**');
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'file it ONCE, in place of enumerating cases',
+    );
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'can be fooled into a wrong result is **Critical**',
+    );
+    // The witness contract: without a concrete demonstrated corner the shape
+    // finding confirms only low, and low-confidence findings are terminal-only —
+    // they never post and never reach the ledger the backstop reads. Drop it and
+    // the headline mechanism goes inert.
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      "Carry ONE demonstrated corner as the finding's witness",
+    );
+    // The bounded-surface exception is the false-positive guard R4-2 demanded;
+    // deleting it would make the lens escalate a small exhaustively-specified
+    // grammar. Pin it literally — the delivery assertions cannot see its loss.
+    expect(ENUMERATION_TRAP_LENS).toContain(
+      'Adversarial input alone does NOT make a surface unbounded',
+    );
   });
 });
 
@@ -2286,16 +2338,112 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('timeout: 600000');
   });
 
-  it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
+  it('welds the PR into Agent 0 — an unqualified number judges the wrong issue', () => {
     const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
     const p = buildRoleBrief(PR_PLAN, '0', { planPath });
     expect(p).toContain('#6766');
     expect(p).toContain('QwenLM/qwen-code');
     expect(p).toContain(join(resolve('/x'), 'qwen-review-pr-6766-context.md'));
+    // The evidence fetch is the welded issue-context command, not a gh prose line.
+    // The full wrapper is pinned: without `"${QWEN_CODE_CLI:-qwen}" review`
+    // the emitted text is an unrunnable bare subcommand name.
+    expect(p).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review issue-context 6766 --repo QwenLM/qwen-code',
+    );
+    expect(p).toContain(
+      join(resolve('/x'), 'qwen-review-pr-6766-issue-context.md'),
+    );
+    expect(p).not.toContain('gh pr view');
     // The empty scope is a complete answer, and it needs evidence to be one.
     expect(p).toContain('scope empty');
     expect(p).toContain('motivating evidence');
     expect(p).toContain('fixes, closes, resolves, or implements');
+  });
+
+  it('welds --host into the Agent 0 command when the plan carries an Enterprise host', () => {
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p = buildRoleBrief({ ...PR_PLAN, host: 'ghe.example.com' }, '0', {
+      planPath,
+    });
+    expect(p).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" review issue-context 6766 --repo QwenLM/qwen-code --host ghe.example.com',
+    );
+  });
+
+  it('trims a padded-but-valid plan host before welding (fetch-pr records the raw flag)', () => {
+    // The weld must not drop a padded host to null: fetch-pr records the raw
+    // `--host` flag, and a GHE review whose host is padded would otherwise
+    // lose `--host` and fetch issue evidence from github.com's same-named repo.
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p = buildRoleBrief({ ...PR_PLAN, host: ' ghe.example.com ' }, '0', {
+      planPath,
+    });
+    expect(p).toContain('--host ghe.example.com');
+    expect(p).not.toContain('--host  ghe.example.com ');
+  });
+
+  it('shell-quotes the evidence path (spaces/apostrophes in workspace paths)', () => {
+    const planPath = join(
+      resolve("/x's proj"),
+      'qwen-review-pr-6766-fetch.json',
+    );
+    const p = buildRoleBrief(PR_PLAN, '0', { planPath });
+    const quoted = `'${join(resolve("/x's proj"), 'qwen-review-pr-6766-issue-context.md').replace(/'/g, "'\\''")}'`;
+    expect(p).toContain(`--out ${quoted}`);
+  });
+
+  it('rejects a tampered plan before welding (pr / ownerRepo / host)', () => {
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, prNumber: '6766; touch /tmp/pwned' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/not a safe positive integer/);
+    // The weld guard also rejects 0 and unsafe integers (which the welded
+    // issue-context handler would reject / mis-round).
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, prNumber: '0' }, '0', { planPath }),
+    ).toThrow(/not a safe positive integer/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, prNumber: '123456789012345678901' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/not a safe positive integer/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, ownerRepo: '../escape' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/owner\/repo/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, ownerRepo: '-evil/repo' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/owner\/repo/);
+    // A present-but-invalid host fails closed (throws) — never silently
+    // dropped from the welded command, which would reroute the evidence
+    // fetch to github.com's same-named repo.
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: 'ghe.example.com; rm -rf /' }, '0', {
+        planPath,
+      }),
+    ).toThrow(/not a hostname/);
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: '--help' }, '0', { planPath }),
+    ).toThrow(/not a hostname/);
+    // A present-but-whitespace-only host fails closed too (every sibling
+    // classifies it as a validation error).
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: ' ' }, '0', { planPath }),
+    ).toThrow(/whitespace-only/);
+    // Regression guard (R8-1): fetch-pr writes `host: null` unconditionally
+    // for a same-repo github.com plan — null must be tolerated, not throw.
+    const planPath2 = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    expect(() =>
+      buildRoleBrief({ ...PR_PLAN, host: null }, '0', { planPath: planPath2 }),
+    ).not.toThrow();
+    expect(
+      buildRoleBrief({ ...PR_PLAN, host: null }, '0', { planPath: planPath2 }),
+    ).not.toContain('--host');
   });
 
   it('refuses Agent 0 on a plan with no pull request in it', () => {

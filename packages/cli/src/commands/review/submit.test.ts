@@ -236,6 +236,47 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       '`--comment` was not in the review arguments',
     );
   });
+
+  it('a missing args file names the missing invocation, not a missing flag, when the setting authorises', () => {
+    // With `review.comment` on, telling the operator to re-run with
+    // `--comment` misdirects: the blocker is that no recorded invocation
+    // names a PR, and a plain re-run fixes it. Flag-driven operators keep
+    // the flag wording — for them the flag IS the missing piece.
+    const missing = join(dir, 'no-such-args.txt');
+    const base = {
+      userAuthorized: false,
+      skillArgs: missing,
+      pr: 123,
+      repo: 'o/r',
+    };
+
+    const bySetting = reviewWriteAuthorization({
+      ...base,
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.why).toContain(
+      'no recorded invocation names a pull request',
+    );
+    expect(bySetting.why).not.toContain('`--comment`');
+
+    const byFlag = reviewWriteAuthorization(base);
+    expect(byFlag.ok).toBe(false);
+    expect(byFlag.why).toContain('cannot show that `--comment` was requested');
+
+    // Both production callers pass a strict boolean (destructured default /
+    // the resolved setting), so pin the flag branch with the explicit false
+    // they actually send — a presence-check mutation of the ternary must not
+    // survive.
+    const byFlagExplicit = reviewWriteAuthorization({
+      ...base,
+      defaultComment: false,
+    });
+    expect(byFlagExplicit.ok).toBe(false);
+    expect(byFlagExplicit.why).toContain(
+      'cannot show that `--comment` was requested',
+    );
+  });
 });
 
 describe('the posting gate', () => {
@@ -359,6 +400,7 @@ describe('the posting gate', () => {
     );
     expect(advice()).not.toContain('Re-run with `--comment`');
     expect(advice()).toContain('invoked naming it');
+    expect(advice()).toContain('Nothing recorded authorises binding');
     writeStderrSpy.mockClear();
 
     // ...or a different PR than this submission targets.
@@ -369,6 +411,17 @@ describe('the posting gate', () => {
     );
     expect(advice()).not.toContain('Re-run with `--comment`');
     expect(advice()).toContain('invoked naming it');
+    writeStderrSpy.mockClear();
+
+    // Nothing recorded at all, with the setting authorising: the refusal
+    // names the missing invocation, and the advice preamble must not
+    // contradict it by presupposing recorded arguments exist.
+    runSubmit(args({ skillArgs: join(dir, 'advice-missing.txt') }), 'unknown', {
+      defaultComment: true,
+    });
+    expect(advice()).toContain('no recorded invocation names a pull request');
+    expect(advice()).toContain('Nothing recorded authorises binding');
+    expect(advice()).not.toContain('The recorded arguments');
     expect(ghMock).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(3);
   });

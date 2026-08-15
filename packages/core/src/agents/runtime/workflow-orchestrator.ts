@@ -29,6 +29,10 @@ import {
 } from './workflow-prompts.js';
 import { AgentTerminateMode } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
+import {
+  attachJsonlTranscriptWriter,
+  buildAgentTranscriptAttach,
+} from '../agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
   AgentToolCallEvent,
@@ -381,6 +385,13 @@ export function createProductionDispatch(
   bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
 ): WorkflowAgentDispatch {
   return async (prompt, opts) => {
+    // An empty or non-string prompt seeds no `user` record, so the
+    // transcript would carry no evidence of what the agent was asked —
+    // and a stall retry on top would open the file with an orphaned
+    // `agent_retry` marker. Reject at the boundary instead.
+    if (typeof prompt !== 'string' || prompt.length === 0) {
+      throw new Error('agent() requires a non-empty string prompt.');
+    }
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
     // retry loop. The wrapper owns the per-attempt AbortController +
     // AgentEventEmitter; it chains the caller's `signal` into the
@@ -392,9 +403,28 @@ export function createProductionDispatch(
     const stallMs = resolveStallMs(
       typeof opts.stallMs === 'number' ? opts.stallMs : undefined,
     );
+    // Minted per `agent()` call rather than per attempt, so a stall-retried
+    // dispatch appends to ONE transcript instead of presenting as two agents
+    // to every reader of the subagent transcript dir.
+    const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+    // Resolved once and handed to both the runtime and the transcript so
+    // the on-disk records name the same agent that ran. The resolved
+    // agentType definition rides along so the override path reuses it
+    // instead of re-scanning subagent files per attempt.
+    const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
+    let attempt = 0;
     return runStallResilient(
       async (attemptSignal, emitter) => {
+        attempt += 1;
         const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        const cleanupTranscript = attachDispatchTranscript(
+          config,
+          workflowAgentId,
+          prompt,
+          agentIdentity.name,
+          emitter,
+          attempt,
+        );
         try {
           return await runSingleDispatch(
             config,
@@ -402,28 +432,128 @@ export function createProductionDispatch(
             opts,
             attemptSignal,
             emitter,
+            workflowAgentId,
+            agentIdentity,
             onTokens,
           );
         } finally {
+          cleanupTranscript();
           cleanupApprovalBridge?.();
         }
       },
       {
         stallMs,
         signal,
-        label: typeof opts.label === 'string' ? opts.label : undefined,
+        // The name can carry a model-authored agentType spelling — keep
+        // the stall log / abandoned error single-line the same way the
+        // "not found" throw site sanitizes it.
+        label: sanitizeForErrorMessage(agentIdentity.name),
       },
     );
   };
+}
+
+/** Identity resolved once per dispatch — see resolveWorkflowAgentIdentity. */
+interface WorkflowAgentIdentity {
+  /** The name the runtime agent runs under and the transcript records. */
+  name: string;
+  /** The resolved agentType definition, when `opts.agentType` matched one. */
+  resolvedAgentType?: SubagentConfig;
+}
+
+/**
+ * Single derivation of a dispatch's identity: the fast path and the
+ * ephemeral override default run the runtime agent under it, and the
+ * transcript records it, so the on-disk identity always matches the agent
+ * that ran. A resolvable agentType wins — the override path runs the agent
+ * under the resolved definition's canonical name (the SubagentManager
+ * lookup is case-insensitive, so the spelling the script passed may differ
+ * from the agent that actually runs), and a label cannot rename a resolved
+ * agentType; the label only names dispatches that run without one.
+ * Otherwise the shared default. The truthy checks keep `label: ''` and
+ * `agentType: ''` from naming the agent ''.
+ *
+ * Also hands back the resolved definition so `runOverridePath` reuses it
+ * instead of calling `findSubagentByName` a second time — that lookup is
+ * uncached disk I/O at every non-session level.
+ */
+async function resolveWorkflowAgentIdentity(
+  config: Config,
+  opts: WorkflowAgentOpts,
+): Promise<WorkflowAgentIdentity> {
+  if (opts.agentType) {
+    const resolved = await config
+      .getSubagentManager()
+      .findSubagentByName(opts.agentType);
+    if (resolved) {
+      return { name: resolved.name, resolvedAgentType: resolved };
+    }
+  }
+  if (typeof opts.label === 'string' && opts.label) {
+    return { name: opts.label };
+  }
+  return { name: opts.agentType || 'workflow-agent' };
+}
+
+/**
+ * Attach the harness's per-agent JSONL transcript writer to one dispatch
+ * attempt, so a workflow subagent leaves the same on-disk record as one
+ * launched through `AgentTool`.
+ *
+ * Workflow dispatch used to leave none. `AgentTool` attaches this writer on
+ * both its foreground and background paths, but a workflow `agent()` call
+ * goes straight to `AgentHeadless` — so a finished run left only the journal,
+ * which stores a hash of the prompt and the returned value and nothing about
+ * what any agent actually did (and no `result` line at all for a dispatch
+ * that threw). Attaching here, in the stall wrapper's attempt closure rather
+ * than inside either dispatch path, covers the fast path and the override
+ * path alike: both already receive this same per-attempt emitter.
+ *
+ * Best-effort by construction. The writer swallows its own IO errors, and a
+ * throw from the attach itself must not take down a dispatch that would
+ * otherwise succeed — an unobservable agent is strictly better than a failed
+ * one.
+ */
+function attachDispatchTranscript(
+  config: Config,
+  agentId: string,
+  prompt: string,
+  /** The name the runtime agent runs under — see resolveWorkflowAgentIdentity. */
+  agentName: string,
+  emitter: AgentEventEmitter,
+  /** 1-based attempt; retries append to the transcript attempt 1 opened. */
+  attempt: number,
+): () => void {
+  const append = attempt > 1;
+  try {
+    const { jsonlPath, options } = buildAgentTranscriptAttach(config, agentId, {
+      agentName,
+      // The prompt the SCRIPT dispatched, seeded as the transcript's first
+      // user record — the same shape AgentTool writes, so a reader that
+      // recovers a launch prompt from a transcript needs no workflow-
+      // specific branch. A retry re-uses the first attempt's record rather
+      // than seeding a second one.
+      initialUserPrompt: append ? undefined : prompt,
+      appendToExisting: append,
+      retryAttempt: append ? attempt : undefined,
+    });
+    return attachJsonlTranscriptWriter(emitter, jsonlPath, options).cleanup;
+  } catch (error) {
+    debugLogger.warn(
+      `[Workflow] failed to attach transcript for ${agentId}: ${error}`,
+    );
+    return () => {};
+  }
 }
 
 /**
  * One single-attempt production dispatch. Receives the per-attempt abort
  * signal (the stall wrapper chains the parent signal into it + the watchdog
  * aborts it on stall) and the per-attempt event emitter (the stall watchdog
- * is already attached; the override/schema path additionally attaches its
- * `structured_output` capture listeners to the same emitter). Returns the
- * agent result on success; throws on any non-success terminal.
+ * and the transcript writer are already attached; the override/schema path
+ * additionally attaches its `structured_output` capture listeners to the same
+ * emitter). Returns the agent result on success; throws on any non-success
+ * terminal.
  */
 async function runSingleDispatch(
   config: Config,
@@ -431,12 +561,18 @@ async function runSingleDispatch(
   opts: WorkflowAgentOpts,
   attemptSignal: AbortSignal,
   emitter: AgentEventEmitter,
+  /**
+   * Owned by the caller so every attempt of one `agent()` call shares an
+   * identity — it keys the transcript file and the ALS agent-context frame.
+   */
+  workflowAgentId: string,
+  /** The identity the runtime agent runs under — see resolveWorkflowAgentIdentity. */
+  agentIdentity: WorkflowAgentIdentity,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
-  const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
   if (
@@ -446,7 +582,7 @@ async function runSingleDispatch(
     opts.schema === undefined
   ) {
     const subagent = await AgentHeadless.create(
-      opts.label ?? 'workflow-agent',
+      agentIdentity.name,
       config,
       {
         systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
@@ -507,6 +643,7 @@ async function runSingleDispatch(
     opts,
     attemptSignal,
     workflowAgentId,
+    agentIdentity,
     onTokens,
     emitter,
   );
@@ -580,6 +717,8 @@ async function runOverridePath(
   opts: WorkflowAgentOpts,
   signal: AbortSignal | undefined,
   workflowAgentId: string,
+  /** The identity the runtime agent runs under — see resolveWorkflowAgentIdentity. */
+  agentIdentity: WorkflowAgentIdentity,
   /**
    * P5: forwarded from createProductionDispatch. The override path
    * builds its own AgentHeadless and runs subagent.execute(); the
@@ -608,7 +747,10 @@ async function runOverridePath(
   let baseConfig: SubagentConfig;
 
   if (opts.agentType !== undefined) {
-    const resolved = await subagentMgr.findSubagentByName(opts.agentType);
+    // Resolved once per dispatch by resolveWorkflowAgentIdentity — the
+    // transcript identity and the runtime config must derive from the same
+    // definition, and re-scanning here would be a second uncached disk read.
+    const resolved = agentIdentity.resolvedAgentType;
     if (!resolved) {
       // Error message verbatim from upstream Claude Code 2.1.168 strings:
       // "agent({agentType}): agent type '{name}' not found". Match for
@@ -632,7 +774,7 @@ async function runOverridePath(
     // createAgentHeadless gives us provider routing via
     // buildRuntimeContentGeneratorView and per-agent ToolRegistry cleanup.
     baseConfig = {
-      name: opts.label ?? 'workflow-agent',
+      name: agentIdentity.name,
       description: 'Default workflow subagent (per-call overrides).',
       systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
       level: 'session',
@@ -1388,6 +1530,14 @@ export class WorkflowOrchestrator {
     let journalAgentId = 0;
 
     const countedDispatch: WorkflowAgentDispatch = (prompt, opts) => {
+      // Must run before deriveAgentKey below: hash.update() throws an
+      // opaque ERR_INVALID_ARG_TYPE for a non-string prompt, preempting
+      // the dispatch's boundary error on the journaled path.
+      if (typeof prompt !== 'string' || prompt.length === 0) {
+        return rejectThroughPauseGate(
+          new Error('agent() requires a non-empty string prompt.'),
+        );
+      }
       // P6: journal cache lookup — runs BEFORE the budget gate + agent
       // counter so a cached result is free (no token spend, no agent-cap
       // slot, no live dispatch). The key is computed SYNCHRONOUSLY here so
