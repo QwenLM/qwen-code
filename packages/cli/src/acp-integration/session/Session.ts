@@ -6500,6 +6500,11 @@ export class Session implements SessionContext {
       preserveFallbackOnAbort?: boolean;
     } = {},
   ): Promise<Part[]> {
+    let modelOverrideResolutionFailed = false;
+    const onModelOverrideResolutionFailed = () => {
+      modelOverrideResolutionFailed = true;
+      options.onModelOverrideResolutionFailed?.();
+    };
     const resolvedMessages: Array<{
       parts: Part[];
       displayText: string;
@@ -6519,8 +6524,7 @@ export class Session implements SessionContext {
                   this.#resolvePrompt(message.content, signal, {
                     onFullTurnModel: options.onFullTurnModel,
                     getModelOverride: options.getModelOverride,
-                    onModelOverrideResolutionFailed:
-                      options.onModelOverrideResolutionFailed,
+                    onModelOverrideResolutionFailed,
                   }),
               );
       } catch (messageError) {
@@ -6544,16 +6548,33 @@ export class Session implements SessionContext {
       const built = prefixMidTurnUserMessageParts(rawParts, displayText);
       resolvedMessages.push({ parts: built, displayText });
     }
-    const parts: Part[] = [];
+    const audioCheckedMessages: Array<{
+      parts: Part[];
+      displayText: string;
+    }> = [];
     for (const resolved of resolvedMessages) {
-      const finalized = options.getModelOverride
+      const audioChecked = options.getModelOverride
         ? await this.#applyAudioBridgeIfNeeded(
             resolved.parts,
             abortSignal,
             options.getModelOverride(),
-            options.onModelOverrideResolutionFailed,
+            onModelOverrideResolutionFailed,
           )
         : resolved.parts;
+      audioCheckedMessages.push({
+        parts: audioChecked,
+        displayText: resolved.displayText,
+      });
+    }
+    const parts: Part[] = [];
+    for (const resolved of audioCheckedMessages) {
+      const finalized =
+        modelOverrideResolutionFailed && hasImageParts(resolved.parts)
+          ? await this.#applyBridgeConversionsIfNeeded(
+              resolved.parts,
+              abortSignal,
+            )
+          : resolved.parts;
       this.config
         .getChatRecordingService()
         ?.recordMidTurnUserMessage(finalized, resolved.displayText);

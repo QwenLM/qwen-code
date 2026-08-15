@@ -11156,6 +11156,121 @@ describe('Session', () => {
         expect(JSON.stringify(recordedAudio)).not.toContain('audio/wav');
       });
 
+      it('rebridges earlier drained images when a later audio route cannot be resolved', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi
+          .fn()
+          .mockReturnValue({ audio: true });
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({
+          resolveForModel: vi
+            .fn()
+            .mockRejectedValue(new Error('missing route')),
+        });
+        runVisionBridgeSpy.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [{ text: '[recovered image transcript]' }],
+          transcript: '[recovered image transcript]',
+          convertedCount: 1,
+          omittedCount: 0,
+          modelId: 'qwen3.7-plus',
+        });
+        Object.assign(mockSettings.merged as Record<string, unknown>, {
+          voiceModel: 'qwen3-asr-flash',
+          env: { OPENAI_API_KEY: 'test-key' },
+        });
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'aW1hZ2U=',
+                },
+              ],
+              displayText: 'please inspect this image',
+            },
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgAAAA==',
+                },
+              ],
+              displayText: 'then listen to this audio',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-read',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read a file' }],
+        });
+
+        expect(transcribeVoiceAudioSpy).not.toHaveBeenCalled();
+        expect(runVisionBridgeSpy).toHaveBeenCalledOnce();
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[0]).toBe('qwen3-code-plus');
+        const secondMessage = secondCall?.[1].message as Part[];
+        expect(textParts(secondMessage).join('\n')).toContain(
+          '[recovered image transcript]',
+        );
+        expect(textParts(secondMessage).join('\n')).toContain(
+          'the active model override could not be resolved',
+        );
+        expect(secondMessage.some((part) => 'inlineData' in part)).toBe(false);
+        const recordedImage = vi
+          .mocked(mockChatRecordingService.recordMidTurnUserMessage)
+          .mock.calls.find(
+            ([, display]) => display === 'please inspect this image',
+          )?.[0];
+        expect(JSON.stringify(recordedImage)).toContain(
+          '[recovered image transcript]',
+        );
+        expect(JSON.stringify(recordedImage)).not.toContain('image/png');
+      });
+
       it('fails closed when the active audio route cannot be resolved', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: [
