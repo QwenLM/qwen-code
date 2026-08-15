@@ -71,6 +71,7 @@ import {
   type RosterPlan,
 } from './roster.js';
 import { BRIEFS } from './agent-briefs.js';
+import { labelFromLaunchPrompt } from './agent-identity.js';
 import { chunkIdsProblem } from './diff-plan.js';
 import { readBudgetStop } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
@@ -358,8 +359,17 @@ function publicRoleLabelZh(req: RequiredAgent): string | undefined {
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
+  // The identity line names the agent wherever it sits: launchers prepend
+  // context lines, and a first-line-only read has labelled twelve finders
+  // with one shared PR-summary sentence — every disclosure then rendered
+  // the same truncated PR quote instead of a name a reader can act on. The
+  // parser is shared with cost-ledger's row labels, so the round and
+  // owned-file suffixes survive here too — two reverse-audit rounds must
+  // not fold into one indistinguishable disclosure line.
+  const identity = labelFromLaunchPrompt(rec.launchPrompt);
+  if (identity !== null) return identity;
   const first = rec.launchPrompt.split('\n')[0]?.trim() ?? '';
-  if (first) return first.length > 60 ? `${first.slice(0, 57)}...` : first;
+  if (first) return first.replace(/\s+/g, ' ');
   return rec.agentName || rec.agentId;
 }
 
@@ -1428,7 +1438,7 @@ export function verificationGaps(
     (k) => k === 'reverse-audit' || k.startsWith('reverse-audit--'),
   );
   const reverse = bestDelivery(reverseKeys);
-  // A budget-stop marker means the round builder itself refused the reverse
+  // A TIME-budget stop marker means the round builder refused the reverse
   // audit on the run's time budget. Exactly ONE gap shape is then by design:
   // `not-built` — the refusal writes no record, so an audit with no records
   // is the audit the gate stopped, and the gap's FIX (rebuild the round)
@@ -1441,7 +1451,15 @@ export function verificationGaps(
   // hand-written round-1 launch is exactly as undelivered when round 3 later
   // hits the budget, and suppressing it would let "stopped before round 3"
   // imply the rounds that did run were faithful.
-  const budgetStopped = readBudgetStop(planPath) !== null;
+  //
+  // Only the time-budget cause earns this exemption. A ROUND-CAP stop does
+  // NOT: the cap gate refuses only `round > cap`, so the not-built gap's FIX
+  // (rebuild `--round 1`) is admitted, and a local run has no deadline to
+  // refuse it at all — the monotone-refusal premise fails twice. So a
+  // round-cap marker leaves the not-built gap and its rebuild remediation
+  // owed, exactly as if no marker were present.
+  const stop = readBudgetStop(planPath);
+  const budgetStopped = stop !== null && stop.cause !== 'round-cap';
   const reverseByDesign = budgetStopped && reverse === 'not-built';
   // A repairable reverse-audit gap only at high: medium is complete without it.
   const reverseGap = !balancedMedium && !reverseByDesign && reverse !== 'ok';

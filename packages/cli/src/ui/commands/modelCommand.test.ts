@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { modelCommand } from './modelCommand.js';
+import { modelCommand, isPickerOnlyModelInvocation } from './modelCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SettingScope } from '../../config/settings.js';
@@ -2641,5 +2641,37 @@ describe('modelCommand', () => {
         dialog: 'model',
       });
     });
+  });
+});
+
+describe('isPickerOnlyModelInvocation', () => {
+  it.each([
+    '',
+    '   ',
+    '--fast',
+    '--voice',
+    '--vision',
+    '--compaction',
+    '--image',
+    '--project',
+    '--global',
+    '--fast --project',
+    '--vision --global',
+    '  --fast   --voice  ',
+  ])('treats %j as picker-only', (args) => {
+    expect(isPickerOnlyModelInvocation(args)).toBe(true);
+  });
+
+  it.each([
+    '--fast qwen3-coder-flash',
+    '--vision qwen-vl-max',
+    '--project qwen-max',
+    '--fast --global qwen-max',
+    '--invalid-flag',
+    '--fastx',
+    'qwen-max',
+    'qwen-max write a one-off prompt',
+  ])('treats %j as not picker-only', (args) => {
+    expect(isPickerOnlyModelInvocation(args)).toBe(false);
   });
 });

@@ -11,6 +11,10 @@ import type {
   GoalSnapshotV2,
   GoalStateResponse,
 } from '@qwen-code/qwen-code-core';
+import {
+  emptyGoalSnapshot,
+  GoalPersistenceUnavailableError,
+} from '@qwen-code/qwen-code-core';
 import { goalCommand, parseGoalCommand } from './goalCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
@@ -194,104 +198,47 @@ describe('goalCommand', () => {
     },
   );
 
-  it.each(['edit revised', 'pause', 'resume'] as const)(
-    'rejects /goal %s in ACP mode',
-    async (args) => {
-      const { runtime } = makeRuntime(goalSnapshot());
+  it.each([
+    [
+      'set Ship it',
+      { action: 'replace', objective: 'Ship it' },
+      { kind: 'set', objective: 'Ship it' },
+    ],
+    [
+      'edit revised',
+      { action: 'edit', objective: 'revised' },
+      { kind: 'edit', objective: 'revised' },
+    ],
+    ['pause', { action: 'pause' }, { kind: 'pause' }],
+    ['resume', { action: 'resume' }, { kind: 'resume' }],
+    ['clear', { action: 'clear' }, { kind: 'clear' }],
+  ] as const)(
+    'uses the canonical runtime for ACP /goal %s',
+    async (args, request, operation) => {
+      const snapshot = goalSnapshot();
+      const { dispatch, runtime } = makeRuntime(snapshot);
       const { context, getGoalRuntimeReady } = makeContext(runtime, {
         executionMode: 'acp',
       });
 
       const result = await goalCommand.action!(context, args);
 
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: expect.stringMatching(/not available in ACP mode/i),
+      expect(dispatch).toHaveBeenCalledWith({
+        ...request,
+        expectedGoalId: 'goal-1',
+        expectedRevision: 4,
       });
-      expect(getGoalRuntimeReady).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'goal_control',
+        operation,
+        response: { snapshot },
+        cause: request.action,
+      });
+      expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
       expect(mockRegisterGoalHook).not.toHaveBeenCalled();
       expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
     },
   );
-
-  it('strips the set keyword before forwarding to the legacy ACP path', async () => {
-    mockRegisterGoalHook.mockReturnValue({
-      condition: 'Ship it',
-      setAt: Date.now(),
-    });
-    const config = {
-      getSessionId: () => 'test-session',
-      isTrustedFolder: () => true,
-      getDisableAllHooks: () => false,
-      getHookSystem: () => ({}),
-    } as unknown as Config;
-    const context = createMockCommandContext({
-      executionMode: 'acp',
-      services: { config },
-    });
-
-    await goalCommand.action!(context, 'set Ship it');
-
-    expect(mockRegisterGoalHook).toHaveBeenCalledWith(
-      expect.objectContaining({ condition: 'Ship it' }),
-    );
-  });
-
-  it.each(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])(
-    'sets a literal %j objective instead of clearing in legacy ACP mode',
-    async (keyword) => {
-      mockRegisterGoalHook.mockReturnValue({
-        condition: keyword,
-        setAt: Date.now(),
-      });
-      const config = {
-        getSessionId: () => 'test-session',
-        isTrustedFolder: () => true,
-        getDisableAllHooks: () => false,
-        getHookSystem: () => ({}),
-      } as unknown as Config;
-      const context = createMockCommandContext({
-        executionMode: 'acp',
-        services: { config },
-      });
-
-      const result = await goalCommand.action!(context, `set ${keyword}`);
-
-      expect(mockRegisterGoalHook).toHaveBeenCalledWith(
-        expect.objectContaining({ condition: keyword }),
-      );
-      expect(mockUnregisterGoalHook).not.toHaveBeenCalled();
-      expect(result).toMatchObject({ type: 'submit_prompt' });
-    },
-  );
-
-  it('still clears on a bare clear keyword in legacy ACP mode', async () => {
-    mockUnregisterGoalHook.mockReturnValue({
-      condition: 'Old goal',
-      iterations: 2,
-      setAt: Date.now() - 1000,
-    });
-    const config = {
-      getSessionId: () => 'test-session',
-      isTrustedFolder: () => true,
-      getDisableAllHooks: () => false,
-      getHookSystem: () => ({}),
-    } as unknown as Config;
-    const context = createMockCommandContext({
-      executionMode: 'acp',
-      services: { config },
-    });
-
-    const result = await goalCommand.action!(context, 'clear');
-
-    expect(mockUnregisterGoalHook).toHaveBeenCalled();
-    expect(mockRegisterGoalHook).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      type: 'message',
-      content: expect.stringMatching(/goal cleared/i),
-    });
-  });
 
   it('rejects invalid set and edit commands before runtime admission', async () => {
     const { runtime } = makeRuntime(noGoalSnapshot());
@@ -532,6 +479,100 @@ describe('goalCommand', () => {
     });
     expect(result).not.toHaveProperty('response');
     expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  describe('goal persistence unavailable', () => {
+    // In ACP an error return throws out of `#processSlashCommandResult`, so
+    // failing here fails the user's whole prompt request — and a sticky
+    // `recoveryError` keeps failing it for the rest of the session, while
+    // `GET /goals` answers the same question fine. The sibling
+    // `sessionGoalGet`/`sessionGoalClear` ext methods already degrade.
+    function unavailableContext() {
+      const getGoalRuntimeReady = vi
+        .fn()
+        .mockRejectedValue(
+          new GoalPersistenceUnavailableError('no transcript'),
+        );
+      const config = {
+        getGoalRuntimeReady,
+        getChatRecordingService: () => undefined,
+        isTrustedFolder: () => true,
+      } as unknown as Config;
+      return createMockCommandContext({
+        executionMode: 'acp',
+        services: { config },
+      });
+    }
+
+    it.each(['', 'clear'])(
+      'answers %j with an empty snapshot instead of failing',
+      async (args) => {
+        const result = await goalCommand.action!(unavailableContext(), args);
+
+        expect(result).toEqual({
+          type: 'goal_control',
+          operation: parseGoalCommand(args),
+          response: { snapshot: emptyGoalSnapshot() },
+        });
+      },
+    );
+
+    it.each(['', 'clear'])(
+      'fails %j when recovery fails while persisted Goal state may remain',
+      async (args) => {
+        const getGoalRuntimeReady = vi
+          .fn()
+          .mockRejectedValue(
+            new GoalPersistenceUnavailableError('migration write failed'),
+          );
+        const config = {
+          getGoalRuntimeReady,
+          getChatRecordingService: () => ({}),
+          isTrustedFolder: () => true,
+        } as unknown as Config;
+        const context = createMockCommandContext({ services: { config } });
+
+        const result = await goalCommand.action!(context, args);
+
+        expect(result).toEqual({
+          type: 'message',
+          messageType: 'error',
+          content: 'migration write failed',
+        });
+        expect(result).not.toHaveProperty('response');
+      },
+    );
+
+    it.each(['Ship it', 'edit revised', 'resume'])(
+      'still fails %j, which genuinely needs persistence',
+      async (args) => {
+        const result = await goalCommand.action!(unavailableContext(), args);
+
+        expect(result).toMatchObject({
+          type: 'message',
+          messageType: 'error',
+        });
+      },
+    );
+
+    it('does not report a failed clear dispatch as successful', async () => {
+      const snapshot = goalSnapshot();
+      const { dispatch, runtime } = makeRuntime(snapshot);
+      dispatch.mockRejectedValue(
+        new GoalPersistenceUnavailableError('journal write failed'),
+      );
+      const { context } = makeContext(runtime);
+
+      const result = await goalCommand.action!(context, 'clear');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'journal write failed',
+      });
+      expect(result).not.toHaveProperty('response');
+      expect(runtime.getSnapshot()).toEqual(snapshot);
+    });
   });
 
   it('rejects when config is missing', async () => {

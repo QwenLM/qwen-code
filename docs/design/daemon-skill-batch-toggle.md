@@ -24,11 +24,16 @@ The request body is:
 
 `skillNames` is a non-empty string array with at most 100 entries. Names are
 trimmed and deduplicated case-insensitively while preserving first-seen order.
-The response is best-effort for expected target errors: valid targets are
-validated against one status snapshot, persisted in one locked write, and
-applied with one live-session refresh. Unknown, hidden, inactive-extension,
-and locked targets are returned without blocking the valid targets. Unexpected
-persistence and runtime-generation failures fail the whole request.
+The response is best-effort for expected target errors: installed targets are
+validated against one status snapshot, all valid names are persisted in one
+locked write, and changes are applied with one live-session refresh. Names
+that are not installed remain valid so callers can declare their state before
+installation. Enabling one removes a matching workspace `skills.disabled`
+entry and is otherwise a no-op, except for the existing `defaultDisabled`
+override behavior; disabling one writes `skills.disabled`. Hidden,
+inactive-extension, and locked targets are returned without blocking valid
+targets. Unexpected persistence and runtime-generation failures fail the whole
+request.
 
 ```json
 {
@@ -46,15 +51,14 @@ persistence and runtime-generation failures fail the whole request.
       "skillName": "deploy",
       "enabled": false,
       "changed": true
-    }
-  ],
-  "errors": [
+    },
     {
       "skillName": "missing",
-      "code": "skill_not_found",
-      "error": "Skill not found: missing"
+      "enabled": false,
+      "changed": true
     }
-  ]
+  ],
+  "errors": []
 }
 ```
 

@@ -62,7 +62,10 @@ import type {
   MidTurnQueueEntry,
   PendingPromptEntry,
 } from './bridgeTypes.js';
-import { TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD } from './bridgeTypes.js';
+import {
+  MID_TURN_RECONCILIATION_RING_SIZE,
+  TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+} from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -247,10 +250,14 @@ describe('BridgeClient — managed external tool guard', () => {
     });
     const entry: {
       sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
       promptActive: boolean;
       activePromptId?: string;
     } = {
       sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
       promptActive: true,
       activePromptId: 'prompt-1',
     };
@@ -275,7 +282,115 @@ describe('BridgeClient — managed external tool guard', () => {
       toolCallId: 'call-1',
       toolName: 'write_file',
       arguments: { path: 'README.md' },
+      effectiveCwd: '/workspace/worktree',
     });
+  });
+
+  it('ignores a forged effective directory in the child payload', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry: {
+      sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'write_file',
+        arguments: { path: 'README.md' },
+        effectiveCwd: '/forged/effective',
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      toolCallId: 'call-1',
+      toolName: 'write_file',
+      arguments: { path: 'README.md' },
+      effectiveCwd: '/workspace/worktree',
+    });
+  });
+
+  it('accepts a prompt-less shell check validated by session ownership', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const entry: {
+      sessionId: string;
+      workspaceCwd: string;
+      effectiveCwd: string;
+      promptActive: boolean;
+      activePromptId?: string;
+    } = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace/worktree',
+      promptActive: false,
+    };
+    const client = makeClient(undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: { command: 'pwd' },
+      }),
+    ).resolves.toEqual({ allowed: true });
+    expect(handler).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      toolCallId: 'call-1',
+      toolName: 'run_shell_command',
+      arguments: { command: 'pwd' },
+      effectiveCwd: '/workspace/worktree',
+    });
+  });
+
+  it('rejects an empty prompt id in a guard request', async () => {
+    const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+      allowed: true,
+    });
+    const client = makeClient(undefined, {
+      resolveEntry: () => ({
+        sessionId: 'session-1',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      }),
+      handler,
+    });
+
+    await expect(
+      client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+        sessionId: 'session-1',
+        promptId: '',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: {},
+      }),
+    ).rejects.toThrow('Invalid external tool guard request');
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('rejects a stale prompt without contacting the host', async () => {
@@ -1775,6 +1890,7 @@ describe('BridgeClient — artifact ingress', () => {
         pendingPermissionIds: new Set<string>(),
         pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        settledMidTurnMessageIds: [] as string[],
         promptActive: true,
       };
       const client = new BridgeClient(
@@ -1859,6 +1975,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -1931,6 +2048,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -1994,6 +2112,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -2043,6 +2162,7 @@ describe('BridgeClient — artifact ingress', () => {
         pendingPermissionIds: new Set<string>(),
         pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        settledMidTurnMessageIds: [] as string[],
         promptActive: true,
       };
       const client = new BridgeClient(
@@ -2106,6 +2226,7 @@ describe('BridgeClient — artifact ingress', () => {
         pendingPermissionIds: new Set<string>(),
         pendingInteractions: new Map(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        settledMidTurnMessageIds: [] as string[],
         promptActive: true,
       };
       const client = new BridgeClient(
@@ -2176,6 +2297,7 @@ describe('BridgeClient — artifact ingress', () => {
             pendingPermissionIds: new Set<string>(),
             pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
+            settledMidTurnMessageIds: [] as string[],
           }
         : undefined,
     );
@@ -2229,6 +2351,7 @@ describe('BridgeClient — artifact ingress', () => {
             pendingPermissionIds: new Set<string>(),
             pendingInteractions: new Map(),
             midTurnMessageQueue: [] as MidTurnQueueEntry[],
+            settledMidTurnMessageIds: [] as string[],
           }
         : undefined,
     );
@@ -2394,6 +2517,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
     };
     const client = new BridgeClient(
       ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
@@ -2450,6 +2574,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -2493,6 +2618,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       promptActive: true,
     };
     const client = new BridgeClient(
@@ -2552,6 +2678,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       promptActive: false,
     };
     const client = new BridgeClient(
@@ -2631,6 +2758,7 @@ describe('BridgeClient — artifact ingress', () => {
       pendingPermissionIds: new Set<string>(),
       pendingInteractions: new Map(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       promptActive: true,
     }));
     const client = new BridgeClient(
@@ -2982,6 +3110,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       | {
           sessionId: string;
           midTurnMessageQueue: MidTurnQueueEntry[];
+          settledMidTurnMessageIds?: string[];
           pendingPromptList?: PendingPromptEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
@@ -2991,7 +3120,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     ownsSession?: (sessionId: string) => boolean,
   ): BridgeClient {
     const resolvedEntry = entry
-      ? { ...entry, pendingPromptList: entry.pendingPromptList ?? [] }
+      ? {
+          ...entry,
+          pendingPromptList: entry.pendingPromptList ?? [],
+          settledMidTurnMessageIds: entry.settledMidTurnMessageIds ?? [],
+        }
       : undefined;
     return new BridgeClient(
       ((sid: string) =>
@@ -3014,9 +3147,27 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:drain',
       activePromptId: 'prompt-drain',
       midTurnMessageQueue: [
-        { messageId: 'mid-1', text: 'first' },
-        { messageId: 'mid-2', text: 'second' },
+        {
+          messageId: 'mid-1',
+          text: 'first',
+          originatorClientId: 'client-1',
+        },
+        {
+          messageId: 'internal',
+          text: '<realtime_delegation />',
+          queueOnly: true,
+        },
+        {
+          messageId: 'anonymous-ui',
+          text: 'anonymous ordinary',
+        },
+        {
+          messageId: 'mid-2',
+          text: 'second',
+          originatorClientId: 'client-2',
+        },
       ],
+      settledMidTurnMessageIds: [],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:drain', entry);
@@ -3026,11 +3177,24 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     });
 
     expect(result).toEqual({
-      messages: ['first', 'second'],
+      messages: [
+        'first',
+        '<realtime_delegation />',
+        'anonymous ordinary',
+        'second',
+      ],
       hasQueuedPrompt: false,
     });
     // Queue emptied so the same messages can't be re-injected on the next batch.
     expect(entry.midTurnMessageQueue).toEqual([]);
+    // Stable ids land in the reconciliation ring so a client that missed the
+    // echo frame (or refreshed) can tell "already injected" from "dropped".
+    expect(entry.settledMidTurnMessageIds).toEqual([
+      'mid-1',
+      'internal',
+      'anonymous-ui',
+      'mid-2',
+    ]);
     // Exactly one SSE frame carrying the drained text for the browser to dedupe.
     expect(publish).toHaveBeenCalledTimes(1);
     expect(publish.mock.calls[0][0]).toMatchObject({
@@ -3038,28 +3202,66 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       promptId: 'prompt-drain',
       data: {
         sessionId: 'sess:drain',
-        messages: ['first', 'second'],
-        messageIds: ['mid-1', 'mid-2'],
+        messages: ['first', 'anonymous ordinary', 'second'],
+        messageIds: ['mid-1', 'anonymous-ui', 'mid-2'],
       },
     });
-    // Anonymous queue entries (no originator) ⇒ no `originatorClientId` on the
-    // frame, so every consumer reconciles it.
+    // The session-wide frame omits internal anonymous steering while the child
+    // still receives it in queue order.
     expect(publish.mock.calls[0][0].originatorClientId).toBeUndefined();
   });
 
-  it('publishes ONE frame per originator, each carrying its own originatorClientId', async () => {
-    // A mixed-originator drain (two clients pushed into the same window) must
-    // route each client its own echo so a peer can't dedupe a message it did
-    // not queue. Order within an originator is preserved.
+  it('does not publish an injected frame for anonymous steering', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'sess:anonymous',
+      midTurnMessageQueue: [
+        {
+          messageId: 'internal',
+          text: '<realtime_delegation />',
+          queueOnly: true,
+        },
+      ],
+      settledMidTurnMessageIds: [],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:anonymous', entry);
+
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:anonymous',
+      }),
+    ).resolves.toEqual({
+      messages: ['<realtime_delegation />'],
+      hasQueuedPrompt: false,
+    });
+    expect(entry.settledMidTurnMessageIds).toEqual(['internal']);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('publishes one session-wide frame for messages from every client', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const entry = {
       sessionId: 'sess:multi',
       activePromptId: 'prompt-multi',
       midTurnMessageQueue: [
-        { messageId: 'mid-a', text: 'a', originatorClientId: 'client-1' },
-        { messageId: 'mid-b', text: 'b', originatorClientId: 'client-2' },
-        { messageId: 'mid-c', text: 'c', originatorClientId: 'client-1' },
+        {
+          messageId: 'mid-a',
+          text: 'a',
+          originatorClientId: 'client-1',
+        },
+        {
+          messageId: 'mid-b',
+          text: 'b',
+          originatorClientId: 'client-2',
+        },
+        {
+          messageId: 'mid-c',
+          text: 'c',
+          originatorClientId: 'client-1',
+        },
       ],
+      settledMidTurnMessageIds: [],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:multi', entry);
@@ -3073,39 +3275,25 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       hasQueuedPrompt: false,
     });
     expect(entry.midTurnMessageQueue).toEqual([]);
+    expect(entry.settledMidTurnMessageIds).toEqual(['mid-a', 'mid-b', 'mid-c']);
 
-    // One frame per originator: client-1 gets ['a','c'], client-2 gets ['b'].
-    expect(publish).toHaveBeenCalledTimes(2);
-    const frames = publish.mock.calls.map((c) => c[0]);
-    const c1 = frames.find((f) => f.originatorClientId === 'client-1');
-    const c2 = frames.find((f) => f.originatorClientId === 'client-2');
-    expect(c1).toMatchObject({
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish.mock.calls[0][0]).toMatchObject({
       type: 'mid_turn_message_injected',
       promptId: 'prompt-multi',
       data: {
         sessionId: 'sess:multi',
-        messages: ['a', 'c'],
-        messageIds: ['mid-a', 'mid-c'],
+        messages: ['a', 'b', 'c'],
+        messageIds: ['mid-a', 'mid-b', 'mid-c'],
       },
-      originatorClientId: 'client-1',
-    });
-    expect(c2).toMatchObject({
-      type: 'mid_turn_message_injected',
-      promptId: 'prompt-multi',
-      data: {
-        sessionId: 'sess:multi',
-        messages: ['b'],
-        messageIds: ['mid-b'],
-      },
-      originatorClientId: 'client-2',
     });
   });
 
   it('still returns the drained messages to the child when the echo frame is dropped (bus closed)', async () => {
     // Teardown-only degradation: `publish()` returns falsy on a closed bus. The
     // child has already been handed the messages (the model sees them), but the
-    // browser never gets the echo — log it so the resend-next-turn window is
-    // diagnosable. The drain itself must NOT fail.
+    // browser never gets the echo — log that reconciliation is required. The
+    // drain itself must NOT fail.
     const publish = vi.fn().mockReturnValue(undefined);
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -3114,8 +3302,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       const entry = {
         sessionId: 'sess:closed',
         midTurnMessageQueue: [
-          { messageId: 'mid-delivered', text: 'still-delivered' },
+          {
+            messageId: 'mid-delivered',
+            text: 'still-delivered',
+            originatorClientId: 'client-1',
+          },
         ],
+        settledMidTurnMessageIds: [],
         events: { publish },
       };
       const client = makeClientWithEntry('sess:closed', entry);
@@ -3130,6 +3323,9 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         hasQueuedPrompt: false,
       });
       expect(entry.midTurnMessageQueue).toEqual([]);
+      // The ring records the handoff even when the echo is dropped — this is
+      // exactly the lost-echo case the reconciliation query exists for.
+      expect(entry.settledMidTurnMessageIds).toEqual(['mid-delivered']);
       // (b) the dropped-echo degradation is logged.
       const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
       expect(logged).toContain('echo frame dropped (bus closed)');
@@ -3143,6 +3339,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const entry = {
       sessionId: 'sess:empty',
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       events: { publish },
     };
     const client = makeClientWithEntry('sess:empty', entry);
@@ -3153,6 +3350,43 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
 
     expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
     expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('bounds the settled-id ring, evicting oldest ids past the cap', async () => {
+    // The ring exists for reconciliation after a missed echo / page refresh;
+    // it must not grow unboundedly across a long session's many drains.
+    const publish = vi.fn().mockReturnValue(true);
+    const prefilled = Array.from(
+      { length: MID_TURN_RECONCILIATION_RING_SIZE - 1 },
+      (_, index) => `old-${index}`,
+    );
+    const entry = {
+      sessionId: 'sess:ring',
+      midTurnMessageQueue: [
+        { messageId: 'new-1', text: 'x' },
+        { messageId: 'new-2', text: 'y' },
+        { messageId: 'new-3', text: 'z' },
+      ],
+      settledMidTurnMessageIds: [...prefilled],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:ring', entry);
+
+    await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:ring',
+    });
+
+    expect(entry.settledMidTurnMessageIds).toHaveLength(
+      MID_TURN_RECONCILIATION_RING_SIZE,
+    );
+    // Oldest prefilled ids evicted; the freshly drained ids are retained.
+    expect(entry.settledMidTurnMessageIds.slice(-3)).toEqual([
+      'new-1',
+      'new-2',
+      'new-3',
+    ]);
+    expect(entry.settledMidTurnMessageIds).not.toContain('old-0');
+    expect(entry.settledMidTurnMessageIds).not.toContain('old-1');
   });
 
   it('returns an empty drain for an unknown session without throwing', async () => {
@@ -3202,6 +3436,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const entry = {
       sessionId: 'sess:queued',
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      settledMidTurnMessageIds: [] as string[],
       pendingPromptList: [running, queued],
       events: { publish },
     };
@@ -3241,6 +3476,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       activePromptId: 'running',
       promptActive: true,
       midTurnMessageQueue: [],
+      settledMidTurnMessageIds: [],
       pendingPromptList: [running, queued],
       events: { publish: vi.fn() },
       todoStopGuardAwaitingQueuedPromptOwnerPromptId: undefined as
@@ -3310,6 +3546,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       activePromptId: 'running',
       promptActive: true,
       midTurnMessageQueue: [],
+      settledMidTurnMessageIds: [],
       pendingPromptList: [running],
       events: { publish: vi.fn() },
     });
@@ -3317,6 +3554,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:idle',
       promptActive: false,
       midTurnMessageQueue: [],
+      settledMidTurnMessageIds: [],
       pendingPromptList: [],
       events: { publish: vi.fn() },
     });
@@ -3343,6 +3581,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:not-owned',
       promptActive: false,
       midTurnMessageQueue: [],
+      settledMidTurnMessageIds: [],
       pendingPromptList: [],
       events: { publish: vi.fn() },
     };

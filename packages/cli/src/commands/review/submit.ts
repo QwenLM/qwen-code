@@ -48,6 +48,7 @@ import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
+import { operatorReviewSettings } from './lib/review-settings.js';
 import {
   ghWithInput,
   isOwnerRepo,
@@ -65,9 +66,9 @@ import {
   severityOf,
 } from './lib/inline-counts.js';
 import {
-  REVIEW_FOOTER_RE,
   footerVersion,
   reviewFooter,
+  stripReviewFooter,
 } from './lib/review-footer.js';
 
 /** The only events GitHub's Create Review API accepts. */
@@ -137,9 +138,12 @@ function normalizeInlineComments(
   comments: ReviewComment[],
   modelId: unknown,
   cliVersion: string,
+  attribution: boolean,
 ): ReviewComment[] {
-  if (typeof modelId !== 'string' || modelId.trim() === '') return comments;
-  const footer = reviewFooter(modelId, cliVersion);
+  const footer =
+    attribution && typeof modelId === 'string' && modelId.trim() !== ''
+      ? reviewFooter(modelId, cliVersion)
+      : undefined;
   return comments.map((comment) =>
     // An empty body stays empty: this runs BEFORE the consistency check, and
     // a footer pasted onto '' would hide the emptiness from the refusal that
@@ -147,7 +151,12 @@ function normalizeInlineComments(
     typeof comment.body === 'string' && comment.body.trim() !== ''
       ? {
           ...comment,
-          body: `${comment.body.replace(REVIEW_FOOTER_RE, '')}\n\n${footer}`,
+          // Forged footers are stripped even with attribution off: a comment
+          // authored by the model must not carry one the operator turned off.
+          body:
+            footer === undefined
+              ? stripReviewFooter(comment.body)
+              : `${stripReviewFooter(comment.body)}\n\n${footer}`,
         }
       : comment,
   );
@@ -167,9 +176,13 @@ function normalizeInlineComments(
  * user typed, and why it binds to a target rather than acting as a bearer
  * token.
  */
-function authorization(args: SubmitArgs): { ok: boolean; why: string } {
+function authorization(
+  args: SubmitArgs,
+  defaultComment: boolean,
+): { ok: boolean; why: string } {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
+    defaultComment,
     skillArgs: args.skillArgs,
     pr: args.pr,
     repo: args.repo,
@@ -200,6 +213,7 @@ function authorization(args: SubmitArgs): { ok: boolean; why: string } {
 function compose(
   payload: ReviewPayload,
   cliVersion: string,
+  attribution: boolean,
 ): {
   event: string;
   body: string;
@@ -237,6 +251,7 @@ function compose(
       draftedComments: comments,
     },
     cliVersion,
+    attribution,
   );
   return { event: r.event, body: r.body, cappedBy: r.cappedBy };
 }
@@ -373,7 +388,17 @@ function inconsistencies(payload: ReviewPayload, event: string): string[] {
   return problems;
 }
 
-export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
+export function runSubmit(
+  args: SubmitArgs,
+  cliVersion = 'unknown',
+  opts: {
+    /** Append the model/version attribution footer (the `review.attribution` setting). */
+    attribution?: boolean;
+    /** The standing `review.comment` setting, for the authorization gate. */
+    defaultComment?: boolean;
+  } = {},
+): void {
+  const { attribution = true, defaultComment = false } = opts;
   setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
@@ -400,19 +425,37 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
     );
   }
 
-  const auth = authorization(args);
+  const auth = authorization(args, defaultComment);
   if (!auth.ok) {
     // Not an error the caller can retry around — a refusal it must accept. The
     // findings are not lost: they are in the terminal output and the saved
     // report, and the user can ask for them to be posted.
+    // The advice must match the refusal class, or it misdirects the retry:
+    // the gate refuses either because comment was never requested (its `why`
+    // carries `` `--comment` was ``) or because nothing recorded authorises
+    // this target — a binding miss, or no recorded arguments at all. The
+    // second arm's preamble stays neutral ("Nothing recorded…") because a
+    // setting-driven missing-args refusal lands here too, and "The recorded
+    // arguments do not bind" would contradict its `why` ("no review
+    // arguments were recorded"). `--comment` cannot fix the second class —
+    // the flag stands in for nothing a target binding needs, and the
+    // `review.comment` setting already stood in for the flag on exactly
+    // those refusals — so advising it there buys the futile retry loop
+    // authorization.ts's refusal wording exists to prevent.
+    const advice = auth.why.includes('`--comment` was')
+      ? `This is the correct outcome of a review the user did not ask to ` +
+        `publish — report the findings in the terminal and stop. Re-run with ` +
+        `\`--comment\`, or pass --user-authorized only after the user has ` +
+        `asked, in a message they typed, for this review to be published.`
+      : `Nothing recorded authorises binding this target — report the ` +
+        `findings in the terminal and stop. Posting to this pull request ` +
+        `needs a review invoked naming it, or --user-authorized after the ` +
+        `user has asked, in a message they typed, for this review to be ` +
+        `published.`;
     writeStderrLine(
       `REFUSED to post to ${args.repo}#${args.pr}: ${auth.why}.\n` +
         `Posting is a public, irreversible write, and this run has no ` +
-        `authorisation for one. This is the correct outcome of a review the ` +
-        `user did not ask to publish — report the findings in the terminal and ` +
-        `stop. Re-run with \`--comment\`, or pass --user-authorized only after ` +
-        `the user has asked, in a message they typed, for this review to be ` +
-        `published.`,
+        `authorisation for one. ${advice}`,
     );
     writeStdoutLine(
       JSON.stringify({ posted: false, reason: auth.why }, null, 2),
@@ -438,6 +481,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
       payload.comments ?? [],
       payload.state?.modelId,
       cliVersion,
+      attribution,
     ),
   };
 
@@ -446,7 +490,7 @@ export function runSubmit(args: SubmitArgs, cliVersion = 'unknown'): void {
   let body: string;
   let cappedBy: string[];
   try {
-    ({ event, body, cappedBy } = compose(payload, cliVersion));
+    ({ event, body, cappedBy } = compose(payload, cliVersion, attribution));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
@@ -588,7 +632,7 @@ export const submitCommand: CommandModule = {
       .option('skill-args', {
         type: 'string',
         describe:
-          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
+          "Path to the CLI-written record of the review's invocation arguments (defaults to .qwen/tmp/qwen-skill-args-review.txt). Its `--comment` — or the standing `review.comment` setting — is what authorises a post. Deliberately NOT the parser's JSON output: that is a document the caller writes, and a caller that wants to post can write anything in it.",
       })
       .option('user-authorized', {
         type: 'boolean',
@@ -610,6 +654,10 @@ export const submitCommand: CommandModule = {
     const cliVersion =
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
       (await getCliVersion());
-    runSubmit(argv as unknown as SubmitArgs, cliVersion);
+    const review = operatorReviewSettings();
+    runSubmit(argv as unknown as SubmitArgs, cliVersion, {
+      attribution: review.attribution,
+      defaultComment: review.comment,
+    });
   },
 };

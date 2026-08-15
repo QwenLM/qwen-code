@@ -33,6 +33,8 @@ import {
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
+  logStartSession,
+  logSessionEnd,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -326,6 +328,8 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   return {
     ...actual,
     logRipgrepFallback: vi.fn(),
+    logStartSession: vi.fn(actual.logStartSession),
+    logSessionEnd: vi.fn(actual.logSessionEnd),
   };
 });
 
@@ -2232,6 +2236,84 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('records no lifecycle transition when resuming the current session id', async () => {
+      const sessionId = 'same-session-id';
+      const config = new Config({ ...baseParams, sessionId });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession(sessionId, {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+    });
+
+    it('ends the outgoing session before starting a replacement without continuation', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      const endedSessionIds: string[] = [];
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+      vi.mocked(logSessionEnd).mockImplementationOnce((cfg: Config) => {
+        endedSessionIds.push(cfg.getSessionId());
+      });
+
+      config.startNewSession('replacement-session');
+
+      expect(endedSessionIds).toEqual([outgoingSessionId]);
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        undefined,
+      );
+      expect(vi.mocked(logSessionEnd).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(logStartSession).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('carries the outgoing session id when resuming a different persisted session', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const outgoingSessionId = config.getSessionId();
+      vi.mocked(logStartSession).mockClear();
+
+      config.startNewSession('resumed-session-id', {
+        conversation: { messages: [] },
+      } as unknown as ResumedSessionData);
+
+      expect(logStartSession).toHaveBeenCalledWith(
+        config,
+        expect.anything(),
+        outgoingSessionId,
+      );
+    });
+
     it('rejects a session switch while the current recorder owns the writer lease', () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const originalSessionId = config.getSessionId();
@@ -2248,6 +2330,9 @@ describe('Server Config (config.ts)', () => {
         }
       ).chatRecordingService = recorder;
 
+      vi.mocked(logSessionEnd).mockClear();
+      vi.mocked(logStartSession).mockClear();
+
       expect(() => config.startNewSession('replacement-session')).toThrow(
         expect.objectContaining({
           name: 'SessionWriterUnavailableError',
@@ -2258,6 +2343,9 @@ describe('Server Config (config.ts)', () => {
       expect(config.getChatRecordingService()).toBe(recorder);
       expect(finalize).not.toHaveBeenCalled();
       expect(flush).not.toHaveBeenCalled();
+      // A rejected switch must leave the live session's lifecycle untouched.
+      expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(logStartSession).not.toHaveBeenCalled();
     });
 
     const resumedGoalSession = (
@@ -2306,6 +2394,112 @@ describe('Server Config (config.ts)', () => {
       };
     };
 
+    // A pre-canonical transcript whose newest Goal record is a legacy
+    // `goal_status` card. Recovering it is the one restore path that has to
+    // *write*: it journals a migrated `goal_state` record.
+    const legacyGoalSession = (): ResumedSessionData => {
+      const record = {
+        uuid: 'legacy-goal',
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          phase: 'result',
+          outputHistoryItems: [
+            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
+          ],
+        },
+      } as unknown as ChatRecord;
+      return {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [record],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: record.uuid,
+      };
+    };
+
+    // Under a writer lease the recorder is `inactive` until it is handed the
+    // lease, and rejects every write until then. Kicking the legacy
+    // migration off from the constructor drove that write into the guard,
+    // and `restore()` latches the failure as `recoveryError` permanently:
+    // the migrated goal was dropped and the whole resumed session lost goal
+    // persistence. Ordering is the deciding variable, so this asserts the
+    // deferred restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before migrating a legacy Goal', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      expect(recorder.hasWriteOwnership()).toBe(false);
+
+      let settled = false;
+      const ready = config.getGoalRuntimeReady().then(
+        (runtime) => {
+          settled = true;
+          return runtime;
+        },
+        (error: unknown) => {
+          settled = true;
+          throw error;
+        },
+      );
+      // Flush microtasks: the pre-fix code had already rejected by here.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      const recordGoalState = vi
+        .spyOn(recorder, 'recordGoalState')
+        .mockResolvedValue({} as ChatRecord);
+      // Stands in for `activateChatRecording()` handing over the lease.
+      vi.spyOn(recorder, 'hasWriteOwnership').mockReturnValue(true);
+      (
+        config as unknown as { startPendingGoalRestore(): void }
+      ).startPendingGoalRestore();
+
+      const runtime = await ready;
+      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        objective: 'ship the thing',
+        status: 'paused',
+      });
+      // The runtime is usable, not latched on `recoveryError` — which is
+      // what `assertOperational()` would rethrow from every later
+      // beginTurn/dispatch/finishTurn.
+      expect(() => runtime.beginTurn('turn-1')).not.toThrow();
+    });
+
+    it('fails a deferred Goal restore instead of hanging when the writer never arrives', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+        sessionData: legacyGoalSession(),
+      });
+      const ready = config.getGoalRuntimeReady();
+      config.startNewSession('replacement-session');
+
+      await expect(ready).rejects.toBeInstanceOf(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
     it('restores the complete resumed-session Goal before exposing readiness', async () => {
       const config = new Config({
         ...baseParams,
@@ -2326,6 +2520,83 @@ describe('Server Config (config.ts)', () => {
       const replacement = await config.getGoalRuntimeReady();
       expect(replacement).not.toBe(initial);
       expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('holds selective Goal readiness and autonomous work until finalization', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const started: string[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      let ready = false;
+      void config.getGoalRuntimeReady().then(() => {
+        ready = true;
+      });
+
+      await Promise.resolve();
+      expect(ready).toBe(false);
+      expect(started).toEqual([]);
+
+      config.finalizeSessionRestore();
+
+      await expect(config.getGoalRuntimeReady()).resolves.toBe(
+        config.getGoalRuntime(),
+      );
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+    });
+
+    it('rejects selective Goal readiness when restore is abandoned', async () => {
+      const record = resumedGoalSession('active').conversation.messages[0]!;
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionRestoreProjection: {
+          sessionId: 'resumed-session',
+          filePath: '/tmp/resumed-session.jsonl',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          runtime: {
+            apiHistory: [],
+            uiTelemetryEvents: [],
+            recording: {
+              lastCompletedUuid: record.uuid,
+              turnParentUuids: [],
+            },
+            goalRecords: [record],
+            initialTurn: 0,
+            backgroundNotificationTaskIds: [],
+          },
+        },
+      });
+      const readiness = config.getGoalRuntimeReady();
+
+      config.startNewSession('replacement-session');
+
+      await expect(readiness).rejects.toThrow('Session restore was abandoned');
     });
 
     it('owns one durable Goal runtime per canonical session', async () => {
@@ -4296,6 +4567,149 @@ describe('Server Config (config.ts)', () => {
 
       config.approveMcpServerForSession('not-pending');
       expect(config.isMcpServerPendingApproval('b')).toBe(true);
+    });
+  });
+
+  describe('reasoning effort override', () => {
+    it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { thinking_budget: 4096 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual({
+        source: 'extra_body',
+        field: 'thinking_budget',
+      });
+    });
+
+    it('does not report an identical static effort or a non-tiered model', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body: { reasoning_effort: 'max' },
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+
+      config.getContentGeneratorConfig().model = 'qwen3.7-max';
+      config.getContentGeneratorConfig().extra_body = {
+        thinking_budget: 4096,
+      };
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
+    });
+
+    it.each([
+      {
+        name: 'extra_body enable_thinking disable',
+        extra_body: { enable_thinking: false },
+        expected: { source: 'extra_body', field: 'enable_thinking' },
+      },
+      {
+        name: 'different extra_body effort',
+        extra_body: { reasoning_effort: 'high' },
+        expected: { source: 'extra_body', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams enable_thinking disable',
+        samplingParams: { enable_thinking: false },
+        expected: { source: 'samplingParams', field: 'enable_thinking' },
+      },
+      {
+        name: 'samplingParams budget',
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+      {
+        name: 'different samplingParams effort',
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'identical samplingParams effort',
+        samplingParams: { reasoning_effort: 'max' },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'extra_body enable_thinking on-switch over a samplingParams disable',
+        extra_body: { enable_thinking: true },
+        samplingParams: { enable_thinking: false },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams enable_thinking on-switch',
+        samplingParams: { enable_thinking: true },
+        expected: undefined,
+      },
+      {
+        name: 'samplingParams effort under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { source: 'samplingParams', field: 'reasoning_effort' },
+      },
+      {
+        name: 'samplingParams budget under an extra_body enable_thinking on-switch',
+        extra_body: { enable_thinking: true },
+        samplingParams: { thinking_budget: 2048 },
+        expected: { source: 'samplingParams', field: 'thinking_budget' },
+      },
+    ])('resolves $name', ({ extra_body, samplingParams, expected }) => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'max' },
+        extra_body,
+        samplingParams,
+      };
+
+      expect(config.getReasoningEffortOverride()).toEqual(expected);
+    });
+
+    it('does not report an override for a non-DashScope endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api.openai.com/v1',
+        reasoning: { effort: 'max' },
+        samplingParams: { thinking_budget: 2048 },
+      };
+
+      expect(config.getReasoningEffortOverride()).toBeUndefined();
     });
   });
 
@@ -7395,6 +7809,17 @@ describe('Server Config (config.ts)', () => {
     it('should return the default threshold', () => {
       const config = new Config(baseParams);
       expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
+    });
+
+    it('treats a null runtime threshold as unset', () => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: null as unknown as number,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(false);
     });
 
     it('should use a custom truncateToolOutputThreshold if provided', () => {
@@ -7415,6 +7840,21 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(
         Number.POSITIVE_INFINITY,
       );
+    });
+
+    it.each([
+      [25_000, 25_000],
+      [10_000, 10_000],
+      [100_000, 100_000],
+      [-1, Number.POSITIVE_INFINITY],
+    ])('tracks an explicit threshold of %s', (threshold, expectedThreshold) => {
+      const config = new Config({
+        ...baseParams,
+        truncateToolOutputThreshold: threshold,
+      });
+
+      expect(config.getTruncateToolOutputThreshold()).toBe(expectedThreshold);
+      expect(config.isTruncateToolOutputThresholdExplicit()).toBe(true);
     });
   });
 

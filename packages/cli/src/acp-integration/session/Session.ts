@@ -34,7 +34,12 @@ import type {
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
-  GoalTerminalEvent,
+  GoalRecord,
+  GoalRuntime,
+  GoalSnapshotV2,
+  GoalStateCause,
+  GoalTurnHost,
+  GoalTurnPermit,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   ToolExecutionStatus,
@@ -128,6 +133,9 @@ import {
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
+  addAgentInputMessageAttributes,
+  AgentOutputMessageCapture,
+  getActiveInteractionSpan,
   withInteractionSpan,
   SessionWriterError,
   startToolSpan,
@@ -153,8 +161,8 @@ import {
   didWriteProjectContextFile,
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
-  clearGoalTerminalObserver,
-  setGoalTerminalObserver,
+  GoalPersistenceUnavailableError,
+  goalTurnContext,
   sessionIdContext,
   promptIdContext,
   todoWorkChainContext,
@@ -175,6 +183,10 @@ import {
   runWithRuntimeContentGenerator,
   getInvocationContext,
   runWithInvocationContext,
+  truncateNotificationLabel,
+  buildBackgroundEntryLabel,
+  collectSessionTurnState,
+  computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -184,6 +196,7 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -249,17 +262,12 @@ import {
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
-import { CommandKind } from '../../ui/commands/types.js';
 import {
-  isTerminalGoalStatusKind,
-  MessageType,
-  type HistoryItemGoalStatus,
-} from '../../ui/types.js';
-import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
-import {
-  goalTerminalEventToHistoryItem,
-  recordGoalStatusItem,
+  collectGoalStatusItemsFromRecords,
+  findGoalToRestore,
 } from '../../ui/utils/restoreGoal.js';
+import { CommandKind } from '../../ui/commands/types.js';
+import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
   ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
@@ -295,6 +303,11 @@ import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
+import type { HistoryItemGoalStatus } from '../../ui/types.js';
+import {
+  goalPublicationKey,
+  renderPreparedGoalUpdate,
+} from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
@@ -329,6 +342,7 @@ const permissionRequestTails = new WeakMap<
   Promise<void>
 >();
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
+const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
@@ -457,6 +471,91 @@ type BeforeModelSendContext = {
   compressionFailed: boolean;
 };
 
+interface AcpGoalTurn {
+  permit: GoalTurnPermit;
+  turnKey: string;
+  controller: AbortController;
+  origin: 'runtime' | 'user';
+  continuationContext: string;
+  verifierFeedback?: string;
+  modelStarted: boolean;
+}
+
+function sameGoalPermit(
+  left: GoalTurnPermit | undefined,
+  right: GoalTurnPermit,
+): boolean {
+  return (
+    left?.goalId === right.goalId &&
+    left.revision === right.revision &&
+    left.turnId === right.turnId
+  );
+}
+
+function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
+  return [
+    {
+      text: [
+        'Continue working on the active Goal.',
+        'Use get_goal for the authoritative objective and evidence state.',
+        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
+        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
+        `Runtime continuation context: ${turn.continuationContext}`,
+        ...(turn.verifierFeedback
+          ? [`Verifier feedback: ${turn.verifierFeedback}`]
+          : []),
+      ].join('\n'),
+    },
+  ];
+}
+
+async function claimGoalTurn(
+  runtime: GoalRuntime,
+  turnKey: string,
+  signal: AbortSignal,
+): Promise<GoalTurnPermit | undefined> {
+  // Checked before the immediate path, not only inside the wait: a prompt
+  // aborted while its preempted turn settles as a handoff would otherwise
+  // claim the permit the handoff just promoted to it, and then take
+  // `prompt()`'s aborted early-exit — which releases only when no goal
+  // turn was claimed. The permit would be held by nobody, forever.
+  if (signal.aborted) return undefined;
+  const immediate =
+    runtime.permitForTurn(turnKey) ?? runtime.beginTurn(turnKey);
+  if (immediate || runtime.getSnapshot().goal?.status !== 'active') {
+    return immediate;
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = () => {};
+    const finish = (permit: GoalTurnPermit | undefined, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      signal.removeEventListener('abort', onAbort);
+      if (error !== undefined) reject(error);
+      else resolve(permit);
+    };
+    const inspect = () => {
+      try {
+        const permit = runtime.permitForTurn(turnKey);
+        if (permit || runtime.getSnapshot().goal?.status !== 'active') {
+          finish(permit);
+        }
+      } catch (error) {
+        finish(undefined, error);
+      }
+    };
+    const onAbort = () => finish(undefined);
+
+    unsubscribe = runtime.subscribe(inspect);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    else inspect();
+  });
+}
+
 type PendingToolResultRecord = {
   ordinal: number;
   sequence: number;
@@ -487,6 +586,7 @@ export type DaemonToolLoopState = {
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
   loopDetected: boolean;
+  loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
 };
@@ -499,6 +599,8 @@ const LOOP_DETECTED_SKIP_MESSAGE =
   'Skipped because loop detection stopped the current turn before this tool call could run.';
 const LOOP_DETECTED_CONTEXT_MESSAGE =
   'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
+export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
+  'Tool-call loop protection stopped this turn. The session is still available; send a more specific instruction to continue.';
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
@@ -604,6 +706,7 @@ function recordDaemonLoopDetected(
 ): true {
   if (!loopState.loopDetected) {
     loopState.loopDetected = true;
+    loopState.loopType = loopType;
     debugLogger.warn(message);
     try {
       logLoopDetected(
@@ -619,6 +722,35 @@ function recordDaemonLoopDetected(
     }
   }
   return true;
+}
+
+function createLoopDetectedTurnError(
+  loopState: DaemonToolLoopState,
+): RequestError {
+  return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
+    code: 'LOOP_DETECTED',
+    errorKind: 'loop_detected',
+    ...(loopState.loopType ? { loopType: loopState.loopType } : {}),
+  });
+}
+
+// Cancellation takes precedence when it races a loop-detected stop.
+function cancelledOrThrowLoopDetected(
+  signal: AbortSignal,
+  loopState: DaemonToolLoopState,
+): 'cancelled' {
+  if (signal.aborted) return 'cancelled';
+  throw createLoopDetectedTurnError(loopState);
+}
+
+function isLoopDetectedTurnError(error: unknown): boolean {
+  if (!(error instanceof RequestError)) return false;
+  const data = error.data;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { code?: unknown }).code === 'LOOP_DETECTED'
+  );
 }
 
 function recordDaemonToolCalls(
@@ -1031,6 +1163,13 @@ export interface BackgroundNotificationQueueItem {
   kind: 'agent' | 'monitor' | 'shell';
   toolUseId?: string;
   todoWorkChainId?: string;
+  /** Structured fields for i18n rendering on the frontend. */
+  structured?: {
+    description?: string;
+    commandLabel?: string;
+    eventCount?: number;
+    droppedLines?: number;
+  };
 }
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
@@ -1067,25 +1206,30 @@ interface PromptChannelDelivery {
   target: CronTaskDelivery['target'];
 }
 
-interface ChannelDeliveryCapture {
-  finalText: string;
+interface AgentResponseCapture {
+  channelDelivery?: {
+    finalText: string;
+  };
+  agentOutput: AgentOutputMessageCapture;
 }
 
 function beginChannelDeliveryResponseBlock(
-  capture: ChannelDeliveryCapture | undefined,
+  capture: AgentResponseCapture | undefined,
 ): string[] | undefined {
-  if (!capture) return undefined;
-  capture.finalText = '';
+  capture?.agentOutput.beginResponse();
+  if (!capture?.channelDelivery) return undefined;
+  capture.channelDelivery.finalText = '';
   return [];
 }
 
 function commitChannelDeliveryResponseBlock(
-  capture: ChannelDeliveryCapture | undefined,
+  capture: AgentResponseCapture | undefined,
   responseBlock: string[] | undefined,
   hasFunctionCalls: boolean,
 ): void {
-  if (capture && responseBlock && !hasFunctionCalls) {
-    capture.finalText = responseBlock.join('');
+  capture?.agentOutput.commitResponse(hasFunctionCalls);
+  if (capture?.channelDelivery && responseBlock && !hasFunctionCalls) {
+    capture.channelDelivery.finalText = responseBlock.join('');
   }
 }
 
@@ -1170,30 +1314,7 @@ export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
 ): number {
-  let maxPromptTurn = 0;
-  let userMessageCount = 0;
-  const promptIdPrefix = `${sessionId}########`;
-
-  for (const record of records) {
-    if (record.sessionId === sessionId && isUserPromptRecord(record)) {
-      userMessageCount += 1;
-    }
-
-    for (const promptId of getRecordPromptIds(record)) {
-      if (!promptId.startsWith(promptIdPrefix)) {
-        continue;
-      }
-
-      const suffix = promptId.slice(promptIdPrefix.length);
-      if (!/^\d+$/.test(suffix)) {
-        continue;
-      }
-
-      maxPromptTurn = Math.max(maxPromptTurn, Number(suffix));
-    }
-  }
-
-  return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+  return computeInitialTurnFromHistoryCore(records, sessionId);
 }
 
 export async function fireSessionPermissionDeniedForAutoMode(
@@ -1226,42 +1347,6 @@ export async function fireSessionPermissionDeniedForAutoMode(
       );
     }
   }
-}
-
-function getRecordPromptIds(record: ChatRecord): string[] {
-  const promptIds: string[] = [];
-  const recordPromptId = (record as { promptId?: unknown }).promptId;
-  if (typeof recordPromptId === 'string') {
-    promptIds.push(recordPromptId);
-  }
-  const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
-  if (telemetryPromptId) {
-    promptIds.push(telemetryPromptId);
-  }
-  return promptIds;
-}
-
-function readTelemetryPromptId(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== 'object' || !('uiEvent' in payload)) {
-    return undefined;
-  }
-  const uiEvent = (payload as { uiEvent?: unknown }).uiEvent;
-  if (!uiEvent || typeof uiEvent !== 'object' || !('prompt_id' in uiEvent)) {
-    return undefined;
-  }
-  const promptId = (uiEvent as { prompt_id?: unknown }).prompt_id;
-  return typeof promptId === 'string' ? promptId : undefined;
-}
-
-function isUserPromptRecord(record: ChatRecord): boolean {
-  if (record.type !== 'user' || record.subtype === 'realtime_message') {
-    return false;
-  }
-  return (
-    record.message?.parts?.some(
-      (part) => typeof part.text === 'string' && part.text.trim().length > 0,
-    ) ?? false
-  );
 }
 
 const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
@@ -1518,12 +1603,25 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
   >();
   private readonly activeAgentNotificationAcceptances = new Set<string>();
+
+  private readonly goalQueue: AcpGoalTurn[] = [];
+  private goalProcessing = false;
+  private activeGoalTurn: AcpGoalTurn | undefined;
+  private goalHostUnbind?: () => void;
+  private goalRuntimeUnsubscribe?: () => void;
+  private lastGoalSnapshot?: GoalSnapshotV2;
+  private lastGoalPublicationKey?: string;
+  // Set only when runtime recovery selected a Goal that initial replay hid.
+  // Keep that Goal private through activation and later progress updates.
+  private suppressedRecoveredGoalId?: string;
+  private goalPublicationTail: Promise<void> = Promise.resolve();
 
   // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
   // against the race where #drainNotificationQueue's finally block kicks off
@@ -1538,6 +1636,7 @@ export class Session implements SessionContext {
   /** The exact status-change callback this Session installed, so dispose can
    *  retract its own and nobody else's. */
   #statusChangeCallback: (() => void) | undefined;
+  #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
     planId: string;
@@ -1614,14 +1713,10 @@ export class Session implements SessionContext {
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
     this.planEmitter = new PlanEmitter(this);
-    // This replayer only ever runs on resume, so it may correct an active goal
-    // card that `#restoreGoalOnResume` is about to refuse.
-    this.historyReplayer = new HistoryReplayer(this, {
-      supersedeUnrestorableGoal: true,
-    });
+    this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
 
-    this.installGoalTerminalObserver();
+    this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
     this.config
@@ -1629,6 +1724,409 @@ export class Session implements SessionContext {
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
         this.#requestWorkflowApproval(entry.runId, approval, rawArgs, signal),
       );
+  }
+
+  #bindGoalRuntime(): void {
+    try {
+      const runtime = this.config.getGoalRuntime();
+      this.lastGoalSnapshot = runtime.getSnapshot();
+      this.goalRuntimeUnsubscribe = runtime.subscribe((snapshot, cause) => {
+        const previousGoal = this.lastGoalSnapshot?.goal ?? null;
+        this.lastGoalSnapshot = snapshot;
+        void this.#queueGoalState(snapshot, cause, previousGoal).catch(
+          (error) =>
+            debugLogger.warn(
+              `Failed to emit ACP Goal state: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+        );
+      });
+      const host: GoalTurnHost = {
+        startGoalTurn: async (input) => {
+          if (
+            this.goalQueue.some(
+              ({ permit }) => permit.turnId === input.permit.turnId,
+            ) ||
+            this.activeGoalTurn?.permit.turnId === input.permit.turnId
+          ) {
+            return;
+          }
+          this.goalQueue.push({
+            permit: { ...input.permit },
+            turnKey: `goal-runtime:${input.permit.turnId}`,
+            controller: new AbortController(),
+            origin: 'runtime',
+            continuationContext: input.continuationContext,
+            ...(input.verifierFeedback
+              ? { verifierFeedback: input.verifierFeedback }
+              : {}),
+            modelStarted: false,
+          });
+          void this.#drainGoalQueue();
+        },
+        preemptGoalTurn: (reason) => {
+          for (const turn of this.goalQueue.splice(0)) {
+            turn.controller.abort(reason);
+          }
+          this.activeGoalTurn?.controller.abort(reason);
+        },
+      };
+      this.goalHostUnbind = this.config.bindGoalTurnHost(host);
+    } catch (error) {
+      if (!(error instanceof GoalPersistenceUnavailableError)) {
+        throw error;
+      }
+      debugLogger.debug('Canonical Goal runtime is unavailable for ACP');
+    }
+  }
+
+  /**
+   * Re-attach this session to the Goal runtime after `/clear`.
+   *
+   * `Config.startNewSession()` disposes the old runtime and builds a fresh
+   * one, so the `subscribe` callback installed by `#bindGoalRuntime` — the
+   * only path that reaches `MessageEmitter.emitGoalState` — would stay
+   * registered on the abandoned instance and the client would never receive
+   * another `_meta.goalState` update. The retained turn host survives the
+   * switch, but the subscription and the publication de-duplication state
+   * belong to the old runtime and have to be rebuilt.
+   */
+  rebindGoalRuntimeForNewSession(): void {
+    if (this.disposed || this.closing) return;
+    this.goalRuntimeUnsubscribe?.();
+    this.goalRuntimeUnsubscribe = undefined;
+    this.goalHostUnbind?.();
+    this.goalHostUnbind = undefined;
+    this.lastGoalSnapshot = undefined;
+    this.lastGoalPublicationKey = undefined;
+    this.suppressedRecoveredGoalId = undefined;
+    this.#bindGoalRuntime();
+  }
+
+  /**
+   * Publish the recovered Goal state once, after history replay.
+   *
+   * Goal recovery runs from the `Config` constructor, long before this
+   * Session exists, so `restore()`'s correction broadcast reaches zero
+   * listeners — and replay streams the pre-migration records, emitting the
+   * legacy `set` card. Clients that derive the live goal from goal cards
+   * (both web-shell and the daemon provider do) are therefore left showing a
+   * goal as running when the migrated goal is `paused` and nothing drives
+   * it; only a second reload self-corrected. Republishing here puts the
+   * authoritative state *after* the replayed card, which is the ordering
+   * that matters. `#publishGoalState` de-duplicates on `(cause, snapshot)`,
+   * so this is a no-op when the subscription already delivered it.
+   *
+   * When recovery failed outright — a malformed or future-schema
+   * `goal_state` record makes `recoverGoalFromRecords` return `unsupported`
+   * — there is no state to publish and no in-session command can correct the
+   * stream, because a degraded `/goal` answers without a cause. That case
+   * gets the same trailing `cleared` card the replay-time
+   * `supersedeUnrestorableGoal` used to emit.
+   */
+  async publishRecoveredGoalState(
+    replayedRecords?: readonly ChatRecord[],
+  ): Promise<void> {
+    if (this.disposed || this.closing) return;
+    let runtime;
+    try {
+      runtime = await this.config.getGoalRuntimeReady();
+    } catch (error) {
+      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+      await this.#supersedeUnrestorableGoal(replayedRecords);
+      return;
+    }
+    const cause = runtime.getRecoveryCause?.();
+    // Nothing was recovered, so the replay already told the whole story.
+    if (!cause) return;
+    await this.#queueGoalState(runtime.getSnapshot(), cause);
+  }
+
+  async renderRecoveredGoalUpdates(
+    replayedRecords?: readonly ChatRecord[],
+  ): Promise<SessionUpdate[]> {
+    if (this.disposed || this.closing) return [];
+    const rendered = await renderPreparedGoalUpdate(
+      () => this.config.getGoalRuntimeReady(),
+      {
+        ...(replayedRecords ? { replayedRecords } : {}),
+        previousGoal: this.lastGoalSnapshot?.goal ?? null,
+      },
+    );
+    if (
+      rendered.publicationKey &&
+      rendered.publicationKey === this.lastGoalPublicationKey
+    ) {
+      return [];
+    }
+    this.primeRecoveredGoalPublication(rendered.publicationKey);
+    return rendered.updates;
+  }
+
+  primeRecoveredGoalPublication(
+    publicationKey: string | undefined,
+    suppressedGoalId?: string,
+  ): void {
+    if (publicationKey) this.lastGoalPublicationKey = publicationKey;
+    this.suppressedRecoveredGoalId = suppressedGoalId;
+  }
+
+  #suppressRecoveredGoalUpdate(snapshot: GoalSnapshotV2): boolean {
+    const suppressedGoalId = this.suppressedRecoveredGoalId;
+    if (!suppressedGoalId) return false;
+    const goal = snapshot.goal;
+    if (goal?.goalId === suppressedGoalId) return true;
+    if (goal === null) {
+      this.suppressedRecoveredGoalId = undefined;
+      return true;
+    }
+    this.suppressedRecoveredGoalId = undefined;
+    return false;
+  }
+
+  /**
+   * Emit a trailing `cleared` card for an active legacy goal the runtime
+   * refused to recover.
+   *
+   * Emitted, not recorded: the transcript keeps its `set` card, so a later
+   * resume that can recover the goal still finds it.
+   */
+  async #supersedeUnrestorableGoal(
+    replayedRecords?: readonly ChatRecord[],
+  ): Promise<void> {
+    const status = this.#unrestorableGoalStatus(replayedRecords);
+    if (!status) return;
+    await this.messageEmitter.emitGoalStatus(status);
+  }
+
+  /**
+   * The `cleared` card for an active legacy goal the runtime refused to
+   * recover, or `undefined` when there is nothing to supersede. Shared by the
+   * streaming and rendering recovery paths so they cannot drift.
+   */
+  #unrestorableGoalStatus(
+    replayedRecords?: readonly ChatRecord[],
+  ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
+    if (!replayedRecords?.length) return undefined;
+    const active = findGoalToRestore(
+      collectGoalStatusItemsFromRecords(replayedRecords),
+    );
+    if (!active) return undefined;
+    return {
+      kind: 'cleared',
+      condition: active.condition,
+      iterations: active.iterations,
+      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
+      lastReason:
+        'Goal not restored: its saved state could not be read, so this session is not driving it.',
+    };
+  }
+
+  async #publishGoalState(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+    previousGoal: GoalRecord | null = this.lastGoalSnapshot?.goal ?? null,
+  ): Promise<void> {
+    if (this.#suppressRecoveredGoalUpdate(snapshot)) return;
+    const publicationKey = goalPublicationKey(snapshot, cause);
+    if (publicationKey && publicationKey === this.lastGoalPublicationKey) {
+      return;
+    }
+    if (publicationKey) this.lastGoalPublicationKey = publicationKey;
+    await this.messageEmitter.emitGoalState(snapshot, cause, previousGoal);
+  }
+
+  #queueGoalState(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+    previousGoal: GoalRecord | null = this.lastGoalSnapshot?.goal ?? null,
+  ): Promise<void> {
+    const publication = this.goalPublicationTail.then(() =>
+      this.#publishGoalState(snapshot, cause, previousGoal),
+    );
+    this.goalPublicationTail = publication.catch(() => undefined);
+    return publication;
+  }
+
+  async #drainGoalQueue(): Promise<void> {
+    if (
+      this.disposed ||
+      this.closing ||
+      this.goalProcessing ||
+      this.pendingPrompt ||
+      this.pendingPromptCompletion ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.notificationProcessing ||
+      this.notificationAbortController
+    ) {
+      return;
+    }
+    const turn = this.goalQueue.shift();
+    if (!turn) return;
+
+    this.goalProcessing = true;
+    this.activeGoalTurn = turn;
+    const parts = buildGoalContinuationParts(turn);
+    try {
+      await this.prompt(
+        {
+          sessionId: this.sessionId,
+          prompt: parts.map((part) => ({
+            type: 'text' as const,
+            text: part.text ?? '',
+          })),
+        },
+        undefined,
+        undefined,
+        undefined,
+        turn,
+      );
+    } catch (error) {
+      // `prompt()` can reject before reaching the try whose finally settles
+      // the turn -- `assertCanStartTurn` throwing 'Session is closing', or
+      // the recording write barrier throwing. The turn is already shifted
+      // off `goalQueue` at that point, so without settling here the runtime
+      // keeps `currentPermit` and `activity: 'running'` forever: no further
+      // continuations get scheduled, and every later prompt with an active
+      // goal hangs in `claimGoalTurn` behind the leaked permit. Settling is
+      // safe to repeat -- it no-ops once the permit is no longer current,
+      // and it swallows its own errors.
+      await this.#settleGoalTurn(turn, undefined, true);
+      debugLogger.warn(
+        `ACP Goal turn failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
+      this.goalProcessing = false;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+      void this.#drainGoalQueue();
+    }
+  }
+
+  async #settleGoalTurn(
+    turn: AcpGoalTurn,
+    result: PromptResponse | undefined,
+    failed: boolean,
+  ): Promise<void> {
+    try {
+      const runtime = await this.config.getGoalRuntimeReady();
+      if (!sameGoalPermit(runtime.permitForTurn(turn.turnKey), turn.permit)) {
+        return;
+      }
+      if (!turn.modelStarted) {
+        if (
+          turn.controller.signal.reason === USER_CANCEL_ABORT_REASON &&
+          runtime.getSnapshot().goal?.status === 'active'
+        ) {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: turn.permit.goalId,
+            expectedRevision: turn.permit.revision,
+          });
+        } else {
+          await runtime.releaseTurn(turn.turnKey);
+        }
+        return;
+      }
+
+      // Settling has to survive a failed flush. `ChatRecordingService`
+      // latches a write failure permanently (a taken-over transcript lease,
+      // for one), so from then on every `flush()` re-throws it — and an
+      // exception here would skip finishTurn/pause/releaseTurn and strand
+      // the runtime's current permit, hanging every later goal turn. The
+      // headless path (`failClosedActiveGoalTurn`) already isolates the
+      // same flush for the same reason.
+      try {
+        await this.config.getChatRecordingService()?.flush();
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to flush ACP Goal turn: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      const cancelledByUser =
+        result?.stopReason === 'cancelled' &&
+        turn.controller.signal.reason === USER_CANCEL_ABORT_REASON;
+      // A turn preempted by a newly arrived user prompt is a handoff, not a
+      // failure. `this.pendingPrompt` is the goal turn's own controller while
+      // a goal turn is in flight, so a new prompt aborts it with
+      // NEW_PROMPT_ABORT_REASON -- and whether that abort surfaced as a clean
+      // `cancelled` stop reason or as a throw from the model network await is
+      // pure timing. Without this, the same user action persists the goal as
+      // either active-with-handoff or paused depending on where the abort
+      // landed, and the paused branch silently stops the autonomous loop.
+      const supersededByNewPrompt =
+        turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON;
+      const shouldPause =
+        !supersededByNewPrompt &&
+        (failed ||
+          result?.stopReason === 'max_tokens' ||
+          cancelledByUser ||
+          turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+      // Same latched-write-failure hazard as the flush above, one step later:
+      // `pause` and `finishTurn` both persist through
+      // `appendRecordStrict`, which re-throws the latched failure forever.
+      // Letting that escape would leave `currentPermit` set and the runtime
+      // `running`, so no continuation is ever scheduled again and every later
+      // prompt hangs in `claimGoalTurn`. Fall back to `releaseTurn`, which is
+      // in-memory only, so the loop survives the already-degraded session.
+      try {
+        if (shouldPause && runtime.getSnapshot().goal?.status === 'active') {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: turn.permit.goalId,
+            expectedRevision: turn.permit.revision,
+          });
+          return;
+        }
+        await runtime.finishTurn(turn.permit);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to record ACP Goal turn settlement: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        await runtime.releaseTurn(turn.turnKey);
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to settle ACP Goal turn: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Stops an autonomous Goal loop when the Stop-hook blocking cap fires.
+   *
+   * `abortGoalForStopHookCap` only knows about the legacy `activeGoalStore`,
+   * which no longer has a writer for daemon sessions, so ACP needs the
+   * canonical runtime acted on directly.
+   */
+  async #pauseGoalForStopHookCap(): Promise<void> {
+    try {
+      const runtime = await this.config.getGoalRuntimeReady();
+      const goal = runtime.getSnapshot().goal;
+      if (goal?.status !== 'active') return;
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: goal.goalId,
+        expectedRevision: goal.revision,
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to pause the Goal after the Stop hook cap: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   async #requestWorkflowApproval(
@@ -2440,6 +2938,13 @@ export class Session implements SessionContext {
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
     }
+    const shellActive =
+      this.config.getBackgroundShellRegistry().hasRunningEntries() ||
+      this.notificationQueue.some((item) => item.kind === 'shell') ||
+      this.currentShellNotificationActive;
+    if (shellActive) {
+      holds.push({ category: 'shell', id: 'background-shells' });
+    }
     return holds;
   }
 
@@ -2451,6 +2956,7 @@ export class Session implements SessionContext {
     return Boolean(
       this.pendingPrompt ||
         this.pendingPromptCompletion ||
+        this.goalProcessing ||
         this.cronProcessing ||
         this.cronAbortController ||
         this.cronCompletion ||
@@ -2485,6 +2991,7 @@ export class Session implements SessionContext {
       resolveGate();
       if (this.disposed) return;
       this.closing = false;
+      void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
     };
@@ -2556,6 +3063,14 @@ export class Session implements SessionContext {
     this.hardSuspendTodoStopGuard();
     this.notificationQueue = [];
     this.cronQueue = [];
+    for (const turn of this.goalQueue.splice(0)) {
+      turn.controller.abort(SESSION_DISPOSE_ABORT_REASON);
+    }
+    this.activeGoalTurn?.controller.abort(SESSION_DISPOSE_ABORT_REASON);
+    this.goalHostUnbind?.();
+    this.goalHostUnbind = undefined;
+    this.goalRuntimeUnsubscribe?.();
+    this.goalRuntimeUnsubscribe = undefined;
     this.notificationAbortController?.abort();
     this.notificationAbortController = null;
     this.notificationProcessing = false;
@@ -2585,7 +3100,12 @@ export class Session implements SessionContext {
       this.#statusChangeCallback = undefined;
     }
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
-    this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
+    const shellRegistry = this.config.getBackgroundShellRegistry();
+    shellRegistry.setNotificationCallback(undefined);
+    if (this.#shellStatusChangeCallback) {
+      shellRegistry.clearStatusChangeCallback(this.#shellStatusChangeCallback);
+      this.#shellStatusChangeCallback = undefined;
+    }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
@@ -2594,7 +3114,6 @@ export class Session implements SessionContext {
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback(undefined);
     this.workflowApprovalAbortController.abort(SESSION_DISPOSE_ABORT_REASON);
-    clearGoalTerminalObserver(this.sessionId);
   }
 
   /**
@@ -2614,76 +3133,38 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Installs (or replaces) this session's goal-terminal observer.
-   *
-   * Public because it does not stay installed: `registerGoalHook` and
-   * `unregisterGoalHook` both clear the observer table for the session, so any
-   * caller that (re-)registers a goal outside `#processSlashCommandResult` —
-   * notably goal restore on resume — has to put it back. Idempotent.
-   */
-  installGoalTerminalObserver(): void {
-    setGoalTerminalObserver(this.sessionId, (event: GoalTerminalEvent) => {
-      void this.messageEmitter.emitGoalTerminal(event).catch((error) => {
-        debugLogger.warn(
-          `Failed to emit goal terminal update: ${this.#formatError(error)}`,
-        );
-      });
-      // The wire update is live-only. Persist the terminal card too, so a
-      // resumed session sees the goal as finished instead of re-registering it
-      // from the still-present `set` card.
-      recordGoalStatusItem(this.config, goalTerminalEventToHistoryItem(event));
-    });
-  }
-
-  /**
-   * Emits a goal card and persists it to the transcript. Both `set` and
-   * `cleared` reach the client this way — from `#emitGoalStatusItems` for a
-   * `/goal` prompt, and from the `sessionGoalClear` ext method — so recording
-   * here (rather than at each call site) keeps the transcript in step with the
-   * hook. Replay goes through `messageEmitter.emitGoalStatus` directly and so
-   * does not re-record.
-   */
-  emitGoalStatus(status: Omit<HistoryItemGoalStatus, 'id' | 'type'>): void {
-    void this.messageEmitter.emitGoalStatus(status).catch((error) => {
-      debugLogger.warn(
-        `Failed to emit goal status update: ${this.#formatError(error)}`,
-      );
-    });
-    recordGoalStatusItem(this.config, {
-      type: MessageType.GOAL_STATUS,
-      ...status,
-    });
-  }
-
-  /**
    * Replays conversation history to the client using modular components.
    * Delegates to HistoryReplayer for consistent event emission.
    */
   primeTurnFromHistory(records: ChatRecord[]): void {
-    for (const record of records) {
-      if (record.subtype !== 'notification') continue;
-      const backgroundTask = (
-        record.systemPayload as
-          | { backgroundTask?: { taskId?: unknown } }
-          | undefined
-      )?.backgroundTask;
-      if (typeof backgroundTask?.taskId === 'string') {
-        this.persistedBackgroundNotificationTaskIds.add(backgroundTask.taskId);
-      }
-    }
-    this.turn = Math.max(
-      this.turn,
-      computeInitialTurnFromHistory(records, this.config.getSessionId()),
+    const turnState = collectSessionTurnState(
+      records,
+      this.config.getSessionId(),
     );
+    this.primeTurnState(
+      turnState.initialTurn,
+      turnState.backgroundNotificationTaskIds,
+    );
+  }
+
+  primeTurnState(
+    initialTurn: number,
+    backgroundNotificationTaskIds: readonly string[],
+  ): void {
+    for (const taskId of backgroundNotificationTaskIds) {
+      this.persistedBackgroundNotificationTaskIds.add(taskId);
+    }
+    this.turn = Math.max(this.turn, initialTurn);
   }
 
   async replayHistory(
     records: ChatRecord[],
     gaps?: HistoryGap[],
+    options?: Parameters<HistoryReplayer['replay']>[2],
   ): Promise<void> {
     this.primeTurnFromHistory(records);
     try {
-      await this.historyReplayer.replay(records, gaps);
+      await this.historyReplayer.replay(records, gaps, options);
     } finally {
       // Replayed plan updates re-stamp the revision via sendUpdate, but they
       // belong to finished cycles; only live updates may bind the next
@@ -2861,12 +3342,14 @@ export class Session implements SessionContext {
     const hadCron = !!this.cronAbortController;
     const hadNotification =
       !!this.notificationAbortController || this.notificationProcessing;
+    const queuedGoalTurns = this.goalQueue.splice(0);
+    const hadQueuedGoalTurn = queuedGoalTurns.length > 0;
 
     if (this.followupAbort) {
       this.followupAbort.abort();
       this.followupAbort = null;
     }
-    if (!hadPrompt && !hadCron && !hadNotification) {
+    if (!hadPrompt && !hadCron && !hadNotification && !hadQueuedGoalTurn) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
 
@@ -2875,6 +3358,10 @@ export class Session implements SessionContext {
     if (this.pendingPrompt) {
       this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
       this.pendingPrompt = null;
+    }
+
+    for (const turn of queuedGoalTurns) {
+      turn.controller.abort(USER_CANCEL_ABORT_REASON);
     }
 
     // Cancel any in-progress cron execution
@@ -2891,6 +3378,32 @@ export class Session implements SessionContext {
     }
     this.notificationQueue = [];
     this.notificationProcessing = false;
+
+    const queuedGoalTurn = queuedGoalTurns[0];
+    if (queuedGoalTurn) {
+      try {
+        const runtime = this.config.getGoalRuntime();
+        if (
+          sameGoalPermit(
+            runtime.permitForTurn(queuedGoalTurn.turnKey),
+            queuedGoalTurn.permit,
+          ) &&
+          runtime.getSnapshot().goal?.status === 'active'
+        ) {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: queuedGoalTurn.permit.goalId,
+            expectedRevision: queuedGoalTurn.permit.revision,
+          });
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to pause queued ACP Goal turn: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     this.#activeWorkChanged();
 
     // Stop scheduler and emit exit summary
@@ -2911,6 +3424,7 @@ export class Session implements SessionContext {
     invocationContext?: InvocationContextV1,
     admissionCancellation?: AbortSignal,
     modelPrompt?: string,
+    scheduledGoalTurn?: AcpGoalTurn,
   ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -2943,11 +3457,38 @@ export class Session implements SessionContext {
     }
     const todoStopGuardPreparation =
       this.#prepareTodoStopGuardForPrompt(params);
+    let goalTurn = scheduledGoalTurn;
+    let reservedGoalRuntime: GoalRuntime | undefined;
+    let reservedGoalTurnKey: string | undefined;
+    if (!goalTurn) {
+      try {
+        const runtime = this.config.getGoalRuntime();
+        if (runtime.getSnapshot().goal?.status === 'active') {
+          reservedGoalRuntime = runtime;
+          reservedGoalTurnKey = `goal-user:${randomUUID()}`;
+          runtime.beginTurn(reservedGoalTurnKey);
+          // A runtime continuation that is queued but has not started yet
+          // holds the runtime's permit, and `#drainGoalQueue` is gated on
+          // this prompt's `pendingPrompt`: the drain cannot start the
+          // continuation until we finish, and we cannot start until its
+          // permit is free. Drop it the way an arriving prompt already drops
+          // queued cron and notification work -- the release above promotes
+          // the reservation, and the runtime mints a fresh continuation once
+          // this prompt settles.
+          for (const queued of this.goalQueue.splice(0)) {
+            queued.controller.abort(NEW_PROMPT_ABORT_REASON);
+            await runtime.releaseTurn(queued.turnKey);
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+      }
+    }
     // After writer admission, install this prompt's AbortController before
     // awaiting the previous prompt so a session/cancel during that wait
     // targets us. A cancel during admission cannot target this pending prompt.
-    this.pendingPrompt?.abort();
-    const pendingSend = new AbortController();
+    this.pendingPrompt?.abort(NEW_PROMPT_ABORT_REASON);
+    const pendingSend = goalTurn?.controller ?? new AbortController();
     const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
@@ -3013,8 +3554,61 @@ export class Session implements SessionContext {
       }
     }
 
+    if (reservedGoalRuntime && reservedGoalTurnKey) {
+      try {
+        const permit = await claimGoalTurn(
+          reservedGoalRuntime,
+          reservedGoalTurnKey,
+          pendingSend.signal,
+        );
+        if (permit) {
+          const goal = reservedGoalRuntime.getSnapshot().goal;
+          if (goal) {
+            const verifierFeedback =
+              reservedGoalRuntime.getVerifierFeedback(permit);
+            goalTurn = {
+              permit,
+              turnKey: reservedGoalTurnKey,
+              controller: pendingSend,
+              origin: 'user',
+              continuationContext: goal.objective,
+              ...(verifierFeedback ? { verifierFeedback } : {}),
+              modelStarted: false,
+            };
+          }
+        }
+      } catch (error) {
+        try {
+          await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
+        } catch (releaseError) {
+          debugLogger.warn(
+            `Failed to release Goal reservation after admission failure: ${
+              releaseError instanceof Error
+                ? releaseError.message
+                : String(releaseError)
+            }`,
+          );
+        } finally {
+          releasePendingSend();
+          this.todoStopGuard.suspend();
+        }
+        throw error;
+      }
+    }
+
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
+      // Release whether or not the claim got as far as building `goalTurn`.
+      // `claimGoalTurn` refuses an already-aborted signal, but the abort can
+      // land in the microtask gap between it resolving with a permit and the
+      // check here — and on that path the old `!goalTurn` guard skipped the
+      // release, so the permit was held by a turn that returns `cancelled`
+      // without ever running. The runtime then stays `running` forever and
+      // every later goal turn blocks behind it. Releasing an unclaimed
+      // reservation is a no-op, so the wider guard costs nothing.
+      if (reservedGoalRuntime && reservedGoalTurnKey) {
+        await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
+      }
       releasePendingSend();
       this.todoStopGuard.suspend();
       return { stopReason: 'cancelled' };
@@ -3028,9 +3622,23 @@ export class Session implements SessionContext {
 
     this.duplicateProviderToolCallResponseIds.clear();
     const channelDelivery = parsePromptChannelDelivery(params);
-    const channelDeliveryCapture = channelDelivery
-      ? { finalText: '' }
-      : undefined;
+    const responseCapture: AgentResponseCapture = {
+      ...(channelDelivery ? { channelDelivery: { finalText: '' } } : {}),
+      agentOutput: new AgentOutputMessageCapture(this.config),
+    };
+    const channelPromptTurn =
+      (params as { _meta?: Record<string, unknown> })._meta?.[
+        CHANNEL_PROMPT_META_KEY
+      ] === true;
+    // One server-side channel classification, consumed by both the
+    // rejection gate below and the guard-mode selection in
+    // #executePromptInner. Only the authenticated channel-prompt marker
+    // classifies a turn: the delivery meta is a caller-requested side
+    // effect (the response is still delivered on end_turn below), and
+    // letting it classify would let any caller opt its own turn out of
+    // loop-detected rejection and the repeated-failure guard. The ACP
+    // boundary strips the channel-prompt key from untrusted callers, so
+    // both decisions see only trusted values.
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -3038,14 +3646,30 @@ export class Session implements SessionContext {
       resolveCompletion = resolve;
     });
 
+    let rejectedByLoopProtection = false;
+    let promptResult: PromptResponse | undefined;
+    let promptFailed = false;
     try {
       const result = await this.#executePrompt(
         params,
         pendingSend,
-        channelDeliveryCapture,
+        responseCapture,
         invocationContext,
         modelPrompt,
+        // Channel turns are non-interactive deliveries: like cron,
+        // background-notification, and goal turns they keep the graceful
+        // end-turn handling so the collected response text is still
+        // delivered. Only the authenticated CHANNEL_PROMPT_META_KEY turns
+        // sent by the channel bridges qualify; the delivery meta alone
+        // schedules the delivery but keeps the foreground rejection. Goal
+        // turns bypass the bridge entirely, so a rejection there would
+        // settle the turn as failed and pause the goal without any
+        // turn_error ever being published.
+        !channelPromptTurn && goalTurn === undefined,
+        goalTurn,
+        channelPromptTurn,
       );
+      promptResult = result;
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -3058,23 +3682,29 @@ export class Session implements SessionContext {
           source: 'prompt',
           target: channelDelivery.target,
           text: normalizeChannelDeliveryText(
-            channelDeliveryCapture?.finalText ?? '',
+            responseCapture.channelDelivery?.finalText ?? '',
           ),
           promptId: channelDelivery.deliveryId,
         });
       }
       return result;
     } catch (error) {
+      promptFailed = true;
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
         });
       }
+      rejectedByLoopProtection = isLoopDetectedTurnError(error);
       throw error;
     } finally {
       const stillOwnsPendingPrompt = this.pendingPrompt === pendingSend;
       releasePendingSend();
       const shouldDrainAutomaticQueues =
+        // Loop-detected turns resolved end_turn (and drained) before loop
+        // stops became rejections; keep that invariant on the new path so
+        // queued cron/notification work is not stranded.
+        rejectedByLoopProtection ||
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
         this.todoStopGuardDrainAutomaticQueuesWhenIdle ||
         this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -3087,6 +3717,11 @@ export class Session implements SessionContext {
         void this.#drainCronQueue();
         void this.#drainNotificationQueue();
       }
+      if (goalTurn) {
+        await this.#settleGoalTurn(goalTurn, promptResult, promptFailed);
+      } else if (reservedGoalRuntime && reservedGoalTurnKey) {
+        await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
+      }
       // Start the scheduler in finally, not the success path: a turn can arm
       // a wakeup via LoopWakeup and then throw on a later step. Gated on
       // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
@@ -3095,6 +3730,7 @@ export class Session implements SessionContext {
       void this.#startCronSchedulerInRuntime();
       resolveCompletion();
       this.pendingPromptCompletion = null;
+      void this.#drainGoalQueue();
       await this.#consumeLiveEndInstruction();
     }
   }
@@ -3260,9 +3896,12 @@ export class Session implements SessionContext {
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture: AgentResponseCapture,
     invocationContext?: InvocationContextV1,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
+    goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -3278,23 +3917,33 @@ export class Session implements SessionContext {
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    return runWithInvocationContext(invocationContext, () =>
-      sessionIdContext.run(sessionId, () =>
-        this.#executePromptInner(
-          params,
-          pendingSend,
-          channelDeliveryCapture,
-          modelPrompt,
+    const execute = () =>
+      runWithInvocationContext(invocationContext, () =>
+        sessionIdContext.run(sessionId, () =>
+          this.#executePromptInner(
+            params,
+            pendingSend,
+            responseCapture,
+            modelPrompt,
+            rejectOnLoopDetected,
+            goalTurn,
+            channelTurn,
+          ),
         ),
-      ),
-    );
+      );
+    return goalTurn
+      ? goalTurnContext.run(goalTurn.permit, execute)
+      : goalTurnContext.exit(execute);
   }
 
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture: AgentResponseCapture,
     modelPrompt?: string,
+    rejectOnLoopDetected = false,
+    goalTurn?: AcpGoalTurn,
+    channelTurn = false,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -3340,6 +3989,11 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const promptDisplayText =
+              typeof promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] ===
+              'string'
+                ? promptMetadata[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY]
+                : undefined;
             const modelPromptBlocks: PromptRequest['prompt'] =
               modelPrompt === undefined
                 ? params.prompt
@@ -3378,6 +4032,16 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_CONTINUE_META_KEY
               ] === true;
+            if (!isRetry && !isContinue && goalTurn?.origin !== 'runtime') {
+              const interactionSpan = getActiveInteractionSpan();
+              if (interactionSpan) {
+                addAgentInputMessageAttributes(
+                  this.config,
+                  interactionSpan,
+                  promptDisplayText ?? promptText,
+                );
+              }
+            }
             let continuationParts: Part[] | null = null;
             // For an `interrupted_prompt` continuation we strip the orphaned
             // user run from history before re-sending it. If the send then
@@ -3385,7 +4049,14 @@ export class Session implements SessionContext {
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
-            if (isContinue) {
+            if (goalTurn?.origin === 'runtime') {
+              this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
+                modelPromptBlocks
+                  .filter((block) => block.type === 'text')
+                  .map((block) => ({ text: block.text })),
+                goalTurn.permit,
+              );
+            } else if (isContinue) {
               const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
                 sessionId: this.sessionId,
                 apiHistory: this.#getCurrentChat().getHistory(),
@@ -3421,16 +4092,27 @@ export class Session implements SessionContext {
               }
             }
 
-            if (isContinue) {
+            if (goalTurn?.origin === 'runtime') {
+              // The automatic Goal turn was recorded above with its runtime
+              // provenance and must not also appear as real user input.
+            } else if (isContinue) {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
-              this.config
-                .getChatRecordingService()
-                ?.recordUserMessage(promptText);
+              const recorder = this.config.getChatRecordingService();
+              if (promptDisplayText !== undefined) {
+                recorder?.recordUserMessage(promptText, goalTurn?.permit, {
+                  displayText: promptDisplayText,
+                  hookContext: '',
+                });
+              } else if (goalTurn) {
+                recorder?.recordUserMessage(promptText, goalTurn.permit);
+              } else {
+                recorder?.recordUserMessage(promptText);
+              }
             }
 
             // Check if the input contains a slash command
@@ -3468,6 +4150,12 @@ export class Session implements SessionContext {
                 pendingSend,
                 this.config,
                 this.settings,
+                {
+                  // `/clear` swaps in a new Goal runtime under this
+                  // long-lived Session; without this the goal-state
+                  // subscription stays on the disposed instance.
+                  startNewSession: () => this.rebindGoalRuntimeForNewSession(),
+                },
               );
 
               parts = await this.#processSlashCommandResult(
@@ -3496,8 +4184,18 @@ export class Session implements SessionContext {
             // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
+            // A runtime continuation is machine-generated, not a user
+            // submission — the same reason `isContinue` is exempt. Firing
+            // the hook on one is also unrecoverable: a block returns before
+            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
+            // branch, which re-queues the identical continuation. Nothing in
+            // that cycle can change the goal state, so it spins — no model
+            // call, one persisted transcript record per lap — until someone
+            // pauses or clears the goal.
+            const isRuntimeContinuation = goalTurn?.origin === 'runtime';
             if (
               !isContinue &&
+              !isRuntimeContinuation &&
               hooksEnabled &&
               messageBus &&
               this.config.hasHooksForEvent?.('UserPromptSubmit')
@@ -3650,9 +4348,7 @@ export class Session implements SessionContext {
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
             const toolLoopState = createDaemonToolLoopState(
-              promptMetadata?.[CHANNEL_PROMPT_META_KEY] === true
-                ? 'off'
-                : this.repeatedToolFailureGuardMode,
+              channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
 
             // conversation_finished must fire on every terminal path of the
@@ -3683,8 +4379,21 @@ export class Session implements SessionContext {
                   pendingSend.signal,
                 );
                 let channelDeliveryResponseBlock: string[] | undefined;
+                let channelDeliveryCheckpoint = 0;
 
                 try {
+                  // Set where the model request is actually issued, not at
+                  // the top of the turn. `modelStarted` is what
+                  // `#settleGoalTurn` reads to decide between `releaseTurn`
+                  // (nothing happened, hand the permit back) and `finishTurn`
+                  // (an iteration completed, count it). Between the top of
+                  // the turn and here sit the abort check and the whole
+                  // prompt-assembly path, so flagging early let a turn that
+                  // was preempted before it ever reached the model settle as
+                  // a completed iteration — a phantom turn on the goal's
+                  // count and a checkpoint recording work that never ran.
+                  // Re-assigning on later loop laps is harmless.
+                  if (goalTurn) goalTurn.modelStarted = true;
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
@@ -3708,8 +4417,8 @@ export class Session implements SessionContext {
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
-                    beginChannelDeliveryResponseBlock(channelDeliveryCapture);
-                  const channelDeliveryCheckpoint =
+                    beginChannelDeliveryResponseBlock(responseCapture);
+                  channelDeliveryCheckpoint =
                     channelDeliveryResponseBlock?.length ?? 0;
 
                   let streamFailed = false;
@@ -3737,10 +4446,14 @@ export class Session implements SessionContext {
                             part.thought,
                           );
                           if (!part.thought) {
+                            responseCapture.agentOutput.appendText(part.text);
                             channelDeliveryResponseBlock?.push(part.text);
                             messageDisplay?.addChunk(part.text);
                           }
                         }
+                        responseCapture.agentOutput.observeFinishReason(
+                          candidate.finishReason,
+                        );
                       }
 
                       if (
@@ -3761,6 +4474,10 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.RETRY ||
                         resp.type === StreamEventType.MODEL_FALLBACK
                       ) {
+                        responseCapture.agentOutput.restartAttempt(
+                          resp.type === StreamEventType.RETRY &&
+                            resp.isContinuation === true,
+                        );
                         if (
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
@@ -3863,7 +4580,7 @@ export class Session implements SessionContext {
                 }
 
                 commitChannelDeliveryResponseBlock(
-                  channelDeliveryCapture,
+                  responseCapture,
                   channelDeliveryResponseBlock,
                   functionCalls.length > 0,
                 );
@@ -3917,13 +4634,17 @@ export class Session implements SessionContext {
                       promptId,
                       toolLoopState,
                       onFullTurnModel,
+                      rejectOnLoopDetected,
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                   if (toolRun.loopDetected) {
@@ -3933,9 +4654,12 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                     return {
-                      stopReason: getAbortAwareEndTurnStopReason(
-                        pendingSend.signal,
-                      ),
+                      stopReason: rejectOnLoopDetected
+                        ? cancelledOrThrowLoopDetected(
+                            pendingSend.signal,
+                            toolLoopState,
+                          )
+                        : getAbortAwareEndTurnStopReason(pendingSend.signal),
                     };
                   }
                 }
@@ -3948,15 +4672,22 @@ export class Session implements SessionContext {
 
               // Fire Stop hook loop (aligned with core path in client.ts)
               // This is triggered after model response completes with no pending tool calls
-              return await this.#handleStopHookLoop(
+              const result = await this.#handleStopHookLoop(
                 pendingSend,
                 promptId,
                 hooksEnabled,
                 messageBus,
                 true,
                 fullTurnModelOverride,
-                channelDeliveryCapture,
+                responseCapture,
+                rejectOnLoopDetected,
               );
+              if (result.stopReason !== 'cancelled') {
+                responseCapture.agentOutput.writeToSpan(
+                  getActiveInteractionSpan(),
+                );
+              }
+              return result;
             } finally {
               logConversationFinishedEvent(
                 this.config,
@@ -3994,7 +4725,8 @@ export class Session implements SessionContext {
     messageBus: MessageBus | undefined,
     allowExternalHooks = true,
     modelOverride?: string,
-    channelDeliveryCapture?: ChannelDeliveryCapture,
+    responseCapture?: AgentResponseCapture,
+    rejectOnLoopDetected = false,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -4059,7 +4791,8 @@ export class Session implements SessionContext {
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
-              channelDeliveryCapture,
+              responseCapture,
+              rejectOnLoopDetected,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -4158,7 +4891,8 @@ export class Session implements SessionContext {
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
-                channelDeliveryCapture,
+                responseCapture,
+                rejectOnLoopDetected,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -4227,11 +4961,20 @@ export class Session implements SessionContext {
           'Stop',
           stopHookBlockingCap,
         );
-        abortGoalForStopHookCap(
-          this.config,
-          this.config.getSessionId(),
-          warning,
-        );
+        if (
+          !abortGoalForStopHookCap(
+            this.config,
+            this.config.getSessionId(),
+            warning,
+          )
+        ) {
+          // The legacy store is empty for daemon sessions, so the cap above
+          // stops nothing on its own: without this the goal stays active,
+          // `finishTurn` mints the next continuation, and the blocked Stop
+          // hook loops the session forever. Pause the canonical runtime the
+          // way the TUI's interrupted-exit path does.
+          await this.#pauseGoalForStopHookCap();
+        }
         this.todoStopGuard.suspend();
         await this.messageEmitter.emitAgentMessage(warning);
         debugLogger.warn(warning);
@@ -4283,7 +5026,8 @@ export class Session implements SessionContext {
             : {}),
           onFullTurnModel,
           getModelOverride: () => modelOverride,
-          channelDeliveryCapture,
+          responseCapture,
+          rejectOnLoopDetected,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -4308,7 +5052,8 @@ export class Session implements SessionContext {
       onAutomaticContinuationValidated?: () => Promise<void>;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
-      channelDeliveryCapture?: ChannelDeliveryCapture;
+      responseCapture?: AgentResponseCapture;
+      rejectOnLoopDetected?: boolean;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -4379,6 +5124,7 @@ export class Session implements SessionContext {
         pendingSend.signal,
       );
       let channelDeliveryResponseBlock: string[] | undefined;
+      let channelDeliveryCheckpoint = 0;
       let providerSendChat: GeminiChat | undefined;
       let userContentPushCountBeforeSend = 0;
 
@@ -4677,10 +5423,9 @@ export class Session implements SessionContext {
         const responseStream = sendResult.responseStream;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
-          options.channelDeliveryCapture,
+          options.responseCapture,
         );
-        const channelDeliveryCheckpoint =
-          channelDeliveryResponseBlock?.length ?? 0;
+        channelDeliveryCheckpoint = channelDeliveryResponseBlock?.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -4720,10 +5465,14 @@ export class Session implements SessionContext {
                 part.thought,
               );
               if (!part.thought) {
+                options.responseCapture?.agentOutput.appendText(part.text);
                 channelDeliveryResponseBlock?.push(part.text);
                 messageDisplay?.addChunk(part.text);
               }
             }
+            options.responseCapture?.agentOutput.observeFinishReason(
+              candidate.finishReason,
+            );
           }
 
           if (
@@ -4743,6 +5492,10 @@ export class Session implements SessionContext {
             response.type === StreamEventType.RETRY ||
             response.type === StreamEventType.MODEL_FALLBACK
           ) {
+            options.responseCapture?.agentOutput.restartAttempt(
+              response.type === StreamEventType.RETRY &&
+                response.isContinuation === true,
+            );
             if (
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
@@ -4826,7 +5579,7 @@ export class Session implements SessionContext {
       }
 
       commitChannelDeliveryResponseBlock(
-        options.channelDeliveryCapture,
+        options.responseCapture,
         channelDeliveryResponseBlock,
         functionCalls.length > 0,
       );
@@ -4853,16 +5606,28 @@ export class Session implements SessionContext {
               options.onFullTurnModel,
             ),
         );
-        if (
-          toolRun.stopAfterPermissionCancel ||
-          toolRun.loopDetected ||
-          pendingSend.signal.aborted
-        ) {
+        if (toolRun.stopAfterPermissionCancel || pendingSend.signal.aborted) {
           this.todoStopGuard.suspend();
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
             kind: 'terminal',
             stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
+        if (toolRun.loopDetected) {
+          this.todoStopGuard.suspend();
+          await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+          return {
+            kind: 'terminal',
+            // Only the foreground chain rejects a loop-detected stop; cron
+            // and background-notification turns keep the graceful end-turn
+            // handling they had before loop stops became rejections.
+            stopReason: options.rejectOnLoopDetected
+              ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
+              : getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -4874,6 +5639,7 @@ export class Session implements SessionContext {
           toolPromptId,
           toolLoopState,
           options.onFullTurnModel,
+          options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.hadMidTurnUserInput) {
@@ -5232,18 +5998,21 @@ export class Session implements SessionContext {
       return { responseStream: null, stopReason: 'cancelled' };
     }
 
-    const responseStream = await this.#getCurrentChat().sendMessageStream(
+    const chat = this.#getCurrentChat();
+    const model =
       options.getModelOverride?.() ??
-        options.modelOverride ??
-        this.config.getModel(),
-      {
-        message,
-        config: {
-          abortSignal,
-        },
+      options.modelOverride ??
+      this.config.getModel();
+    const request = {
+      message,
+      config: {
+        abortSignal,
       },
-      promptId,
-    );
+    };
+    const goalPermit = goalTurnContext.getStore();
+    const responseStream = goalPermit
+      ? await chat.sendMessageStream(model, request, promptId, goalPermit)
+      : await chat.sendMessageStream(model, request, promptId);
     return { responseStream };
   }
 
@@ -5312,6 +6081,7 @@ export class Session implements SessionContext {
     promptId: string,
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
+    rejectOnLoopDetected = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -5405,14 +6175,19 @@ export class Session implements SessionContext {
         toolLoopState,
         { recordToQwenLogger: false },
       );
-      try {
-        await this.messageEmitter.emitAgentMessage(
-          REPEATED_TOOL_FAILURE_STOP_MESSAGE,
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
-        );
+      if (!rejectOnLoopDetected) {
+        // Rejecting turns publish the structured turn_error as the
+        // user-visible explanation; graceful (non-interactive) stops have
+        // no replacement, so keep the transcript stop message for them.
+        try {
+          await this.messageEmitter.emitAgentMessage(
+            REPEATED_TOOL_FAILURE_STOP_MESSAGE,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to emit repeated tool failure stop message: ${this.#formatError(error)}`,
+          );
+        }
       }
       return {
         message: null,
@@ -5890,6 +6665,7 @@ export class Session implements SessionContext {
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
+    if (this.goalProcessing) return;
     if (this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
@@ -5906,6 +6682,7 @@ export class Session implements SessionContext {
       this.closing ||
       this.cronProcessing ||
       this.pendingPrompt ||
+      this.goalProcessing ||
       this.notificationProcessing ||
       this.#nextCronQueueIndex() < 0
     ) {
@@ -5932,6 +6709,7 @@ export class Session implements SessionContext {
       resolveCompletion();
       this.cronCompletion = null;
 
+      void this.#drainGoalQueue();
       void this.#drainNotificationQueue();
 
       // Stop scheduler if all jobs were deleted during execution. With
@@ -6011,9 +6789,10 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
         let cronCompleted = false;
-        const channelDeliveryCapture = item.delivery
-          ? { finalText: '' }
-          : undefined;
+        const responseCapture: AgentResponseCapture = {
+          ...(item.delivery ? { channelDelivery: { finalText: '' } } : {}),
+          agentOutput: new AgentOutputMessageCapture(this.config),
+        };
         await withInteractionSpan(
           this.config,
           {
@@ -6190,7 +6969,6 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
-
                 const sendResult =
                   await this.#sendMessageStreamWithAutoCompression(
                     promptId,
@@ -6210,7 +6988,7 @@ export class Session implements SessionContext {
                 }
                 const responseStream = sendResult.responseStream;
                 const channelDeliveryResponseBlock =
-                  beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                  beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.length ?? 0;
                 if (loopTick && turnCount === 1) {
@@ -6247,10 +7025,14 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
+                          responseCapture.agentOutput.appendText(part.text);
                           channelDeliveryResponseBlock?.push(part.text);
                           messageDisplay?.addChunk(part.text);
                         }
                       }
+                      responseCapture.agentOutput.observeFinishReason(
+                        candidate.finishReason,
+                      );
                     }
 
                     if (
@@ -6271,6 +7053,10 @@ export class Session implements SessionContext {
                       resp.type === StreamEventType.RETRY ||
                       resp.type === StreamEventType.MODEL_FALLBACK
                     ) {
+                      responseCapture.agentOutput.restartAttempt(
+                        resp.type === StreamEventType.RETRY &&
+                          resp.isContinuation === true,
+                      );
                       if (
                         resp.type === StreamEventType.MODEL_FALLBACK ||
                         !resp.isContinuation
@@ -6306,7 +7092,7 @@ export class Session implements SessionContext {
                 }
 
                 commitChannelDeliveryResponseBlock(
-                  channelDeliveryCapture,
+                  responseCapture,
                   channelDeliveryResponseBlock,
                   functionCalls.length > 0,
                 );
@@ -6360,7 +7146,7 @@ export class Session implements SessionContext {
                   undefined,
                   false,
                   undefined,
-                  channelDeliveryCapture,
+                  responseCapture,
                 );
                 stopReason = guardStop.stopReason;
                 if (guardStop.stopReason === 'max_tokens') {
@@ -6397,6 +7183,11 @@ export class Session implements SessionContext {
                 ),
               );
             }
+            if (!ac.signal.aborted && !cronHadError) {
+              responseCapture.agentOutput.writeToSpan(
+                getActiveInteractionSpan(),
+              );
+            }
           },
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
@@ -6413,7 +7204,7 @@ export class Session implements SessionContext {
             source: 'scheduled',
             target: item.delivery.target,
             text: normalizeChannelDeliveryText(
-              channelDeliveryCapture?.finalText ?? '',
+              responseCapture.channelDelivery?.finalText ?? '',
             ),
             taskId: item.taskId,
             firedAt: item.firedAt,
@@ -6450,6 +7241,7 @@ export class Session implements SessionContext {
     backgroundRegistry.setStatusChangeCallback(this.#statusChangeCallback);
     backgroundRegistry.setNotificationCallback(
       (displayText, modelText, meta) => {
+        const entry = backgroundRegistry.get(meta.agentId);
         this.#enqueueBackgroundNotification({
           displayText,
           modelText,
@@ -6460,6 +7252,13 @@ export class Session implements SessionContext {
             this.#agentContinuesTodoStopGuardWorkChain(meta.agentId),
           toolUseId: meta.toolUseId,
           todoWorkChainId: meta.todoWorkChainId,
+          structured: entry
+            ? {
+                description: truncateNotificationLabel(
+                  buildBackgroundEntryLabel(entry),
+                ),
+              }
+            : undefined,
         });
       },
     );
@@ -6470,6 +7269,7 @@ export class Session implements SessionContext {
         return;
       }
 
+      const entry = monitorRegistry.get(meta.monitorId);
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,
@@ -6483,11 +7283,23 @@ export class Session implements SessionContext {
           ),
         toolUseId: meta.toolUseId,
         todoWorkChainId: meta.todoWorkChainId,
+        structured: entry
+          ? {
+              description: truncateNotificationLabel(entry.description),
+              eventCount: meta.eventCount,
+              droppedLines: entry.droppedLines || undefined,
+            }
+          : undefined,
       });
     });
 
     const shellRegistry = this.config.getBackgroundShellRegistry();
+    this.#shellStatusChangeCallback = () => {
+      this.#activeWorkChanged();
+    };
+    shellRegistry.setStatusChangeCallback(this.#shellStatusChangeCallback);
     shellRegistry.setNotificationCallback((displayText, modelText, meta) => {
+      const entry = shellRegistry.get(meta.shellId);
       this.#enqueueBackgroundNotification({
         displayText,
         modelText,
@@ -6497,6 +7309,9 @@ export class Session implements SessionContext {
         continuesTodoStopGuardWorkChain:
           !this.todoStopGuardBackgroundBaseline.shells.has(meta.shellId),
         todoWorkChainId: meta.todoWorkChainId,
+        structured: entry
+          ? { commandLabel: truncateNotificationLabel(entry.description) }
+          : undefined,
       });
     });
 
@@ -6621,6 +7436,7 @@ export class Session implements SessionContext {
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
+          ...item.structured,
         },
       );
     } catch (error) {
@@ -6646,7 +7462,12 @@ export class Session implements SessionContext {
     if (this.disposed) return;
     if (this.closing) return;
     if (this.notificationProcessing) return;
-    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+    if (
+      this.pendingPrompt ||
+      this.goalProcessing ||
+      this.cronProcessing ||
+      this.cronAbortController
+    ) {
       return;
     }
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
@@ -6666,6 +7487,7 @@ export class Session implements SessionContext {
       this.closing ||
       this.notificationProcessing ||
       this.pendingPrompt ||
+      this.goalProcessing ||
       this.cronProcessing ||
       this.cronAbortController ||
       this.#nextNotificationQueueIndex() < 0
@@ -6684,6 +7506,7 @@ export class Session implements SessionContext {
       while (this.notificationQueue.length > 0) {
         if (
           this.pendingPrompt ||
+          this.goalProcessing ||
           this.cronProcessing ||
           this.cronAbortController
         ) {
@@ -6699,6 +7522,7 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
           await runWithInvocationContext(undefined, () =>
@@ -6708,6 +7532,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }
       }
@@ -6717,11 +7542,13 @@ export class Session implements SessionContext {
       this.notificationCompletion = null;
       this.#activeWorkChanged();
 
+      void this.#drainGoalQueue();
       void this.#drainCronQueue();
 
       if (
         this.notificationQueue.length > 0 &&
         !this.pendingPrompt &&
+        !this.goalProcessing &&
         !this.cronProcessing &&
         !this.cronAbortController
       ) {
@@ -6771,6 +7598,7 @@ export class Session implements SessionContext {
                 status: item.status,
                 kind: item.kind,
                 toolUseId: item.toolUseId,
+                ...item.structured,
               });
           }
 
@@ -7021,6 +7849,7 @@ export class Session implements SessionContext {
           status: item.status,
           kind: item.kind,
           toolUseId: item.toolUseId,
+          ...item.structured,
         },
       },
     });
@@ -9307,6 +10136,13 @@ export class Session implements SessionContext {
                 toolName: policyToolName,
                 args: invocation.params as Record<string, unknown>,
                 signal: activeToolAbortSignal,
+                // Same identity and execution scope `CoreToolScheduler`
+                // supplies. This is the path daemon ACP sessions actually
+                // take, so without them a host policy that falls back to the
+                // session — or reasons about where the tool runs — sees
+                // neither on every call made here.
+                sessionId: this.config.getSessionId(),
+                cwd: this.config.getTargetDir(),
                 ...(invocationContext ? { invocationContext } : {}),
               },
             );
@@ -9952,37 +10788,6 @@ export class Session implements SessionContext {
     }
   }
 
-  #emitGoalStatusItems(result: NonInteractiveSlashCommandResult): void {
-    if (!('outputHistoryItems' in result)) {
-      return;
-    }
-    let hasActiveGoalStatus = false;
-    for (const item of result.outputHistoryItems ?? []) {
-      if (item.type === MessageType.GOAL_STATUS) {
-        this.emitGoalStatus({
-          kind: item.kind,
-          condition: item.condition,
-          ...(item.iterations !== undefined
-            ? { iterations: item.iterations }
-            : {}),
-          ...(item.setAt !== undefined ? { setAt: item.setAt } : {}),
-          ...(item.durationMs !== undefined
-            ? { durationMs: item.durationMs }
-            : {}),
-          ...(item.lastReason !== undefined
-            ? { lastReason: item.lastReason }
-            : {}),
-        });
-        if (!isTerminalGoalStatusKind(item.kind)) {
-          hasActiveGoalStatus = true;
-        }
-      }
-    }
-    if (hasActiveGoalStatus) {
-      this.installGoalTerminalObserver();
-    }
-  }
-
   /**
    * Processes the result of a slash command execution.
    *
@@ -10005,7 +10810,6 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     onFullTurnModel: (model: string) => boolean,
   ): Promise<Part[] | null> {
-    this.#emitGoalStatusItems(result);
     this.refreshContextFilesOnWrite =
       result.type === 'submit_prompt' &&
       Boolean(result.refreshContextFilesOnWrite);
@@ -10087,9 +10891,15 @@ export class Session implements SessionContext {
       }
 
       case 'goal_control':
-        throw new Error(
-          'Canonical Goal control is not available in ACP integration yet.',
-        );
+        if (!result.cause) {
+          await this.#queueGoalState(
+            result.response.snapshot,
+            undefined,
+            this.lastGoalSnapshot?.goal ?? null,
+          );
+          this.lastGoalSnapshot = result.response.snapshot;
+        }
+        return null;
 
       case 'no_command':
         // No command was found or executed, resolve the original prompt

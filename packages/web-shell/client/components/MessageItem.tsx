@@ -1,10 +1,11 @@
-import { memo, type ReactElement } from 'react';
+import { memo, useContext, type ReactElement } from 'react';
 import type {
   ACPToolCall,
   Message,
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import { CompactModeContext } from '../App';
 import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -28,6 +29,8 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Click an uploaded image in a user message to preview it in the right panel. */
+  onImagePreview?: (src: string, alt?: string) => void;
   workspaceCwd?: string;
   isLatest?: boolean;
   showRetryHint?: boolean;
@@ -46,6 +49,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onImagePreview,
   workspaceCwd,
   isLatest = false,
   showRetryHint = false,
@@ -60,6 +64,7 @@ export const MessageItem = memo(function MessageItem({
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  const compactMode = useContext(CompactModeContext);
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -71,6 +76,7 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
+            onImagePreview={onImagePreview}
           />
         );
       case 'assistant':
@@ -89,7 +95,6 @@ export const MessageItem = memo(function MessageItem({
       case 'thinking':
         return (
           <ThinkingMessage
-            messageId={message.id}
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
@@ -101,9 +106,11 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ToolGroup
             tools={message.tools}
+            thoughts={message.thoughts}
             pendingApproval={pendingApproval}
             workspaceCwd={workspaceCwd}
             isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'plan':
@@ -223,6 +230,7 @@ export const MessageItem = memo(function MessageItem({
     <MessageTimestamp
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
+      toolGroupSpacing={message.role === 'tool_group' && compactMode}
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle={t('common.copy')}
     >
@@ -264,6 +272,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.isLatest !== next.isLatest) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
@@ -363,6 +372,7 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
     case 'tool_group':
       return (
         next.role === 'tool_group' &&
+        areToolGroupThoughtsEqual(prev.thoughts, next.thoughts) &&
         prev.tools.length === next.tools.length &&
         prev.tools.every((tool, index) =>
           areToolCallsEqual(tool, next.tools[index]),
@@ -408,6 +418,32 @@ function areToolCallsEqual(
     stableJson(prev.locations) === stableJson(next.locations) &&
     stableJson(prev.content) === stableJson(next.content) &&
     areToolListsEqual(prev.subTools, next.subTools)
+  );
+}
+
+function areToolGroupThoughtsEqual(
+  prev:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+  next:
+    | Array<{
+        content: string;
+        isStreaming?: boolean;
+        beforeToolCallId?: string;
+      }>
+    | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every(
+    (thought, index) =>
+      thought.content === next[index]?.content &&
+      thought.isStreaming === next[index]?.isStreaming &&
+      thought.beforeToolCallId === next[index]?.beforeToolCallId,
   );
 }
 
