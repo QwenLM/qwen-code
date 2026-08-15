@@ -12,6 +12,7 @@ import type {
 import {
   TEXT_CACHE_MAX_ENTRIES,
   __getTextUtilsCacheSizes,
+  clearStringWidthCache,
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
   sanitizeFilenameForDisplay,
@@ -438,6 +439,14 @@ describe('textUtils', () => {
 
       expect(getCachedStringWidth('héllo')).toBe(5);
       expect(getCachedStringWidth('目标')).toBe(4);
+    });
+
+    it('does not cache long string width keys', () => {
+      clearStringWidthCache();
+      const longCjk = '目'.repeat(1001);
+
+      expect(getCachedStringWidth(longCjk)).toBe(2002);
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(0);
     });
   });
 });
