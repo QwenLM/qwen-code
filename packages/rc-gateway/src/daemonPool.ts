@@ -35,7 +35,7 @@ export interface PooledDaemonSpawn {
 
 /**
  * The session-routing surface of `DaemonClient` that the gateway's routes
- * actually call through `deps.daemon` — exactly the 13 methods, signatures
+ * actually call through `deps.daemon` — exactly the 14 methods, signatures
  * copied verbatim from `DaemonClient` (packages/sdk-typescript/src/daemon/
  * DaemonClient.ts) so a real `DaemonClient` structurally satisfies this
  * interface with zero changes. `DaemonPool` is the other implementation: a
@@ -90,6 +90,10 @@ export interface SessionDaemon {
     sessionId: string,
     req?: RestoreSessionRequest,
     clientId?: string,
+  ): Promise<DaemonRestoredSession>;
+  resumeSession(
+    sessionId: string,
+    req: { workspaceCwd: string },
   ): Promise<DaemonRestoredSession>;
 }
 

@@ -242,6 +242,65 @@ describe('gateway app', () => {
     expect(denied.status).toBe(403);
   });
 
+  it('POST /session/:id/resume: a WRITE token resumes via the daemon; read-only is denied', async () => {
+    // add-resume-conversations: the gateway mounts a bare resume route so a
+    // phone can reactivate a past conversation on its workspace's daemon.
+    const dir = mkdtempSync(join(tmpdir(), 'rc-srv-resume-'));
+    const { url, pairing } = await boot();
+
+    // A WRITE token resumes (the stub daemon echoes back sessionId + the
+    // posted cwd as workspaceCwd).
+    const { code: wcode } = pairing.mint([WRITE, SESSION_READ]);
+    const wredeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: wcode, label: 'phone' }),
+    });
+    const { token: wtoken } = (await wredeem.json()) as { token: string };
+    const resumed = await fetch(
+      `${url}/session/11111111111111111111111111111111/resume`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${wtoken}`,
+        },
+        body: JSON.stringify({ cwd: dir }),
+      },
+    );
+    expect(resumed.status).toBe(200);
+    const body = (await resumed.json()) as {
+      sessionId: string;
+      workspaceCwd: string;
+    };
+    expect(body).toMatchObject({
+      sessionId: '11111111111111111111111111111111',
+      workspaceCwd: dir,
+    });
+    expect(stub!.lastResumeSessionBody).toMatchObject({ cwd: dir });
+
+    // A session:read-only token cannot resume (WRITE required).
+    const { code: rcode } = pairing.mint([SESSION_READ]);
+    const rredeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: rcode, label: 'viewer' }),
+    });
+    const { token: rtoken } = (await rredeem.json()) as { token: string };
+    const denied = await fetch(
+      `${url}/session/11111111111111111111111111111111/resume`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${rtoken}`,
+        },
+        body: JSON.stringify({ cwd: dir }),
+      },
+    );
+    expect(denied.status).toBe(403);
+  });
+
   it('a bridge-scope token can stream a session (the bundle includes session:read)', async () => {
     // add-bridge-protocol slice 1: a `bridge` grant expands to the concrete
     // {bridge, session:read, approve, write} bundle, so a bridge can subscribe

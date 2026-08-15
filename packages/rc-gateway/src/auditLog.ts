@@ -119,7 +119,8 @@ export type AuditAction =
   | 'review_started'
   | 'review_cancelled'
   | 'session_approval_mode_set'
-  | 'policy_explained';
+  | 'policy_explained'
+  | 'session_resumed';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -191,6 +192,7 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'review_cancelled',
   'session_approval_mode_set',
   'policy_explained',
+  'session_resumed',
 ];
 
 export interface AuditEntry {

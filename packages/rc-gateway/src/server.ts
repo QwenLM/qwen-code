@@ -120,6 +120,7 @@ import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import { createSessionContextRoute } from './routes/sessionContext.js';
 import { createSessionEndRoute } from './routes/sessionEnd.js';
 import { createSessionCreateRoute } from './routes/sessionCreate.js';
+import { createSessionResumeRoute } from './routes/sessionResume.js';
 import {
   createListTokensRoute,
   createMintTokenRoute,
@@ -684,6 +685,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     subActorBan, // banned chat user → 403 (before touching the daemon)
     createSessionCreateRoute(deps.daemon, audit),
+  );
+  // POST /session/:id/resume — reactivate a past (ended) conversation on its
+  // workspace's daemon so a phone can pick it back up (add-resume-conversations).
+  // Write-scoped; bare namespace. No enforceSessionLock — unlike /end or
+  // /prompt, resuming an ENDED session has no live lock to enforce.
+  app.post(
+    '/session/:id/resume',
+    requireScope(WRITE, audit),
+    subActorBan, // banned chat user → 403 (before touching the daemon)
+    createSessionResumeRoute(deps.daemon, audit),
   );
   // GET /rc/fs — folder browser so the phone can pick which directory a new
   // conversation (POST /session above) runs in. Write-scoped, owner/control-
