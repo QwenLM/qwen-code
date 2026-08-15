@@ -99,6 +99,10 @@ test('keeps long session details inside a constrained WebShell @smoke', async ({
     { width: 520, height: 320 },
   ]) {
     await page.setViewportSize(size);
+    // Close the details popover before re-hovering: at constrained sizes it
+    // can flip to cover its own anchor row and intercept the hover.
+    await page.mouse.move(0, 0);
+    await expect(details).toBeHidden();
     await sessionTitle.hover();
     await expect(details).toBeVisible();
     await expectDetailsInsideRoot(webShellRoot, details);

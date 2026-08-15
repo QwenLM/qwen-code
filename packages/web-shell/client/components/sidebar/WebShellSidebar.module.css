@@ -403,6 +403,9 @@
   gap: 8px;
   margin-right: -12px;
   padding-right: 12px;
+  /* The footer overlays the bottom of this scroll area; keep the last row
+     scrollable clear of it so rows stay hoverable. */
+  padding-bottom: 40px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -707,10 +710,7 @@
 
 .sessionDetailsTooltip {
   width: min(360px, var(--radix-popover-content-available-width, 360px));
-  min-width: min(
-    280px,
-    var(--radix-popover-content-available-width, 280px)
-  );
+  min-width: min(280px, var(--radix-popover-content-available-width, 280px));
   max-width: var(--radix-popover-content-available-width, 360px);
   display: flex;
   flex-direction: column;

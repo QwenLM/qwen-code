@@ -27,6 +27,7 @@ import type {
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalActivity,
+  SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
   ActivityIcon,
@@ -602,7 +603,14 @@ function SidebarSessionSurface({
     closeTimerRef.current = window.setTimeout(() => {
       // A hover-out must not unmount the surface while it holds keyboard
       // focus (search or rename inputs): the close would drop focus to body.
-      if (contentRef.current?.contains(document.activeElement)) return;
+      // document.activeElement retargets to the shadow host in shadow-DOM
+      // portal mode, so also probe the surface's own tree for :focus.
+      if (
+        contentRef.current?.contains(document.activeElement) ||
+        contentRef.current?.querySelector(':focus')
+      ) {
+        return;
+      }
       changeOpen(false);
     }, 150);
   }, [cancelClose, changeOpen]);
@@ -613,7 +621,10 @@ function SidebarSessionSurface({
     if (!collapsed || !open) return;
     const handlePointerMove = (event: PointerEvent) => {
       if (!pointerOpenRef.current) return;
-      const target = event.target;
+      // Shadow-DOM portal mode retargets event.target to the shadow host;
+      // composedPath keeps the real node (same approach as App.tsx).
+      const target =
+        (event.composedPath()[0] as Node | undefined) ?? event.target;
       const insideSurface =
         target instanceof Node &&
         (triggerRef.current?.contains(target) ||
@@ -699,7 +710,8 @@ function SidebarSessionSurface({
           }}
           onPointerLeave={closeAfterDelay}
           onInteractOutside={(event) => {
-            const target = event.target;
+            const originalTarget = event.detail.originalEvent.composedPath()[0];
+            const target = (originalTarget as Node | undefined) ?? event.target;
             if (
               target instanceof Element &&
               target.closest(
@@ -997,8 +1009,8 @@ export function WebShellSidebar({
     readWorkspaceExpanded(primaryWorkspaceExpansionId),
   );
   const [showAllProjectSessions, setShowAllProjectSessions] = useState(false);
-  const [projectsExpanded, setProjectsExpanded] = useState(() =>
-    readWorkspaceExpanded('projects'),
+  const [projectsExpanded, setProjectsExpanded] = useState(
+    () => hideProjectHeader || readWorkspaceExpanded('projects'),
   );
   const [collapsedSessionsOpen, setCollapsedSessionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1028,8 +1040,10 @@ export function WebShellSidebar({
   }, []);
 
   useEffect(() => {
-    if (!projectExpanded) setShowAllProjectSessions(false);
-  }, [projectExpanded]);
+    // The five-row preview is scoped per source and per primary workspace;
+    // reset the one-shot show-all when either changes, not only on collapse.
+    setShowAllProjectSessions(false);
+  }, [projectExpanded, primaryWorkspaceExpansionId, selectedSessionSource]);
 
   const previousPrimaryExpansionIdRef = useRef(primaryWorkspaceExpansionId);
   useEffect(() => {
@@ -1711,6 +1725,12 @@ export function WebShellSidebar({
   useEffect(() => {
     if (!collapsed) {
       setCollapsedSessionsOpen(false);
+    } else {
+      // A stale open search would otherwise mount its autofocused input
+      // inside the collapsed hover popover and steal focus from the
+      // composer on every hover-open.
+      setSearchOpen(false);
+      setSearchQuery('');
     }
   }, [collapsed]);
 
@@ -2125,13 +2145,24 @@ export function WebShellSidebar({
             displayName: nextName,
           });
     rename
-      .then(() => {
+      .then((result: SessionMetadataResult | void) => {
         renamed = true;
+        // The daemon clamps displayName to 256 chars and reports the stored
+        // value; propagate that instead of the locally typed string so the
+        // catalog cache never disagrees with the daemon.
+        const effectiveName =
+          typeof result?.displayName === 'string' && result.displayName
+            ? result.displayName
+            : nextName;
         if (workspaceCwd) {
           if (onSessionRenameConfirmed) {
-            onSessionRenameConfirmed(workspaceCwd, sessionId, nextName);
+            onSessionRenameConfirmed(workspaceCwd, sessionId, effectiveName);
           } else {
-            sessionCatalogController.renamed(workspaceCwd, sessionId, nextName);
+            sessionCatalogController.renamed(
+              workspaceCwd,
+              sessionId,
+              effectiveName,
+            );
           }
         }
         cancelRename();
@@ -3300,6 +3331,7 @@ export function WebShellSidebar({
               <form
                 className={styles.renameForm}
                 onKeyDown={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
                 onSubmit={(event) => {
                   event.preventDefault();
                   saveRename();
@@ -3308,6 +3340,7 @@ export function WebShellSidebar({
                 <input
                   autoFocus
                   className={styles.renameInput}
+                  maxLength={256}
                   value={editingName}
                   onChange={(event) => setEditingName(event.target.value)}
                   onBlur={cancelRename}
@@ -3477,6 +3510,7 @@ export function WebShellSidebar({
                   className={styles.renameForm}
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
                   onSubmit={(event) => {
                     event.preventDefault();
                     saveRename();
@@ -3485,6 +3519,7 @@ export function WebShellSidebar({
                   <input
                     autoFocus
                     className={styles.renameInput}
+                    maxLength={256}
                     value={editingName}
                     onChange={(event) => setEditingName(event.target.value)}
                     onBlur={cancelRename}
@@ -4682,12 +4717,11 @@ export function WebShellSidebar({
                   className={styles.projectsHeaderToggle}
                   type="button"
                   aria-expanded={projectsExpanded}
-                  onClick={() =>
-                    setProjectsExpanded((expanded) => {
-                      writeWorkspaceExpanded('projects', !expanded);
-                      return !expanded;
-                    })
-                  }
+                  onClick={() => {
+                    const nextExpanded = !projectsExpanded;
+                    writeWorkspaceExpanded('projects', nextExpanded);
+                    setProjectsExpanded(nextExpanded);
+                  }}
                 >
                   <span>{t('sidebar.project')}</span>
                   <IconChevron expanded={projectsExpanded} />
