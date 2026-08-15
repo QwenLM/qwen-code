@@ -349,6 +349,7 @@ const {
       streamingState: 'idle' as StreamingState,
       blocks: [] as unknown[],
       messages: [] as unknown[],
+      queuedPromptHoldHistory: [] as boolean[],
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
       latestToastHostElevated: false,
@@ -570,15 +571,20 @@ vi.mock('./hooks/useAnimationFrameValue', () => ({
 }));
 
 vi.mock('./hooks/useQueuedPrompts', () => ({
-  useQueuedPrompts: () => ({
-    queuedPrompts: [],
-    queuedTexts,
-    enqueuePrompt: rawEnqueuePrompt,
-    removeQueuedPrompt: vi.fn(),
-    editQueuedPrompt: vi.fn(),
-    editLastQueuedPrompt,
-    clearQueuedPrompts,
-  }),
+  useQueuedPrompts: (args: { holdQueuedPromptsLocally?: boolean }) => {
+    testState.queuedPromptHoldHistory.push(
+      args.holdQueuedPromptsLocally === true,
+    );
+    return {
+      queuedPrompts: [],
+      queuedTexts,
+      enqueuePrompt: rawEnqueuePrompt,
+      removeQueuedPrompt: vi.fn(),
+      editQueuedPrompt: vi.fn(),
+      editLastQueuedPrompt,
+      clearQueuedPrompts,
+    };
+  },
 }));
 
 vi.mock('./utils/systemInfo', () => ({
@@ -4526,6 +4532,7 @@ beforeEach(() => {
   testState.streamingState = 'idle';
   testState.blocks = [];
   testState.messages = [];
+  testState.queuedPromptHoldHistory = [];
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
   testState.latestToastHostElevated = false;
@@ -10552,6 +10559,16 @@ describe('App session callbacks', () => {
 
     expect(snapshots.at(-1)).toBeNull();
     expect(activeGoals.at(-1)).toBeNull();
+  });
+
+  it('holds queued prompts on the first render of an active Goal', async () => {
+    mockConnection.goalState = activeGoalSnapshot();
+
+    renderApp();
+    await flush();
+
+    expect(testState.queuedPromptHoldHistory.length).toBeGreaterThan(0);
+    expect(testState.queuedPromptHoldHistory).not.toContain(false);
   });
 
   it('restores the Goal snapshot when the same session learns its workspace', async () => {

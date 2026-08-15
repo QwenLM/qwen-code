@@ -1084,9 +1084,8 @@ export function useQueuedPrompts({
 
   const fallbackToPendingPrompt = useCallback(
     (id: number) => {
-      if (writeBlockedRef.current || holdQueuedPromptsLocallyRef.current) {
-        return;
-      }
+      const deferSubmission =
+        writeBlockedRef.current || holdQueuedPromptsLocallyRef.current;
       const current = queuedPromptsRef.current;
       const index = current.findIndex(
         (prompt) => prompt.id === id && prompt.midTurnState !== undefined,
@@ -1097,7 +1096,7 @@ export function useQueuedPrompts({
         midTurnState: undefined,
         midTurnMessageId: undefined,
         midTurnFailedAction: undefined,
-        serverState: 'submitting',
+        ...(deferSubmission ? {} : { serverState: 'submitting' as const }),
         isEditing: false,
         isRemoving: false,
       };
@@ -1105,7 +1104,7 @@ export function useQueuedPrompts({
       next[index] = prompt;
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
-      submitPendingPrompt(prompt);
+      if (!deferSubmission) submitPendingPrompt(prompt);
     },
     [submitPendingPrompt],
   );
@@ -1320,11 +1319,24 @@ export function useQueuedPrompts({
           if (index === -1) return;
           if (current[index]?.midTurnState === undefined) return;
           if (latestSessionIdRef.current !== targetSessionId) return;
-          if (!result.accepted || latestStreamingStateRef.current === 'idle') {
+          if (!result.accepted) {
             fallbackToPendingPrompt(prompt.id);
             return;
           }
+          if (latestStreamingStateRef.current === 'idle') {
+            const next = current.filter((item) => item.id !== prompt.id);
+            queuedPromptsRef.current = next;
+            setQueuedPrompts(next);
+            prompt.onAdmitted?.();
+            if (prompt.onComplete && result.messageId) {
+              settleCompletionCallback(result.messageId, prompt.onComplete);
+            }
+            return;
+          }
           prompt.onAdmitted?.();
+          if (prompt.onComplete && result.messageId) {
+            settleCompletionCallback(result.messageId, prompt.onComplete);
+          }
           const next = [...current];
           next[index] = {
             ...current[index]!,
@@ -1394,22 +1406,25 @@ export function useQueuedPrompts({
 
   useEffect(() => {
     if (streamingState !== 'idle' || writeBlocked) return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (ctrl) {
-      ctrl.abort();
-      midTurnEnqueueAbortRef.current = null;
-    }
-    const currentOwnerKey = queueOwnerKey(
-      latestWorkspaceCwdRef.current,
-      latestSessionIdRef.current,
-    );
-    for (const [
-      controller,
-      insertionOwnerKey,
-    ] of explicitInsertAbortControllersRef.current) {
-      if (insertionOwnerKey !== currentOwnerKey) continue;
-      controller.abort();
-      explicitInsertAbortControllersRef.current.delete(controller);
+    if (!canQueryMidTurn) {
+      const acceptedIds = new Set(
+        queuedPromptsRef.current
+          .filter(
+            (prompt) =>
+              prompt.midTurnState === 'queued' &&
+              !prompt.midTurnFailedAction &&
+              !prompt.isEditing &&
+              !prompt.isRemoving,
+          )
+          .map((prompt) => prompt.id),
+      );
+      if (acceptedIds.size > 0) {
+        const next = queuedPromptsRef.current.filter(
+          (prompt) => !acceptedIds.has(prompt.id),
+        );
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+      }
     }
     if (holdQueuedPromptsLocally) return;
     for (const prompt of queuedPromptsRef.current) {
@@ -1421,18 +1436,6 @@ export function useQueuedPrompts({
       setQueuedPrompts(next);
       if (prompt.midTurnFailedAction === 'edit') {
         restoreQueuedPromptsToEditor([prompt], prompt.sessionId);
-      }
-    }
-    if (!canQueryMidTurn) {
-      for (const prompt of queuedPromptsRef.current) {
-        if (
-          prompt.midTurnState &&
-          !prompt.midTurnFailedAction &&
-          !prompt.isEditing &&
-          !prompt.isRemoving
-        ) {
-          fallbackToPendingPrompt(prompt.id);
-        }
       }
     }
     const localPrompts = queuedPromptsRef.current.filter(
@@ -1764,8 +1767,7 @@ export function useQueuedPrompts({
       const prompt = queuedPromptsRef.current.find((item) => item.id === id);
       if (
         !canMutateMidTurn ||
-        (latestStreamingStateRef.current === 'idle' &&
-          !holdQueuedPromptsLocallyRef.current) ||
+        latestStreamingStateRef.current === 'idle' ||
         !prompt ||
         prompt.serverState !== undefined ||
         prompt.serverPromptId !== undefined ||
@@ -1961,7 +1963,10 @@ export function useQueuedPrompts({
       const current = queuedPromptsRef.current;
       const index = current.findIndex((item) => item.id === prompt.id);
       const deliveredAtIdle =
-        isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
+        queueOwnerKey(
+          latestWorkspaceCwdRef.current,
+          latestSessionIdRef.current,
+        ) === promptOwnerKey &&
         (latestStreamingStateRef.current as DaemonStreamingState) === 'idle' &&
         !canQueryMidTurn;
       if (index === -1) {
@@ -1971,15 +1976,7 @@ export function useQueuedPrompts({
             heldPromptsByOwnerRef.current.set(
               promptOwnerKey,
               deliveredAtIdle
-                ? stashed.map((item) =>
-                    item.id === prompt.id
-                      ? {
-                          ...item,
-                          midTurnMessageId: undefined,
-                          isInserting: false,
-                        }
-                      : item,
-                  )
+                ? stashed.filter((item) => item.id !== prompt.id)
                 : stashed.map((item) =>
                     item.id === prompt.id
                       ? {
@@ -2003,20 +2000,11 @@ export function useQueuedPrompts({
         return;
       }
       if (deliveredAtIdle) {
-        const shouldHold =
-          writeBlockedRef.current || holdQueuedPromptsLocallyRef.current;
-        const pendingPrompt: QueuedPrompt = {
-          ...current[index]!,
-          midTurnMessageId: undefined,
-          isInserting: false,
-          ...(shouldHold ? {} : { serverState: 'submitting' }),
-        };
-        const next = [...current];
-        next[index] = pendingPrompt;
+        const next = current.filter((item) => item.id !== prompt.id);
         queuedPromptsRef.current = next;
         setQueuedPrompts(next);
         finishInsertion();
-        if (!shouldHold) submitPendingPrompt(pendingPrompt);
+        prompt.onAdmitted?.();
         return;
       }
       if (!current[index]!.isInserting) {

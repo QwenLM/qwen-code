@@ -316,7 +316,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     ]);
   });
 
-  it('aborts an explicit insert when the turn becomes idle', () => {
+  it('keeps an explicit insert in flight when the turn becomes idle', () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
       new Promise(() => undefined),
@@ -331,22 +331,13 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       ?.signal;
     render('idle', 'session-1', false, false, true);
 
-    expect(signal?.aborted).toBe(true);
+    expect(signal?.aborted).toBe(false);
   });
 
-  it('silently submits an explicit insert aborted as the turn becomes idle', async () => {
+  it('does not resubmit an explicit insert accepted as the turn becomes idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
-    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
-      (_message, opts) => {
-        opts?.signal?.addEventListener(
-          'abort',
-          () => admission.reject(new DOMException('aborted', 'AbortError')),
-          { once: true },
-        );
-        return admission.promise;
-      },
-    );
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
     const { render, reportError } = mount(
       'responding',
       actions,
@@ -362,28 +353,20 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       insertion = latest.insertQueuedPrompt(1);
     });
     render('idle', 'session-1', false, false, false);
-    await act(async () => insertion);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'accepted-once' });
+      await insertion;
+    });
 
     expect(reportError).not.toHaveBeenCalled();
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
-    expect(latest.queuedPrompts).toMatchObject([
-      { text: 'submit after settle', serverState: 'submitting' },
-    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
-  it('silently holds an explicit insert aborted while a Goal remains active', async () => {
+  it('silently holds an explicit insert rejected while a Goal remains active', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
-    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
-      (_message, opts) => {
-        opts?.signal?.addEventListener(
-          'abort',
-          () => admission.reject(new DOMException('aborted', 'AbortError')),
-          { once: true },
-        );
-        return admission.promise;
-      },
-    );
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
     const { render, reportError } = mount(
       'responding',
       actions,
@@ -399,9 +382,12 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       insertion = latest.insertQueuedPrompt(1);
     });
     render('idle', 'session-1', false, false, true);
-    await act(async () => insertion);
+    await act(async () => {
+      admission.resolve({ accepted: false });
+      await insertion;
+    });
 
-    expect(reportError).not.toHaveBeenCalled();
+    expect(reportError).toHaveBeenCalledOnce();
     expect(actions.submitPrompt).not.toHaveBeenCalled();
     expect(latest.queuedPrompts).toMatchObject([{ text: 'keep held' }]);
     expect(latest.queuedPrompts[0]?.admissionOutcome).toBeUndefined();
@@ -482,9 +468,13 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
 
     render('idle', 'session-1', false, false, true);
-    expect(signal?.aborted).toBe(true);
-    await act(async () => insertion);
+    expect(signal?.aborted).toBe(false);
+    await act(async () => {
+      admission.resolve({ accepted: true, messageId: 'inserted-once' });
+      await insertion;
+    });
     expect(actions.enqueueMidTurnMessage).toHaveBeenCalledTimes(1);
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('submits locally held Goal follow-ups after the Goal stops', () => {
@@ -1226,7 +1216,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
-  it('retains a legacy explicit insert accepted after idle until Goal release', async () => {
+  it('does not resubmit a legacy explicit insert accepted after idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean; messageId?: string }>();
     vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
@@ -1243,12 +1233,32 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       await insertion;
     });
 
-    expect(latest.queuedPrompts).toMatchObject([{ text: 'do not lose me' }]);
-    expect(latest.queuedPrompts[0]).not.toHaveProperty('serverState');
+    expect(latest.queuedPrompts).toEqual([]);
     expect(actions.submitPrompt).not.toHaveBeenCalled();
 
     render('idle', 'session-1', false, false, false);
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not resubmit a legacy insert accepted before Goal hold', async () => {
+    const { actions } = createActions();
+    vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
+      accepted: true,
+      messageId: 'accepted-before-idle',
+    });
+    const { render } = mount('responding', actions);
+
+    act(() => latest.enqueuePrompt('already accepted'));
+    await act(async () => {});
+    expect(latest.queuedPrompts).toMatchObject([
+      { midTurnMessageId: 'accepted-before-idle', midTurnState: 'queued' },
+    ]);
+
+    render('idle', 'session-1', false, false, true);
+    expect(latest.queuedPrompts).toEqual([]);
+    render('idle', 'session-1', false, false, false);
+
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('freezes mid-turn fallback while a session switch is preparing', async () => {
@@ -1264,14 +1274,14 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
 
     expect(actions.submitPrompt).not.toHaveBeenCalled();
     expect(latest.queuedPrompts).toMatchObject([
-      { text: '留在当前会话', midTurnState: 'submitting' },
+      { text: '留在当前会话', midTurnState: undefined },
     ]);
 
     render('idle', 'session-1', false, false);
     expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
 
-  it('falls back once when the running turn ends before injection', async () => {
+  it('does not resubmit an accepted message when the running turn ends', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
       accepted: true,
@@ -1286,35 +1296,33 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     render('idle');
     await act(async () => {});
 
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
-    expect(latest.queuedPrompts).toMatchObject([
-      { text: '继续处理', serverState: 'submitting' },
-    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
-  it('ignores a late admission result after idle fallback claimed the prompt', async () => {
+  it('does not resubmit an unresolved legacy admission at idle', async () => {
     const { actions } = createActions();
     const admission = deferred<{ accepted: boolean }>();
-    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(admission.promise);
+    let signal: AbortSignal | undefined;
+    vi.mocked(actions.enqueueMidTurnMessage).mockImplementation(
+      (_message, options) => {
+        signal = options?.signal;
+        return admission.promise;
+      },
+    );
     const { render } = mount('responding', actions);
 
     act(() => {
       latest.enqueuePrompt('不要重复');
     });
     render('idle');
-    render('responding');
+    expect(signal?.aborted).toBe(false);
     await act(async () =>
       admission.resolve({ accepted: true, messageId: 'mid-late' }),
     );
 
-    expect(actions.submitPrompt).toHaveBeenCalledTimes(1);
-    expect(latest.queuedPrompts).toMatchObject([
-      {
-        text: '不要重复',
-        serverState: 'submitting',
-        midTurnState: undefined,
-      },
-    ]);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    expect(latest.queuedPrompts).toEqual([]);
   });
 
   it('deletes an accepted message from the daemon queue', async () => {

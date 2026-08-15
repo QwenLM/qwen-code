@@ -412,18 +412,17 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         streamingState: 'idle',
         canQueryMidTurn: false,
       });
-      // Legacy path: resend directly, no reconciliation round-trip.
+      // The accepted legacy admission remains daemon-owned even without a
+      // reconciliation capability.
       expect(sdkMock.actions.getMidTurnMessages).not.toHaveBeenCalled();
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'note',
-        expect.objectContaining({ sessionId: 'session-a' }),
-      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }
   });
 
-  it('falls back when a legacy admission response reaches an idle turn', async () => {
+  it('does not resubmit when a legacy admission is accepted at idle', async () => {
     let resolveAdmission:
       | ((value: { accepted: boolean; messageId?: string }) => void)
       | undefined;
@@ -449,10 +448,8 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         resolveAdmission?.({ accepted: true, messageId: 'legacy-late' });
       });
 
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'legacy late response',
-        expect.objectContaining({ sessionId: 'session-a' }),
-      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }
@@ -923,7 +920,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('explicitly inserts a locally held Goal prompt while transport is idle', async () => {
+  it('does not explicitly insert a locally held Goal prompt while idle', async () => {
     const harness = createHarness();
     try {
       await harness.render({
@@ -939,10 +936,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         await harness.result().insertQueuedPrompt(queuedPromptId!);
       });
 
-      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
-        'insert into active Goal',
-        expect.objectContaining({ messageId: expect.any(String) }),
-      );
+      expect(sdkMock.actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
       expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
@@ -1364,17 +1358,16 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('silently submits a query-capable insert aborted at turn settle', async () => {
-    let rejectAdmission: ((error: Error) => void) | undefined;
+  it('does not resubmit a query-capable insert accepted at turn settle', async () => {
+    let resolveAdmission:
+      | ((result: { accepted: boolean; messageId?: string }) => void)
+      | undefined;
+    let admissionSignal: AbortSignal | undefined;
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
-      (_message: string, opts?: { signal?: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          rejectAdmission = reject;
-          opts?.signal?.addEventListener(
-            'abort',
-            () => reject(new DOMException('aborted', 'AbortError')),
-            { once: true },
-          );
+      (_message: string, opts?: { messageId?: string; signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          resolveAdmission = resolve;
+          admissionSignal = opts?.signal;
         }),
     );
     const harness = createHarness();
@@ -1394,15 +1387,22 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
         streamingState: 'idle',
         holdQueuedPromptsLocally: false,
       });
-      await act(async () => insertion);
+      const messageId =
+        sdkMock.actions.enqueueMidTurnMessage.mock.calls[0]?.[1]?.messageId;
+      sdkMock.actions.getMidTurnMessages.mockResolvedValue({
+        messages: [],
+        settledMessageIds: [],
+        promotedMessageIds: [messageId!],
+      });
+      await act(async () => {
+        resolveAdmission?.({ accepted: true, messageId });
+        await insertion;
+      });
 
-      expect(rejectAdmission).toBeDefined();
+      expect(admissionSignal?.aborted).toBe(false);
       expect(harness.reportError).not.toHaveBeenCalled();
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledTimes(1);
-      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
-        'query settle',
-        expect.objectContaining({ optimisticUserMessage: false }),
-      );
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+      expect(harness.result().queuedPrompts).toEqual([]);
     } finally {
       await harness.dispose();
     }
@@ -1629,15 +1629,23 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     }
   });
 
-  it('aborts a pending legacy enqueue at the idle transition', async () => {
+  it('keeps a pending legacy enqueue owned by the daemon at idle', async () => {
     let admissionSignal: AbortSignal | undefined;
+    let resolveAdmission:
+      | ((value: { accepted: boolean; messageId?: string }) => void)
+      | undefined;
+    const admission = new Promise<{ accepted: boolean; messageId?: string }>(
+      (resolve) => {
+        resolveAdmission = resolve;
+      },
+    );
     sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
       (
         _message: string,
         opts?: { signal?: AbortSignal; messageId?: string },
       ) => {
         admissionSignal = opts?.signal;
-        return new Promise(() => {});
+        return admission;
       },
     );
     const harness = createHarness();
@@ -1653,8 +1661,14 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(admissionSignal?.aborted).toBe(false);
 
       await harness.render({ streamingState: 'idle', canQueryMidTurn: false });
-      // Without the abort the in-flight admission would land in the next turn.
-      expect(admissionSignal?.aborted).toBe(true);
+      expect(admissionSignal?.aborted).toBe(false);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        resolveAdmission?.({ accepted: true, messageId: 'mid-late' });
+      });
+      expect(harness.result().queuedPrompts).toEqual([]);
+      expect(sdkMock.actions.submitPrompt).not.toHaveBeenCalled();
     } finally {
       await harness.dispose();
     }

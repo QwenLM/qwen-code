@@ -6058,7 +6058,7 @@ export function App({
     holdQueuedPromptsLocally:
       connection.sessionId !== undefined &&
       (connection.goalState === undefined ||
-        goalSnapshot?.goal?.status === 'active'),
+        connection.goalState.goal?.status === 'active'),
     sessionActions,
     store,
     editorRef,
