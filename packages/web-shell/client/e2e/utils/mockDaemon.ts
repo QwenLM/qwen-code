@@ -6,6 +6,7 @@ import {
   type DaemonChannelsSnapshot,
   type DaemonChannelPairingRequest,
   type DaemonChannelTypeCatalog,
+  type DaemonPersistedBranchedSession,
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
@@ -87,6 +88,13 @@ export interface WebShellDaemonScenario {
   gitLog?: unknown;
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
+  /** Stateful response and replay used by historical branch E2E flows. */
+  branch?: {
+    sessionId: string;
+    clientId?: string;
+    displayName: string;
+    events: DaemonEvent[];
+  };
 }
 
 export interface MockDaemonController {
@@ -98,6 +106,7 @@ export interface MockDaemonController {
   promptRequests(): DaemonRequestRecord[];
   permissionRequests(): DaemonRequestRecord[];
   modelRequests(): DaemonRequestRecord[];
+  branchRequests(): DaemonRequestRecord[];
   configOptionRequests(): DaemonRequestRecord[];
 }
 
@@ -363,6 +372,7 @@ export function createWebShellDaemonScenario(
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
+    branch: overrides.branch,
   };
 }
 
@@ -431,6 +441,10 @@ export async function installMockDaemon(
       requests.filter((request) =>
         /\/session\/[^/]+\/model$/.test(request.path),
       ),
+    branchRequests: () =>
+      requests.filter((request) =>
+        /\/session\/[^/]+\/branch\/?$/.test(request.path),
+      ),
     configOptionRequests: () =>
       requests.filter((request) =>
         /\/session\/[^/]+\/config-option$/.test(request.path),
@@ -454,13 +468,24 @@ export function userTextEvent(
 
 export function assistantTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: {
+    id?: number;
+    sessionId?: string;
+    branchRecordId?: string;
+  } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.branchRecordId
+        ? {
+            _meta: {
+              qwenTranscript: { branchRecordId: options.branchRecordId },
+            },
+          }
+        : {}),
     },
     options.id,
   );
@@ -608,7 +633,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
       path,
     )
   );
@@ -752,7 +777,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'POST' &&
-    /^\/session\/[^/]+\/(load|resume|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
+    /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|model|config-option|approval-mode|heartbeat|cancel|detach)\/?$/.test(
       path,
     )
   ) {
@@ -1276,6 +1301,23 @@ async function handleDaemonRoute(
       await json(route, restoredSessionEnvelope(scenario, sessionId));
       return;
     }
+    if (action === 'branch') {
+      if (!scenario.branch) {
+        await json(route, { error: 'Branch scenario is not configured.' }, 404);
+        return;
+      }
+      const branch = scenario.branch;
+      const response: DaemonPersistedBranchedSession = {
+        sessionId: branch.sessionId,
+        displayName: branch.displayName,
+        forkedFrom: {
+          sessionId,
+          displayName: scenario.displayName,
+        },
+      };
+      await json(route, response, 201);
+      return;
+    }
     if (action === 'artifacts') {
       await json(route, sessionArtifactsEnvelope(scenario, sessionId));
       return;
@@ -1430,17 +1472,22 @@ function restoredSessionEnvelope(
   scenario: WebShellDaemonScenario,
   sessionId: string,
 ): DaemonRestoredSession {
+  const branch =
+    scenario.branch?.sessionId === sessionId ? scenario.branch : undefined;
+  const events = branch?.events ?? scenario.events;
   return {
     sessionId,
     workspaceCwd: scenario.workspaceCwd,
     attached: true,
-    clientId: scenario.clientId,
+    clientId: branch?.clientId ?? scenario.clientId,
     createdAt: now,
     hasActivePrompt: false,
-    state: scenario.state,
-    compactedReplay: scenario.events,
+    state: branch
+      ? { ...scenario.state, displayName: branch.displayName }
+      : scenario.state,
+    compactedReplay: events,
     liveJournal: [],
-    lastEventId: maxEventId(scenario.events),
+    lastEventId: maxEventId(events),
   };
 }
 

@@ -413,7 +413,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       fetchedSha,
       fetchedAt,
       auditSince,
-      host: args.host ?? null,
+      // Record the TRIMMED host: setGhHost routes the padded-but-valid flag
+      // fine, but downstream readers that re-validate (compose-review's plan
+      // identity, the agent-prompt weld) must see the same canonical form, or
+      // a padded host silently drops to github.com anchor links.
+      host: args.host?.trim() || null,
       worktreePath: wt,
       baseRefName: meta.baseRefName,
       headRefName: meta.headRefName,
