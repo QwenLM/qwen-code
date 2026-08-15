@@ -3991,6 +3991,13 @@ jobs:
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "gate_container_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-gate-container.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          # The gate EXECUTES these three helpers too, and RUNNER_TEMP is
+          # writable by the branch/agent code later steps run on this host: a
+          # neutered schema/contracts/resolver helper lets a fix that should be
+          # rejected exit 0 honestly, and the wrapper would carry that exit code
+          # to the push. Digest them as one blob (they are staged and verified
+          # together, so a single value is enough and cannot drift apart).
+          echo "gate_helpers_sha256=$(cat "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -5242,6 +5249,7 @@ jobs:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           GATE_CONTAINER_SHA256: '${{ steps.stage.outputs.gate_container_sha256 }}'
+          GATE_HELPERS_SHA256: '${{ steps.stage.outputs.gate_helpers_sha256 }}'
           # The image the gate runs in, from the resolve step's OUTPUT rather
           # than $GITHUB_ENV: branch code must not be able to choose it.
           GATE_IMAGE: '${{ steps.sandbox.outputs.image }}'
@@ -5263,6 +5271,14 @@ jobs:
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
           echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null
+          # The helpers the gate executes are staged in the same writable
+          # RUNNER_TEMP, so verify them as one blob before the wrapper copies
+          # them across the container wall.
+          GATE_HELPERS_NOW="$(cat "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
+          if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
+            echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
+            exit 1
+          fi
           bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"
 
       - name: 'Repair deterministic rejection'
@@ -5373,6 +5389,7 @@ jobs:
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           GATE_CONTAINER_SHA256: '${{ steps.stage.outputs.gate_container_sha256 }}'
+          GATE_HELPERS_SHA256: '${{ steps.stage.outputs.gate_helpers_sha256 }}'
           # The image the gate runs in, from the resolve step's OUTPUT rather
           # than $GITHUB_ENV: branch code must not be able to choose it.
           GATE_IMAGE: '${{ steps.sandbox.outputs.image }}'
@@ -5394,6 +5411,14 @@ jobs:
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
           echo "${GATE_CONTAINER_SHA256}  ${RUNNER_TEMP}/run-autofix-gate-container.sh" | sha256sum -c - > /dev/null
+          # The helpers the gate executes are staged in the same writable
+          # RUNNER_TEMP, so verify them as one blob before the wrapper copies
+          # them across the container wall.
+          GATE_HELPERS_NOW="$(cat "${RUNNER_TEMP}/check-settings-schema.sh" "${RUNNER_TEMP}/check-autofix-contracts.sh" "${RUNNER_TEMP}/resolve-owning-packages.sh" | sha256sum | cut -d' ' -f1)"
+          if [[ "${GATE_HELPERS_NOW}" != "${GATE_HELPERS_SHA256}" ]]; then
+            echo "::error::staged gate helpers no longer match the digest recorded at staging time; refusing to run the gate."
+            exit 1
+          fi
           bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"
 
       - name: 'Finalize verification'

@@ -77,7 +77,30 @@ done
 # root-owned files — the same failure the job's ownership-restore step exists
 # for. --env is an explicit allowlist: anything not named here is simply
 # absent inside, which is the whole point.
+# The gate reads agent-authored verdict INPUTS from the rw WORKDIR mount
+# after its build legs — branch code in the container can plant
+# `no-action.md` to manufacture a `noop` (published as the bot's own "no
+# changes needed" rationale, advancing the watermark) or plant
+# `resolved-comments.txt` to close human review threads. The gate never
+# writes these four, so fingerprint them before the run and refuse the
+# verdict if they moved.
+verdict_inputs_digest() {
+  local f
+  for f in no-action.md address-summary.md resolved-comments.txt comment-replies.json; do
+    printf '%s:%s\n' "${f}" "$(sha256sum "${WORKDIR}/${f}" 2> /dev/null | cut -d' ' -f1)"
+  done
+}
+INPUTS_BEFORE="$(verdict_inputs_digest)"
+
+# --network none: the gate only runs build/typecheck/lint/test against
+# node_modules already installed on the host side, so it needs no egress —
+# and offline operation in this same image is established in-repo by
+# repo-hygiene.yml's SANDBOX_ARGS, whose posture (--init, --cap-drop ALL,
+# --security-opt no-new-privileges) this mirrors. Without it a malicious
+# branch's build script can exfiltrate anything readable in the container
+# using the runner's network position.
 docker run --rm --name "${GATE_CONTAINER}" \
+  --init --network none --cap-drop ALL --security-opt no-new-privileges \
   --user "$(id -u):$(id -g)" \
   --workdir "${GITHUB_WORKSPACE}" \
   --volume "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
@@ -97,6 +120,14 @@ docker run --rm --name "${GATE_CONTAINER}" \
 GATE_RC=$?
 
 echo "🧱 gate container exited ${GATE_RC}"
+
+if [[ "$(verdict_inputs_digest)" != "${INPUTS_BEFORE}" ]]; then
+  # Something in the container rewrote the agent's verdict inputs. The gate's
+  # own exit code is now meaningless as evidence about the fix, so take the
+  # crash path (retry) rather than publish a verdict derived from them.
+  echo "::error::the gate container modified the agent's verdict inputs in ${WORKDIR} — refusing the verdict; the next scan retries."
+  exit 125
+fi
 
 # Verdict translation. Only these keys are forwarded, last value wins (the
 # gate appends its final verdict last), and `outcome` is gated on the exit

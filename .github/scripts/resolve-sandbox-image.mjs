@@ -109,7 +109,7 @@ function pullImage(command, image) {
   });
 }
 
-function exportImage(image) {
+export function exportImage(image) {
   if (process.env.GITHUB_ENV) {
     appendFileSync(process.env.GITHUB_ENV, `QWEN_SANDBOX_IMAGE=${image}\n`);
   }

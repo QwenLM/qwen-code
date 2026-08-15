@@ -6252,10 +6252,37 @@ exit 1
     expect(workflow).toContain(
       "- name: 'Resolve sandbox image'\n        # id + step output",
     );
+    // The two gate steps are one hardening surface: their env+run bodies must
+    // stay identical, or a guard added to the first pass silently misses the
+    // repair pass (the one that runs after the branch's code already ran).
+    const gateBodyOf = (step) =>
+      step.replace(/^ +- name: '[^']*'\n/, '').replace(/\s+/g, ' ');
+    expect(gateBodyOf(verificationGateSteps[1]).length).toBeGreaterThan(200);
+    expect(
+      gateBodyOf(verificationGateSteps[1]).includes(
+        'bash "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
+      ),
+    ).toBe(true);
+    const runBodyOf = (step) =>
+      (step.match(/ {8}run: \|-\n([\s\S]*)$/)?.[1] ?? '').replace(/\s+/g, ' ');
+    expect(runBodyOf(repairVerificationGateStep)).toBe(
+      runBodyOf(verificationGateSteps[1]),
+    );
     expect(workflow).toContain(
       'cp .github/scripts/run-autofix-gate-container.sh "${RUNNER_TEMP}/run-autofix-gate-container.sh"',
     );
     expect(workflow).toContain('echo "gate_container_sha256=$(sha256sum ');
+    // The image output is load-bearing (empty GATE_IMAGE → the wrapper
+    // refuses and every round takes the gate-crashed retry), so pin the id
+    // itself, not just the consumer string.
+    expect(workflow).toMatch(
+      /- name: 'Resolve sandbox image'\n[^\n]*\n[\s\S]{0,400}?id: 'sandbox'/,
+    );
+    // The three helpers the gate EXECUTES are staged in the same writable
+    // RUNNER_TEMP, so they are digested at staging and verified before the
+    // wrapper copies them across the wall.
+    expect(workflow).toContain('echo "gate_helpers_sha256=$(cat ');
+    expect(workflow.match(/GATE_HELPERS_NOW="\$\(cat /g) ?? []).toHaveLength(2);
     // The container env is an explicit ALLOWLIST: everything unnamed is
     // absent inside, which is the isolation. The PAT, the host $GITHUB_ENV
     // and the runner's real $GITHUB_OUTPUT must never appear in it.
@@ -6304,8 +6331,42 @@ exit 1
     // legitimately writes goes to the separate rw scratch mount.
     expect(dockerRun).toContain('--volume "${CBIN}:${CBIN}:ro"');
     expect(dockerRun).toContain('--volume "${CRW}:${CRW}"');
+    // Mount TARGETS must equal their sources (a retargeting mutant would slip
+    // past a sources-only comparison), and the workdir must be the workspace —
+    // without it the container starts at / and every gate run dies exit 128
+    // in git, reporting as a crash while every other assertion stays green.
+    for (const [, src, dst] of dockerRun.matchAll(
+      /--volume "([^":]+):([^":]+)(?::ro)?"/g,
+    )) {
+      expect(dst).toBe(src);
+    }
+    expect(dockerRun).toContain('--workdir "${GITHUB_WORKSPACE}"');
+    expect(dockerRun).toContain('--env BRANCH="${BRANCH}"');
+    expect(dockerRun).toContain('--env WORKDIR="${WORKDIR}"');
     expect(dockerRun).toContain('--user "$(id -u):$(id -g)"');
     expect(dockerRun).toContain('--rm');
+    // Sandbox posture carried over from repo-hygiene.yml's SANDBOX_ARGS, which
+    // runs the same command set in the same image: no egress for a build that
+    // needs none, and no extra capabilities.
+    expect(dockerRun).toContain('--network none');
+    expect(dockerRun).toContain('--cap-drop ALL');
+    expect(dockerRun).toContain('--security-opt no-new-privileges');
+    expect(dockerRun).toContain('--init');
+    // The agent-authored verdict inputs are fingerprinted around the run: the
+    // WORKDIR mount is writable, so branch code could otherwise plant
+    // no-action.md to manufacture a noop the bot publishes as its own.
+    expect(wrapper).toContain('INPUTS_BEFORE="$(verdict_inputs_digest)"');
+    expect(wrapper).toMatch(
+      /if \[\[ "\$\(verdict_inputs_digest\)" != "\$\{INPUTS_BEFORE\}" \]\]/,
+    );
+    for (const f of [
+      'no-action.md',
+      'address-summary.md',
+      'resolved-comments.txt',
+      'comment-replies.json',
+    ]) {
+      expect(wrapper).toContain(f);
+    }
     // --rm only fires on a normal exit: a step timeout / job cap / cancel
     // kills the docker CLIENT and would leave the container running as the
     // runner uid with rw mounts on the shared workspace. Name it so the
@@ -6363,6 +6424,23 @@ exit 1
     // retry: synthesizing `failed` there would advance the watermark and hand
     // the item off for good.
     expect(runTranslate(1, [])).toBe('');
+    // A legitimate no-op round carries through as well.
+    expect(runTranslate(0, ['outcome=noop'])).toBe('outcome=noop');
+    // Last-wins extraction is the anti-forgery shape: branch code appending an
+    // earlier forged line cannot displace the gate's final verdict.
+    expect(runTranslate(0, ['outcome=failed', 'outcome=fixed'])).toBe(
+      'outcome=fixed',
+    );
+    // preexisting routes to the base-update handoff (never a push) and rides
+    // along with a genuine failure.
+    expect(runTranslate(1, ['outcome=failed', 'preexisting=true'])).toBe(
+      'outcome=failed\npreexisting=true',
+    );
+    // committed= is a ref-only fact the gate records before any check runs; it
+    // is forwarded on non-zero paths too so the handoff wording stays right.
+    expect(runTranslate(1, ['committed=true', 'outcome=failed'])).toBe(
+      'committed=true\noutcome=failed',
+    );
     // Exit 0 with no verdict is a crash, not a silent success: outcome stays
     // unset so 'Finalize verification' retries on the next scan.
     expect(runTranslate(0, [])).toBe('');
@@ -6378,7 +6456,7 @@ exit 1
     // fails here instead of silently re-opening the class.
     const steps = workflow.split(/\n {6}- name: /).slice(1);
     const branchCode =
-      /bash "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"|run-agent\.mjs|\bnpm (run|ci|test)\b|\bnpx /;
+      /bash "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"|run-agent\.mjs|\bnpm (run|ci|test|install|i|rebuild|exec)\b|\bnpx |\bpnpm |\byarn /;
     const offenders = [];
     for (const step of steps) {
       if (!step.includes('CI_DEV_BOT_PAT')) continue;
