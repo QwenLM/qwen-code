@@ -4036,7 +4036,9 @@ describe('DingtalkChannel outbound file delivery', () => {
       const markdownBody = JSON.parse(
         String((markdownCalls()[0]![1] as RequestInit).body),
       ) as { markdown: { text: string } };
-      expect(markdownBody.markdown.text).toContain('[File: 周报 final.PDF]');
+      expect(markdownBody.markdown.text).toContain(
+        '[File sent: 周报 final.PDF]',
+      );
       expect(markdownBody.markdown.text).not.toContain(file.path);
       expect(markdownBody.markdown.text).not.toContain('[FILE:');
       const fileCall = fileCalls()[0]!;
@@ -4112,11 +4114,37 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(fileCalls()).toHaveLength(1);
       expect(closeOutput).toHaveBeenCalledWith(
         'segment-1',
-        '[File: report.txt]',
+        '[File sent: report.txt]',
         'completed',
         segment,
       );
       expect(events.indexOf('card')).toBeLessThan(events.indexOf('file'));
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('neutralizes an abandoned image marker before delivering a nested file', async () => {
+    const file = createTempFile('report.txt');
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `[IMAGE: /tmp/private-chart.png [FILE: ${file.path}] caption]`,
+      );
+
+      expect(uploadCalls()).toHaveLength(1);
+      expect(fileCalls()).toHaveLength(1);
+      const markdownBody = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(markdownBody.markdown.text).toContain('[Image pending]');
+      expect(markdownBody.markdown.text).toContain('[File sent: report.txt]');
+      expect(markdownBody.markdown.text).not.toContain('/tmp/private-chart');
+      expect(markdownBody.markdown.text).not.toContain(file.path);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }

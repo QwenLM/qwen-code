@@ -1,91 +1,53 @@
+import MarkdownIt from 'markdown-it';
+
 export interface OutboundMediaMarker {
   start: number;
   end: number;
   path: string;
 }
 
-function maskCode(text: string): string {
-  const masked = text.split('');
-  const blank = (start: number, end: number) => {
-    for (let i = start; i < end; i++) {
-      if (masked[i] !== '\n') masked[i] = ' ';
-    }
-  };
-
-  const withoutQuotePrefix = (line: string): string => {
-    let offset = 0;
-    while (offset < line.length) {
-      let spaces = 0;
-      while (spaces < 4 && line[offset + spaces] === ' ') spaces++;
-      if (spaces > 3 || line[offset + spaces] !== '>') break;
-      offset += spaces + 1;
-      if (line[offset] === ' ') offset++;
-    }
-    return line.slice(offset);
-  };
-
-  let fence: { character: '`' | '~'; length: number } | undefined;
-  let lineStart = 0;
-  while (lineStart < text.length) {
-    const newline = text.indexOf('\n', lineStart);
-    const lineEnd = newline === -1 ? text.length : newline;
-    const line = text.slice(lineStart, lineEnd).replace(/\r$/u, '');
-    const body = withoutQuotePrefix(line);
-    if (fence) {
-      blank(lineStart, lineEnd);
-      const closing = body.match(/^ {0,3}(`+|~+)[\t ]*$/u)?.[1];
-      if (closing?.[0] === fence.character && closing.length >= fence.length) {
-        fence = undefined;
-      }
-    } else {
-      const opening = body.match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
-      const delimiter = opening?.[1];
-      const info = opening?.[2] ?? '';
-      if (delimiter && (delimiter[0] !== '`' || !info.includes('`'))) {
-        fence = {
-          character: delimiter[0] as '`' | '~',
-          length: delimiter.length,
-        };
-        blank(lineStart, lineEnd);
-      } else if (/^(?: {4}|\t)/u.test(body)) {
-        blank(lineStart, lineEnd);
-      }
-    }
-    if (newline === -1) break;
-    lineStart = newline + 1;
-  }
-
-  let offset = 0;
-  while (offset < text.length) {
-    if (masked[offset] === '`') {
-      let runLength = 1;
-      while (masked[offset + runLength] === '`') runLength++;
-      let closing = offset + runLength;
-      while (closing < text.length) {
-        while (closing < text.length && masked[closing] !== '`') closing++;
-        let closingLength = 0;
-        while (masked[closing + closingLength] === '`') closingLength++;
-        if (closingLength === runLength) break;
-        closing += Math.max(1, closingLength);
-      }
-      const newline = text.indexOf('\n', offset + runLength);
-      const end =
-        closing < text.length
-          ? closing + runLength
-          : newline === -1
-            ? text.length
-            : newline;
-      blank(offset, end);
-      offset = end;
-      continue;
-    }
-    offset++;
-  }
-
-  return masked.join('');
-}
-
 const MEDIA_MARKER_PATTERN = /\[(IMAGE|FILE):\s*/giu;
+const CODE_TOKEN_TYPES = new Set(['code_block', 'code_inline', 'fence']);
+const markdown = new MarkdownIt();
+type MarkdownToken = ReturnType<typeof markdown.parse>[number];
+
+function markerOpeningsInCode(
+  text: string,
+  openings: readonly RegExpMatchArray[],
+): Set<number> {
+  const sentinels = openings.map((_, index) => {
+    let sentinel = `\u{e000}QWEN_MEDIA_MARKER_${index}\u{e001}`;
+    while (text.includes(sentinel)) sentinel += '\u{e002}';
+    return sentinel;
+  });
+  let instrumented = text;
+  for (let index = openings.length - 1; index >= 0; index--) {
+    const opening = openings[index]!;
+    instrumented =
+      instrumented.slice(0, opening.index) +
+      sentinels[index] +
+      instrumented.slice(opening.index! + opening[0].length);
+  }
+
+  const codeOpenings = new Set<number>();
+  const visit = (tokens: readonly MarkdownToken[]) => {
+    for (const token of tokens) {
+      if (CODE_TOKEN_TYPES.has(token.type)) {
+        for (const [index, sentinel] of sentinels.entries()) {
+          if (
+            token.content.includes(sentinel) ||
+            token.info.includes(sentinel)
+          ) {
+            codeOpenings.add(openings[index]!.index!);
+          }
+        }
+      }
+      if (token.children) visit(token.children);
+    }
+  };
+  visit(markdown.parse(instrumented, {}));
+  return codeOpenings;
+}
 
 function previousOpenBracket(text: string, open: number): number {
   return open === 0 ? -1 : text.lastIndexOf('[', open - 1);
@@ -136,22 +98,21 @@ function markerBoundary(
 }
 
 function markerSafeTruncationStart(text: string, start: number): number {
-  const visibleText = maskCode(text);
-  const before = visibleText.slice(0, start);
+  const before = text.slice(0, start);
   let open = before.lastIndexOf('[');
   while (open !== -1) {
-    const opening = visibleText.slice(open).match(/^\[(IMAGE|FILE):\s*/iu);
+    const opening = text.slice(open).match(/^\[(IMAGE|FILE):\s*/iu);
     if (opening) {
       const pathStart = open + opening[0].length;
-      const nextOpeningOffset = visibleText
+      const nextOpeningOffset = text
         .slice(pathStart)
         .search(MEDIA_MARKER_PATTERN);
       const boundary = markerBoundary(
-        visibleText,
+        text,
         pathStart,
         nextOpeningOffset === -1 ? undefined : pathStart + nextOpeningOffset,
       );
-      const close = findMarkerClose(visibleText, pathStart, boundary);
+      const close = findMarkerClose(text, pathStart, boundary);
       if (close >= start) return close + 1;
       if (close === -1 && boundary >= start) return boundary;
     }
@@ -180,23 +141,26 @@ export function truncateOutboundMediaText(
 export function findOutboundMediaMarkers(
   text: string,
   markerName: 'IMAGE' | 'FILE',
+  includeCode = false,
 ): OutboundMediaMarker[] {
-  const visibleText = maskCode(text);
-  const openings = [...visibleText.matchAll(MEDIA_MARKER_PATTERN)];
+  const openings = [...text.matchAll(MEDIA_MARKER_PATTERN)];
+  const codeOpenings = includeCode
+    ? new Set<number>()
+    : markerOpeningsInCode(text, openings);
   const markers: OutboundMediaMarker[] = [];
 
   for (let i = 0; i < openings.length; i++) {
     const match = openings[i]!;
-    if (match.index === undefined || match[1]?.toUpperCase() !== markerName) {
+    if (
+      match.index === undefined ||
+      match[1]?.toUpperCase() !== markerName ||
+      codeOpenings.has(match.index)
+    ) {
       continue;
     }
     const pathStart = match.index + match[0].length;
-    const boundary = markerBoundary(
-      visibleText,
-      pathStart,
-      openings[i + 1]?.index,
-    );
-    const close = findMarkerClose(visibleText, pathStart, boundary);
+    const boundary = markerBoundary(text, pathStart, openings[i + 1]?.index);
+    const close = findMarkerClose(text, pathStart, boundary);
     if (close === -1) continue;
     const path = text.slice(pathStart, close).trim();
     if (!path) continue;
@@ -235,31 +199,71 @@ export function stripPartialOutboundMediaMarker(
   markerName: 'IMAGE' | 'FILE',
   pendingText: string,
 ): string {
-  const visibleText = maskCode(text);
   const prefix = `${markerName}:`;
-  let open = visibleText.lastIndexOf('[');
-  let stripAt: number | undefined;
-  while (open !== -1) {
-    const candidate = visibleText.slice(open + 1);
-    if (/[\r\n]/u.test(candidate)) break;
-    const nextOpen = visibleText.indexOf('[', open + 1);
-    const ownSegment =
-      nextOpen === -1 ? candidate : candidate.slice(0, nextOpen - open - 1);
-    if (ownSegment.includes(']')) {
-      open = previousOpenBracket(visibleText, open);
+  let cursor = 0;
+  let searchFrom = 0;
+  let result = '';
+  while (searchFrom < text.length) {
+    const open = text.indexOf('[', searchFrom);
+    if (open === -1) break;
+    const lineEndMatch = text.slice(open + 1).search(/[\r\n]/u);
+    const lineEnd = lineEndMatch === -1 ? text.length : open + 1 + lineEndMatch;
+    const candidate = text.slice(open + 1, lineEnd);
+    const normalizedCandidate = candidate.toUpperCase();
+    if (!normalizedCandidate) {
+      searchFrom = open + 1;
       continue;
     }
-    const normalizedCandidate = candidate.toUpperCase();
-    if (
-      normalizedCandidate &&
-      (prefix.startsWith(normalizedCandidate) ||
-        normalizedCandidate.startsWith(prefix))
-    ) {
-      stripAt = open;
+    let end = lineEnd;
+    if (!normalizedCandidate.startsWith(prefix)) {
+      if (!prefix.startsWith(normalizedCandidate)) {
+        searchFrom = open + 1;
+        continue;
+      }
+    } else {
+      const opening = text.slice(open).match(/^\[(IMAGE|FILE):\s*/iu)!;
+      const pathStart = open + opening[0].length;
+      const nextMarkerOffset = text
+        .slice(pathStart, lineEnd)
+        .search(MEDIA_MARKER_PATTERN);
+      const boundary =
+        nextMarkerOffset === -1 ? lineEnd : pathStart + nextMarkerOffset;
+      if (findMarkerClose(text, pathStart, boundary) !== -1) {
+        searchFrom = open + 1;
+        continue;
+      }
+      end = boundary;
     }
-    open = previousOpenBracket(visibleText, open);
+    const nextMarker = text.slice(end).match(/^\[(IMAGE|FILE):\s*/iu);
+    const replacement =
+      nextMarker?.[1]?.toUpperCase() === markerName ? '' : pendingText;
+    result += `${text.slice(cursor, open)}${replacement}`;
+    cursor = end;
+    searchFrom = end;
   }
-  return stripAt === undefined
-    ? text
-    : `${text.slice(0, stripAt)}${pendingText}`;
+  return cursor === 0 ? text : result + text.slice(cursor);
+}
+
+export function sanitizeOutboundMediaMarkers(
+  text: string,
+  markerName: 'IMAGE' | 'FILE',
+  replacement: string,
+): string {
+  let result = text;
+  const passes = [...text.matchAll(MEDIA_MARKER_PATTERN)].length + 1;
+  for (let pass = 0; pass < passes; pass++) {
+    const markers = findOutboundMediaMarkers(result, markerName, true);
+    const next = stripPartialOutboundMediaMarker(
+      replaceOutboundMediaMarkers(
+        result,
+        markers,
+        markers.map(() => replacement),
+      ),
+      markerName,
+      replacement,
+    );
+    if (next === result) return result;
+    result = next;
+  }
+  return result;
 }

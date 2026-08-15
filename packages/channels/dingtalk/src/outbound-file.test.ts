@@ -65,6 +65,27 @@ describe('outbound file markers', () => {
     );
   });
 
+  it('uses parsed markdown code regions to classify markers', () => {
+    expect(
+      findFileMarkers('Example:\n\n \t[FILE: /workspace/code.txt]\n'),
+    ).toEqual([]);
+    expect(
+      findFileMarkers('Run `echo [FILE: /workspace/live.txt] to send').map(
+        ({ path }) => path,
+      ),
+    ).toEqual(['/workspace/live.txt']);
+    expect(
+      findFileMarkers(
+        '```text [FILE: /workspace/fence-info.txt]\ncontent\n```',
+      ),
+    ).toEqual([]);
+    expect(
+      findFileMarkers(
+        '`\u{e000}QWEN_MEDIA_MARKER_0\u{e001}`\n[FILE: /workspace/live.txt]',
+      ).map(({ path }) => path),
+    ).toEqual(['/workspace/live.txt']);
+  });
+
   it('hides complete and partial visible file paths while streaming', () => {
     expect(
       sanitizeStreamingFileMarkers(
@@ -78,7 +99,7 @@ describe('outbound file markers', () => {
     expect(stripPartialFileMarker('array[')).toBe('array[');
   });
 
-  it('preserves file-like text inside code', () => {
+  it('scrubs file marker paths inside code', () => {
     const text = [
       '`[FILE: /Users/ben/inline.pdf]`',
       '```text',
@@ -86,7 +107,21 @@ describe('outbound file markers', () => {
       '```',
     ].join('\n');
 
-    expect(sanitizeStreamingFileMarkers(text)).toBe(text);
+    expect(sanitizeStreamingFileMarkers(text)).toBe(
+      ['``', '```text', '', '```'].join('\n'),
+    );
+  });
+
+  it('sanitizes nested markers to a fixed point', () => {
+    for (const text of [
+      'A [FILE: /Users/ben/secret [FILE: x]] B',
+      '[FILE:[FILE: /a.pdf] /b.pdf]',
+      '[FILE: /hid[FILE: /a] den /x]',
+    ]) {
+      const sanitized = sanitizeStreamingFileMarkers(text);
+      expect(findFileMarkers(sanitized)).toEqual([]);
+      expect(sanitized).not.toMatch(/\[FILE:/iu);
+    }
   });
 });
 

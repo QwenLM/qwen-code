@@ -113,7 +113,7 @@ describe('streaming image markers', () => {
     ).toBe('before [Image pending]');
   });
 
-  it('preserves image-like text inside code', () => {
+  it('scrubs image marker paths inside code', () => {
     expect(
       sanitizeStreamingImageMarkers(
         [
@@ -124,12 +124,7 @@ describe('streaming image markers', () => {
         ].join('\n'),
       ),
     ).toBe(
-      [
-        '`[IMAGE: /Users/ben/inline.png]`',
-        '```text',
-        '[IMAGE: /Users/ben/fenced.png]',
-        '```',
-      ].join('\n'),
+      ['`[Image pending]`', '```text', '[Image pending]', '```'].join('\n'),
     );
   });
 });

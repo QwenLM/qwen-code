@@ -3,6 +3,7 @@ import { readValidatedLocalFile } from './outbound-local-file.js';
 import {
   findOutboundMediaMarkers,
   replaceOutboundMediaMarkers,
+  sanitizeOutboundMediaMarkers,
   stripPartialOutboundMediaMarker,
   type OutboundMediaMarker,
 } from './outbound-markers.js';
@@ -36,14 +37,7 @@ export function stripPartialFileMarker(text: string): string {
 }
 
 export function sanitizeStreamingFileMarkers(text: string): string {
-  const markers = findFileMarkers(text);
-  return stripPartialFileMarker(
-    replaceFileMarkers(
-      text,
-      markers,
-      markers.map(() => ''),
-    ),
-  );
+  return sanitizeOutboundMediaMarkers(text, 'FILE', '');
 }
 
 export function safeFileName(filePath: string): string {

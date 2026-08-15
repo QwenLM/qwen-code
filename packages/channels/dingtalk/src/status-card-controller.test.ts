@@ -562,7 +562,7 @@ describe('StatusCardController', () => {
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
   });
 
-  it('omits delivered file markers from the terminal card', async () => {
+  it('keeps a successful file receipt in the terminal card', async () => {
     const { client, controller } = createHarness();
     controller.replace(
       segment(),
@@ -571,21 +571,22 @@ describe('StatusCardController', () => {
     );
 
     await expect(
-      controller.complete('segment-1', 'before [File: report.txt] after'),
+      controller.complete('segment-1', 'before [File sent: report.txt] after'),
     ).resolves.toBe(true);
 
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          blockList: '[{"type":0,"markdown":"before  after"}]',
-          content: 'before  after',
-          copy_content: 'before  after',
+          blockList:
+            '[{"type":0,"markdown":"before [File sent: report.txt] after"}]',
+          content: 'before [File sent: report.txt] after',
+          copy_content: 'before [File sent: report.txt] after',
         }),
       }),
     );
     expect(
       JSON.stringify(vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0]),
-    ).not.toMatch(/File pending|File:|\/Users\/ben\/private/u);
+    ).not.toMatch(/File pending|\[FILE:|\/Users\/ben\/private/iu);
   });
 
   it('retains streamed content when completion has no response body', async () => {

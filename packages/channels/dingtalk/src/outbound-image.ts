@@ -3,6 +3,7 @@ import { readValidatedLocalFile } from './outbound-local-file.js';
 import {
   findOutboundMediaMarkers,
   replaceOutboundMediaMarkers,
+  sanitizeOutboundMediaMarkers,
   stripPartialOutboundMediaMarker,
   type OutboundMediaMarker,
 } from './outbound-markers.js';
@@ -39,14 +40,7 @@ export function stripPartialImageMarker(text: string): string {
 }
 
 export function sanitizeStreamingImageMarkers(text: string): string {
-  const markers = findImageMarkers(text);
-  return stripPartialImageMarker(
-    replaceImageMarkers(
-      text,
-      markers,
-      markers.map(() => '[Image pending]'),
-    ),
-  );
+  return sanitizeOutboundMediaMarkers(text, 'IMAGE', '[Image pending]');
 }
 
 function detectImageMime(data: Buffer): string {

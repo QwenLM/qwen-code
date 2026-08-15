@@ -828,7 +828,7 @@ describe('DingtalkInteractionPresenter', () => {
       'multiline inline code',
       '`example\n[FILE: /Users/ben/private/report.pdf]\ncontinued`',
     ],
-  ])('preserves file-like text inside %s', async (_label, output) => {
+  ])('scrubs file marker paths inside %s', async (_label, output) => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
     const presenter = new DingtalkInteractionPresenter({ sendFallback });
     presenter.registerRun('run-1', 'owner-1', target);
@@ -836,7 +836,29 @@ describe('DingtalkInteractionPresenter', () => {
 
     await presenter.closeOutput('segment-1', '', 'response_boundary');
 
-    expect(sendFallback).toHaveBeenCalledWith('cid-1', output, 'session-1');
+    const fallback = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallback).not.toContain('[FILE:');
+    expect(fallback).not.toContain('/Users/ben/private');
+  });
+
+  it('scrubs markers after chunked windowing drops a fence opener', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      `\`\`\`text\n${'x'.repeat(CONTENT_LIMIT + 100)}`,
+    );
+    presenter.appendOutput(
+      segment('segment-1'),
+      '\n```\n[FILE: /Users/ben/private/report.pdf]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallback = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallback).not.toContain('[FILE:');
+    expect(fallback).not.toContain('/Users/ben/private');
   });
 
   it('does not expose a file path when truncation splits its marker', async () => {

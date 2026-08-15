@@ -23,6 +23,7 @@ import {
   findImageMarkers,
   readValidatedImage,
   replaceImageMarkers,
+  stripPartialImageMarker,
   uploadDingTalkImage,
 } from './outbound-image.js';
 import {
@@ -31,6 +32,7 @@ import {
   readValidatedFile,
   replaceFileMarkers,
   safeFileName,
+  stripPartialFileMarker,
   uploadDingTalkFile,
 } from './outbound-file.js';
 import {
@@ -625,7 +627,7 @@ export class DingtalkChannel extends ChannelBase {
 
   private async prepareOutgoingImages(text: string): Promise<string> {
     const markers = findImageMarkers(text);
-    if (markers.length === 0) return text;
+    if (markers.length === 0) return stripPartialImageMarker(text);
 
     const replacements: string[] = [];
     for (const marker of markers) {
@@ -673,7 +675,9 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
 
-    return replaceImageMarkers(text, markers, replacements);
+    return stripPartialImageMarker(
+      replaceImageMarkers(text, markers, replacements),
+    );
   }
 
   private async prepareOutgoingContent(
@@ -681,7 +685,9 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<PreparedDingTalkOutput> {
     const imageText = await this.prepareOutgoingImages(text);
     const markers = findFileMarkers(imageText);
-    if (markers.length === 0) return { text: imageText, files: [] };
+    if (markers.length === 0) {
+      return { text: stripPartialFileMarker(imageText), files: [] };
+    }
 
     const files: PreparedDingTalkFile[] = [];
     const replacements: string[] = [];
@@ -724,7 +730,7 @@ export class DingtalkChannel extends ChannelBase {
           fileName: file.fileName,
           fileType: file.fileType,
         });
-        replacements.push(`[File: ${file.fileName}]`);
+        replacements.push(`[File sent: ${file.fileName}]`);
       } catch (error) {
         process.stderr.write(
           `[DingTalk:${this.name}] outbound file upload failed (${sanitizeLogText(
@@ -740,7 +746,9 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     return {
-      text: replaceFileMarkers(imageText, markers, replacements),
+      text: stripPartialFileMarker(
+        replaceFileMarkers(imageText, markers, replacements),
+      ),
       files,
     };
   }

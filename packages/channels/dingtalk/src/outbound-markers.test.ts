@@ -48,7 +48,24 @@ describe('outbound media markers', () => {
         'IMAGE',
         '[Image pending]',
       ),
-    ).toBe('see [Image pending]');
+    ).toBe('see [Image pending][FILE: /tmp/b]');
+  });
+
+  it('does not mistake complete bracketed markers for partial markers', () => {
+    expect(
+      stripPartialOutboundMediaMarker(
+        'done [IMAGE: /a/b[1].png] sent',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('done [IMAGE: /a/b[1].png] sent');
+    expect(
+      stripPartialOutboundMediaMarker(
+        '[IMAGE: processing [1/2] done]',
+        'IMAGE',
+        '[Image pending]',
+      ),
+    ).toBe('[IMAGE: processing [1/2] done]');
   });
 
   it('keeps truncation boundaries outside partial markers', () => {
