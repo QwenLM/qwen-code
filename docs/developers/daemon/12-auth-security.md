@@ -6,7 +6,7 @@
 
 1. **Bind** — non-loopback bind without a bearer token **refuses to start**.
 2. **Bearer auth** — `bearerAuth` middleware with constant-time SHA-256 compare protects every route except `/health` on loopback (`require_auth` extends this to loopback and `/health` too).
-3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal` (plus port) are accepted; defense against DNS rebinding.
+3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal` (plus port) are accepted; defense against DNS rebinding. The Local Control LAN listener is the exception that always enforces its advertised-authority Host check, whatever the primary bind is.
 4. **Origin control** — the runtime app always installs `allowOriginCors` over a mutable allowlist (`MutableOriginAllowlist`): the `--allow-origin <pattern>` entries seed it, and Local Control adds the LAN origin while enabled. Non-matching origins receive the 403 deny envelope. The unconditional deny wall (`denyBrowserOriginCors`) survives only in the bootstrap app that answers before the runtime starts.
 5. **Per-route mutation gate** — Wave 4 mutating routes can opt in to `401` responses even on loopback when no token is configured, using a distinct `code: 'token_required'` error.
 6. **Device-flow auth** — separate OAuth surface for providers (`POST /workspace/auth/device-flow` + GET/DELETE on `/:id`).
@@ -91,7 +91,7 @@ Loopback-only. Maintains a `Set<string>` keyed by port. Allowed Hosts:
 
 Host comparison is **case-insensitive** — Express normalizes header names but not values, so Docker proxies that capitalize Hosts (`Localhost:4170`, `HOST.docker.internal`) would 403 with an exact-string compare.
 
-Non-loopback binds bypass this middleware (operator chose the surface area; bearer token gates Host spoofing instead).
+Non-loopback binds bypass the primary gate (operator chose the surface area; bearer token gates Host spoofing instead). The Local Control LAN listener is the exception: it always enforces its advertised-authority Host check, whatever the primary bind is.
 
 ### `denyBrowserOriginCors` (bootstrap app only)
 

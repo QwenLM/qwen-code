@@ -9707,12 +9707,20 @@ describe('ACP WebSocket transport security', () => {
     const paired = await wsConnectLocalControl('pairing-token');
     expect(paired.code).toBe(101);
 
+    // The detach must be SELECTIVE: a client on the primary listener (the
+    // operator's own loopback Web Shell / desktop session) stays connected
+    // while only the LAN (phone) sockets are cut.
+    const primary = await wsConnect();
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+
     const closed = new Promise<void>((resolve) =>
       paired.socket!.once('close', () => resolve()),
     );
     acpHandle!.detachServer(lanServer!);
     await closed;
     expect(paired.socket!.readyState).toBe(WebSocket.CLOSED);
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+    primary.close();
   });
 
   function wsConnectWithSubprotocols(

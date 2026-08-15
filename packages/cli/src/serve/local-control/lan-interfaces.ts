@@ -49,8 +49,14 @@ function isSoftwareNetwork(interfaceName: string): boolean {
   // Thunderbolt bridges are `bridge<N>` (both virtual), while a plain `br0`
   // is the canonical libvirt bridged-LAN host interface and Windows names a
   // manual physical bridge "Network Bridge" — those carry the machine's real
-  // LAN address and must stay eligible.
-  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt[a-z0-9]*|hamachi|nordlynx|proton|wintun|docker|veth|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br-[0-9a-f]+|bridge\d)(\d|[\s_.-]|$)/i.test(
+  // LAN address and must stay eligible. `veth` keeps the same shape: Docker
+  // peer IDs are `veth<hex>` and may be letter-led (`vethd4a1b2c`), which
+  // the bare token's digit boundary let escape. Corporate SSL-VPN adapters
+  // (AnyConnect, GlobalProtect, Pulse Secure, FortiClient, Cloudflare WARP)
+  // carry no `vpn` substring, so their vendor names are listed explicitly —
+  // the class fix (structural classification instead of name matching) is
+  // tracked in #9158.
+  return /(^|[\s_.-])(utun|tun|tap|ppp|ipsec|wg|wireguard|tailscale|zerotier|zt[a-z0-9]*|hamachi|nordlynx|proton|wintun|docker|veth[0-9a-f]+|vmnet|vboxnet|vethernet|virtualbox|host[- ]only|podman|cni|lxcbr|lxdbr|flannel|virbr|br-[0-9a-f]+|bridge\d|anyconnect|globalprotect|pulse[\s-]secure|forticlient|fortinet|cloudflare)(\d|[\s_.-]|$)/i.test(
     interfaceName,
   );
 }

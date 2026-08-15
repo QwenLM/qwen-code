@@ -34,6 +34,7 @@ describe('listLanCandidates', () => {
         zt7nnig26: [ipv4('10.147.17.2')],
         zta4b6c8d: [ipv4('10.147.17.3')],
         'vEthernet (WSL)': [ipv4('172.20.0.1')],
+        vethd4a1b2c: [ipv4('172.21.0.2')],
         'VirtualBox Host-Only Network': [ipv4('192.168.56.1')],
         podman0: [ipv4('10.88.0.1')],
         'cni-podman0': [ipv4('10.89.0.1')],
@@ -63,6 +64,16 @@ describe('listLanCandidates', () => {
         'OpenVPN Wintun Adapter': [ipv4('10.8.0.3')],
         NordVPN: [ipv4('10.8.1.2')],
         vpnkit: [ipv4('192.168.65.3')],
+        // Corporate SSL-VPN adapters carry no `vpn` substring — the vendor
+        // names are listed explicitly so a sole-candidate VPN address is
+        // never silently auto-advertised in the QR.
+        'Cisco AnyConnect Secure Mobility Client Virtual Adapter': [
+          ipv4('10.8.2.2'),
+        ],
+        GlobalProtect: [ipv4('10.8.3.2')],
+        'Pulse Secure Adapter': [ipv4('10.8.4.2')],
+        'FortiClient Virtual Adapter': [ipv4('10.8.5.2')],
+        'Cloudflare WARP': [ipv4('10.8.6.2')],
         'Ethernet 3': [ipv4('192.168.7.10')],
       }),
     ).toEqual([{ interfaceName: 'Ethernet 3', address: '192.168.7.10' }]);

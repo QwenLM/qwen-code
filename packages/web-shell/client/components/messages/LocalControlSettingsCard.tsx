@@ -110,16 +110,28 @@ export function LocalControlSettingsCard() {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    let ignore = false;
+    // A re-run after a failed fetch must not keep rendering the stale
+    // error next to fresh status; `toggle()` is the other clearing path.
+    setError('');
     requestLocalControl(baseUrl, token, 'GET', '/workspace/local-control')
       .then((next) => {
+        if (ignore) return;
         setStatus(next);
         setSelectedAddress((current) =>
           reconcileSelection(next.interfaces, current),
         );
       })
-      .catch((failure: unknown) =>
-        setError(failure instanceof Error ? failure.message : String(failure)),
-      );
+      .catch((failure: unknown) => {
+        if (!ignore) {
+          setError(
+            failure instanceof Error ? failure.message : String(failure),
+          );
+        }
+      });
+    return () => {
+      ignore = true;
+    };
   }, [baseUrl, token]);
 
   const toggle = async () => {
