@@ -8229,12 +8229,16 @@ exit 1
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
-    // The in-shell BASH_FUNC/proxy denylist sweep an earlier round added to
-    // these steps was removed: an in-shell sweep bootstraps trust from the
-    // very namespace it sanitizes (a planted BASH_FUNC_env%%/unset%%/alias/
-    // DEBUG-trap defeats it). Nothing re-introduces it. The failure/handoff
-    // step (reviewAddressReportStep) demonstrably carried the sweep in round
-    // 3, so it is covered too — round 3 re-introduced the pattern once.
+    // DRIFT ALARM, NOT A BOUNDARY. The guarantee that a planted channel
+    // cannot reach the privileged work is the `env -i` clean child, pinned
+    // separately below; no regex over source text can be that guarantee,
+    // because the space of sweep spellings is unbounded (round 4 learned this
+    // about the sweep itself, and the same logic applies to a test that
+    // enumerates its spellings). What this loop buys is an alarm when someone
+    // reintroduces the PATTERN — round 3 did exactly that once — so it aims
+    // at the ENUMERATION PRIMITIVES a sweep needs (walking the environment,
+    // clearing functions/aliases/traps) rather than at any particular
+    // vocabulary of variable names.
     for (const step of [
       publishPrStep,
       pushAndReportStep,
@@ -8262,9 +8266,13 @@ exit 1
       expect(code).not.toMatch(/\bunalias\b/);
       expect(code).not.toMatch(/expand_aliases/);
       expect(code).not.toMatch(/\btrap -/);
-      expect(code).not.toMatch(
-        /\bunset [A-Z_ ]*\b(?:HTTPS?_PROXY|SSL_CERT_[A-Z]+|BASH_ENV)\b/,
-      );
+      // The enumeration primitives: a sweep has to WALK the environment to
+      // decide what to clear, whatever vocabulary it then uses.
+      expect(code).not.toMatch(/\bcompgen -[ev]/);
+      expect(code).not.toMatch(/\bdeclare -x\b/);
+      expect(code).not.toMatch(/<\s*<\(\s*env\s*\)/);
+      expect(code).not.toMatch(/\benv\s*\|/);
+      expect(code).not.toMatch(/\bexport -n\b/);
     }
     // The fork fetch and salvage fetch cannot recurse into a planted
     // submodule and execute an ext:: URL with the PAT (env-level
@@ -10517,6 +10525,19 @@ exit 1
       expect(step).toContain(
         'UPSERT_LOG="${RUNNER_TEMP}/autofix-upsert-log.$$"',
       );
+      // R10-22: the step runs under `bash -eo pipefail`, where `rm -f` on a
+      // planted DIRECTORY exits 1 and kills it; `-rf` clears any shape, and
+      // `set -C` then refuses a symlink planted in between.
+      expect(step).toContain('rm -rf "${UPSERT_LOG}" 2> /dev/null || true');
+      expect(step).toMatch(
+        /if ! \(set -C; : > "\$\{UPSERT_LOG\}"\) 2> \/dev\/null; then/,
+      );
+      expect(step).not.toMatch(/rm -f "\$\{UPSERT_LOG\}"/);
+      // R10-19: `$(<missing)` is fatal under -e and no `|| true` / `if !`
+      // form rescues it (measured), so the file is TESTED before the read.
+      expect(step).toMatch(
+        /if \[\[ -f "\$\{UPSERT_LOG\}" && -r "\$\{UPSERT_LOG\}" \]\]; then\n\s*UPSERT_OUT="\$\(<"\$\{UPSERT_LOG\}"\)"/,
+      );
       expect(step).toContain('exec > "${UPSERT_LOG}" 2>&1');
       expect(step).toContain('UPSERT_OUT="$(<"${UPSERT_LOG}")"');
       expect(step).toMatch(/' > \/dev\/null 2>&1 \|\| true/);
@@ -10547,7 +10568,7 @@ exit 1
       // R8-5: the captured output is re-emitted, so the child's warnings
       // actually reach the log (deleting both loops was invisible).
       expect(step).toMatch(
-        /while IFS= read -r _upsert_line; do\n\s*\[\[ "\$\{_upsert_line\}" == '__upsert_child_live__' \]\] \|\|\n\s*printf '%s\\n' "\$\{_upsert_line\}"\n\s*done <<< "\$\{UPSERT_OUT\}"/,
+        /while IFS= read -r _upsert_line; do\n\s*\[\[ "\$\{_upsert_line\}" == '__upsert_child_live__' \]\] \|\|\n\s*printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}"\n\s*done <<< "\$\{UPSERT_OUT\}"/,
       );
       // Ordering: the digest gate runs, and ONLY on a match does the staged
       // script execute — both inside the same clean child. A reordering or a
@@ -10806,7 +10827,10 @@ exit 1
           [
             '#!/usr/bin/env bash',
             'for a in "$@"; do [[ "$a" == "--rawfile" ]] && exit 3; done',
-            'exec /usr/bin/jq "$@"',
+            // Resolve the real jq through the ORIGINAL PATH (this stub shadows
+            // it): /usr/bin/jq does not exist on macOS, where jq lives in
+            // /opt/homebrew/bin or /usr/local/bin.
+            `exec env PATH="${process.env.PATH}" jq "$@"`,
           ].join('\n'),
         );
         chmodSync(join(bin, 'jq'), 0o755);
@@ -12158,15 +12182,21 @@ exit 1
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
     expect(escapeSites).toHaveLength(9);
     // The tenth agent-derived publish site lives in the staged
-    // upsert-deferred-issue.sh (line builder). Same treatment as its
-    // siblings — count AND canonical spelling, not mere presence: a no-op
-    // `\-\-` spelling once shipped past a presence-only pin.
+    // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
+    // sed afterwards: the rv/ic dedupe identity is the rendered line, so
+    // escaping after the corpus comparison meant a reason containing `<!--`
+    // never matched its stored form and republished every round (R10-5).
     const scriptEscapeSites =
-      upsertDeferredScript.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
+      upsertDeferredScript.match(/gsub\("<!--"; "[^"]*"\)/g) ?? [];
     expect(scriptEscapeSites).toHaveLength(1);
     for (const site of scriptEscapeSites) {
-      expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
+      expect(site).toBe('gsub("<!--"; "<!\\\\-\\\\-")');
     }
+    expect(upsertDeferredScript).not.toMatch(/sed 's\/<!--/);
+    // …and it precedes the dedupe comparison, not follows it.
+    expect(upsertDeferredScript.indexOf('gsub("<!--"')).toBeLessThan(
+      upsertDeferredScript.indexOf('index($r.key)'),
+    );
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }

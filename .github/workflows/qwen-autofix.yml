@@ -5349,7 +5349,12 @@ jobs:
                 # nothing re-derives it, so print it before deleting. `::` is
                 # neutralized because the content is agent-written and a raw
                 # `::` at line start would be parsed as a workflow command.
-                echo '::warning::could not merge carried deferrals across the repair; keeping the earlier set. This run'"'"'s deferrals are LOST — raw content follows for manual recovery:'
+                _dfsize="$(wc -c < "${WORKDIR}/deferred-findings.json" 2> /dev/null | tr -d ' ')"
+                if [[ -n "${_dfsize}" ]] && (( _dfsize > 4000 )); then
+                  echo "::warning::could not merge carried deferrals across the repair; keeping the earlier set. This run's deferrals are LOST — raw content follows, TRUNCATED at 4000 of ${_dfsize} bytes (the full file is in this run's artifact dump):"
+                else
+                  echo "::warning::could not merge carried deferrals across the repair; keeping the earlier set. This run's deferrals are LOST — raw content follows for manual recovery:"
+                fi
                 head -c 4000 "${WORKDIR}/deferred-findings.json" | sed 's/::/;;/g'
                 echo
                 rm -f "${WORKDIR}/deferred-findings.carry.next"
@@ -5746,8 +5751,18 @@ jobs:
             # every EXTERNAL command in this (parent) shell print to stdout, so
             # $(mktemp) / $(cat) would return that noise inside the value.
             UPSERT_LOG="${RUNNER_TEMP}/autofix-upsert-log.$$"
-            rm -f "${UPSERT_LOG}"
-            : > "${UPSERT_LOG}"
+            # This step runs under `bash -eo pipefail`. A watcher can
+            # pre-plant this predictable path, and `rm -f` on a DIRECTORY
+            # exits 1 — fatal — while `-rf` clears any planted shape.
+            # Creating under `set -C` then refuses to follow a symlink
+            # planted between the two, and a creation failure warns
+            # instead of killing the round.
+            rm -rf "${UPSERT_LOG}" 2> /dev/null || true
+            if ! (set -C; : > "${UPSERT_LOG}") 2> /dev/null; then
+              echo '::warning::could not create the upsert log file; deferred findings NOT persisted this round'
+              UPSERT_LOG=''
+            fi
+            if [[ -n "${UPSERT_LOG}" ]]; then
             LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
               LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
               /usr/bin/env -i \
@@ -5779,8 +5794,16 @@ jobs:
                 bash -c "${UPSERT_SRC}" ||
                   echo "::warning::deferred-findings upsert failed; continuing"
               ' > /dev/null 2>&1 || true
-            UPSERT_OUT="$(<"${UPSERT_LOG}")"
-            rm -f "${UPSERT_LOG}"
+            # `$(<missing)` is FATAL under -e and neither `|| true` nor
+            # `if !` rescues it (measured), so the file is TESTED first.
+            # Still fork-free: a planted loader channel makes every
+            # external command in this shell print to stdout, so
+            # $(cat …) would carry that noise into the value.
+            UPSERT_OUT=''
+            if [[ -f "${UPSERT_LOG}" && -r "${UPSERT_LOG}" ]]; then
+              UPSERT_OUT="$(<"${UPSERT_LOG}")"
+            fi
+            rm -rf "${UPSERT_LOG}" 2> /dev/null || true
             # Inspect with bash BUILTINS only ([[ ]], read, printf — no exec):
             # under loader trace mode every external binary, grep included,
             # would itself print-and-exit-0, so a grep-based check would be
@@ -5788,10 +5811,15 @@ jobs:
             if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
               echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
             fi
+            # The log lives in agent-writable RUNNER_TEMP, so a line-start
+            # `::` reaching this step's stdout would be a workflow command.
+            # Neutralized with the same parameter expansion the rest of the
+            # feature uses a sed for — builtin, no fork.
             while IFS= read -r _upsert_line; do
               [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
-                printf '%s\n' "${_upsert_line}"
+                printf '%s\n' "${_upsert_line//::/;;}"
             done <<< "${UPSERT_OUT}"
+            fi
           }
 
                     # Take this PAT-bearing step off every mutable host git surface —
@@ -6751,8 +6779,18 @@ jobs:
               # a hash-the-path check and a re-open cannot swap the payload.
               # Fork-free path + read-back, same rationale as the twin.
               UPSERT_LOG="${RUNNER_TEMP}/autofix-upsert-log.$$"
-              rm -f "${UPSERT_LOG}"
-              : > "${UPSERT_LOG}"
+              # This step runs under `bash -eo pipefail`. A watcher can
+              # pre-plant this predictable path, and `rm -f` on a DIRECTORY
+              # exits 1 — fatal — while `-rf` clears any planted shape.
+              # Creating under `set -C` then refuses to follow a symlink
+              # planted between the two, and a creation failure warns
+              # instead of killing the round.
+              rm -rf "${UPSERT_LOG}" 2> /dev/null || true
+              if ! (set -C; : > "${UPSERT_LOG}") 2> /dev/null; then
+                echo '::warning::could not create the upsert log file; deferred findings NOT persisted this round'
+                UPSERT_LOG=''
+              fi
+              if [[ -n "${UPSERT_LOG}" ]]; then
               LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
               LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
                 /usr/bin/env -i \
@@ -6789,16 +6827,26 @@ jobs:
                   bash -c "${UPSERT_SRC}" ||
                     echo "::warning::deferred-findings upsert failed; continuing"
                 ' > /dev/null 2>&1 || true
-              UPSERT_OUT="$(<"${UPSERT_LOG}")"
-              rm -f "${UPSERT_LOG}"
+              # `$(<missing)` is FATAL under -e and neither `|| true` nor
+              # `if !` rescues it (measured), so the file is TESTED first.
+              # Still fork-free: a planted loader channel makes every
+              # external command in this shell print to stdout, so
+              # $(cat …) would carry that noise into the value.
+              UPSERT_OUT=''
+              if [[ -f "${UPSERT_LOG}" && -r "${UPSERT_LOG}" ]]; then
+                UPSERT_OUT="$(<"${UPSERT_LOG}")"
+              fi
+              rm -rf "${UPSERT_LOG}" 2> /dev/null || true
               # Builtin-only inspection, same rationale as the twin.
               if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
                 echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
               fi
+              # Same neutralization as the twin: the log is agent-reachable.
               while IFS= read -r _upsert_line; do
                 [[ "${_upsert_line}" == '__upsert_child_live__' ]] ||
-                  printf '%s\n' "${_upsert_line}"
+                  printf '%s\n' "${_upsert_line//::/;;}"
               done <<< "${UPSERT_OUT}"
+              fi
             fi
           fi
 

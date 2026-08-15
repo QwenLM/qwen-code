@@ -246,25 +246,45 @@ if ! NEW_LINES="$(jq -r --rawfile known "${KNOWN_FILE}" --arg resolved "${RESOLV
        else "rc" end) as $pfx
     | select(($src != "review_comment") or (($done | index($id)) | not))
     | {src: $src, id: $id,
+       # The path charset filter already excludes `<`, so the comment opener
+       # cannot survive there; the reason is escaped explicitly below.
        line: "- \($pfx):\($id) `\(.path // "?" | gsub("[^A-Za-z0-9._/ -]"; "?") | .[0:200])`: \(.reason
         | gsub("[\r\n]+"; " ")
         | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
         | gsub("@"; "@\u200b")
+        # Escape the comment opener HERE, not in a sed after the corpus
+        # comparison: the rv/ic identity IS the rendered line, so comparing a
+        # raw rendering against the escaped stored form never matches and
+        # re-publishes the finding every round.
+        | gsub("<!--"; "<!\\-\\-")
         | .[0:500])",
-       anchor: ("^- " + $pfx + ":" + ($id | tostring) + " ")})
+       anchor: ("^- " + $pfx + ":" + ($id | tostring) + " ")}
+    # Identity key for the multi-finding sources. NOT the exact line: a
+    # reworded re-emission (the repair flow re-runs the agent, so this is
+    # routine) would publish a permanent duplicate. NOT the id either — that
+    # is what silently ate sibling findings. So: id plus a normalized digest
+    # of path+reason — case-folded, punctuation-collapsed, capped — which
+    # absorbs whitespace and phrasing churn while keeping genuinely distinct
+    # findings apart. Erring toward a visible duplicate over a silent loss.
+    | . + {key: ((.line | ascii_downcase | gsub("[^a-z0-9]+"; " ")
+        | gsub("^ +| +$"; "") | .[0:160]))})
   # An inline comment is one finding, so its id IS the identity (and the
   # anchor keeps working across rounds). A review body or an issue-level
   # comment can raise SEVERAL findings under one id, so there the identity —
   # and the corpus check — is the rendered line itself; keying those on the
   # id alone silently ate every sibling but the first.
-  | unique_by(if .src == "review_comment" then [.src, .id] else [.src, .id, .line] end)
+  | unique_by(if .src == "review_comment" then [.src, .id] else [.src, .id, .key] end)
   | map(. as $r
     | select(if $r.src == "review_comment"
         then ($klines | any(test($r.anchor))) | not
-        else ($klines | index($r.line)) == null end)
+        # Corpus check on the same normalized key, so a reworded sibling of an
+        # already-tracked finding is recognised as tracked.
+        else ($klines
+          | map(ascii_downcase | gsub("[^a-z0-9]+"; " ")
+            | gsub("^ +| +$"; "") | .[0:160])
+          | index($r.key)) == null end)
     | $r.line)
-  | .[]' "${FINDINGS}" 2> /dev/null |
-  sed 's/<!--/<!\\-\\-/g')"; then
+  | .[]' "${FINDINGS}" 2> /dev/null)"; then
   # The only remaining silent-exit path: a jq/sed failure here would leave
   # NEW_LINES empty and read as "nothing new". Warn, per the header contract.
   lost 'could not build the deferred-findings lines'
