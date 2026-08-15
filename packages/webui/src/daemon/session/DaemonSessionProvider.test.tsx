@@ -3288,6 +3288,80 @@ describe('DaemonSessionProvider', () => {
     expect(blocks.some((b) => b.kind === 'debug')).toBe(false);
   });
 
+  it('keeps the burst in one block when a malformed_payload debug event interleaves', async () => {
+    // Sibling of the test above for the stimulus that STILL takes the block
+    // path: unrecognized_* diagnostics now route to the sidechannel without
+    // `clearActiveText`, so they can no longer discriminate the
+    // flush-before-guard fix (#7012) — deleting the guard leaves that test
+    // green. `malformed_payload` still appends a status block (with
+    // `clearActiveText`), so this interleaved frame splits the assistant
+    // burst unless the guard flushes first (#8823 review).
+    const burstDrained = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* observerMalformedBurst(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'first ' },
+            },
+          },
+        };
+        // An unusable session_update discriminator normalizes to a `debug`
+        // UI event with `debugReason: 'malformed_payload'`.
+        yield {
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: { update: { sessionUpdate: 42 } },
+        };
+        yield {
+          id: 3,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'second' },
+            },
+          },
+        };
+        burstDrained.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await burstDrained.promise;
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    const assistantBlocks = blocks.filter((b) => b.kind === 'assistant');
+    expect(assistantBlocks).toHaveLength(1);
+    expect((assistantBlocks[0] as { text?: string }).text).toBe('first second');
+  });
+
   it('does not insert abort errors from shell commands into the transcript', async () => {
     const session = createMockSession({
       events: createIdleEvents(),

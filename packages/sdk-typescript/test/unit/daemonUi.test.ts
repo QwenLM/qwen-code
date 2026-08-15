@@ -2707,6 +2707,98 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('carries the envelope coordinates and correlation fields onto sidechannel entries (#8823)', () => {
+    // Every field the type promises must actually land: a mutation deleting
+    // any one spread (or swapping `receivedAt` for a constant) used to leave
+    // the whole suite green because only `debugReason` was asserted. `now`
+    // is distinct from `serverTimestamp` and `eventId` so `receivedAt`
+    // discriminates.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent({
+        id: 42,
+        v: 1,
+        type: 'some_future_event',
+        promptId: 'prompt-1',
+        originatorClientId: 'client-9',
+        serverTimestamp: 1234,
+        data: {
+          update: {
+            sessionUpdate: 'mystery_kind',
+            _meta: {
+              qwenTranscript: {
+                sourceRecordIds: ['rec-1', 'rec-2'],
+                branchRecordId: 'branch-1',
+              },
+            },
+          },
+        },
+      } as never),
+      { now: 5 },
+    );
+
+    expect(state.unrecognizedDiagnostics).toEqual([
+      {
+        debugReason: 'unrecognized_event',
+        text: expect.any(String),
+        promptId: 'prompt-1',
+        sourceRecordIds: ['rec-1', 'rec-2'],
+        branchRecordId: 'branch-1',
+        originatorClientId: 'client-9',
+        eventId: 42,
+        serverTimestamp: 1234,
+        receivedAt: 5,
+      },
+    ]);
+  });
+
+  it('caps sidechannel text at the block-length limit (#8823)', () => {
+    // The replaced `appendStatusBlock` path truncated exactly these
+    // diagnostics; the sidechannel must not admit unbounded strings.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          debugReason: 'unrecognized_event',
+          text: 'x'.repeat(110_000),
+        },
+      ],
+    );
+
+    const entry = state.unrecognizedDiagnostics[0];
+    expect(entry).toBeDefined();
+    expect(entry?.text.endsWith('\n[truncated]\n')).toBe(true);
+    // Same total bound as the block path's `truncateText`: the suffix fits
+    // within the cap, not on top of it.
+    expect(entry?.text.length).toBeLessThanOrEqual(100_000);
+  });
+
+  it('still stamps debugReason on the block path for malformed payloads (#8823)', () => {
+    // Block-level `debugReason` stays load-bearing for the events that still
+    // take the block path (and for legacy persisted blocks): dropping the
+    // stamp in `appendStatusBlock` must not ship green.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        {
+          type: 'debug',
+          debugReason: 'malformed_payload',
+          text: 'broken frame payload',
+        },
+      ],
+    );
+
+    expect(state.unrecognizedDiagnostics).toEqual([]);
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toEqual(
+      expect.objectContaining({
+        kind: 'debug',
+        debugReason: 'malformed_payload',
+      }),
+    );
+  });
+
   it('leaves client-dispatched debug blocks without a debugReason', () => {
     // The mirror of the test above, and the invariant that keeps Web Shell's
     // model-switch summary visible. Without it, defaulting the field in

@@ -303,24 +303,36 @@ export type DaemonUiDebugReason = (typeof DAEMON_UI_DEBUG_REASONS)[number];
  * normalizer has no case for. These diagnostics are routed to the bounded
  * `unrecognizedDiagnostics` sidechannel instead of `blocks[]`; `malformed_*`
  * diagnostics stay in the transcript because they signal an actual defect.
+ *
+ * A runtime const array (the package's established pattern for reason
+ * unions, see `DAEMON_UI_DEBUG_REASONS`): type-only exports are erased by
+ * esbuild, so a type-level subset gives the router nothing to test against,
+ * and a third reason added only to the type would compile cleanly while
+ * falling through to `appendStatusBlock` (#8823 review).
  */
-export type DaemonUnrecognizedDiagnosticReason = Extract<
-  DaemonUiDebugReason,
-  'unrecognized_event' | 'unrecognized_session_update'
->;
+export const DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS = [
+  'unrecognized_event',
+  'unrecognized_session_update',
+] as const satisfies readonly DaemonUiDebugReason[];
+
+export type DaemonUnrecognizedDiagnosticReason =
+  (typeof DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS)[number];
 
 /**
  * One forward-compatibility diagnostic mirrored onto the transcript
- * sidechannel. Carries the normalizer classification plus the original
- * event envelope fields a developer console needs, without ever entering
+ * sidechannel. Carries the normalizer classification, the correlation
+ * fields `createBase` stamps onto every normalized projection, and the SSE
+ * envelope coordinates a developer console needs — without ever entering
  * `blocks[]` (so it cannot finalize a streaming assistant/thought block or
  * consume the `maxBlocks` budget).
  */
 export interface DaemonUnrecognizedDiagnostic {
   debugReason: DaemonUnrecognizedDiagnosticReason;
   text: string;
-  source?: string;
-  data?: unknown;
+  promptId?: string;
+  sourceRecordIds?: readonly string[];
+  branchRecordId?: string;
+  originatorClientId?: string;
   eventId?: number;
   serverTimestamp?: number;
   /** Reducer receive time (`state.now` at dispatch). */

@@ -21,7 +21,10 @@ import type {
   DaemonUnrecognizedDiagnosticReason,
   DaemonUserShellTranscriptBlock,
 } from './types.js';
-import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
+import {
+  DAEMON_PLAN_TOOL_CALL_ID,
+  DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS,
+} from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
 import { isRecord } from './utils.js';
 
@@ -1284,14 +1287,23 @@ type UnrecognizedDiagnosticEvent = DaemonUiStatusEvent & {
   debugReason: DaemonUnrecognizedDiagnosticReason;
 };
 
+/** Membership over the runtime reason array, so a reason added there is
+ *  routed here without a second hand-edited literal list (#8823 review). */
+function isUnrecognizedReason(
+  reason: DaemonUiStatusEvent['debugReason'],
+): reason is DaemonUnrecognizedDiagnosticReason {
+  return (
+    reason !== undefined &&
+    (DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS as readonly string[]).includes(
+      reason,
+    )
+  );
+}
+
 function isUnrecognizedDiagnostic(
   event: DaemonUiStatusEvent,
 ): event is UnrecognizedDiagnosticEvent {
-  return (
-    event.type === 'debug' &&
-    (event.debugReason === 'unrecognized_event' ||
-      event.debugReason === 'unrecognized_session_update')
-  );
+  return event.type === 'debug' && isUnrecognizedReason(event.debugReason);
 }
 
 /**
@@ -1309,12 +1321,31 @@ function appendUnrecognizedDiagnostic(
   state: DaemonTranscriptState,
   event: UnrecognizedDiagnosticEvent,
 ): void {
+  // The replaced `appendStatusBlock` path capped exactly these diagnostics at
+  // `MAX_TEXT_BLOCK_LENGTH`; a single SSE frame can carry ~16M code units and
+  // up to `UNRECOGNIZED_DIAGNOSTICS_LIMIT` entries persist, so the cap stays.
+  // Mirrors `truncateText` exactly (suffix fits WITHIN the cap; the block
+  // variant also reports truncation, which has no block id to report under).
   const diagnostic: DaemonUnrecognizedDiagnostic = {
     debugReason: event.debugReason,
-    text: event.text,
+    text:
+      event.text.length <= MAX_TEXT_BLOCK_LENGTH
+        ? event.text
+        : event.text.slice(
+            0,
+            Math.max(0, MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length),
+          ) + TEXT_TRUNCATED_SUFFIX,
     receivedAt: state.now,
-    ...(event.source !== undefined ? { source: event.source } : {}),
-    ...(event.data !== undefined ? { data: event.data } : {}),
+    ...(event.promptId !== undefined ? { promptId: event.promptId } : {}),
+    ...(event.sourceRecordIds !== undefined
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
+    ...(event.branchRecordId !== undefined
+      ? { branchRecordId: event.branchRecordId }
+      : {}),
+    ...(event.originatorClientId !== undefined
+      ? { originatorClientId: event.originatorClientId }
+      : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
