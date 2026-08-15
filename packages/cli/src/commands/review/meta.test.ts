@@ -272,6 +272,7 @@ describe('metaCommand handler', () => {
     // status`), so the ordering must hold against it too, not just the
     // data call.
     expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
+    expect(authOrder).toBeLessThan(ghOrder);
   });
 
   it('prints the result as one JSON object', () => {
