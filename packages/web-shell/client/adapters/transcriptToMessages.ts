@@ -462,6 +462,12 @@ export function transcriptBlocksToDaemonMessages(
         if (images && images.length > 0) {
           msg.images = images;
         }
+        if (textBlock.files && textBlock.files.length > 0) {
+          msg.files = textBlock.files.map((file) => ({
+            name: file.name,
+            mimeType: file.mimeType || 'text/plain',
+          }));
+        }
         messages.push(msg);
         break;
       }

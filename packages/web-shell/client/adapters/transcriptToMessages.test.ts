@@ -203,6 +203,21 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('preserves user file attachment metadata', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'check this', 1, false, {
+        files: [{ name: 'app.log', mimeType: 'text/plain' }],
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      id: 'user-1',
+      role: 'user',
+      content: 'check this',
+      files: [{ name: 'app.log', mimeType: 'text/plain' }],
+    });
+  });
+
   it('preserves user input annotations metadata', () => {
     const inputAnnotations = [
       {

@@ -394,7 +394,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     try {
       await harness.render({ streamingState: 'responding' });
       await act(async () => {
-        harness.result().enqueuePrompt('note', undefined, onComplete);
+        harness
+          .result()
+          .enqueuePrompt('note', undefined, undefined, onComplete);
       });
       await harness.render({ streamingState: 'idle' });
       expect(harness.result().queuedPrompts).toEqual([]);
@@ -421,7 +423,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     try {
       await harness.render({ streamingState: 'responding' });
       await act(async () => {
-        harness.result().enqueuePrompt('promote me', undefined, onComplete);
+        harness
+          .result()
+          .enqueuePrompt('promote me', undefined, undefined, onComplete);
       });
       await harness.render({ streamingState: 'idle' });
 
@@ -662,7 +666,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     try {
       await harness.render({ streamingState: 'responding' });
       await act(async () => {
-        harness.result().enqueuePrompt('recover me', undefined, onComplete);
+        harness
+          .result()
+          .enqueuePrompt('recover me', undefined, undefined, onComplete);
       });
       const row = harness.result().queuedPrompts[0]!;
       const messageId = row.midTurnMessageId!;
@@ -735,7 +741,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       await act(async () => {
         harness
           .result()
-          .enqueuePrompt('deleted by peer', undefined, onComplete);
+          .enqueuePrompt('deleted by peer', undefined, undefined, onComplete);
       });
       await act(async () => {
         await Promise.resolve();
@@ -1328,7 +1334,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     try {
       await harness.render({ streamingState: 'responding' });
       await act(async () => {
-        harness.result().enqueuePrompt('note', undefined, onComplete);
+        harness
+          .result()
+          .enqueuePrompt('note', undefined, undefined, onComplete);
       });
       for (let i = 0; i < 3; i++) {
         await act(async () => {
@@ -1365,7 +1373,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     try {
       await harness.render({ streamingState: 'responding' });
       await act(async () => {
-        harness.result().enqueuePrompt('rejected', undefined, onComplete);
+        harness
+          .result()
+          .enqueuePrompt('rejected', undefined, undefined, onComplete);
       });
       for (let i = 0; i < 3; i++) {
         await act(async () => {
@@ -1419,6 +1429,7 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
           .enqueuePrompt(
             'lost in transit',
             [{ data: 'aW1n', media_type: 'image/png' }],
+            undefined,
             onComplete,
           );
       });
@@ -1505,7 +1516,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     try {
       await harness.render({ streamingState: 'responding' });
       await act(async () => {
-        harness.result().enqueuePrompt('echoed', undefined, onComplete);
+        harness
+          .result()
+          .enqueuePrompt('echoed', undefined, undefined, onComplete);
       });
       await act(async () => {
         await Promise.resolve();
@@ -1609,7 +1622,9 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
     try {
       await harness.render({ streamingState: 'responding' });
       await act(async () => {
-        harness.result().enqueuePrompt('promote me', undefined, onComplete);
+        harness
+          .result()
+          .enqueuePrompt('promote me', undefined, undefined, onComplete);
       });
       for (let i = 0; i < 3; i++) {
         await act(async () => {

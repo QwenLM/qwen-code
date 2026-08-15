@@ -31,7 +31,7 @@ import type {
   DaemonTranscriptStore,
   PromptContentBlock,
 } from '@qwen-code/sdk/daemon';
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { EditorHandle } from './useComposerCore';
 import { removeInjectedFromQueue } from '../midTurnDedup';
 import { isCommandPrompt } from '../utils/localCommandQueue';
@@ -124,6 +124,7 @@ function areQueuedPromptsEqual(
       prompt.admissionOutcome === other.admissionOutcome &&
       prompt.payloadAvailable === other.payloadAvailable &&
       (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
+      (prompt.files?.length ?? 0) === (other.files?.length ?? 0) &&
       (prompt.inputAnnotations?.length ?? 0) ===
         (other.inputAnnotations?.length ?? 0)
     );
@@ -184,12 +185,23 @@ function contentHasDegradedMedia(
   });
 }
 
+function toStoreFiles(
+  files: readonly PromptFile[] | undefined,
+): Array<{ name: string; mimeType: string }> | undefined {
+  if (!files || files.length === 0) return undefined;
+  return files.map((file) => ({
+    name: file.name,
+    mimeType: file.media_type || 'text/plain',
+  }));
+}
+
 export interface UseQueuedPromptsResult {
   queuedPrompts: QueuedPrompt[];
   queuedTexts: string[];
   enqueuePrompt: (
     text: string,
     images?: PromptImage[],
+    files?: PromptFile[],
     onComplete?: () => void,
     inputAnnotations?: DaemonInputAnnotation[],
     onAdmitted?: () => void,
@@ -359,6 +371,7 @@ export function useQueuedPrompts({
             p.serverState === 'submitting' &&
             p.admissionOutcome !== 'unknown' &&
             (p.images?.length ?? 0) === 0 &&
+            (p.files?.length ?? 0) === 0 &&
             p.text === serverPrompt.text,
         );
         if (submittingMatches.length === 1) {
@@ -377,14 +390,15 @@ export function useQueuedPrompts({
         if (serverPrompt.state === 'running' || hasDisplayedPrompt) {
           continue;
         }
-        const hasUnboundImageSubmission = next.some(
+        const hasUnboundAttachmentSubmission = next.some(
           (prompt) =>
             !prompt.serverPromptId &&
             prompt.serverState === 'submitting' &&
             prompt.admissionOutcome !== 'unknown' &&
-            (prompt.images?.length ?? 0) > 0,
+            ((prompt.images?.length ?? 0) > 0 ||
+              (prompt.files?.length ?? 0) > 0),
         );
-        if (hasUnboundImageSubmission) continue;
+        if (hasUnboundAttachmentSubmission) continue;
         next.push({
           id: nextQueuedPromptIdRef.current++,
           sessionId: targetSessionId,
@@ -694,6 +708,8 @@ export function useQueuedPrompts({
       );
       const images = attachmentPrompts.flatMap((prompt) => prompt.images ?? []);
       if (images.length > 0) editor.restoreImages(images);
+      const files = attachmentPrompts.flatMap((prompt) => prompt.files ?? []);
+      if (files.length > 0) editor.restoreFiles(files);
       let annotationOffset = 0;
       const inputAnnotations: DaemonInputAnnotation[] = [];
       for (const prompt of attachmentPrompts) {
@@ -772,7 +788,9 @@ export function useQueuedPrompts({
       if (
         displayedServerPromptIdsRef.current.has(promptId) ||
         prompt.payloadCompleteness === 'summary-only' ||
-        (!prompt.text && (prompt.images?.length ?? 0) === 0)
+        (!prompt.text &&
+          (prompt.images?.length ?? 0) === 0 &&
+          (prompt.files?.length ?? 0) === 0)
       ) {
         return;
       }
@@ -783,6 +801,7 @@ export function useQueuedPrompts({
         prompt.inputAnnotations?.length
           ? { inputAnnotations: prompt.inputAnnotations }
           : undefined,
+        toStoreFiles(prompt.files),
       );
     },
     [store],
@@ -867,6 +886,7 @@ export function useQueuedPrompts({
                 item.serverState === 'submitting' &&
                 item.admissionOutcome !== 'unknown' &&
                 (item.images?.length ?? 0) === 0 &&
+                (item.files?.length ?? 0) === 0 &&
                 item.text === eventText,
             );
           if (prompt) {
@@ -960,6 +980,7 @@ export function useQueuedPrompts({
       sessionActions
         .submitPrompt(prompt.text, {
           images: prompt.images,
+          files: prompt.files,
           inputAnnotations: prompt.inputAnnotations,
           optimisticUserMessage: false,
           sessionId: targetSessionId,
@@ -1043,7 +1064,10 @@ export function useQueuedPrompts({
             if (prompt.onComplete) {
               settleCompletionCallback(result.promptId, prompt.onComplete);
             }
-            if ((prompt.images?.length ?? 0) > 0) {
+            if (
+              (prompt.images?.length ?? 0) > 0 ||
+              (prompt.files?.length ?? 0) > 0
+            ) {
               void refreshPendingPrompts(targetSessionId);
             }
             return;
@@ -1083,7 +1107,10 @@ export function useQueuedPrompts({
           if (prompt.onComplete) {
             settleCompletionCallback(result.promptId, prompt.onComplete);
           }
-          if ((prompt.images?.length ?? 0) > 0) {
+          if (
+            (prompt.images?.length ?? 0) > 0 ||
+            (prompt.files?.length ?? 0) > 0
+          ) {
             void refreshPendingPrompts(targetSessionId);
           }
         })
@@ -1164,12 +1191,14 @@ export function useQueuedPrompts({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       onComplete?: () => void,
       inputAnnotations?: DaemonInputAnnotation[],
       onAdmitted?: () => void,
     ) => {
       const trimmed = text.trim();
-      if (!trimmed && (images?.length ?? 0) === 0) return true;
+      if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
+        return true;
       const targetSessionId = latestSessionIdRef.current;
       const targetWorkspaceCwd = latestWorkspaceCwdRef.current;
       const ownerToken = ownerTokenRef.current;
@@ -1189,6 +1218,7 @@ export function useQueuedPrompts({
         );
       const shouldInsertMidTurn =
         latestStreamingStateRef.current !== 'idle' &&
+        (files?.length ?? 0) === 0 &&
         (imageList.length === 0 || canSendMidTurnMedia) &&
         (inputAnnotations?.length ?? 0) === 0 &&
         !isCommandPrompt(trimmed);
@@ -1404,6 +1434,7 @@ export function useQueuedPrompts({
         sessionId: targetSessionId,
         text: trimmed,
         images: images ? [...images] : undefined,
+        files: files ? [...files] : undefined,
         inputAnnotations: inputAnnotations ? [...inputAnnotations] : undefined,
         onComplete,
         onAdmitted,
@@ -1867,6 +1898,7 @@ export function useQueuedPrompts({
               ...prompt,
               text: '',
               images: undefined,
+              files: undefined,
               inputAnnotations: undefined,
               onComplete: undefined,
               payloadAvailable: false,

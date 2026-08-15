@@ -88,7 +88,8 @@ const rootDir = join(__dirname, '..');
 // Bumped from 189KB to 190KB for historical branch sessions and transcript
 // branch-point projection merged with the upload and reasoning APIs.
 // Bumped from 190KB to 195KB for session media upload, cleanup, and hydration
-// merged with the branch-session APIs.
+// merged with the branch-session APIs and the composer text-file attachment
+// metadata (#9180).
 const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 195 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so

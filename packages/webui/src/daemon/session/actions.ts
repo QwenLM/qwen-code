@@ -61,6 +61,7 @@ import type {
   AddDaemonSessionNotice,
   DaemonConnectionState,
   DaemonNoticeOperation,
+  DaemonPromptFile,
   DaemonPromptStatus,
   DaemonSessionActions,
   SettledPrompt,
@@ -69,6 +70,17 @@ import type {
 
 interface RefBox<T> {
   current: T;
+}
+
+function normalizePromptFiles(
+  files: readonly DaemonPromptFile[] | undefined,
+): Array<{ name: string; text: string; mimeType: string }> {
+  return (files ?? []).map((file) => ({
+    name: file.name,
+    text: file.text,
+    mimeType:
+      file.mimeType || file.mediaType || file.media_type || 'text/plain',
+  }));
 }
 
 const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
@@ -243,6 +255,7 @@ export function createDaemonSessionActions({
     session: DaemonSessionClient,
     text: string,
     images: ReadonlyArray<{ data: string; mimeType: string }>,
+    files: readonly DaemonPromptFile[],
     signal?: AbortSignal,
   ): Promise<{
     content: PromptContentBlock[];
@@ -259,7 +272,10 @@ export function createDaemonSessionActions({
       images.some((image) => image.mimeType === 'image/*') ||
       typeof session.uploadMedia !== 'function'
     ) {
-      return { content: toDaemonPromptContent(text, images), references: [] };
+      return {
+        content: toDaemonPromptContent(text, images, files),
+        references: [],
+      };
     }
     const results = await Promise.allSettled(
       images.map(
@@ -278,11 +294,16 @@ export function createDaemonSessionActions({
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
     if (!failure) {
-      return { content: [{ type: 'text', text }, ...references], references };
+      const content = toDaemonPromptContent(text, [], files);
+      content.splice(1, 0, ...references);
+      return { content, references };
     }
     await removeUploadedMedia(session, references);
     if (extractHttpStatus(failure.reason) === 404) {
-      return { content: toDaemonPromptContent(text, images), references: [] };
+      return {
+        content: toDaemonPromptContent(text, images, files),
+        references: [],
+      };
     }
     throw failure.reason;
   }
@@ -563,6 +584,7 @@ export function createDaemonSessionActions({
           mimeType:
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
+        const normalizedFiles = normalizePromptFiles(options?.files);
         const inputAnnotations =
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
@@ -572,12 +594,14 @@ export function createDaemonSessionActions({
             text,
             normalizedImages,
             inputAnnotations ? { inputAnnotations } : undefined,
+            normalizedFiles,
           );
         }
         const uploaded = await promptContentWithUploadedMedia(
           session,
           text,
           normalizedImages,
+          normalizedFiles,
           ctrl.signal,
         );
         if (ctrl.signal.aborted) {
@@ -668,6 +692,7 @@ export function createDaemonSessionActions({
         data: img.data,
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
+      const normalizedFiles = normalizePromptFiles(options?.files);
       const inputAnnotations =
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations
@@ -677,12 +702,14 @@ export function createDaemonSessionActions({
           text,
           normalizedImages,
           inputAnnotations ? { inputAnnotations } : undefined,
+          normalizedFiles,
         );
       }
       const uploaded = await promptContentWithUploadedMedia(
         session,
         text,
         normalizedImages,
+        normalizedFiles,
         options?.signal,
       );
       const promptRequest: Record<string, unknown> = {

@@ -41,7 +41,7 @@ import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTra
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
-import type { PromptImage } from '../adapters/promptTypes';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type {
   ComposerSubmitCommit,
   ComposerSubmitMetadata,
@@ -569,11 +569,13 @@ export function ChatPane({
     (
       text: string,
       images?: PromptImage[],
+      files?: PromptFile[],
       commitAccepted?: ComposerSubmitCommit,
       metadata?: ComposerSubmitMetadata,
     ): boolean => {
       const trimmed = text.trim();
-      if (!trimmed && (images?.length ?? 0) === 0) return false;
+      if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
+        return false;
       if (admissionPayloadLocked) return false;
       if (
         trimmed &&
@@ -608,6 +610,7 @@ export function ChatPane({
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
+            ...(files && files.length ? { files } : {}),
             ...(inputAnnotations ? { inputAnnotations } : {}),
             onAdmissionStarted: () => {
               admissionStarted = true;
@@ -654,10 +657,11 @@ export function ChatPane({
       }
       const queued =
         !trimmed && !inputAnnotations
-          ? enqueuePrompt(trimmed, images)
+          ? enqueuePrompt(trimmed, images, files)
           : enqueuePrompt(
               trimmed,
               images,
+              files,
               undefined,
               inputAnnotations,
               notifyFirstPromptAdmitted,
