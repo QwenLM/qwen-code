@@ -159,9 +159,14 @@ function readSessions(planPath: string): SessionEntry[] {
     const epoch = runEpochMs(planPath);
     const ceiling = runCeilingMs();
     const planMtime = planMtimeMs(planPath);
-    // Cap the entry count too: the byte bound alone still admits tens of
-    // thousands of tiny entries, each of which costs a directory read.
-    const kept = parsed.slice(0, MAX_LEDGER_ENTRIES).filter(
+    // Validate FIRST, cap the survivors: sliced raw, 64 malformed entries at
+    // the front consume the whole cap and hide every real one behind them —
+    // `sessionEntryCount` then reads 0 and the resume cap resets, which is
+    // the attack the count exists to survive. Validation cost is bounded by
+    // MAX_LEDGER_BYTES (the file cannot hold enough entries to matter); the
+    // cap's own job — bounding the directory reads CONSUMERS pay per entry —
+    // is done by capping what is returned, and that stands either way.
+    const kept = parsed.filter(
       (e): e is SessionEntry =>
         typeof e === 'object' &&
         e !== null &&
@@ -182,6 +187,7 @@ function readSessions(planPath: string): SessionEntry[] {
         Math.abs((e as SessionEntry).planMtimeMs! - planMtime) <=
           PLAN_MTIME_TOLERANCE_MS,
     );
+    const capped = kept.slice(0, MAX_LEDGER_ENTRIES);
     // Deduplicate on READ, not only on append: the file lives in a directory
     // the orchestrator can reach, and a hand-written duplicate would make a
     // consumer that iterates entries (the cost ledger) bill one session
@@ -191,7 +197,7 @@ function readSessions(planPath: string): SessionEntry[] {
     // would otherwise read as a second session and double-count everything
     // inside it.
     const seen = new Set<string>();
-    return kept.filter((e) => {
+    return capped.filter((e) => {
       const k = e.sessionId.toLowerCase();
       return seen.has(k) ? false : (seen.add(k), true);
     });
@@ -392,27 +398,28 @@ export function readResumeMarker(planPath: string): ResumeMarker {
     const raw = parsed as ResumeMarker;
     const seenResume = new Set<string>();
     const resumes = Array.isArray(raw.resumes)
-      ? raw.resumes.slice(0, MAX_LEDGER_ENTRIES).filter(
-          (e) =>
-            typeof e === 'object' &&
-            e !== null &&
-            typeof e.sessionId === 'string' &&
-            // Same closed charset as the session ledger: these ids have the
-            // same address semantics, and one read path applying the gate
-            // while the other does not is how a threat model rots.
-            SESSION_ID_RE.test(e.sessionId) &&
-            typeof e.atMs === 'number' &&
-            e.atMs >= epoch &&
-            e.atMs <= ceiling &&
-            // Duplicates would each consume a RESUME_MAX slot and refuse a
-            // legitimate continuation.
-            !seenResume.has(e.sessionId.toLowerCase()) &&
-            (seenResume.add(e.sessionId.toLowerCase()), true),
-        )
+      ? raw.resumes
+          .filter(
+            (e) =>
+              typeof e === 'object' &&
+              e !== null &&
+              typeof e.sessionId === 'string' &&
+              // Same closed charset as the session ledger: these ids have the
+              // same address semantics, and one read path applying the gate
+              // while the other does not is how a threat model rots.
+              SESSION_ID_RE.test(e.sessionId) &&
+              typeof e.atMs === 'number' &&
+              e.atMs >= epoch &&
+              e.atMs <= ceiling &&
+              // Duplicates would each consume a RESUME_MAX slot and refuse a
+              // legitimate continuation.
+              !seenResume.has(e.sessionId.toLowerCase()) &&
+              (seenResume.add(e.sessionId.toLowerCase()), true),
+          )
+          .slice(0, MAX_LEDGER_ENTRIES)
       : [];
     const restarts = Array.isArray(raw.restarts)
       ? raw.restarts
-          .slice(0, MAX_LEDGER_ENTRIES)
           .filter(
             (e) =>
               typeof e === 'object' &&
@@ -422,6 +429,10 @@ export function readResumeMarker(planPath: string): ResumeMarker {
               e.atMs >= epoch &&
               e.atMs <= ceiling,
           )
+          // Validated first, like the ledger and the resumes above: sliced
+          // raw, junk at the front hides the real restart and the
+          // once-per-review bound resets.
+          .slice(0, MAX_LEDGER_ENTRIES)
       : [];
     return { schemaVersion: 1, resumes, restarts };
   } catch {

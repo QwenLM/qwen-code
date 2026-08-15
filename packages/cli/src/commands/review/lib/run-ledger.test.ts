@@ -80,6 +80,41 @@ describe('sessionEntryCount — the cap term the gate must not swallow', () => {
     expect(sessionEntryCount(plan)).toBe(0);
   });
 
+  it('validates entries BEFORE the cap, so junk cannot consume it', () => {
+    // Sliced raw, 64 malformed entries at the front hide every real one:
+    // `sessionEntryCount` reads 0 and the resume cap resets — the attack the
+    // count exists to survive. The witness is the reviewer's own: junk
+    // first, one valid entry last.
+    appendRunSession(plan, envOf('S1'));
+    const raw = JSON.parse(
+      readFileSync(runSessionsPath(plan), 'utf8'),
+    ) as Array<Record<string, unknown>>;
+    const junk = Array.from({ length: 70 }, (_, i) => ({ garbage: i }));
+    writeFileSync(runSessionsPath(plan), JSON.stringify([...junk, ...raw]));
+
+    expect(sessionEntryCount(plan)).toBe(1);
+    authorize('S2');
+    expect(priorSessionIds(plan, envOf('S2'))).toEqual(['S1']);
+  });
+
+  it('still caps the VALIDATED entries at the bound', () => {
+    // The cap's job — bounding the directory reads consumers pay per entry —
+    // survives the reorder: valid entries past the bound are dropped.
+    const mtime = statSync(plan).mtimeMs;
+    const now = Date.now();
+    const entries = Array.from({ length: 70 }, (_, i) => ({
+      sessionId: `S${i}`,
+      atMs: now,
+      planMtimeMs: mtime,
+    }));
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    writeFileSync(runSessionsPath(plan), JSON.stringify(entries));
+
+    expect(sessionEntryCount(plan)).toBe(64);
+  });
+
   it('applies the same fences as every other read', () => {
     // A count that admitted a foreign or stale entry would cap the wrong
     // number: it runs through `readSessions`, so the epoch, plan-mtime and
