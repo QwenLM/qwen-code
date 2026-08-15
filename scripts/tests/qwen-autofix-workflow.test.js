@@ -6384,6 +6384,27 @@ exit 1
         ],
       }),
     ).toBe('true 2');
+    // measured= order inverts run order across DISTINCT runs — a failed
+    // job's re-run keeps its OLD run id but stamps a NEWER measured=:
+    // PREV_SUM must follow measured=, so the current 150 >= 100 runaway
+    // escalates. Reverting to run-id ordering would read run 1002's stale
+    // 900 as PREV_SUM and suppress it (#9192 R2-4).
+    expect(
+      diverge({
+        src: 100,
+        test: 50,
+        history: [
+          marker(60, 40, 'true', 1, 'W1', {
+            run: 1001,
+            measured: '2026-01-01T00:09:00Z',
+          }),
+          marker(500, 400, 'true', 2, 'W1', {
+            run: 1002,
+            measured: '2026-01-01T00:02:00Z',
+          }),
+        ],
+      }),
+    ).toBe('true 2');
     // Two DISTINCT runs that share round= AND a frozen eval watermark (the
     // state-triggered conflict lane: a push stamps NEXT_ROUND, the following
     // no-op re-stamps the same ROUND, neither NEWEST nor ROUND advances) are
@@ -6513,6 +6534,24 @@ exit 1
         ],
       }),
     ).toBe('false 0');
+    // …and the created_at fallback ITSELF is pinned: a legacy marker whose
+    // created_at sits AFTER the cutoff still counts. Dropping the fallback
+    // (measured= absent → "") would exclude every post-update legacy marker
+    // and under-count the census (#9192 R2-3).
+    expect(
+      diverge({
+        src: 999,
+        test: 999,
+        cutoff: '2026-01-01T12:00:00Z',
+        history: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-01-01T18:00:00Z',
+            body: '<!-- autofix-growth-now src=500 test=300 over=true round=1 run=1001 key=W1 -->',
+          },
+        ],
+      }),
+    ).toBe('false 1');
     // A malformed GROWTH_DIVERGENCE_ROUNDS falls back to 2 (the sanitize guard
     // at the top of the block) instead of crashing the `-ge` arithmetic: two
     // prior over-budget rounds still climbing → diverged.
@@ -6545,7 +6584,7 @@ exit 1
     // of silently inerting the feature. Every writer path is covered, not just
     // the push path (a drift in only the no-op or failure suffix would
     // otherwise survive green).
-    const roundTrip = (roundVar) => {
+    const roundTrip = (roundVar, { omitMeasuredAt = false } = {}) => {
       const line = workflow.match(
         new RegExp(
           `echo "<!-- autofix-growth-now src=\\$\\{GROWTH_SRC:-0\\}[^\\n]*round=\\$\\{${roundVar}\\}[^\\n]*-->"`,
@@ -6557,7 +6596,8 @@ exit 1
         [
           '-c',
           `GROWTH_SRC=500\nGROWTH_TEST=300\nCRITICAL_ONLY_GROWTH=true\n` +
-            `${roundVar}=2\nGITHUB_RUN_ID=1002\nMEASURED_AT=2026-01-01T00:05:00Z\n` +
+            `${roundVar}=2\nGITHUB_RUN_ID=1002\n` +
+            (omitMeasuredAt ? '' : 'MEASURED_AT=2026-01-01T00:05:00Z\n') +
             `GROWTH_BASE_WIN=W1\nWINDOW=none\n${line}`,
         ],
         { encoding: 'utf8' },
@@ -6579,6 +6619,11 @@ exit 1
     expect(roundTrip('NEXT_ROUND')).toBe('false 1'); // push path
     expect(roundTrip('ROUND')).toBe('false 1'); // no-op path
     expect(roundTrip('MARK_ROUND')).toBe('false 1'); // failure/handoff path
+    // …and it still round-trips when prepare NEVER RAN (MEASURED_AT empty):
+    // measured= omits itself rather than emit an empty value no scan can
+    // match, so the marker survives on the created_at fallback instead of
+    // silently dropping (#9192 R2-1).
+    expect(roundTrip('MARK_ROUND', { omitMeasuredAt: true })).toBe('false 1');
     rmSync(dir, { recursive: true, force: true });
 
     // The report writes the per-round growth-now marker on ALL THREE report
@@ -6590,7 +6635,7 @@ exit 1
       workflow.match(/<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g) ?? [],
     ).toHaveLength(3);
     expect(workflow).toContain(
-      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=',
+      'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // The failure/handoff report step binds the three growth outputs so its
     // marker is not inert-by-omission.

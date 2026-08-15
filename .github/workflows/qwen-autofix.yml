@@ -6088,7 +6088,10 @@ jobs:
           # over-budget round that never reaches 'Push and report' leaves a
           # history gap and the divergence count under-reports. Empty outputs
           # (prepare never ran) fall through the :-0/:-false marker fallbacks
-          # to an inert over=false entry.
+          # to an inert over=false entry — measured= then OMITS itself (an
+          # EMPTY measured= value matches no scan and would silently drop the
+          # marker these fallbacks exist to keep); the reader falls back to
+          # the comment's created_at.
           GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'
           GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
@@ -6603,7 +6606,7 @@ jobs:
               # marker the push/no-op report paths write, so an over-budget
               # round that timed out or was gate-rejected is not a gap. run=
               # (per-workflow-run) is the DEDUP identity; measured= orders.
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID} measured=${MEASURED_AT} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
               # A sentinel ts means the agent evaluated NOTHING (crash, API
               # error, gate crash) and the next scan must retry. Recording a
               # judged head here would make RED_HEAD == LIVE_HEAD, so the
