@@ -3871,6 +3871,7 @@ export class GeminiClient {
             chat.getGenerationConfig(),
             cachedHistory,
             this.config.getModel(),
+            this.config.getSessionId(),
           );
         } catch {
           // Best-effort — don't block the main flow
