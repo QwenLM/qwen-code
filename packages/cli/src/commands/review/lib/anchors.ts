@@ -348,9 +348,11 @@ function normalizeCollapsed(s: string): string {
  * because the quote is in the diff, just not the WHOLE of any line; there the
  * natural anchor is a mid-line fragment, and containment is what places it.
  *
- * Only the faithful reading of a single-line snippet qualifies: a multi-line
- * snippet cannot sit inside one line, and the marker-stripped readings are
- * already guesses about what was typed. Same safety shape as the whole-line
+ * A multi-line snippet cannot sit inside one line. With `midLineOnly`, a
+ * candidate whose line equals the fragment modulo surrounding whitespace is
+ * dropped: that shape is an indentation guess stacked on a marker guess, the
+ * stack the whole-line tiers refuse. `resolveAnchor` sets it when retrying
+ * the marker-stripped reading. Same safety shape as the whole-line
  * tiers — a hit on several lines is decided by the claimed line or refused,
  * and the whitespace-collapsed reading earns its place only when it is the
  * ONLY place the fragment could go. A resolved fragment sits inside a hunk by
@@ -361,10 +363,29 @@ function substringResolution(
   hay: NewSideLine[],
   needleLines: string[],
   claimedLine?: number,
+  midLineOnly = false,
 ): AnchorResolution | null {
   if (needleLines.length !== 1) return null;
   const needle = normalizeExact(needleLines[0]);
-  if (needle.trim().length < MIN_SUBSTRING_LENGTH) return null;
+  if (needle.trim().length < MIN_SUBSTRING_LENGTH) {
+    // Too short to place — but when it IS inside a hunk line, say so: the
+    // generic absence reason would claim the quote appears nowhere (false
+    // here) and key the recovery to re-attribution, when the only remedy is
+    // a longer fragment.
+    const contained = hay.some(
+      (l) =>
+        l.text.includes(needle) ||
+        normalizeCollapsed(l.text).includes(normalizeCollapsed(needle)),
+    );
+    if (!contained) return null;
+    return {
+      status: 'unmatched',
+      reason:
+        'the snippet sits inside a hunk line but is shorter than ' +
+        `${MIN_SUBSTRING_LENGTH} characters — too short to place a line ` +
+        'reliably; quote a longer stretch of the line it sits in',
+    };
+  }
 
   const norms: Array<[boolean, (s: string) => string]> = [
     [true, (s) => s],
@@ -377,6 +398,11 @@ function substringResolution(
     // report an ambiguity the resolver does not actually have.
     const cands: Candidate[] = hay
       .filter((l) => norm(l.text).includes(normNeedle))
+      .filter(
+        (l) =>
+          !midLineOnly ||
+          normalizeCollapsed(l.text) !== normalizeCollapsed(needle),
+      )
       .map((l) => ({ startLine: l.newLine, line: l.newLine, added: l.added }));
     if (cands.length === 0) continue;
 
@@ -514,6 +540,21 @@ export function resolveAnchor(
   // found anything at all.
   const fragment = substringResolution(newSideLines, variants[0], claimedLine);
   if (fragment) return fragment;
+
+  // The faithful reading found nothing even as a fragment. If the quote was
+  // copied with its `+` marker column — the mistake the whole-line tiers
+  // forgive — offer the marker-stripped reading to the containment tier too,
+  // mid-line only: a containing line equal to the fragment modulo whitespace
+  // is the stacked indentation guess the tiers above refuse.
+  if (variants.length > 1) {
+    const stripped = substringResolution(
+      newSideLines,
+      variants[1],
+      claimedLine,
+      true,
+    );
+    if (stripped) return stripped;
+  }
 
   return {
     status: 'unmatched',

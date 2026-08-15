@@ -566,6 +566,58 @@ describe('anchorRequestsFor', () => {
     ).toThrow(/anchor request id "p1-1" is produced twice/);
   });
 
+  it('refuses the collision when the other finding is itself an aggregate', () => {
+    // `p1-1` here mints `p1-1-1`, `p1-1-2` — it never emits its own bare id,
+    // so a guard that only compares minted ids never sees the collision. The
+    // Step 7 id-join pairs `p1`'s first-location resolution with finding
+    // `p1-1`'s body, and the comment lands on the wrong finding.
+    expect(() =>
+      anchorRequestsFor([
+        finding({
+          id: 'p1',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          ],
+        }),
+        finding({
+          id: 'p1-1',
+          locations: [
+            { file: 'c.ts', line: 3, anchor: 'const c = 3;' },
+            { file: 'd.ts', line: 4, anchor: 'const d = 4;' },
+          ],
+        }),
+      ]),
+    ).toThrow(/anchor request id "p1-1" is produced twice/);
+  });
+
+  // A low-confidence, anchorless, or Nice-to-have finding emits nothing —
+  // but it stays in the artifact, and Step 7 joins resolutions to the
+  // artifact by id. A minted id equal to its id attaches the comment to the
+  // wrong body all the same.
+  const noRequestShapes: Array<[string, Partial<Finding>]> = [
+    ['low-confidence', { confidence: 'low' }],
+    ['anchorless', { locations: [{ file: 'z.ts', line: 9 }] }],
+    ['Nice to have', { severity: 'Nice to have' }],
+  ];
+  it.each(noRequestShapes)(
+    'refuses the collision when the other finding emits no request (%s)',
+    (_shape, over) => {
+      expect(() =>
+        anchorRequestsFor([
+          finding({
+            id: 'p1',
+            locations: [
+              { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+              { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+            ],
+          }),
+          finding({ id: 'p1-1', ...over }),
+        ]),
+      ).toThrow(/anchor request id "p1-1" is produced twice/);
+    },
+  );
+
   it('projects only high-confidence Criticals and Suggestions', () => {
     // The resolver input is the comments[] set: Nice to have and
     // low-confidence findings are terminal-only and never anchored.
@@ -804,6 +856,94 @@ describe('findings (command boundary)', () => {
     });
     const requests = JSON.parse(readFileSync(anchors, 'utf8'));
     expect(requests.map((r: { id: string }) => r.id)).toEqual(['kept']);
+  });
+
+  it('--to-anchors leaves the previous pair untouched when the projection throws', () => {
+    // The projection can throw (the expanded-id collision guard). It runs
+    // BEFORE the artifact write precisely so a failed rerun leaves the
+    // previous consistent pair on disk — not v2 findings beside v1 anchors,
+    // a pair Step 7 joins by id.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'a1', anchor: 'charge(amt);', source: 'probe' },
+      ]),
+    );
+    (findingsCommand.handler as (a: unknown) => void)({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    const findingsBefore = readFileSync(out, 'utf8');
+    const anchorsBefore = readFileSync(anchors, 'utf8');
+
+    // Rerun on the same paths with input the collision guard refuses.
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          ...base,
+          id: 'p1',
+          source: 'probe',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2, anchor: 'const b = 2;' },
+          ],
+        },
+        { ...base, id: 'p1-1', source: 'probe', anchor: 'other(amt);' },
+      ]),
+    );
+    expect(() =>
+      (findingsCommand.handler as (a: unknown) => void)({
+        input,
+        out,
+        toAnchors: anchors,
+        print: false,
+      }),
+    ).toThrow(/anchor request id "p1-1" is produced twice/);
+    expect(readFileSync(out, 'utf8')).toBe(findingsBefore);
+    expect(readFileSync(anchors, 'utf8')).toBe(anchorsBefore);
+  });
+
+  it('--to-anchors names the postable locations it cannot project', () => {
+    // The projection skips anchorless locations, and nothing downstream
+    // cross-checks the artifact against the resolver input — so the skip
+    // must be named: a Critical that silently drops out of the posted
+    // review is the failure this line exists to prevent.
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'findings.json');
+    const anchors = join(dir, 'anchors.json');
+    writeFileSync(
+      input,
+      JSON.stringify([
+        { ...base, id: 'anchored-c', source: 'probe', anchor: 'charge(amt);' },
+        { ...base, id: 'anchorless-c', source: 'probe' },
+        {
+          ...base,
+          id: 'agg',
+          source: 'probe',
+          locations: [
+            { file: 'a.ts', line: 1, anchor: 'const a = 1;' },
+            { file: 'b.ts', line: 2 },
+          ],
+        },
+      ]),
+    );
+    const stderr = runCapturingStderr({
+      input,
+      out,
+      toAnchors: anchors,
+      print: false,
+    });
+    expect(stderr).toContain(
+      'anchorless-c carries 1 location(s) without an anchor',
+    );
+    expect(stderr).toContain('agg carries 1 location(s) without an anchor');
+    expect(stderr).not.toContain('anchored-c carries');
   });
 
   it.each([

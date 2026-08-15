@@ -830,6 +830,18 @@ export function buildReport(findings: readonly Finding[]): FindingsReport {
 }
 
 /**
+ * Headed for the `comments` array — the projection set. The projection and
+ * its skip disclosure must agree on exactly this set, so both read one
+ * predicate.
+ */
+function isPostable(f: Finding): boolean {
+  return (
+    f.confidence === 'high' &&
+    (f.severity === 'Critical' || f.severity === 'Suggestion')
+  );
+}
+
+/**
  * The Step 7 resolver input, projected from the canonical findings.
  *
  * `resolve-anchors` wants flat `{id, path, anchor, line?}` entries — one per
@@ -847,10 +859,13 @@ export function anchorRequestsFor(
   findings: readonly Finding[],
 ): AnchorRequest[] {
   const requests: AnchorRequest[] = [];
-  const seen = new Map<string, string>();
+  // Seed with EVERY finding's own id, not just the postable ones: Step 7
+  // joins each resolution back to the artifact by id, so a minted `<id>-N`
+  // equal to any finding's id attaches the comment to the wrong body,
+  // whether or not that finding projects a request of its own.
+  const seen = new Map<string, string>(findings.map((f) => [f.id, f.id]));
   for (const f of findings) {
-    if (f.confidence !== 'high') continue;
-    if (f.severity !== 'Critical' && f.severity !== 'Suggestion') continue;
+    if (!isPostable(f)) continue;
     const postable = f.locations.filter((l) => l.anchor !== undefined);
     const multi = postable.length > 1;
     for (const [i, l] of postable.entries()) {
@@ -858,10 +873,12 @@ export function anchorRequestsFor(
       // Finding ids are unique, but an EXPANDED id can equal another finding's
       // own id (`p1`'s first location mints `p1-1`; a standalone finding may
       // be named `p1-1`). Resolutions join back on this id, so the collision
-      // must fail here, at projection — not at Step 7, where `resolve-anchors`
-      // would refuse the whole batch and take every other resolution down.
+      // must fail here: the emitted ids are unique, so no later gate sees it,
+      // and Step 7's join would attach the comment to the wrong finding's
+      // body. A finding matching its own id is the standalone shape, not a
+      // collision.
       const other = seen.get(id);
-      if (other !== undefined) {
+      if (other !== undefined && other !== f.id) {
         throw new Error(
           `findings: anchor request id "${id}" is produced twice — findings ` +
             `"${other}" and "${f.id}" both claim it; rename one of the findings`,
@@ -877,6 +894,25 @@ export function anchorRequestsFor(
     }
   }
   return requests;
+}
+
+/**
+ * The locations the projection skips: a postable finding carrying a location
+ * with no anchor. Nothing downstream cross-checks the artifact's postable
+ * findings against the resolver input, so the command discloses them — the
+ * disposition is the ordinary unanchorable one (a Critical moves to the
+ * body, a Suggestion is discarded).
+ */
+function anchorlessLocationsFor(
+  findings: readonly Finding[],
+): Array<{ id: string; count: number }> {
+  const skipped: Array<{ id: string; count: number }> = [];
+  for (const f of findings) {
+    if (!isPostable(f)) continue;
+    const count = f.locations.filter((l) => l.anchor === undefined).length;
+    if (count > 0) skipped.push({ id: f.id, count });
+  }
+  return skipped;
 }
 
 /** One line per finding, for a terminal that will not render the JSON. */
@@ -1017,25 +1053,36 @@ export const findingsCommand: CommandModule = {
     findings = witnessHold.findings;
     const report = buildReport(findings);
 
+    // Project the resolver input from the SAME findings the artifact carries —
+    // after the holds above, so a Critical lowered to Suggestion (or a
+    // confidence lowered to terminal-only) projects as the holds intend — and
+    // BEFORE anything is written: a projection the collision guard refuses
+    // must leave the previous run's consistent pair on disk, not a rewritten
+    // findings.json beside a stale anchors.json.
+    const anchorRequests =
+      toAnchors !== undefined ? anchorRequestsFor(report.findings) : undefined;
+
     const target = resolve(out);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
-    // Project the resolver input from the SAME findings the artifact carries —
-    // after the holds above, so a Critical lowered to Suggestion (or a
-    // confidence lowered to terminal-only) projects as the holds intend.
-    if (toAnchors !== undefined) {
-      const requests = anchorRequestsFor(report.findings);
+    if (toAnchors !== undefined && anchorRequests !== undefined) {
       const anchorTarget = resolve(toAnchors);
       mkdirSync(dirname(anchorTarget), { recursive: true });
       writeFileSync(
         anchorTarget,
-        `${JSON.stringify(requests, null, 2)}\n`,
+        `${JSON.stringify(anchorRequests, null, 2)}\n`,
         'utf8',
       );
       writeStderrLine(
-        `findings: wrote ${requests.length} anchor request(s) for Step 7 to ${anchorTarget}`,
+        `findings: wrote ${anchorRequests.length} anchor request(s) for Step 7 to ${anchorTarget}`,
       );
+      for (const { id, count } of anchorlessLocationsFor(report.findings)) {
+        writeStderrLine(
+          `findings: ${id} carries ${count} location(s) without an anchor — ` +
+            'absent from the resolver input; dispose as unanchorable',
+        );
+      }
     }
 
     const { bySeverity, byConfidence } = report.counts;
