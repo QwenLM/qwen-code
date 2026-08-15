@@ -81,6 +81,20 @@ const prReviewJob = prReviewDoc.jobs['review-pr'];
 const prReviewOwnershipStep = prReviewJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
+const resolvePrJob = prReviewDoc.jobs['resolve-pr'];
+const resolveConflictsStep = resolvePrJob.steps.find(
+  (s) => s.id === 'resolve_conflicts',
+);
+const followupWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'workflows',
+  'qwen-issue-followup-bot.yml',
+);
+const followupDoc = parse(readFileSync(followupWorkflowPath, 'utf8'));
+const followupStep = followupDoc.jobs['follow-up-issues'].steps.find(
+  (s) => s.name === 'Run Qwen issue follow-up',
+);
 const ciWebShellJob = ciDoc.jobs.web_shell_e2e_smoke;
 const ciWebShellOwnershipStep = ciWebShellJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
@@ -197,6 +211,104 @@ describe('qwen-triage: agent tool/permission settings', () => {
   });
 });
 
+// The same settings_json → settings bug survived in two more workflows after
+// the triage fix. An unknown action input is dropped without error, so the
+// /resolve agent ran every time with no turn cap, no tool allowlist, and no
+// sandbox — on a runner pool its runs-on comment chose specifically because
+// `sandbox: true` needs docker — and the follow-up bot ran uncapped too.
+// These blocks were therefore never validated by anything; parse them here.
+describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
+  it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
+    assert.ok(
+      resolveConflictsStep,
+      'resolve-pr job must keep its resolve_conflicts agent step',
+    );
+    assert.ok(
+      typeof resolveConflictsStep.with.settings === 'string',
+      'resolve_conflicts must pass a `settings` string',
+    );
+    assert.equal(
+      resolveConflictsStep.with.settings_json,
+      undefined,
+      '`settings_json` is silently ignored by the action — never use it',
+    );
+  });
+
+  it('settings is valid JSON pinning the turn cap, allowlist, and sandbox', () => {
+    const settings = JSON.parse(resolveConflictsStep.with.settings);
+    assert.equal(
+      settings.model?.maxSessionTurns,
+      400,
+      'model.maxSessionTurns must stay 400',
+    );
+    const core = settings.tools?.core;
+    assert.ok(
+      Array.isArray(core),
+      'tools.core must be an array (registration allowlist)',
+    );
+    for (const t of [
+      'read_file',
+      'write_file',
+      'run_shell_command(git merge)',
+    ]) {
+      assert.ok(core.includes(t), `tools.core must include ${t}`);
+    }
+    // The runs-on comment pins this job to hosted runners because the sandbox
+    // needs docker; dropping the key would pay that routing cost for nothing.
+    assert.equal(
+      settings.tools?.sandbox,
+      true,
+      'tools.sandbox must stay true — the runs-on routing depends on it',
+    );
+    // v1 top-level keys only work through runtime migration; write the native
+    // v2 shape (qwen-triage.yml convention).
+    assert.equal(settings.coreTools, undefined);
+    assert.equal(settings.maxSessionTurns, undefined);
+    assert.equal(settings.sandbox, undefined);
+  });
+});
+
+describe('qwen-issue-followup-bot.yml: agent settings', () => {
+  it('passes `settings:` (not the silently-dropped `settings_json:`)', () => {
+    assert.ok(
+      followupStep,
+      'follow-up-issues job must keep its "Run Qwen issue follow-up" step',
+    );
+    assert.ok(
+      typeof followupStep.with.settings === 'string',
+      'the follow-up step must pass a `settings` string',
+    );
+    assert.equal(
+      followupStep.with.settings_json,
+      undefined,
+      '`settings_json` is silently ignored by the action — never use it',
+    );
+  });
+
+  it('settings is valid JSON pinning the turn cap and gh allowlist', () => {
+    const settings = JSON.parse(followupStep.with.settings);
+    assert.equal(
+      settings.model?.maxSessionTurns,
+      50,
+      'model.maxSessionTurns must stay 50',
+    );
+    const core = settings.tools?.core;
+    assert.ok(
+      Array.isArray(core),
+      'tools.core must be an array (registration allowlist)',
+    );
+    for (const t of [
+      'run_shell_command(gh issue view)',
+      'run_shell_command(gh issue comment)',
+    ]) {
+      assert.ok(core.includes(t), `tools.core must include ${t}`);
+    }
+    assert.equal(settings.coreTools, undefined);
+    assert.equal(settings.maxSessionTurns, undefined);
+    assert.equal(settings.sandbox, undefined);
+  });
+});
+
 describe('qwen-triage: fork-PR runner routing', () => {
   const runsOn = String(triageJob['runs-on']);
   const authorizeJob = doc.jobs.authorize;
@@ -219,7 +331,10 @@ describe('qwen-triage: fork-PR runner routing', () => {
   it('keeps the authorize gate itself on the same-repo guard', () => {
     // authorize IS the permission check (and loads CI_BOT_PAT); it cannot
     // route on its own output and must not widen to association-based trust.
-    assert.match(authorizeRunsOn, /head\.repo\.full_name == github\.repository/);
+    assert.match(
+      authorizeRunsOn,
+      /head\.repo\.full_name == github\.repository/,
+    );
     assert.doesNotMatch(authorizeRunsOn, /author_association/);
     assert.doesNotMatch(authorizeRunsOn, /needs\./);
   });
@@ -651,8 +766,14 @@ describe('qwen-triage: npm cache restore-only invariant', () => {
       const restoreIdx = jobDef.steps.findIndex(
         (s) => s.name === 'Restore npm cache',
       );
-      assert.ok(clearIdx !== -1, `'Clear stale npm cache' step must exist in ${jobName}`);
-      assert.ok(restoreIdx !== -1, `'Restore npm cache' step must exist in ${jobName}`);
+      assert.ok(
+        clearIdx !== -1,
+        `'Clear stale npm cache' step must exist in ${jobName}`,
+      );
+      assert.ok(
+        restoreIdx !== -1,
+        `'Restore npm cache' step must exist in ${jobName}`,
+      );
       assert.ok(
         clearIdx < restoreIdx,
         'clear step must come before restore step',
@@ -708,8 +829,8 @@ describe('qwen-triage: npm cache producer workflow', () => {
   });
 
   it('saves with the same key and path the triage lanes restore', () => {
-    const saveStep = saveJob.steps.find(
-      (s) => s.uses?.startsWith('actions/cache/save@'),
+    const saveStep = saveJob.steps.find((s) =>
+      s.uses?.startsWith('actions/cache/save@'),
     );
     assert.ok(saveStep, 'must have an actions/cache/save step');
     for (const [jobName, jobDef] of [
@@ -733,8 +854,8 @@ describe('qwen-triage: npm cache producer workflow', () => {
   });
 
   it('populates the cache directory it saves', () => {
-    const saveStep = saveJob.steps.find(
-      (s) => s.uses?.startsWith('actions/cache/save@'),
+    const saveStep = saveJob.steps.find((s) =>
+      s.uses?.startsWith('actions/cache/save@'),
     );
     assert.ok(saveStep, 'must have an actions/cache/save step');
     const dir = saveStep.with.path.replace(

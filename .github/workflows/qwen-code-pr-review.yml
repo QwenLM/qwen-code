@@ -1934,31 +1934,40 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          # coreTools specifiers (e.g. `run_shell_command(git add)`) are advisory:
+          # The input name is `settings` — this action version has no
+          # `settings_json` input, and an unknown input is silently dropped.
+          # That is exactly what happened to this block: every /resolve run so
+          # far ignored it, and the agent ran without the turn cap, toolset
+          # allowlist, or the sandbox the runs-on comment above assumes.
+          # tools.core specifiers (e.g. `run_shell_command(git add)`) are advisory:
           # the permission manager keys on the tool name and drops the parenthesised
           # command. Real containment = sandbox + write authorization + no agent token.
-          settings_json: |-
+          settings: |-
             {
-              "maxSessionTurns": 400,
-              "coreTools": [
-                "read_file",
-                "read_many_files",
-                "glob",
-                "search_file_content",
-                "write_file",
-                "run_shell_command(cat)",
-                "run_shell_command(git add)",
-                "run_shell_command(git checkout)",
-                "run_shell_command(git commit)",
-                "run_shell_command(git diff)",
-                "run_shell_command(git log)",
-                "run_shell_command(git merge)",
-                "run_shell_command(git status)",
-                "run_shell_command(ls)",
-                "run_shell_command(mkdir)",
-                "run_shell_command(pwd)"
-              ],
-              "sandbox": true
+              "model": {
+                "maxSessionTurns": 400
+              },
+              "tools": {
+                "core": [
+                  "read_file",
+                  "read_many_files",
+                  "glob",
+                  "search_file_content",
+                  "write_file",
+                  "run_shell_command(cat)",
+                  "run_shell_command(git add)",
+                  "run_shell_command(git checkout)",
+                  "run_shell_command(git commit)",
+                  "run_shell_command(git diff)",
+                  "run_shell_command(git log)",
+                  "run_shell_command(git merge)",
+                  "run_shell_command(git status)",
+                  "run_shell_command(ls)",
+                  "run_shell_command(mkdir)",
+                  "run_shell_command(pwd)"
+                ],
+                "sandbox": true
+              }
             }
           prompt: |-
             ## Role
