@@ -5627,7 +5627,7 @@ export abstract class ChannelBase {
         : null;
       if (streamer) {
         promptState.stopStreaming = () => streamer.stop();
-        promptState.drainStreaming = () => streamer.drain();
+        promptState.drainStreaming = () => streamer.flush();
       }
 
       // Chunks arriving while a cancel is PENDING are held here: pushing them
@@ -5731,7 +5731,8 @@ export abstract class ChannelBase {
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
           const segment = this.closeOutputSegment(sessionId, promptState);
-          await streamer?.drain();
+          await streamer?.flush();
+          if (promptState.cancelled || promptState.cancellationEmitted) return;
           await this.notifyOutputSegmentEnd(
             envelope.chatId,
             sessionId,
@@ -5754,26 +5755,29 @@ export abstract class ChannelBase {
         if (!promptState.deliveryStarted) {
           await this.settleCancelRequested(promptState);
         }
-        if (!promptState.cancelled) {
+        const cancelledBeforeFailure = promptState.cancelled;
+        if (!cancelledBeforeFailure) {
           releaseHeldChunks();
           const segment = this.closeOutputSegment(sessionId, promptState);
-          await streamer?.drain();
-          await this.notifyOutputSegmentEnd(
-            envelope.chatId,
-            sessionId,
-            segment,
-            'failed',
-          );
-          this.emitTaskLifecycle({
-            ...this.lifecycleBase(
+          await streamer?.flush();
+          if (!promptState.cancelled && !promptState.cancellationEmitted) {
+            await this.notifyOutputSegmentEnd(
               envelope.chatId,
               sessionId,
-              envelope.messageId,
-            ),
-            type: 'failed',
-            error: this.lifecycleError(err),
-            phase: promptState.deliveryStarted ? 'delivery' : 'agent',
-          });
+              segment,
+              'failed',
+            );
+            this.emitTaskLifecycle({
+              ...this.lifecycleBase(
+                envelope.chatId,
+                sessionId,
+                envelope.messageId,
+              ),
+              type: 'failed',
+              error: this.lifecycleError(err),
+              phase: promptState.deliveryStarted ? 'delivery' : 'agent',
+            });
+          }
         } else {
           const channel = sanitizeLogText(this.name, 64);
           const safeSessionId = sanitizeLogText(sessionId, 64);
@@ -5782,7 +5786,7 @@ export abstract class ChannelBase {
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
-        if (promptState.cancelled) {
+        if (cancelledBeforeFailure) {
           return;
         }
         throw err;

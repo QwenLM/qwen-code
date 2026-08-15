@@ -5,8 +5,10 @@ import { describe, expect, it } from 'vitest';
 import {
   findTrailingPartialOutboundMediaMarker,
   findOutboundMediaMarkers,
+  sanitizeOutboundMediaMarkers,
   stripPartialOutboundMediaMarker,
   truncateOutboundMediaText,
+  unwrapFileMarkersAroundImages,
 } from './outbound-markers.js';
 
 describe('outbound media markers', () => {
@@ -138,8 +140,51 @@ describe('outbound media markers', () => {
 
   it('keeps an ambiguous bracketed path in streaming carry', () => {
     expect(findTrailingPartialOutboundMediaMarker('[IMAGE: /tmp/a[1]')).toEqual(
-      { start: 0, markerName: 'IMAGE' },
+      { start: 0, markerName: 'IMAGE', complete: true },
     );
+    expect(
+      findTrailingPartialOutboundMediaMarker('[FILE: /tmp/a[1].tx'),
+    ).toEqual({ start: 0, markerName: 'FILE' });
+  });
+
+  it('sanitizes the full authoritative marker span', () => {
+    expect(
+      sanitizeOutboundMediaMarkers(
+        '[FILE: [v2] /Users/ben/private/leak.pdf]',
+        'FILE',
+        '',
+      ),
+    ).toBe('');
+    expect(
+      sanitizeOutboundMediaMarkers(
+        'sending [FILE: /tmp/report[1].pdf',
+        'FILE',
+        '',
+      ),
+    ).toBe('sending ');
+    expect(
+      sanitizeOutboundMediaMarkers(
+        '[FILE: /tmp/report.pdf] As shown in [1]',
+        'FILE',
+        '',
+      ),
+    ).toBe(' As shown in [1]');
+  });
+
+  it('unwraps nested image markers without consuming following brackets', () => {
+    expect(
+      unwrapFileMarkersAroundImages(
+        '[FILE: [IMAGE: /tmp/a.png]] As shown in [1]',
+      ),
+    ).toBe('[IMAGE: /tmp/a.png] As shown in [1]');
+    expect(
+      unwrapFileMarkersAroundImages(
+        '[FILE: [IMAGE: /tmp/a.png] As shown in [1]',
+      ),
+    ).toBe('[IMAGE: /tmp/a.png] As shown in [1]');
+    expect(
+      unwrapFileMarkersAroundImages('```\n[FILE: [IMAGE: /tmp/a.png]]\n```'),
+    ).toBe('```\n[IMAGE: /tmp/a.png]\n```');
   });
 
   it('treats escaped marker syntax as literal text', () => {

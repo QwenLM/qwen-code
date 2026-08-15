@@ -17,6 +17,7 @@ import {
   findOutboundMediaMarkers,
   replaceOutboundMediaMarkers,
   truncateOutboundMediaText,
+  unwrapFileMarkersAroundImages,
 } from './outbound-markers.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import {
@@ -52,65 +53,6 @@ export interface DingtalkInteractionPresenterOptions {
   sendFallback?(chatId: string, text: string, sessionId: string): Promise<void>;
 }
 
-function isEscapedMarker(text: string, index: number): boolean {
-  let backslashes = 0;
-  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor--) {
-    backslashes++;
-  }
-  return backslashes % 2 === 1;
-}
-
-function stripFileWrappersAroundImages(text: string): string {
-  const images = findImageMarkers(text);
-  const openings = [...text.matchAll(/\[FILE:\s*/giu)].filter(
-    (opening) =>
-      opening.index !== undefined && !isEscapedMarker(text, opening.index),
-  );
-  const wrappers = openings.flatMap((opening) => {
-    const start = opening.index!;
-    const pathStart = start + opening[0].length;
-    const lineBreak = text.slice(pathStart).search(/[\r\n]/u);
-    const lineEnd = lineBreak === -1 ? text.length : pathStart + lineBreak;
-    const nested = images.filter(
-      (image) => image.start >= pathStart && image.end <= lineEnd,
-    );
-    if (
-      nested.length === 0 ||
-      text.slice(pathStart, nested[0]!.start).includes(']')
-    ) {
-      return [];
-    }
-    const lastImage = nested.at(-1)!;
-    const lastClose = text.lastIndexOf(']', lineEnd - 1);
-    if (lastClose < lastImage.end) {
-      return [{ start, end: nested[0]!.start, replacement: '' }];
-    }
-    return [
-      {
-        start,
-        end: lastClose + 1,
-        replacement: nested
-          .map((image) => text.slice(image.start, image.end))
-          .join(' '),
-      },
-    ];
-  });
-  const nonOverlapping = wrappers
-    .sort((left, right) => left.start - right.start)
-    .filter(
-      (wrapper, index, sorted) =>
-        index === 0 || wrapper.start >= sorted[index - 1]!.end,
-    );
-  let result = text;
-  for (const wrapper of nonOverlapping.reverse()) {
-    result =
-      result.slice(0, wrapper.start) +
-      wrapper.replacement +
-      result.slice(wrapper.end);
-  }
-  return result;
-}
-
 function sanitizeFallbackOutput(text: string): string {
   const originalImageCounts = new Map<string, number>();
   for (const marker of findImageMarkers(text)) {
@@ -118,7 +60,7 @@ function sanitizeFallbackOutput(text: string): string {
     originalImageCounts.set(image, (originalImageCounts.get(image) ?? 0) + 1);
   }
   let result = sanitizeStreamingFileMarkers(
-    stripFileWrappersAroundImages(text),
+    unwrapFileMarkersAroundImages(text),
   );
   const imageMarkers = findImageMarkers(result).flatMap((marker) => {
     const image = result.slice(marker.start, marker.end);

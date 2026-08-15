@@ -10,7 +10,10 @@ import {
 import type { DingtalkCardCallbackResult } from './interactive-card-types.js';
 import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 import { sanitizeStreamingFileMarkers } from './outbound-file.js';
-import { truncateOutboundMediaText } from './outbound-markers.js';
+import {
+  truncateOutboundMediaText,
+  unwrapFileMarkersAroundImages,
+} from './outbound-markers.js';
 
 const FLUSH_INTERVAL_MS = 500;
 const STATUS_REFRESH_INTERVAL_MS = 1_000;
@@ -68,7 +71,7 @@ function sanitizeStreamingMediaMarkers(content: string): string {
   let result = content;
   while (true) {
     const next = sanitizeStreamingFileMarkers(
-      sanitizeStreamingImageMarkers(result),
+      sanitizeStreamingImageMarkers(unwrapFileMarkersAroundImages(result)),
     );
     if (next === result) return result;
     result = next;

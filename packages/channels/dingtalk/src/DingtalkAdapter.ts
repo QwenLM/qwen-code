@@ -149,6 +149,7 @@ const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text}
 const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const WEBHOOK_FETCH_TIMEOUT_MS = 30_000;
 const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
 const mentionTarget = Symbol('mentionTarget');
 const IMAGE_INSTRUCTIONS = [
@@ -251,7 +252,7 @@ export class DingtalkChannel extends ChannelBase {
   private sessionMentionTargets = new Map<string, string>();
   private blockStreamingMediaCarry = new Map<
     string,
-    { text: string; markerName?: 'IMAGE' | 'FILE' }
+    { text: string; markerName?: 'IMAGE' | 'FILE'; complete?: boolean }
   >();
   private bufferedMentionTargets = new Set<string>();
   private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
@@ -653,6 +654,10 @@ export class DingtalkChannel extends ChannelBase {
         for (const candidate of [
           ...(marker.candidates ?? [{ end: marker.end, path: marker.path }]),
         ].sort((left, right) => right.end - left.end)) {
+          if (candidate.end < marker.end) {
+            validationError = new Error('Image marker path is incomplete');
+            continue;
+          }
           try {
             image = readValidatedImage(candidate.path, {
               workspaceDir: this.config.cwd,
@@ -744,6 +749,10 @@ export class DingtalkChannel extends ChannelBase {
         for (const candidate of [
           ...(marker.candidates ?? [{ end: marker.end, path: marker.path }]),
         ].sort((left, right) => right.end - left.end)) {
+          if (candidate.end < marker.end) {
+            validationError = new Error('File marker path is incomplete');
+            continue;
+          }
           try {
             file = readValidatedFile(candidate.path, {
               workspaceDir: this.config.cwd,
@@ -880,6 +889,7 @@ export class DingtalkChannel extends ChannelBase {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(WEBHOOK_FETCH_TIMEOUT_MS),
       });
 
       if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
@@ -1785,6 +1795,7 @@ export class DingtalkChannel extends ChannelBase {
     this.blockStreamingMediaCarry.set(sessionId, {
       text: combined.slice(partial.start),
       markerName: partial.markerName,
+      complete: partial.complete,
     });
     const ready = combined.slice(0, partial.start);
     return ready.trim() ? ready : undefined;
@@ -1797,6 +1808,9 @@ export class DingtalkChannel extends ChannelBase {
     const pending = this.blockStreamingMediaCarry.get(sessionId);
     if (!pending) return undefined;
     this.blockStreamingMediaCarry.delete(sessionId);
+    if (pending.complete) {
+      return this.sendResponseText(chatId, pending.text, sessionId);
+    }
     const text = pending.markerName
       ? pending.markerName === 'IMAGE'
         ? '[Image delivery failed: incomplete marker]'
@@ -1912,9 +1926,7 @@ export class DingtalkChannel extends ChannelBase {
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
     const carry =
-      reason === 'completed' ||
-      reason === 'response_boundary' ||
-      reason === 'input_requested'
+      reason === 'completed' || reason === 'response_boundary'
         ? this.flushBlockStreamingMediaCarry(chatId, sessionId)
         : undefined;
     if (reason === 'failed' || reason === 'cancelled') {

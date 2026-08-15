@@ -914,6 +914,24 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('keeps bracketed text after a nested image wrapper', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '[FILE: [IMAGE: /tmp/chart.png]] As shown in [1]',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      '[IMAGE: /tmp/chart.png] As shown in [1]',
+      'session-1',
+    );
+  });
+
   it('removes a complete outer file suffix around a nested image', async () => {
     const sendFallback = vi.fn().mockResolvedValue(undefined);
     const presenter = new DingtalkInteractionPresenter({ sendFallback });

@@ -1621,7 +1621,7 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
-    it('drains queued block sends before presenting user input', async () => {
+    it('flushes idle-buffered block text before presenting user input', async () => {
       let releaseSend!: () => void;
       const pendingSend = new Promise<void>((resolve) => {
         releaseSend = resolve;
@@ -1647,8 +1647,8 @@ describe('ChannelBase', () => {
         'test-chan',
         defaultConfig({
           blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 1, maxChars: 100 },
-          blockStreamingCoalesce: { idleMs: 0 },
+          blockStreamingChunk: { minChars: 400, maxChars: 1000 },
+          blockStreamingCoalesce: { idleMs: 1500 },
         }),
         bridge,
       );
@@ -1661,12 +1661,10 @@ describe('ChannelBase', () => {
       (bridge as unknown as EventEmitter).emit(
         'textChunk',
         active.sessionId,
-        'first\n\n',
+        'x'.repeat(400),
       );
-      await vi.waitFor(() => expect(order).toContain('send:start'));
       emitUserQuestion(active.sessionId, 'req-after-block');
-      await Promise.resolve();
-      expect(order).toEqual(['send:start']);
+      await vi.waitFor(() => expect(order).toEqual(['send:start']));
       releaseSend();
       await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
 
@@ -13713,7 +13711,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('drains queued block sends before a failed segment and prompt end', async () => {
+    it('flushes idle-buffered block text before a failed segment and prompt end', async () => {
       let releaseSend!: () => void;
       const pendingSend = new Promise<void>((resolve) => {
         releaseSend = resolve;
@@ -13744,7 +13742,7 @@ describe('ChannelBase', () => {
           (bridge as unknown as EventEmitter).emit(
             'textChunk',
             sid,
-            'first\n\n',
+            'x'.repeat(400),
           );
           return Promise.reject(new Error('agent failed'));
         },
@@ -13753,8 +13751,8 @@ describe('ChannelBase', () => {
         'test-chan',
         defaultConfig({
           blockStreaming: 'on',
-          blockStreamingChunk: { minChars: 1, maxChars: 100 },
-          blockStreamingCoalesce: { idleMs: 0 },
+          blockStreamingChunk: { minChars: 400, maxChars: 1000 },
+          blockStreamingCoalesce: { idleMs: 1500 },
         }),
         bridge,
       );
@@ -13771,6 +13769,54 @@ describe('ChannelBase', () => {
         'segment:failed',
         'prompt:end',
       ]);
+    });
+
+    it('does not emit failed when cancellation settles during the delivery drain', async () => {
+      let releaseSend!: () => void;
+      const pendingSend = new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      class FailedCancelRaceChannel extends TestChannel {
+        protected override async sendResponseMessage(): Promise<void> {
+          await pendingSend;
+        }
+      }
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'first\n\n',
+          );
+          return Promise.reject(new Error('agent failed'));
+        },
+      );
+      const ch = new FailedCancelRaceChannel(
+        'test-chan',
+        defaultConfig({
+          blockStreaming: 'on',
+          blockStreamingChunk: { minChars: 1, maxChars: 100 },
+          blockStreamingCoalesce: { idleMs: 0 },
+        }),
+        bridge,
+      );
+
+      const running = ch.handleInbound(envelope());
+      await vi.waitFor(() =>
+        expect(ch.taskEvents.some((event) => event.type === 'text_chunk')).toBe(
+          true,
+        ),
+      );
+      await expect(ch.cancelPromptForTest('s-1')).resolves.toBe(true);
+      releaseSend();
+
+      await expect(running).rejects.toThrow('agent failed');
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'cancelled'),
+      ).toHaveLength(1);
+      expect(ch.taskEvents.some((event) => event.type === 'failed')).toBe(
+        false,
+      );
     });
 
     it('drains queued block sends before a cancelled segment and prompt end', async () => {

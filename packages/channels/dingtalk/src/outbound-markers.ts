@@ -162,6 +162,12 @@ function markerBoundary(
 }
 
 function markerSafeTruncationStart(text: string, start: number): number {
+  for (const markerName of ['IMAGE', 'FILE'] as const) {
+    for (const marker of findOutboundMediaMarkers(text, markerName, true)) {
+      const end = markerSanitizationEnd(text, marker);
+      if (marker.start < start && end >= start) return end;
+    }
+  }
   const before = text.slice(0, start);
   let open = before.lastIndexOf('[');
   while (open !== -1) {
@@ -185,6 +191,28 @@ function markerSafeTruncationStart(text: string, start: number): number {
     open = previousOpenBracket(before, open);
   }
   return start;
+}
+
+function markerSanitizationEnd(
+  text: string,
+  marker: OutboundMediaMarker,
+): number {
+  if (/\[IMAGE$/iu.test(text.slice(0, marker.start))) return marker.end;
+  const opening = text.slice(marker.start).match(/^\[(IMAGE|FILE):\s*/iu);
+  if (!opening) return marker.end;
+  const pathStart = marker.start + opening[0].length;
+  const nextOpeningOffset = text.slice(pathStart).search(MEDIA_MARKER_PATTERN);
+  const boundary = markerBoundary(
+    text,
+    pathStart,
+    nextOpeningOffset === -1 ? undefined : pathStart + nextOpeningOffset,
+  );
+  const primaryPath = text.slice(pathStart, marker.end - 1);
+  const end = primaryPath.includes('[')
+    ? (marker.candidates?.at(-1)?.end ?? marker.end)
+    : marker.end;
+  if (isMarkerCloseBoundary(text, end - 1, boundary)) return end;
+  return primaryPath.includes('[') ? boundary : end;
 }
 
 export function truncateOutboundMediaText(
@@ -348,7 +376,12 @@ export function sanitizeOutboundMediaMarkers(
 ): string {
   let result = text;
   while (true) {
-    const markers = findOutboundMediaMarkers(result, markerName, true);
+    const markers = findOutboundMediaMarkers(result, markerName, true).map(
+      (marker) => ({
+        ...marker,
+        end: markerSanitizationEnd(result, marker),
+      }),
+    );
     const next = stripPartialOutboundMediaMarker(
       replaceOutboundMediaMarkers(
         result,
@@ -367,6 +400,7 @@ export function sanitizeOutboundMediaMarkers(
 export interface TrailingPartialOutboundMediaMarker {
   start: number;
   markerName?: 'IMAGE' | 'FILE';
+  complete?: boolean;
 }
 
 export function findTrailingPartialOutboundMediaMarker(
@@ -412,14 +446,80 @@ export function findTrailingPartialOutboundMediaMarker(
         close === text.length - 1 &&
         text.slice(pathStart, close).includes('[') &&
         text.indexOf(']', pathStart) === close;
+      const trailingBracketedPath =
+        close !== -1 &&
+        text.slice(pathStart, close).includes('[') &&
+        !isMarkerCloseBoundary(text, close, boundary);
       if (
         boundary === text.length &&
-        (close === -1 || ambiguousBracketedPath)
+        (close === -1 || ambiguousBracketedPath || trailingBracketedPath)
       ) {
-        return { start: open, markerName };
+        return {
+          start: open,
+          markerName,
+          ...(ambiguousBracketedPath ? { complete: true } : {}),
+        };
       }
     }
     open = previousOpenBracket(text, open);
   }
   return undefined;
+}
+
+export function unwrapFileMarkersAroundImages(text: string): string {
+  const images = findOutboundMediaMarkers(text, 'IMAGE', true);
+  const openings = markerOpenings(text).filter(
+    (opening) => opening[1]?.toLowerCase() === 'file',
+  );
+  const wrappers = openings.flatMap((opening) => {
+    const start = opening.index!;
+    const pathStart = start + opening[0].length;
+    const lineBreak = text.slice(pathStart).search(/[\r\n]/u);
+    const lineEnd = lineBreak === -1 ? text.length : pathStart + lineBreak;
+    const nested = images.filter(
+      (image) => image.start >= pathStart && image.end <= lineEnd,
+    );
+    if (
+      nested.length === 0 ||
+      text.slice(pathStart, nested[0]!.start).includes(']')
+    ) {
+      return [];
+    }
+    const lastImage = nested.at(-1)!;
+    let wrapperClose = lastImage.end;
+    if (text[wrapperClose] !== ']') {
+      const nextClose = text.indexOf(']', wrapperClose);
+      const suffix = text.slice(wrapperClose, nextClose).trim();
+      wrapperClose =
+        nextClose < lineEnd && /^(?:[~/\\]|[A-Za-z]:[\\/])/u.test(suffix)
+          ? nextClose
+          : -1;
+    }
+    if (wrapperClose === -1 || wrapperClose >= lineEnd) {
+      return [{ start, end: nested[0]!.start, replacement: '' }];
+    }
+    return [
+      {
+        start,
+        end: wrapperClose + 1,
+        replacement: nested
+          .map((image) => text.slice(image.start, image.end))
+          .join(' '),
+      },
+    ];
+  });
+  const nonOverlapping = wrappers
+    .sort((left, right) => left.start - right.start)
+    .filter(
+      (wrapper, index, sorted) =>
+        index === 0 || wrapper.start >= sorted[index - 1]!.end,
+    );
+  let result = text;
+  for (const wrapper of nonOverlapping.reverse()) {
+    result =
+      result.slice(0, wrapper.start) +
+      wrapper.replacement +
+      result.slice(wrapper.end);
+  }
+  return result;
 }

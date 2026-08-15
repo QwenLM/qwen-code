@@ -190,6 +190,24 @@ describe('StatusCardController', () => {
     expect(streamContents.at(-1)).toBe('before  after');
   });
 
+  it.each([
+    ['plain text', 'before [FILE: [IMAGE: /tmp/a.png]] after'],
+    ['Markdown code', '```\n[FILE: [IMAGE: /tmp/a.png]]\n```'],
+  ])('unwraps nested image wrappers in %s', async (_label, content) => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+
+    controller.replace(segment(), target, content);
+    await vi.advanceTimersByTimeAsync(500);
+
+    const snapshot = vi
+      .mocked(client.openOrUpdateStream)
+      .mock.calls.at(-1)?.[0].content;
+    expect(snapshot).toContain('[Image pending]');
+    expect(snapshot).not.toContain('[FILE:');
+    expect(snapshot).not.toContain(']]');
+  });
+
   it('sanitizes marker kinds to a combined fixed point', async () => {
     vi.useFakeTimers();
     const { client, controller } = createHarness();
