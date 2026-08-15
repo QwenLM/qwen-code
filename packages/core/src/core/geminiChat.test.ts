@@ -2052,6 +2052,410 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('still accepts a quiet completion when the armed attempt is transport-replayed (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 5) {
+            // The armed attempt dies at the socket before its first chunk:
+            // replayable. The replayed final attempt must still carry the
+            // one-shot acceptance instead of running un-armed into the
+            // exhausted budget.
+            return (async function* () {
+              throw Object.assign(new TypeError('terminated'), {
+                cause: Object.assign(new Error('socket failure'), {
+                  code: 'ECONNRESET',
+                }),
+              });
+
+              yield {} as GenerateContentResponse;
+            })();
+          }
+          return streamResponse(stopResponse([]));
+        });
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-armed-transport-replay',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 120_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(6);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(chatWithRecording.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: '(empty content)' }],
+        });
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still accepts a quiet completion when the armed attempt hits a rate limit (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 5) {
+            // The armed attempt is throttled (429) and rescheduled by the
+            // rate-limit branch; the rescheduled attempt is still the final
+            // one and must keep the one-shot acceptance.
+            return (async function* () {
+              throw new StreamContentError(
+                '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+              );
+
+              yield {} as GenerateContentResponse;
+            })();
+          }
+          return streamResponse(stopResponse([]));
+        });
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-armed-rate-limit',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 180_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(6);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(chatWithRecording.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: '(empty content)' }],
+        });
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('arms the quiet completion when a mixed error type exhausts the budget (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        let callCount = 0;
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 4) {
+            // A non-NO_TOOL_RESULT_PROGRESS transient error consumes the
+            // final retry slot; the shared budget means the last attempt
+            // must still be armed.
+            return (async function* () {
+              yield {} as GenerateContentResponse;
+            })();
+          }
+          return streamResponse(stopResponse([]));
+        });
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-mixed-final-error',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 120_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(chatWithRecording.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [{ text: '(empty content)' }],
+        });
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('records an accepted inlineData-only quiet turn in the transcript (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        const imagePart = {
+          inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+        };
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse({
+            candidates: [
+              {
+                content: { parts: [imagePart] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-inlinedata-accept',
+        );
+        await collectStreamWithFakeTimers(stream, 120_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(chatWithRecording.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: [imagePart],
+        });
+        // History and JSONL must come from the same source: the record
+        // carries the inlineData part, not an empty message.
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+        expect(recordAssistantTurn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: [imagePart],
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps SAFETY-blocked quiet tool result completions fatal (#9026)', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: { path: '/tmp/example' },
+                },
+              },
+            ],
+          },
+        ]);
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse({
+            candidates: [
+              {
+                content: { parts: [] },
+                finishReason: 'SAFETY',
+              },
+            ],
+          } as unknown as GenerateContentResponse),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-tool-result-safety-fatal',
+        );
+
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })();
+        const settled = expect(collecting).rejects.toMatchObject({
+          type: 'NO_TOOL_RESULT_PROGRESS',
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await settled;
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should keep MAX_TOKENS quiet tool result completions fatal after retry exhaustion (#9026)', async () => {
       vi.useFakeTimers();
       try {
@@ -2111,11 +2515,21 @@ describe('GeminiChat', async () => {
           'prompt-id-tool-result-max-tokens-after-exhaustion',
         );
 
-        await expect(
-          collectStreamWithFakeTimers(stream, 35_000),
-        ).rejects.toMatchObject({
+        // Attach the rejection assertion BEFORE advancing timers: the
+        // rejection fires during the advance and would otherwise surface
+        // as an unhandled rejection (same hazard documented for
+        // expectStreamExhaustion above).
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })();
+        const settled = expect(collecting).rejects.toMatchObject({
           type: 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS',
         });
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await settled;
         expect(
           mockContentGenerator.generateContentStream,
         ).toHaveBeenCalledTimes(5);
