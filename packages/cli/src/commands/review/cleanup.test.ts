@@ -209,6 +209,42 @@ describe('runCleanup', () => {
     );
   });
 
+  it('re-checks the lease after the network-bound audit and skips if a session moved in during it (#9205)', () => {
+    // The gate above reads the lease BEFORE the audit, but the audit spawns
+    // network-bound gh processes (seconds-scale). A review of the same PR that
+    // starts inside that window — reading no lease, then writing its own —
+    // must not be destroyed by this cleanup: re-read the lease after the audit,
+    // before any destructive step, and take the same skip path.
+    const lease = {
+      sessionId: 'session-b',
+      promptId: 'prompt-b',
+      target: 'pr-123',
+      repositoryRoot: '/repo',
+      worktreePath: '/repo/.qwen/tmp/review-pr-123',
+      branch: 'qwen-review/pr-123',
+    };
+    // First read (the gate): no lease yet. Second read (post-audit): session B
+    // has acquired one.
+    mocks.readReviewWorktreeLease
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce(lease);
+    mocks.reviewLeaseHeldByAnotherSession
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+
+    runCleanup('pr-123');
+
+    expect(mocks.readReviewWorktreeLease).toHaveBeenCalledTimes(2);
+    // Nothing of B's may be touched.
+    expect(mocks.releaseWorktree).not.toHaveBeenCalled();
+    expect(mocks.execFileSync).not.toHaveBeenCalled();
+    expect(mocks.rmSync).not.toHaveBeenCalled();
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('acquired the lease'),
+    );
+  });
+
   it('releases the review worktree AND both disposable siblings', () => {
     // `base-tree` deliberately leaves its tree standing for the whole review
     // (a later verifier may need it, and a base that failed to build is kept as
@@ -260,6 +296,33 @@ describe('runCleanup', () => {
     expect(
       mocks.writeStdoutLine.mock.calls.map((c) => String(c[0])).join('\n'),
     ).not.toContain('qwen-review-lease-pr-123.json');
+  });
+
+  it('sweeps the side files of a lease-named target that share the lease prefix', () => {
+    // The guard keys on the real lease shape, not the bare prefix: a
+    // file-review target named `lease` flattens to exactly the lease prefix,
+    // so keying on the prefix alone skips its OWN side files and nothing else
+    // ever removes them (`clearReviewWorktreeLease` no-ops off `pr-\d+`) —
+    // permanent residue. Only files shaped `…-pr-<n>.json` are real leases.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.existsSync.mockReturnValue(true);
+    mocks.readdirSync.mockReturnValue([
+      'qwen-review-lease-diff.txt',
+      'qwen-review-lease-pr-999.json',
+    ]);
+
+    runCleanup('lease');
+
+    const sideFile = join('/repo/.qwen/tmp', 'qwen-review-lease-diff.txt');
+    expect(mocks.rmSync).toHaveBeenCalledWith(sideFile, {
+      recursive: true,
+      force: true,
+    });
+    // A live foreign lease survives the very same sweep.
+    expect(mocks.rmSync).not.toHaveBeenCalledWith(
+      join('/repo/.qwen/tmp', 'qwen-review-lease-pr-999.json'),
+      expect.anything(),
+    );
   });
 
   it('still sweeps side files that match the target prefix', () => {

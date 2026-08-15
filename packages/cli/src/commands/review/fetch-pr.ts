@@ -493,7 +493,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
   } catch (err) {
-    clearReviewWorktreeLease(process.cwd(), leaseTarget);
+    // Best-effort, like the branch rollbacks: `clearReviewWorktreeLease` can
+    // itself throw on an un-removable lease file, and that must not mask the
+    // original failure cause.
+    tryRemove(() => clearReviewWorktreeLease(process.cwd(), leaseTarget));
     throw err;
   }
 }

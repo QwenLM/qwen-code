@@ -374,8 +374,15 @@ describe('fetch-pr report assembly', () => {
         process.cwd(),
         'pr-42',
       );
+      // The decision must receive the lease that was read — same hazard, one
+      // call over: an unwired `holder` makes the service return false for
+      // every lease, silently disabling the lock.
+      expect(vi.mocked(reviewLeaseHeldByAnotherSession)).toHaveBeenCalledWith(
+        foreignLease,
+      );
       // Nothing was touched on the way out.
       expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+      expect(vi.mocked(clearReviewWorktreeLease)).not.toHaveBeenCalled();
       expect(producerMocks.git).not.toHaveBeenCalled();
       expect(producerMocks.gh).not.toHaveBeenCalled();
       expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
@@ -405,6 +412,21 @@ describe('fetch-pr report assembly', () => {
       await reportFor({});
 
       expect(vi.mocked(createReviewWorktreeLease)).toHaveBeenCalledTimes(1);
+      // Pin the lease's ARGUMENTS — the service silently no-ops on a malformed
+      // target, so an unwired `target` writes nothing and voids the lock with
+      // every other test still green.
+      expect(vi.mocked(createReviewWorktreeLease)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: 'pr-42',
+          repositoryRoot: process.cwd(),
+          worktreePath: '.qwen/tmp/review-pr-42',
+          branch: 'qwen-review/pr-42',
+        }),
+      );
+      // Success must NOT clear the lease: it persists so a concurrent session
+      // cannot stale-clean this run's live worktree. A catch→finally refactor
+      // would delete it here while every rollback test stays green.
+      expect(vi.mocked(clearReviewWorktreeLease)).not.toHaveBeenCalled();
     });
 
     it('writes the lease before the stale-clean and the first git call', async () => {
@@ -491,6 +513,23 @@ describe('fetch-pr report assembly', () => {
       expect(vi.mocked(clearReviewWorktreeLease)).toHaveBeenCalledWith(
         process.cwd(),
         'pr-42',
+      );
+    });
+
+    it('still surfaces the original cause when the lease rollback itself throws', async () => {
+      // The rollback is best-effort (tryRemove): an un-removable lease file —
+      // EACCES on a shared runner, EROFS on a read-only fs — must not mask the
+      // failure that triggered the rollback, and the lease wedge it would
+      // otherwise report is secondary to naming the real cause.
+      producerMocks.git.mockImplementation(() => {
+        throw new Error('network down');
+      });
+      vi.mocked(clearReviewWorktreeLease).mockImplementationOnce(() => {
+        throw new Error('EACCES: permission denied, unlink lease');
+      });
+
+      await expect(reportFor({})).rejects.toThrow(
+        'Failed to fetch PR #42 from remote "origin"',
       );
     });
   });

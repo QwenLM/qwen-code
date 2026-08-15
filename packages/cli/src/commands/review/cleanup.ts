@@ -414,6 +414,19 @@ export function runCleanup(target: string): void {
     // carrier), check the PR for writes that bypassed `qwen review submit`.
     auditPrWrites(target, prNumber);
 
+    // The audit is network-bound (seconds) — a lease can appear during it (a
+    // review that started after the gate above read none). Re-check before
+    // destroying anything and take the same skip path (#9205).
+    const holderAfterAudit = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holderAfterAudit)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — a review session ` +
+          `(session ${holderAfterAudit.sessionId}) acquired the lease ` +
+          `during the audit; its own cleanup releases it.`,
+      );
+      return;
+    }
+
     // Report what actually happened, in both directions. Announcing "Removed …"
     // off a path that is still on disk is a lie; saying nothing at all when we
     // could not remove it leaves a leftover that will wedge the next run's
@@ -488,12 +501,17 @@ export function runCleanup(target: string): void {
   }
 
   for (const file of tmpEntries) {
-    // The lease doubles as the review's lock (#9205), and a file-review
-    // target named `lease` (or `./lease`, `lease-pr`) flattens to exactly
-    // this prefix — unguarded, the sweep rmSyncs every live PR lease,
-    // including another session's. Lease removal belongs to
-    // `clearReviewWorktreeLease` below, which runs for this run's target.
-    if (file.startsWith(LEASE_PREFIX)) continue;
+    // The lease doubles as the review's lock (#9205), so live PR leases must
+    // not be swept. Skip only the real lease shape (…-pr-<n>.json), not the
+    // bare prefix: a file-review target named "lease" flattens to this same
+    // prefix, and its OWN side files still need removal — nothing else removes
+    // them. Lease removal itself belongs to clearReviewWorktreeLease below.
+    if (
+      file.startsWith(LEASE_PREFIX) &&
+      /^pr-\d+\.json$/.test(file.slice(LEASE_PREFIX.length))
+    ) {
+      continue;
+    }
     if (!file.startsWith(prefix)) continue;
     const full = join(REVIEW_TMP_DIR, file);
     try {
