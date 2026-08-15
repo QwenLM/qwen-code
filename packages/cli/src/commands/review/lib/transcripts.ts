@@ -534,10 +534,22 @@ export function readTranscripts(
     // No directory at all is an *infrastructure* fact, not a verdict about the
     // agents. Conflating the two would let a read-only HOME or a full disk read
     // as "every agent idled" and block every review with no diagnosable cause.
+    // A CONTAINMENT refusal is not an absence, and the message must not say
+    // it is: every consumer branches on the error type, never on the cause,
+    // so this sentence is the diagnosis that reaches the operator. Framing a
+    // detected redirect as "the harness could not write them" points at the
+    // write path when the actual fact is the security-relevant one.
+    const uncontained =
+      ((err as { code?: string }).code ??
+        (err as { cause?: { code?: string } }).cause?.code) === 'EUNCONTAINED';
     throw new TranscriptsUnavailableError(
-      `no subagent transcripts at ${dir} (${(err as Error).message}). The ` +
-        'harness writes one per agent; if there are none, either no agents ran ' +
-        'or the harness could not write them.',
+      uncontained
+        ? `the subagent transcript directory ${dir} is not contained in the ` +
+          `harness tree (${(err as Error).message}). This run cannot read ` +
+          'evidence through a path it cannot vouch for.'
+        : `no subagent transcripts at ${dir} (${(err as Error).message}). The ` +
+          'harness writes one per agent; if there are none, either no agents ran ' +
+          'or the harness could not write them.',
       // The original errno travels with it: a caller that tolerates "the dir
       // does not exist yet" must be able to tell that apart from EACCES/EIO,
       // and the flattened message string cannot say which it was.
@@ -662,8 +674,9 @@ export function priorSessionDirs(
   }> = [];
   // The harness tree's own root. A linked or absent project dir leaves nothing
   // below it that can be called contained evidence.
-  const root = containedRoot(projectDir);
-  if (root === null) return out;
+  const rootVerdict = containedRoot(projectDir);
+  if (!rootVerdict.ok) return out;
+  const root = rootVerdict.root;
   // `chats/` is validated once, not per session: it is the same directory for
   // every entry, and the leaf open below still refuses a per-file link.
   const chatsDir = join(root, 'chats');

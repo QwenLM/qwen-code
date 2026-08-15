@@ -146,6 +146,28 @@ describe('readContainedFile', () => {
     expect(opened.stale).toBe(true);
   });
 
+  it('skips a stale file WITHOUT reading it — proven by the seam', () => {
+    // The `stale` docstring promises the bytes are never touched, and the two
+    // staleness tests assert only the returned shape: reordering the check
+    // after the read leaves both green while the promise is broken.
+    const file = join(root, 'agent-old.jsonl');
+    writeFileSync(file, 'records from an earlier review');
+    const old = new Date('2020-01-02T03:04:05Z');
+    utimesSync(file, old, old);
+    let reads = 0;
+
+    const opened = readContainedFile(file, MAX_LEDGER_BYTES, {
+      minMtimeMs: old.getTime() + 1,
+      read: (fd, buf, off, len, pos) => {
+        reads++;
+        return readSync(fd, buf, off, len, pos as number);
+      },
+    });
+
+    expect(opened.stale).toBe(true);
+    expect(reads).toBe(0);
+  });
+
   it('refuses a directory', () => {
     const dir = join(root, 'subagents');
     mkdirSync(dir);
@@ -213,12 +235,29 @@ describe('readContainedFile', () => {
     5000,
   );
 
-  it('reports a missing file as an open failure, not as empty content', () => {
+  it('separates an ABSENT file from a refused one, by reason', () => {
+    // The distinction a discloser needs: absence is the ordinary state of a
+    // run that recorded nothing, a refusal is a fact worth printing. Both
+    // used to arrive as `open-failed`, so the documented purpose of this
+    // field was inexpressible and callers reached into `cause.code` instead.
     try {
       readContainedFile(join(root, 'nope.json'), MAX_LEDGER_BYTES);
       expect.unreachable('absent must not read as empty');
     } catch (err) {
-      expect((err as ContainedReadError).reason).toBe('open-failed');
+      expect((err as ContainedReadError).reason).toBe('absent');
+    }
+
+    if (!isWindows) {
+      const real = join(root, 'target.json');
+      writeFileSync(real, 'x');
+      const link = join(root, 'linked.json');
+      symlinkSync(real, link);
+      try {
+        readContainedFile(link, MAX_LEDGER_BYTES);
+        expect.unreachable('a link must be refused');
+      } catch (err) {
+        expect((err as ContainedReadError).reason).toBe('open-failed');
+      }
     }
   });
 });
@@ -347,6 +386,24 @@ describe('containedDir', () => {
     }
   });
 
+  it('refuses a path under a DIFFERENT root by shape', () => {
+    // The cross-drive case on Windows: `relative('C:\\root', 'D:\\other')`
+    // returns an absolute path, which is neither empty nor `..`-prefixed and
+    // read as contained. Exercised here through two independent temp roots,
+    // which is the same shape `relative` reports as non-relative whenever the
+    // two share no common ancestor inside the root.
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'other-root-')));
+    try {
+      mkdirSync(join(other, 'subagents', 'S-1'), { recursive: true });
+      expect(containedDir(root, join(other, 'subagents', 'S-1'))).toEqual({
+        ok: false,
+        reason: 'uncontained',
+      });
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a file standing where a directory must be', () => {
     const notDir = join(root, 'subagents');
     writeFileSync(notDir, 'not a directory');
@@ -379,6 +436,40 @@ describe('listContainedDir', () => {
     expect(listContainedDir(dir, res.identity)).toEqual(['agent-a.jsonl']);
   });
 
+  it('propagates a readdir failure rather than reading it as empty', () => {
+    // The documented contract: callers separate ENOENT ("no agents ran") from
+    // a live I/O fault themselves, and swallowing it here would erase that
+    // distinction before they ever see it.
+    const dir = join(root, 'S-listing');
+    mkdirSync(dir);
+    const res = containedDir(root, dir);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    rmSync(dir, { recursive: true, force: true });
+
+    expect(() => listContainedDir(dir, res.identity)).toThrow(/ENOENT/);
+  });
+
+  it('discards the listing on an INODE mismatch alone', () => {
+    // The load-bearing half: the dev clause catches only cross-device swaps,
+    // while a same-device swap — the ordinary rename-over — moves the inode
+    // and nothing else. The existing case fabricates both fields, so the dev
+    // comparison short-circuits and this one never decides.
+    const dir = join(root, 'S-ino');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'agent-a.jsonl'), '');
+    const res = containedDir(root, dir);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    expect(() =>
+      listContainedDir(dir, {
+        dev: res.identity.dev,
+        ino: res.identity.ino + 1,
+      }),
+    ).toThrow(/replaced between validation and listing/);
+  });
+
   it('discards the listing on a DEVICE mismatch alone', () => {
     // The `dev` half of the re-check, exercised on its own: a swap to a
     // same-inode directory on another device (a bind or overlay mount, or
@@ -390,12 +481,15 @@ describe('listContainedDir', () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
 
-    expect(
+    // A detected swap THROWS: it is the one unambiguous signal of
+    // interference this re-check produces, and returning `[]` made it
+    // indistinguishable from a mundane empty directory.
+    expect(() =>
       listContainedDir(dir, {
         dev: res.identity.dev + 1,
         ino: res.identity.ino,
       }),
-    ).toEqual([]);
+    ).toThrow(/replaced between validation and listing/);
   });
 
   it('discards the listing when the directory is no longer the same one', () => {
@@ -407,7 +501,9 @@ describe('listContainedDir', () => {
     // again, so the entries could come from a different directory than the one
     // that was validated. A different inode is the detection.
     const identity = { dev: 1, ino: -1 };
-    expect(listContainedDir(dir, identity)).toEqual([]);
+    expect(() => listContainedDir(dir, identity)).toThrow(
+      /replaced between validation and listing/,
+    );
   });
 });
 
@@ -417,15 +513,23 @@ describe('containedRoot', () => {
     try {
       const real = join(base, 'project');
       mkdirSync(real);
-      expect(containedRoot(real)).toBe(real);
-      expect(containedRoot(join(base, 'missing'))).toBeNull();
+      expect(containedRoot(real)).toEqual({ ok: true, root: real });
+      // Absent is not a containment verdict: reporting it as one sends an
+      // operator hunting for a planted link that does not exist.
+      expect(containedRoot(join(base, 'missing'))).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
 
       if (!isWindows) {
         const link = join(base, 'linked-project');
         symlinkSync(real, link);
         // The whole tree hangs off this: a linked project dir means nothing
         // below it can be called contained evidence.
-        expect(containedRoot(link)).toBeNull();
+        expect(containedRoot(link)).toEqual({
+          ok: false,
+          reason: 'uncontained',
+        });
       }
     } finally {
       rmSync(base, { recursive: true, force: true });

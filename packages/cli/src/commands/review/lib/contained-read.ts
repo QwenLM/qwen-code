@@ -119,7 +119,9 @@ export interface ContainedFile {
 export class ContainedReadError extends Error {
   constructor(
     message: string,
-    readonly reason:
+    readonly reason: /** The file is not there. The ordinary state, not a fault. */
+    | 'absent'
+      /** There, and the open refused — a link, a permission, an I/O fault. */
       | 'open-failed'
       | 'not-regular'
       | 'too-large'
@@ -161,6 +163,16 @@ export function readContainedFile(
 ): ContainedFile {
   let fd: number;
   try {
+    // Windows has no `O_NOFOLLOW`, so without this the open FOLLOWS a leaf
+    // link and `fstat` then validates the TARGET — a planted ledger link
+    // inside a genuinely contained directory would parse as entries there.
+    // `lstat` does not follow on any platform, and refusing is this module's
+    // documented direction anyway.
+    if (process.platform === 'win32' && lstatSync(path).isSymbolicLink()) {
+      throw Object.assign(new Error(`${path} is a symbolic link`), {
+        code: 'ELOOP',
+      });
+    }
     fd = openSync(path, readFlags());
   } catch (err) {
     // ELOOP here IS the symlink refusal on POSIX: `O_NOFOLLOW` fails the open
@@ -168,7 +180,13 @@ export function readContainedFile(
     // caller decides which of the two matters to it.
     throw new ContainedReadError(
       `could not open ${path}: ${(err as Error).message}`,
-      'open-failed',
+      // ENOENT is absence; every other errno is a refusal. Different reasons,
+      // so a caller that discloses can ask this type rather than reaching
+      // into an undocumented `cause.code` chain that routes correctly only by
+      // accident.
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+        ? 'absent'
+        : 'open-failed',
       { cause: err },
     );
   }
@@ -363,10 +381,22 @@ export function listContainedDir(dir: string, identity: DirIdentity): string[] {
   let after;
   try {
     after = lstatSync(dir);
-  } catch {
-    return [];
+  } catch (err) {
+    // It was there a moment ago and cannot be stat'ed now. Not "no agents".
+    throw new UncontainedPathError(
+      `${dir} could not be re-validated after listing: ` +
+        `${(err as Error).message}`,
+    );
   }
-  if (after.dev !== identity.dev || after.ino !== identity.ino) return [];
+  if (after.dev !== identity.dev || after.ino !== identity.ino) {
+    // A DETECTED swap — the one unambiguous signal of interference this
+    // re-check exists to produce. Returning `[]` made it indistinguishable
+    // from a mundane empty directory, so the detection fired and nothing
+    // downstream ever said so. Callers already route `EUNCONTAINED`.
+    throw new UncontainedPathError(
+      `${dir} was replaced between validation and listing`,
+    );
+  }
   return names;
 }
 
@@ -377,15 +407,30 @@ export function listContainedDir(dir: string, identity: DirIdentity): string[] {
  * Returns null when it is absent or is itself a link — in which case nothing
  * below it can be read as contained evidence.
  */
-export function containedRoot(projectDir: string): string | null {
+export function containedRoot(
+  projectDir: string,
+):
+  | { ok: true; root: string }
+  | { ok: false; reason: 'missing' | 'uncontained' } {
   const root = resolve(projectDir);
   try {
     const st = lstatSync(root);
-    if (st.isSymbolicLink() || !st.isDirectory()) return null;
-  } catch {
-    return null;
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      return { ok: false, reason: 'uncontained' };
+    }
+  } catch (err) {
+    // Absent is mundane — a cleaned-up harness tree — and printing the
+    // containment word for it sends an operator hunting for a planted link
+    // that does not exist.
+    return {
+      ok: false,
+      reason:
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? 'missing'
+          : 'uncontained',
+    };
   }
-  return root;
+  return { ok: true, root };
 }
 
 /**

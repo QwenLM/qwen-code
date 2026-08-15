@@ -897,6 +897,48 @@ describe('the properties the threat model rests on', () => {
     expect(entries[0].endsAtMs).toBe(base + 510_000);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'hardens the resume MARKER on the same terms as the session ledger',
+    () => {
+      // Both files go through one reader, and every containment probe so far
+      // aimed at `run-sessions.json`. A marker read through a planted link
+      // would let a forged resume history reset the cap this feature bounds
+      // itself with.
+      mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+        recursive: true,
+      });
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'elsewhere-')));
+      try {
+        writeFileSync(
+          join(elsewhere, 'resume.json'),
+          JSON.stringify({
+            schemaVersion: 1,
+            resumes: [{ sessionId: 'FORGED', atMs: Date.now() }],
+            restarts: [],
+          }),
+        );
+        symlinkSync(join(elsewhere, 'resume.json'), resumeMarkerPath(plan));
+        expect(readResumeMarker(plan).resumes).toEqual([]);
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not block on a FIFO planted at the marker path',
+    () => {
+      mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+        recursive: true,
+      });
+      execFileSync('mkfifo', [resumeMarkerPath(plan)]);
+      const started = Date.now();
+      expect(readResumeMarker(plan).resumes).toEqual([]);
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+    5000,
+  );
+
   it('drops an entry older than the slack window', () => {
     const mtimeMs = statSync(plan).mtimeMs;
     appendRunSession(plan, envOf('S1'), Math.floor(mtimeMs) - 3000);

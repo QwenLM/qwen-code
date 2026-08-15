@@ -1768,7 +1768,7 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
       const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
       dirs.push(elsewhere);
       symlinkSync(elsewhere, join(project, 'subagents', 'S0'));
-      runLedger(plan, project);
+      runLedger(plan);
 
       const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       let ledger;
@@ -1794,7 +1794,7 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
       // cost reads as the current session's, with no floor mark and no
       // warning — and spent money cannot be re-owed.
       const { plan, project, env } = fixture();
-      runLedger(plan, project);
+      runLedger(plan);
       const ledgerPath = join(project, 'plan-prompts', 'run-sessions.json');
       rmSync(ledgerPath);
       execFileSync('mkfifo', [ledgerPath]);
@@ -1815,6 +1815,124 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
     },
     5000,
   );
+
+  it('names an ABSENT chats directory as absent, not as a redirect', () => {
+    // The mundane state this branch exists for — chat recording off, so the
+    // directory was never created. Every other fixture mkdirs it, and the
+    // symlink test reaches only the containment arm.
+    const { plan, project, env } = fixture();
+    rmSync(join(project, 'chats'), { recursive: true, force: true });
+    expect(() => computeLedger(plan, env)).toThrow(/chat recording off/);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'counts a refused prior AGENT stream, not only a refused chat',
+    () => {
+      // `readAgentDir`'s per-file refusal → `missingStreams++` has no driving
+      // test: the symlinked-directory case nulls the directory before the
+      // listing runs, and the unreadable-directory case fails at the listing.
+      // This plants the link one level down, on the stream itself.
+      const { plan, project, env } = fixture();
+      writeFileSync(
+        join(project, 'chats', 'S0.jsonl'),
+        event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+      );
+      const priorDir = join(project, 'subagents', 'S0');
+      mkdirSync(priorDir, { recursive: true });
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      dirs.push(elsewhere);
+      const foreign = join(elsewhere, 'foreign.jsonl');
+      writeFileSync(
+        foreign,
+        event('2026-08-03T10:06:00Z', { input: 7, output: 1 }),
+      );
+      symlinkSync(foreign, join(priorDir, 'agent-x.jsonl'));
+      runLedger(plan);
+
+      const ledger = computeLedger(plan, env);
+      expect(ledger.missingStreams).toBeGreaterThan(0);
+      // ...and the forged stream is not billed.
+      expect(ledger.totals.inputTokens).toBe(1500);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'discloses a prior chat the accessor refused outright',
+    () => {
+      // The other half of the redirected-`chats/` story: the accessor nulls
+      // `chatFile` for every prior session at once, and this asserts the
+      // ledger says so rather than quietly billing none of them.
+      const { plan, project, env } = fixture();
+      const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+      dirs.push(elsewhere);
+      writeFileSync(
+        join(elsewhere, `${SESSION}.jsonl`),
+        event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
+      );
+      runLedger(plan);
+      rmSync(join(project, 'chats'), { recursive: true, force: true });
+      symlinkSync(elsewhere, join(project, 'chats'));
+
+      // The CURRENT session's chat is fatal on the same verdict, which is the
+      // documented direction — the main loop's cost is not optional.
+      expect(() => computeLedger(plan, env)).toThrow(
+        /not a contained directory/,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'marks the ledger a floor when a prior agent dir cannot be LISTED',
+    () => {
+      // The directory passes containment — `lstat` on it succeeds — and the
+      // listing then fails. Every other disclosed refusal in this function
+      // increments the counter; without it here the rendered ledger and the
+      // archived JSON both say `missingStreams: 0` while that attempt's agent
+      // cost is missing, so the "this ledger is a floor" mark never appears.
+      const { plan, project, env } = fixture();
+      writeFileSync(
+        join(project, 'chats', 'S0.jsonl'),
+        event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+      );
+      const priorDir = join(project, 'subagents', 'S0');
+      mkdirSync(priorDir, { recursive: true });
+      runLedger(plan);
+      chmodSync(priorDir, 0o000);
+      try {
+        const ledger = computeLedger(plan, env);
+        expect(ledger.missingStreams).toBeGreaterThan(0);
+        expect(renderLedger(ledger)).toContain('floor');
+      } finally {
+        chmodSync(priorDir, 0o755);
+      }
+    },
+  );
+
+  it('stays silent when a prior attempt simply recorded no chat', () => {
+    // ENOENT is the ordinary state, and the two tests that drive this path
+    // assert only totals — so a mutation that disclosed every absence would
+    // ship green and print a warning for every healthy resumed run.
+    const { plan, project, env } = fixture();
+    mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
+    writeFileSync(
+      join(project, 'subagents', 'S0', 'agent-x.jsonl'),
+      event('2026-08-03T10:05:00Z', { input: 300, output: 30 }),
+    );
+    runLedger(plan);
+
+    const err = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let ledger;
+    let printed: string;
+    try {
+      ledger = computeLedger(plan, env);
+    } finally {
+      printed = err.mock.calls.map((c) => String(c[0])).join('');
+      err.mockRestore();
+    }
+
+    expect(ledger.missingStreams).toBe(0);
+    expect(printed).toBe('');
+  });
 
   it("folds the interrupted attempt's main loop and agents into the totals", () => {
     const { plan, env, project } = fixture();

@@ -379,11 +379,18 @@ export function computeLedger(
   // does. `O_NOFOLLOW` in `readUsage` refuses a linked leaf, but `chats/`
   // itself is a directory this process never created, and a link there
   // redirects every session's stream at once — including this one's.
-  const root = containedRoot(projectDir);
+  const rootVerdict = containedRoot(projectDir);
+  const root = rootVerdict.ok ? rootVerdict.root : null;
   const chatsDir = root === null ? null : join(root, 'chats');
+  // The project dir's own verdict travels through: absent is mundane (a
+  // cleaned-up harness tree) and must not be reported with the word reserved
+  // for redirects.
   const chatsVerdict =
     root === null || chatsDir === null
-      ? ({ ok: false, reason: 'uncontained' } as const)
+      ? ({
+          ok: false,
+          reason: rootVerdict.ok ? 'uncontained' : rootVerdict.reason,
+        } as const)
       : containedDir(root, chatsDir);
   const chatFile =
     chatsVerdict.ok && chatsDir !== null
@@ -399,8 +406,8 @@ export function computeLedger(
       // subcommand whose whole purpose is diagnosability.
       throw new Error(
         !chatsVerdict.ok && chatsVerdict.reason === 'missing'
-          ? `the harness chat directory ${chatsDir} does not exist ` +
-            '(chat recording off?)'
+          ? `the harness chat directory ${chatsDir ?? join(projectDir, 'chats')} ` +
+            'does not exist (chat recording off?)'
           : `the harness chat directory under ${projectDir} is not a ` +
             'contained directory',
       );
@@ -590,6 +597,11 @@ export function computeLedger(
         // floored: the summary would otherwise announce that this session's
         // cost is included while omitting all of its agents.
         if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          // Counted as well as printed: every other disclosed refusal in this
+          // function increments, and without it the rendered ledger and the
+          // archived JSON both record `missingStreams: 0` — no floor mark —
+          // while that attempt's agent cost is missing.
+          missingStreams++;
           writeStderrLineSafe(
             `WARNING: could not list the prior session's subagent transcripts at ` +
               `${priorDir} (${(err as NodeJS.ErrnoException)?.code ?? (err as Error).message}); ` +
