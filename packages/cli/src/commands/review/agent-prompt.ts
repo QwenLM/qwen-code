@@ -2539,7 +2539,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // The reverse-audit gate for a --chunk build, placed after the plan read
   // because its convergence half reads the plan's chunk list. A round
   // holding an admission stamp is being REPAIRED — a truncated delivery,
-  // rebuilt per chunk — and bypasses everything: its cost and its schedule
+  // rebuilt per chunk — and bypasses the gates: its cost and its schedule
   // were ruled on when the round was admitted, and refusing the repair
   // leaves the truncation unrepairable (the auditor never launched,
   // nothing writing the unreviewedDimensions entry for it) under a
@@ -2555,12 +2555,16 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // below), and the ones after it are repairs of it. A chunk merely
   // retired inside a live round is still buildable: refusing it could only
   // spare an audit, and sparing audits is never this file's failure
-  // direction.
-  if (
-    args.role === 'reverse-audit' &&
-    hasChunk &&
-    !readRoundStamps(args.plan).some((s) => s.round === (args.round ?? null))
-  ) {
+  // direction. The one thing EVERY build of the round carries, stamped or
+  // not, is the chunk's own certification diagnostic (#9213 on #9206): a
+  // round built one auditor at a time stamps on its FIRST chunk build, so
+  // gating the note on the stamp re-silenced chunks 2..N — the exact
+  // never-retire shape the note exists to name. The schedule read is
+  // read-only; only the convergence and budget rulings stay gated.
+  if (args.role === 'reverse-audit' && hasChunk) {
+    const roundAdmitted = readRoundStamps(args.plan).some(
+      (s) => s.round === (args.round ?? null),
+    );
     const planChunkIds = (
       Array.isArray(report.chunks) ? (report.chunks as DiffChunk[]) : []
     )
@@ -2581,14 +2585,19 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       } catch (err) {
         // Same degradation as the round builder: an unreadable history must
         // fall back to building the auditor, never to refusing it — named,
-        // as the round builder names it (#9206).
+        // as the round builder names it (#9206). Named only on the builds
+        // that are NOT repairs: the round's admission build (its first
+        // chunk build, or the round builder itself) already spoke for it,
+        // and a repair stays the clean rebuild its exemption promises.
         schedule = null;
-        writeStderrLine(
-          `NOTE: reverse-audit retirement unavailable this round — ` +
-            `${(err as Error).message ?? String(err)} — auditing the chunk.`,
-        );
+        if (!roundAdmitted) {
+          writeStderrLine(
+            `NOTE: reverse-audit retirement unavailable this round — ` +
+              `${(err as Error).message ?? String(err)} — auditing the chunk.`,
+          );
+        }
       }
-      if (schedule !== null && schedule.converged) {
+      if (!roundAdmitted && schedule !== null && schedule.converged) {
         refuseConverged(args.plan);
         return;
       }
@@ -2605,6 +2614,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       }
     }
     if (
+      !roundAdmitted &&
       !admitReverseAuditRound(
         args.plan,
         args.round,

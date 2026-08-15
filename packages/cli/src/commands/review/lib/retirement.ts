@@ -272,15 +272,47 @@ const EXAMPLE_RECEIPT_CLAUSE = (
 ).trim();
 
 /**
- * A clause that CONTRADICTS the phrase proves no walk, however long:
- * `…found, but I could not open the generated files` clears every length
- * and object floor on the admission's own words. The widening that admitted
- * sentence punctuation made such hedged returns match at all, and both
- * separator paths share this guard — a dash-led hedge is the same shape.
- * Misjudging here fails the way everything in this module fails — the
- * receipt reads `unknown` and the chunk stays under audit.
+ * A contrast word riding in the receipt's LEAD — the phrase's filler,
+ * before any clause exists (`…found but only skimmed.`) — hedges the claim
+ * itself. The clause-only test never sees the filler, so the lead is
+ * tested separately; refusing there costs only receipts whose own claim
+ * is hedged. Misjudging here fails the way everything in this module
+ * fails — the receipt reads `unknown` and the chunk stays under audit.
  */
 const CONTRAST_RE = /\b(?:but|however|although|except)\b|但是|不过|然而/i;
+
+/**
+ * The polarity guard, read by its INVERTED burden instead of an
+ * enumeration of contrast words (#9213 on #9206): prose has no last hedge
+ * — `though`, `yet`, `unfortunately`, 只是 all sat outside the old list —
+ * and every list gap failed toward RETIREMENT, the direction this module
+ * declares impossible. So a clause carrying ANY negation or incapacity
+ * marker contradicts the all-clear phrase however long and object-named
+ * it is (`…found. I could not open the generated files` clears every
+ * length floor on the admission's own words), and reads `unknown`; a
+ * contrast word WITHOUT one contradicts nothing — `…the list already
+ * covered them, but I re-verified the readers` is the walk the receipt
+ * claims, not a hedge. Both separator paths share the guard — a dash-led
+ * hedge is the same shape — and a marker the list misses still fails the
+ * way everything here fails, on the audit side.
+ */
+const NEGATION_MARKER_RE =
+  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|未|没|无法/i;
+
+/**
+ * The brief's own all-clear vocabulary — the exact shapes
+ * `DRY_RECEIPT_PHRASE` names — restates the phrase inside the clause
+ * (`no gaps:`, 未发现问题) instead of contradicting it. Stripped before
+ * the marker test, so a walk narrated in the brief's own words is not
+ * refused by the same marker that catches `could not open the files`; a
+ * novel positive phrasing the strip misses still fails toward audit,
+ * like every other refusal here.
+ */
+const SATURATED_CLAUSE_RE = new RegExp(DRY_RECEIPT_PHRASE, 'gi');
+
+function contradictsThePhrase(clause: string): boolean {
+  return NEGATION_MARKER_RE.test(clause.replace(SATURATED_CLAUSE_RE, ' '));
+}
 
 /**
  * Does the clause after the receipt's separator name anything? An ENCLOSED
@@ -295,14 +327,17 @@ const CONTRAST_RE = /\b(?:but|however|although|except)\b|但是|不过|然而/i;
  * — the shape and a phrase or two — and a partial echo passes this check;
  * what catches that is the rest of the dry bar (the territory read, the
  * substance floor). This refusal closes the cheapest path: the exact
- * sentence every auditor is handed. Misjudging here fails the way
- * everything in this module fails — the receipt reads `unknown` and the
- * chunk stays under audit.
+ * sentence every auditor is handed. BESIDE the substance floor sit the two
+ * polarity refusals: a contrast word in the receipt's lead (a hedge on the
+ * claim itself) and a clause that contradicts the phrase. Misjudging here
+ * fails the way everything in this module fails — the receipt reads
+ * `unknown` and the chunk stays under audit.
  */
-function substantiveClause(clause: string): boolean {
+function substantiveClause(clause: string, lead: string): boolean {
   const c = clause.replace(/\s+/g, ' ').trim();
   if (c.length === 0) return false;
-  if (CONTRAST_RE.test(c)) return false;
+  if (CONTRAST_RE.test(lead)) return false;
+  if (contradictsThePhrase(c)) return false;
   if (EXAMPLE_RECEIPT_CLAUSE.length > 0 && c.includes(EXAMPLE_RECEIPT_CLAUSE)) {
     return false;
   }
@@ -412,9 +447,16 @@ function classifyReturn(
   // about. The gap itself is not lost: coverage reports it and Step 3D
   // rules on it; retirement certifies the audit that DID happen, not the
   // exploration that did not.
-  const judged = stripBudgetGapLines(text);
+  // Re-trimmed after the strip: a disclosure line parted from the receipt
+  // by a blank line leaves a leading \n, and the anchored matcher's ^ must
+  // not die on the strip's own leftover whitespace (#9213).
+  const judged = stripBudgetGapLines(text).trim();
+  // The ANCHORED matcher leads: the unanchored one, tried first, found a
+  // NESTED phrase occurrence inside a legitimate clause (`…walked; no
+  // gaps: none.`), truncated the clause at it, and refused the very
+  // receipts the anchored path was added to admit (#9213).
   const receipt =
-    DRY_RECEIPT_RE.exec(judged) ?? DRY_RECEIPT_START_RE.exec(judged);
+    DRY_RECEIPT_START_RE.exec(judged) ?? DRY_RECEIPT_RE.exec(judged);
   // The clause is cut at any INLINE disclosure marker before its substance
   // is judged: a one-line return (`No new issues found — …; Budget gap: X`)
   // slips past the line-based strip, and the `[\s\S]*` capture would
@@ -424,6 +466,12 @@ function classifyReturn(
   const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
   const judgedClause =
     inlineGap === null ? clause : clause.slice(0, inlineGap.index);
+  // Everything of the match BEFORE the clause capture — phrase, filler,
+  // separator: the polarity guard's lead side (see CONTRAST_RE).
+  const lead =
+    receipt === null
+      ? ''
+      : receipt[0].slice(0, receipt[0].length - clause.length);
   const unknown = (failure: CertificationFailure): Classification => ({
     outcome: 'unknown',
     failure,
@@ -433,7 +481,7 @@ function classifyReturn(
   if (!openedTheTerritory(rec.diffReads, territory))
     return unknown('territory read missing');
   if (receipt === null) return unknown('receipt not matched');
-  if (!substantiveClause(judgedClause))
+  if (!substantiveClause(judgedClause, lead))
     return unknown('receipt clause not substantive');
   return { outcome: 'dry', failure: null };
 }

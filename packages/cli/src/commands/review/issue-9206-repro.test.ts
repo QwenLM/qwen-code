@@ -46,6 +46,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -429,6 +430,104 @@ describe('issue #9206 — Step 9 cleanup must not destroy a non-converged run’
     runCleanup('pr-9206');
 
     expect(existsSync(recordDir)).toBe(true);
+  });
+
+  it('a marker-less kept directory survives a SECOND cleanup once its plan is swept (#9213)', () => {
+    // The first cleanup keeps the killed run's record directory but sweeps
+    // the plan file beside it (retention only preserves the -prompts
+    // entry). A second cleanup before the evidence is examined then finds
+    // no marker and an unstatable plan — runEpochMs reads -Infinity, the
+    // mtime comparison computes false — and silently deletes the directory
+    // the first cleanup explicitly kept. A record directory whose plan is
+    // gone is itself the retained shape: keep it.
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    const planPath = join(
+      dir,
+      '.qwen',
+      'tmp',
+      'qwen-review-pr-9206-fetch.json',
+    );
+    const recordDir = promptRecordDir(planPath);
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'reverse-audit--chunk-1--round-1--abc123.txt'),
+      'a recorded launch prompt — the certification history',
+    );
+    writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
+    const fresh = new Date(Date.now() + 60 * 60 * 1000);
+    utimesSync(planPath, fresh, fresh);
+
+    runCleanup('pr-9206');
+    expect(existsSync(recordDir)).toBe(true);
+    expect(existsSync(planPath)).toBe(false);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    runCleanup('pr-9206');
+
+    expect(existsSync(recordDir)).toBe(true);
+    const out = (writeStdoutLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(out).toContain('Kept');
+  });
+
+  it('one unstatable record entry does not veto the previous-run evidence (#9213)', () => {
+    // Retention is existential — ANY file older than the plan — but the
+    // scan wrapped every stat in ONE try/catch, so a single broken entry
+    // (a vanished file, a planted broken symlink) aborted the walk and
+    // swept the older evidence beside it. `a-broken-symlink` sorts before
+    // the record, so the old code hit the throw first.
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    const planPath = join(
+      dir,
+      '.qwen',
+      'tmp',
+      'qwen-review-pr-9206-fetch.json',
+    );
+    const recordDir = promptRecordDir(planPath);
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'reverse-audit--chunk-1--round-1--abc123.txt'),
+      'a recorded launch prompt — the certification history',
+    );
+    symlinkSync(
+      join(dir, 'does-not-exist'),
+      join(recordDir, 'a-broken-symlink'),
+    );
+    writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
+    const fresh = new Date(Date.now() + 60 * 60 * 1000);
+    utimesSync(planPath, fresh, fresh);
+
+    runCleanup('pr-9206');
+
+    expect(existsSync(recordDir)).toBe(true);
+  });
+
+  it('records NEWER than the plan are this run\u2019s — a single run still sweeps (#9213)', () => {
+    // The negative direction of the mtime signal: only records OLDER than
+    // the plan are a previous run's. A converged single run writes its
+    // records after the capture and leaves no marker — its history earned
+    // nothing, and the sweep takes it. Pinning the comparison keeps a
+    // `<` \u2192 `!==` mutant (retain a converged run's own records forever,
+    // under a false Kept claim) from shipping green.
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    const planPath = join(
+      dir,
+      '.qwen',
+      'tmp',
+      'qwen-review-pr-9206-fetch.json',
+    );
+    writeFileSync(planPath, JSON.stringify({ prNumber: '9206' }));
+    const recordDir = promptRecordDir(planPath);
+    mkdirSync(recordDir, { recursive: true });
+    writeFileSync(
+      join(recordDir, 'reverse-audit--chunk-1--round-1--abc123.txt'),
+      'this run\u2019s own record',
+    );
+
+    runCleanup('pr-9206');
+
+    expect(existsSync(recordDir)).toBe(false);
   });
 
   it('a non-converged run (round cap hit) keeps its prompt-record directory', () => {

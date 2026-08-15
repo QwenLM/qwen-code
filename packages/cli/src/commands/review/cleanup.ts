@@ -490,6 +490,13 @@ export function runCleanup(target: string): void {
   //   refusals write one), but its records predate the retry's fresh plan
   //   capture — nothing clears the record dir between runs. A file older
   //   than the plan's own mtime is a previous run's.
+  // - A record directory whose plan file is GONE — the shape the signals
+  //   above leave behind. A previous cleanup kept the directory and swept
+  //   the plan beside it (retention preserves only the -prompts entry), so
+  //   the mtime comparison can no longer run — an unstatable plan reads
+  //   epoch -Infinity and no record is older than it. A directory that
+  //   survived one cleanup on this evidence must survive the next; the
+  //   Kept line's manual-removal instruction is the exit (#9213 on #9206).
   //
   // The decision is made BEFORE the sweep runs: the plan file the epoch
   // reads is itself one of the swept entries.
@@ -502,7 +509,8 @@ export function runCleanup(target: string): void {
     );
     if (
       readBudgetStopUnfenced(planCandidate) !== null ||
-      hasPreviousRunRecords(planCandidate)
+      hasPreviousRunRecords(planCandidate) ||
+      !existsSync(planCandidate)
     ) {
       preserved.add(file);
     }
@@ -513,7 +521,7 @@ export function runCleanup(target: string): void {
     const full = join(REVIEW_TMP_DIR, file);
     if (preserved.has(file)) {
       writeStdoutLine(
-        `Kept ${full}: a reverse audit stopped here without converging — ` +
+        `Kept ${full}: a review run stopped here without converging — ` +
           `the record directory is the evidence for diagnosing it; remove ` +
           `it manually once done.`,
       );
@@ -550,16 +558,24 @@ export function runCleanup(target: string): void {
  * own capture — records a PREVIOUS run wrote. Every run rewrites the plan
  * at its Step 1 capture and nothing clears the record dir, so a file this
  * run wrote is always newer than the plan; anything older belongs to a
- * run that stopped and never cleaned up (#9206). Unreadable → false: the
- * sweep proceeds as it always did.
+ * run that stopped and never cleaned up (#9206). Unreadable directory or
+ * plan → false: the sweep proceeds as it always did. One unreadable
+ * ENTRY is skipped instead: the check is existential — ANY file older
+ * than the plan — and a single unstatable entry (a vanished file, a
+ * broken symlink planted in the record dir) must not veto the older
+ * evidence beside it (#9213).
  */
 function hasPreviousRunRecords(planPath: string): boolean {
   try {
     const epoch = runEpochMs(planPath);
     const dir = promptRecordDir(planPath);
-    return readdirSync(dir).some(
-      (name) => statSync(join(dir, name)).mtimeMs < epoch,
-    );
+    return readdirSync(dir).some((name) => {
+      try {
+        return statSync(join(dir, name)).mtimeMs < epoch;
+      } catch {
+        return false;
+      }
+    });
   } catch {
     return false;
   }

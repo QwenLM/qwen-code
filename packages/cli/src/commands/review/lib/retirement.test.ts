@@ -715,6 +715,118 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(r3.skipped).toEqual([]);
   });
 
+  it.each([
+    [
+      'a hedge the contrast list does not name (though)',
+      'No new issues were found. I could not open the generated files, ' +
+        'though.',
+    ],
+    [
+      'a hedge led by Yet',
+      'No new issues were found. Yet I could not open the generated files ' +
+        'and did not check them.',
+    ],
+    [
+      'a hedge led by unfortunately',
+      'No new issues were found; unfortunately the generated files would ' +
+        'not open and I did not check them.',
+    ],
+    [
+      'a Chinese hedge without a listed contrast word (只是)',
+      '未发现新问题，只是我未能打开生成的文件，没有检查它们。',
+    ],
+    [
+      'a comma-led incapacity admission without any contrast word',
+      'No new issues were found, I could not open the generated files and ' +
+        'did not check them.',
+    ],
+    [
+      'a hedge riding inside the phrase filler',
+      'No new issues found but only skimmed. Re-walked the reconnect state ' +
+        'machine.',
+    ],
+  ])('a hedge is refused wherever it sits: %s (#9213)', (_label, hedged) => {
+    // The polarity guard used to enumerate contrast WORDS over unbounded
+    // prose: any hedge not on the list (though, Yet, unfortunately, 只是)
+    // retired the chunk on the clause that admitted it was not checked,
+    // and a hedge inside the phrase's filler (…found but only skimmed.)
+    // never reached the clause-only test at all. Both directions fail
+    // toward RETIREMENT — the direction this module declares impossible.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), hedged);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), hedged);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('an innocuous "but" does not block retirement — only a hedge does (#9213)', () => {
+    // The clause-contrast refusal used to reject ANY occurrence of a
+    // contrast word, so the commonest honest connective — "already in the
+    // list, still re-verified, BUT I checked again" — regressed from dry
+    // to unknown and blocked retirement on exactly the budgeted runs the
+    // optimization exists for. A contrast word without a negation or
+    // incapacity marker in its scope contradicts nothing.
+    const receipt =
+      'No new issues were found — re-walked the retry cap and both changed ' +
+      "exports' call sites; the list already covered them, but I " +
+      're-verified the readers.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('an innocuous 不过 does not block the Chinese receipt either (#9213)', () => {
+    const receipt =
+      '未发现新问题——重新走查了重连状态机与两个已改导出的全部调用点，' +
+      '清单已覆盖它们，不过我又核对了一遍。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
+  it('a nested phrase occurrence inside the clause does not truncate it (#9213)', () => {
+    // The clause naming the walk naturally repeats the brief's saturated
+    // vocabulary plus a colon or dash (`no gaps:`, `no issues —`); the
+    // unanchored matcher tried FIRST found the nested occurrence and
+    // refused the truncated clause, defeating the widening's purpose on
+    // exactly the receipts it was added to admit. The anchored matcher
+    // must take the lead.
+    for (const receipt of [
+      'No new issues were found. All six layers walked; no gaps: none.',
+      'No new issues were found. Re-walked the scheduler: no issues — all ' +
+        'cold.',
+    ]) {
+      transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+      transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+      const r3 = schedule(3, [13]);
+      expect(r3.due).toEqual([]);
+      expect(r3.converged).toBe(true);
+    }
+  });
+
+  it('a budget-gap line parted by a blank line does not block the receipt (#9213)', () => {
+    // Stripping the disclosure line leaves a leading blank when it sat a
+    // paragraph above the receipt; the anchored matcher's ^ must not die
+    // on strip's own leftover whitespace.
+    const receipt =
+      'Budget gap: walked the parser only\n\n' +
+      'No new issues found. Re-walked the reconnect state machine.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.converged).toBe(true);
+  });
+
   it('quoting the stock phrase to NEGATE it is not a receipt (#9206)', () => {
     // A return that names the phrase inside a negation matched mid-text
     // once the stops widened: the quoted phrase opened a clause out of

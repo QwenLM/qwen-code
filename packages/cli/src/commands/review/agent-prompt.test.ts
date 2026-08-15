@@ -4345,6 +4345,69 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(keysOf(3)).toHaveLength(1);
   });
 
+  it('every chunk build of the round carries its own failures, not just the first (#9213)', () => {
+    // A round built one auditor at a time stamps on its FIRST chunk build;
+    // the builds after it used to skip the diagnostic block entirely, so
+    // chunks 2..N re-audited in the exact silence this PR exists to end —
+    // the paired test above builds a single chunk per round and cannot see
+    // it. Build rounds 1-2 per chunk for chunks 13 and 14 with NO
+    // transcripts, then build round 3 one auditor at a time.
+    for (const round of [1, 2]) {
+      for (const chunk of [13, 14]) {
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'reverse-audit',
+          findings,
+          chunk,
+          round,
+        });
+      }
+    }
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 13,
+      round: 3,
+    });
+    let err = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain(
+      'chunk 13 \u2014 round 1: no matching transcript; round 2: no matching transcript',
+    );
+    // The first build admitted the round — its stamp is what used to gate
+    // the second build's diagnostic out.
+    expect(readRoundStamps(plan).some((s) => s.round === 3)).toBe(true);
+
+    (writeStdoutLine as unknown as Mock).mockClear();
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      findings,
+      chunk: 14,
+      round: 3,
+    });
+    expect(process.exitCode).toBeUndefined();
+    err = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement certified nothing');
+    expect(err).toContain(
+      'chunk 14 \u2014 round 1: no matching transcript; round 2: no matching transcript',
+    );
+    // The repair semantics stand: a stamped round still builds its chunk.
+    const out = (writeStdoutLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(out).toContain('You are review agent');
+    expect(keysOf(3)).toHaveLength(2);
+  });
+
   it('a per-chunk build with no readable transcripts names itself too (#9206)', () => {
     // Mirror of the all-chunks catch test for the --chunk twin: an
     // unreadable history degrades to building the auditor — never to
