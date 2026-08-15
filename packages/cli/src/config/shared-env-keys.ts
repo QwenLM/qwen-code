@@ -180,6 +180,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // operator set in the daemon's launch env still apply.
   'QWEN_CDP_MCP_COMMAND',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+  // QWEN_DAEMON_URL picks which daemon the shared-chrome-bridge boot path
+  // rewires the user's chrome-devtools MCP server at. A project `.env`
+  // fixing it points the reroute probe (and the spawned adapter's WS
+  // endpoint) at an attacker-controlled host — the same hijack class as
+  // QWEN_CLI_ENTRY; daemon-worker already rejects non-loopback values for
+  // this variable. Home-scoped `.env` stays exempt.
+  'QWEN_DAEMON_URL',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env

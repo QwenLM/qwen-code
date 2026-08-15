@@ -1917,12 +1917,17 @@ export function mountAcpHttp(
               opts.cdpTunnelRegistry !== undefined &&
               parsed !== null &&
               typeof parsed === 'object' &&
-              isCdpInboundFrameType(frameType) &&
+              isCdpInboundFrameType(frameType)
+            ) {
+              // This connection is the extension bridge: route if a link
+              // consumes the frame, drop silently otherwise — mirroring the
+              // non-draining intercept, because the extension speaks cdp_*
+              // frames, not JSON-RPC error envelopes. Non-bridge peers
+              // sending cdp_* frames still get the drain rejection below.
               opts.cdpTunnelRegistry.routeInboundFrom(
                 cdpEndpoint,
                 parsed as Record<string, unknown>,
-              )
-            ) {
+              );
               return;
             }
             ws.send(

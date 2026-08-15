@@ -108,6 +108,14 @@ let attachedLinks = new Set<string>();
 let attachInFlight: Promise<{ url?: string; title?: string }> | null = null;
 let attachOwnerLinkId: string | null = null;
 /**
+ * Links whose `cdp_attach` is part of the in-flight flow (owner + joiners),
+ * registered synchronously at frame arrival. `handleRelease` records deferred
+ * releases only for these: a previously-landed link evicted by a tab-switch
+ * set replacement has its handleAttach long completed and must not plant a
+ * stale `releasedDuringAttach` entry.
+ */
+let inFlightParticipants = new Set<string>();
+/**
  * Links whose `cdp_release` (or socket close) arrived while their attach was
  * mid-flight. A teardown that fires before the attach lands can't detach a
  * tab the debugger isn't on yet, so it records the link here; the attach
@@ -286,14 +294,21 @@ function ensureAttachment(
 ): Promise<{ url?: string; title?: string }> {
   const inFlight = attachInFlight;
   if (inFlight) {
+    inFlightParticipants.add(linkId);
     // Join the attachment another link is establishing; add our ref once it
-    // lands (a rejection propagates to our caller's error ack as well).
+    // lands (a rejection propagates to our caller's error ack as well). A
+    // detach can land between the flow resolving and this microtask; never
+    // ref a dead attachment.
     return inFlight.then((info) => {
+      if (attachedTabId === null) {
+        throw new Error('debugger detached during attach');
+      }
       attachedLinks.add(linkId);
       return info;
     });
   }
   attachOwnerLinkId = linkId;
+  inFlightParticipants = new Set([linkId]);
   const flow = runAttachFlow(linkId);
   attachInFlight = flow;
   return flow;
@@ -309,7 +324,14 @@ async function runAttachFlow(
     if (attachedTabId === tabId) {
       attachedLinks.add(linkId);
       ensureAttachObservers();
-      return await tabInfoOf(tabId);
+      const info = await tabInfoOf(tabId);
+      // A debugger detach (banner Cancel / DevTools / tab close) or a full
+      // teardown can land during the metadata fetch; acking success there
+      // would leave every link on a dead attachment.
+      if (attachedTabId !== tabId) {
+        throw new Error('debugger detached during attach');
+      }
+      return info;
     }
 
     const prevTabId = attachedTabId;
@@ -349,10 +371,15 @@ async function runAttachFlow(
     }
     ensureAttachObservers();
 
-    return await tabInfoOf(tabId);
+    const info = await tabInfoOf(tabId);
+    if (attachedTabId !== tabId) {
+      throw new Error('debugger detached during attach');
+    }
+    return info;
   } finally {
     attachOwnerLinkId = null;
     attachInFlight = null;
+    inFlightParticipants = new Set();
   }
 }
 
@@ -494,9 +521,14 @@ function handleRelease(frame: CdpReleaseFrame): void {
       );
       return;
     }
-    // Not landed yet (the in-flight link or a joiner): record the release so
-    // handleAttach drops the link the moment it finishes wiring up.
-    releasedDuringAttach.add(linkId);
+    // Not landed yet — but only links participating in the in-flight flow
+    // (owner or joiner) have a pending handleAttach. A previously-landed
+    // link evicted by a tab-switch set replacement completed long ago;
+    // recording it would plant a stale ledger entry that spuriously rejects
+    // the link's next attach.
+    if (inFlightParticipants.has(linkId)) {
+      releasedDuringAttach.add(linkId);
+    }
     return;
   }
   attachedLinks.delete(linkId);

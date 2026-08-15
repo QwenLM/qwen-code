@@ -80,6 +80,21 @@ describe('CdpTunnelRegistry (Plan C #5626, multi-client #8737)', () => {
     expect(reg.linkCount()).toBe(2);
   });
 
+  it('caps multi-client links so a reconnect loop cannot grow state unbounded', () => {
+    const reg = new CdpTunnelRegistry();
+    reg.register(endpoint('a', true));
+    const links = [];
+    for (let i = 0; i < 16; i++) {
+      links.push(acquire(reg)!);
+    }
+    expect(reg.linkCount()).toBe(16);
+    expect(acquire(reg)).toBeUndefined();
+
+    reg.releaseLink(links[0].linkId);
+    expect(acquire(reg)).toBeDefined();
+    expect(reg.linkCount()).toBe(16);
+  });
+
   it('tagged result/attached frames route only to the owning link', () => {
     const reg = new CdpTunnelRegistry();
     reg.register(endpoint('a', true));
