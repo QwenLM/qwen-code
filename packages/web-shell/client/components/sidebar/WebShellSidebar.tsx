@@ -4361,7 +4361,7 @@ export function WebShellSidebar({
                   loadErrorLabel={t('sidebar.loadFailed')}
                   organizationEnabled={false}
                   sourceType={sourceMetadataEnabled ? 'default' : undefined}
-                  channelGroupingEnabled={channelGroupingEnabled}
+                  channelGroupingEnabled={false}
                   ungroupedLabel={t('sidebar.groupUngrouped')}
                   formatTime={(iso) => formatRelativeTime(iso, t)}
                   autoExpandKey={

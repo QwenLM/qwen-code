@@ -1239,6 +1239,13 @@ function registerScheduledTaskCrudRoutes(
           .json({ error: 'Task not found', code: 'task_not_found' });
         return;
       }
+      if (!updated.recurring && updated.sessionId) {
+        channelDeliveryAuthorizations?.revokeScheduledTask(
+          workspaceCwd,
+          updated.sessionId,
+          updated.id,
+        );
+      }
       const view = toView(updated);
       // A consumed one-shot was removed from the store — its manual run WAS its
       // single fire, so the returned view must not advertise a future nextRunAt on

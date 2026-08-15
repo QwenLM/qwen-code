@@ -119,12 +119,7 @@ async function inspectDirectory(
   directory: string,
   requirePrivateMode: boolean,
 ): Promise<DirectoryIdentity> {
-  let stat: Awaited<ReturnType<typeof fs.lstat>>;
-  try {
-    stat = await fs.lstat(directory);
-  } catch (error) {
-    throw new UnsafeOwnershipStateError(undefined, { cause: error });
-  }
+  const stat = await fs.lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new UnsafeOwnershipStateError();
   }
@@ -145,12 +140,8 @@ async function ensureDirectory(
   try {
     return await inspectDirectory(directory, requirePrivateMode);
   } catch (error) {
-    if (!(error instanceof UnsafeOwnershipStateError)) throw error;
-    try {
-      await fs.lstat(directory);
+    if (error instanceof UnsafeOwnershipStateError || !isMissing(error)) {
       throw error;
-    } catch (statError) {
-      if (!isMissing(statError)) throw error;
     }
   }
 
@@ -503,7 +494,10 @@ class FileConversationRuntimeOwnership implements ConversationRuntimeOwnership {
       await inspectDirectory(this.stableBaseDir, false);
       return await inspectDirectory(this.ownerDirectory, true);
     } catch (error) {
-      if (error instanceof UnsafeOwnershipStateError) {
+      if (
+        error instanceof UnsafeOwnershipStateError ||
+        (this.state !== 'unclaimed' && isMissing(error))
+      ) {
         throw this.compromise(error);
       }
       throw conversationRuntimeUnavailableError(error);

@@ -1034,6 +1034,40 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks).toEqual([]);
   });
 
+  it('revokes channel delivery when a manual run consumes a one-shot task', async () => {
+    const delivery = {
+      kind: 'channel',
+      target: {
+        channelName: 'dingtalk',
+        type: 'user' as const,
+        id: 'user-1',
+      },
+    };
+    const created = await create({
+      cron: '0 9 1 1 *',
+      prompt: 'p',
+      recurring: false,
+      delivery,
+    });
+
+    const res = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(res.status).toBe(200);
+    const firedAt = res.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: created.body.sessionId,
+        deliveryId: `${created.body.id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: created.body.id,
+        firedAt,
+        target: delivery.target,
+      }),
+    ).toBe(false);
+  });
+
   it('keeps a RECURRING task on manual run (only stamps lastFiredAt)', async () => {
     await seedTask({
       id: 'rec-run',
