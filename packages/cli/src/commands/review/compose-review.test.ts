@@ -4438,6 +4438,10 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     // The clause and the marker must name the SAME round — mutation-verified
     // that re-splitting the side-file read ships green without this pin.
     expect(parseLedger(r.body)?.round).toBe(6);
+    // Pure deferrals stay OUT of the ledger work list — feeding them to
+    // buildLedger re-opens next round exactly what the posture recorded
+    // so nobody would re-rule it (round-8 mutant shipped green).
+    expect(parseLedger(r.body)?.findings).toEqual([]);
   });
 
   it('caps — never refuses — deferrals the posture does not license', () => {
@@ -4477,7 +4481,7 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
       base({ deferredSuggestions: ['a.ts:1 — nit'] }),
     );
     expect(absent.cappedBy).toContain('unlicensed-deferral');
-    expect(absent.body).toContain('carried no `severityFloor`');
+    expect(absent.body).toContain('carried no recognisable `severityFloor`');
     // And `auto` in the context-unavailable state: the round is unknowable,
     // so no posture can license the deferral.
     const noContext = composeReview(
@@ -4491,15 +4495,31 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     expect(noContext.body).toContain('context-unavailable');
   });
 
-  it('refuses a malformed severityFloor outright', () => {
-    expect(() =>
-      composeReview(
-        base({
-          severityFloor: 'blocker' as never,
-          deferredSuggestions: ['a.ts:1 — nit'],
-        }),
-      ),
-    ).toThrow(/severityFloor/);
+  it('an unrecognised severityFloor is unknown — never a throw', () => {
+    // Round-8 finding: the shape refusal fired unconditionally, so a
+    // model-transcribed drift ("Critical", "auto ", "") on an ordinary
+    // zero-deferral round lost the WHOLE composed round over a field that
+    // changed no output. Unknown folds into the absent state: unlicensed
+    // (capped, disclosed) with a list, inert without one. Trimmed/cased
+    // spellings of the three legal values still resolve.
+    const withList = composeReview(
+      base({
+        severityFloor: 'blocker' as never,
+        deferredSuggestions: ['a.ts:1 — nit'],
+      }),
+    );
+    expect(withList.cappedBy).toContain('unlicensed-deferral');
+    const inert = composeReview(base({ severityFloor: 'blocker' as never }));
+    expect(inert.event).toBe('APPROVE');
+    expect(inert.cappedBy).toEqual([]);
+    const cased = composeReview(
+      base({
+        severityFloor: ' Critical ' as never,
+        deferredSuggestions: ['a.ts:1 — nit'],
+      }),
+    );
+    expect(cased.cappedBy).toEqual([]);
+    expect(cased.deferredCount).toBe(1);
   });
 
   it('the two deferral regexes agree on separators — one spelling, one verdict', () => {
@@ -4527,6 +4547,11 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
       'packages/core/src/my-file.ts:42 — [test] mutation survivor',
       'src/my-file.ts:42 - [build] tsc fails on the merge commit',
       'a.ts:1 — [probe] sendShellCommand ran twice',
+      // Round-8 probe: the SKILL-prescribed aggregate line, a leading
+      // space, and an en dash all classified non-deterministic.
+      'a.ts:10 (+2 locations) — [test] aggregate survivor',
+      '  a.ts:1 — [test] leading whitespace',
+      'a.ts:1 – [test] en dash',
     ]) {
       const r = composeReview({
         criticalsInline: 0,
@@ -4730,6 +4755,44 @@ describe('composeReview — convergence-posture deferrals (disclosed, never capp
     });
     const ledger = parseLedger(marked.body);
     expect(ledger?.findings.some((f) => f.sev === 'C')).toBe(true);
+    // A relocation-only run (no floor echoed) incurs no licence cap — the
+    // licence keys on the post-split deferred list, and salvage is exactly
+    // the run relocation exists for (round-8 mutant).
+    expect(marked.cappedBy).not.toContain('unlicensed-deferral');
+  });
+
+  it('classifies a relocated Critical by source position — a title-borne [test] does not exempt it', () => {
+    // Round-8 probe: the whole-entry tag scan the model's own body
+    // Criticals get let a title-borne [test] exempt an unverified relocated
+    // claim from the floor, and it posted as a blocking RC with no
+    // verifier. Own describe: base()'s planPath default writes a verify
+    // record into the shared dir, which would satisfy the very floor this
+    // proves.
+    const planPath = coveredPlan(['reverse-audit']);
+    const titled = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      deferredSuggestions: [
+        'a.ts:1 — [review] critical: mishandles [test] configuration files',
+      ],
+    });
+    expect(titled.cappedBy).toContain('criticals-unverified');
+    expect(titled.event).toBe('COMMENT');
+    // Control: the SAME entry with a source-position [test] tag IS
+    // deterministic and needs no verifier — relocated, it blocks.
+    const genuine = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['reverse-audit']),
+      env: ENV,
+      modelId: MODEL,
+      deferredSuggestions: ['a.ts:1 — [test] critical: red on the merge'],
+    });
+    expect(genuine.cappedBy).not.toContain('criticals-unverified');
+    expect(genuine.event).toBe('REQUEST_CHANGES');
     // The lookbehind spares hyphenated compounds — the SKILL's own
     // "non-Critical" phrasing is a realistic model output, and tripping on
     // it would have blocked over a nit.

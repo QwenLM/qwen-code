@@ -125,10 +125,15 @@ const DETERMINISTIC_TAG_RE = /\[(?:build|test|probe)\]/i;
  * every `packages/.../my-file.ts — [test] …` entry non-deterministic and
  * demanding a verifier that cannot exist — the self-inflicted permanent
  * cap. Separator-agnostic like the Critical tripwire (hyphen/en/em — the
- * cheapest real spelling drift), and an entry with no whitespace-flanked
- * separator matches nothing: non-deterministic, the fail-closed direction.
+ * cheapest real spelling drift); the SKILL-prescribed aggregate suffix
+ * `(+N locations)` between the anchor and the separator is tolerated
+ * (round-8 probe: the prescribed aggregate line itself was misclassified);
+ * entries are trimmed before the scan (a leading space defeated the `^`
+ * anchor); and an entry with no whitespace-flanked separator matches
+ * nothing: non-deterministic, the fail-closed direction.
  */
-const DETERMINISTIC_DEFERRAL_RE = /^\S+\s+[—–-]\s*\[(?:build|test|probe)\]/i;
+const DETERMINISTIC_DEFERRAL_RE =
+  /^\S+(?:\s+\([^)]*\))?\s+[—–-]\s*\[(?:build|test|probe)\]/i;
 
 /**
  * The deferral channel's Critical filter, shared by the body composer and
@@ -142,18 +147,29 @@ const CRITICAL_DEFERRAL_RE = /\[critical\]|(?<![\w-])critical\s*:/i;
 function splitDeferralChannel(raw: unknown): {
   deferred: string[];
   relocated: string[];
+  /**
+   * How many relocated entries are DETERMINISTIC by the source-position
+   * classifier — the body composer uses this so a relocated Critical is
+   * classified by the same position-anchored rule as a deferred one, never
+   * by the whole-entry tag scan the model's own body Criticals get: a
+   * title-borne `[test]` in a relocated unverified claim exempted it from
+   * the floor and posted it as a blocker (round-8 probe).
+   */
+  relocatedDeterministic: number;
 } {
   const entries = toStringList(raw, 'deferredSuggestions')
-    .map(stripReviewFooter)
-    .filter((entry) => entry.trim() !== '');
+    .map((entry) => stripReviewFooter(entry).trim())
+    .filter((entry) => entry !== '');
+  const relocatedRaw = entries.filter((x) => CRITICAL_DEFERRAL_RE.test(x));
   return {
     deferred: entries.filter((x) => !CRITICAL_DEFERRAL_RE.test(x)),
-    relocated: entries
-      .filter((x) => CRITICAL_DEFERRAL_RE.test(x))
-      .map(
-        (stray) =>
-          `${stray} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
-      ),
+    relocated: relocatedRaw.map(
+      (stray) =>
+        `${stray} _(relocated from the deferral channel — a Critical is never deferred, it posts)_`,
+    ),
+    relocatedDeterministic: relocatedRaw.filter((x) =>
+      DETERMINISTIC_DEFERRAL_RE.test(x),
+    ).length,
   };
 }
 
@@ -207,9 +223,13 @@ export interface ComposeReviewInput {
    */
   deferredSuggestions?: string[];
   /**
-   * The RESOLVED posting floor from the Step 1 verdict (`critical`,
-   * `suggestion`, or `auto`), carried into the state so the deferral
-   * channel's precondition is checkable: deferrals are legitimate under a
+   * The UNRESOLVED posting floor from the Step 1 verdict (`critical`,
+   * `suggestion`, or the literal `auto`) — never the level `auto` resolved
+   * to this round: the module resolves `auto` itself from the side-file
+   * round, and a pre-resolved `suggestion` is indistinguishable from the
+   * operator's posture-off override (a shipped regression, closed in round
+   * 5). Carried so the deferral channel's precondition is checkable:
+   * deferrals are legitimate under a
    * `critical` floor at any round, and under `auto` from round 2 (the
    * code-age rule) — never under an explicit `suggestion` floor (the
    * operator turned the posture off), never on round 1 of `auto` (no
@@ -725,8 +745,11 @@ function composeReviewBody(
   // the next round rules on, not a lost round. The split lives in the
   // shared helper: the ledger marker performs the same one, so a relocated
   // blocker also rides the work list.
-  const { deferred: deferredSuggestions, relocated: relocatedCriticals } =
-    splitDeferralChannel(input.deferredSuggestions);
+  const {
+    deferred: deferredSuggestions,
+    relocated: relocatedCriticals,
+    relocatedDeterministic,
+  } = splitDeferralChannel(input.deferredSuggestions);
   for (const stray of relocatedCriticals) {
     bodyCriticals.push(stray);
   }
@@ -744,20 +767,23 @@ function composeReviewBody(
   // past them; the anchor is withheld with every other cap. The shape check
   // stays a refusal — a floor that is not one of the three values is a
   // malformed state file, same as a NaN count.
-  const floorAbsent =
-    input.severityFloor === undefined || input.severityFloor === null;
-  const severityFloor = input.severityFloor ?? 'auto';
-  if (
-    severityFloor !== 'critical' &&
-    severityFloor !== 'suggestion' &&
-    severityFloor !== 'auto'
-  ) {
-    throw new TypeError(
-      `compose-review: severityFloor must be critical|suggestion|auto, got ${JSON.stringify(
-        input.severityFloor,
-      )}`,
-    );
-  }
+  // A floor the module does not recognise — absent, null, or a
+  // model-transcribed spelling drift ("Critical", "auto ", "") — is folded
+  // into ONE state: unknown. It caps as unlicensed when a deferral list
+  // exists (fail-closed, disclosed) and is inert when it does not — a
+  // refusal here would lose the whole round over a field that changes no
+  // output on a zero-deferral run, the exact outcome the licence block is
+  // written to avoid. Model-transcribed prose is not a NaN count.
+  const floorRaw =
+    typeof input.severityFloor === 'string'
+      ? input.severityFloor.trim().toLowerCase()
+      : input.severityFloor;
+  const floorKnown =
+    floorRaw === 'critical' || floorRaw === 'suggestion' || floorRaw === 'auto';
+  const floorAbsent = !floorKnown;
+  const severityFloor: 'critical' | 'suggestion' | 'auto' = floorKnown
+    ? (floorRaw as 'critical' | 'suggestion' | 'auto')
+    : 'auto';
   const cannotTell = toStringList(
     input.cannotTellCriticals,
     'cannotTellCriticals',
@@ -919,9 +945,20 @@ function composeReviewBody(
   // pre-confirmed and skip verification. `[lint]` is NOT trusted as a tag — a
   // model-written string containing it must not launder an unverified claim into a
   // blocker (that is what the gate's provenance-tracked criticals are for).
-  const nonDeterministicBodyCriticals = modelBodyCriticals.filter(
-    (x) => !DETERMINISTIC_TAG_RE.test(x),
-  ).length;
+  // Relocated entries (the tail of `modelBodyCriticals` — pushed after the
+  // input's own) are classified by the deferral channel's position-anchored
+  // rule, counted in the split, not by the whole-entry tag scan the model's
+  // own body Criticals get: they came in as deferral strings, and a
+  // title-borne `[test]` must not exempt an unverified relocated claim from
+  // the floor.
+  const relocatedCount = relocatedCriticals.length;
+  const ownBodyCriticals = modelBodyCriticals.slice(
+    0,
+    modelBodyCriticals.length - relocatedCount,
+  );
+  const nonDeterministicBodyCriticals =
+    ownBodyCriticals.filter((x) => !DETERMINISTIC_TAG_RE.test(x)).length +
+    (relocatedCount - relocatedDeterministic);
   const criticalsNeedingVerify =
     criticalsInline + nonDeterministicBodyCriticals;
   // Fail closed at every exit: this flag softens a Request changes below, and
@@ -1238,7 +1275,7 @@ function composeReviewBody(
     deferredSuggestions.length === 0
       ? null
       : floorAbsent
-        ? 'the state carried no `severityFloor`, so the licence cannot be checked'
+        ? 'the state carried no recognisable `severityFloor`, so the licence cannot be checked'
         : severityFloor === 'suggestion'
           ? 'the operator turned the posture off (`--severity-floor suggestion`)'
           : severityFloor === 'auto' && contextUnavailable

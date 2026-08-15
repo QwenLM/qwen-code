@@ -30,8 +30,9 @@ export type ReviewEffort = 'low' | 'medium' | 'high';
 
 /**
  * The posting floor for findings on a PR review: `critical` posts only
- * Critical findings (non-Criticals are recorded and deferred), `suggestion`
- * posts Criticals and Suggestions — today's behaviour. The floor governs what
+ * Critical findings (otherwise-postable high-confidence Suggestions are
+ * recorded and deferred; low-confidence and Nice-to-have stay terminal-only
+ * as ever), `suggestion` posts Criticals and Suggestions — today's behaviour. The floor governs what
  * the review PUBLISHES, never what it finds or verifies.
  */
 export type ReviewSeverityFloor = 'critical' | 'suggestion';
@@ -159,6 +160,16 @@ function isFlag(token: string): boolean {
 
 function isPureInteger(token: string): boolean {
   return /^\d+$/.test(token);
+}
+
+/** A token that classifies as a PR target (number or PR URL). */
+function isPrShapedToken(token: string): boolean {
+  const shape = classifyToken(token);
+  return (
+    shape !== null &&
+    shape !== 'invalid-url' &&
+    (shape.type === 'pr-number' || shape.type === 'pr-url')
+  );
 }
 
 /**
@@ -337,6 +348,12 @@ export function parseReviewArgs(
         const effortValue = asEffort(value);
         if (effortValue !== null) {
           explicitEffort = effortValue;
+        } else if (value !== '' && isPrShapedToken(value)) {
+          // A PR-shaped value in either flag syntax is the same typo of the
+          // same intent — it joins the disposal pool exactly as the spaced
+          // form does, so which codebase gets reviewed cannot depend on
+          // which syntax happened to be typed (round-8 review finding).
+          kept.push({ token: value, invalidValueOf: '--effort' });
         } else {
           effortIssues.push({ kind: 'invalid-eq', value });
         }
@@ -377,6 +394,8 @@ export function parseReviewArgs(
         const floorValue = asSeverityFloor(value);
         if (floorValue !== null) {
           explicitFloor = floorValue;
+        } else if (value !== '' && isPrShapedToken(value)) {
+          kept.push({ token: value, invalidValueOf: '--severity-floor' });
         } else {
           floorIssues.push({ kind: 'invalid-eq', value });
         }
@@ -431,30 +450,21 @@ export function parseReviewArgs(
   // falls back to the local diff nothing contradicted.
   const soleCandidate = kept.length === 1;
   const hasValidCandidate = kept.some((k) => k.invalidValueOf === undefined);
-  const isPrShaped = (token: string): boolean => {
-    const shape = classifyToken(token);
-    return (
-      shape !== null &&
-      shape !== 'invalid-url' &&
-      (shape.type === 'pr-number' || shape.type === 'pr-url')
-    );
-  };
+  const isPrShaped = isPrShapedToken;
   // The pool counts BOTH spellings: an `=`-form invalid value never enters
   // `kept` (it was recorded as `invalid-eq` and consumed in place), but it
   // is the same typed PR number — `--severity-floor=6711 --effort 6712`
   // must be exactly as ambiguous as the all-spaced spelling, or the guard
   // is defeated by which syntax happened to be typed.
+  // Distinct values, not occurrences: `--severity-floor 6711 --effort 6711`
+  // names ONE PR twice and is unambiguous. Both flag syntaxes already
+  // landed in `kept` above, so the pool sees every spelling.
   const prShapedPool = [
-    ...kept
-      .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
-      .map((k) => k.token),
-    ...[...effortIssues, ...floorIssues]
-      .filter(
-        (i): i is { kind: 'invalid-eq'; value: string } =>
-          i.kind === 'invalid-eq',
-      )
-      .map((i) => i.value)
-      .filter(isPrShaped),
+    ...new Set(
+      kept
+        .filter((k) => k.invalidValueOf !== undefined && isPrShaped(k.token))
+        .map((k) => k.token),
+    ),
   ];
   if (!hasValidCandidate && prShapedPool.length > 1) {
     warnings.push(

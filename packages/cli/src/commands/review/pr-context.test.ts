@@ -32,6 +32,7 @@ import {
   type RawComment,
   latestOwnLedger,
   persistRecoveredLedger,
+  recoverOwnLedger,
   renderLedgerSection,
 } from './pr-context.js';
 import { serializeLedger, type Ledger } from './lib/ledger.js';
@@ -1078,7 +1079,10 @@ describe('latestOwnLedger', () => {
     // later head), so "take commitId from the latest review regardless of
     // ledger" fails here instead of passing by coincidence. An invalid or
     // missing commit_id yields null, never a truncated or garbage reference.
-    const head = 'a'.repeat(40);
+    // 64 hex chars: COMMIT_SHA_RE's deliberate {40,64} breadth exists for
+    // SHA-256 heads, and no fixture pinned it (round-8 finding) — narrowing
+    // to {40} would silently drop the age reference on such repos.
+    const head = 'a'.repeat(64);
     const recovered = latestOwnLedger(
       [
         {
@@ -1113,6 +1117,38 @@ describe('latestOwnLedger', () => {
     );
     expect(invalid?.ledger.round).toBe(1);
     expect(invalid?.commitId).toBeNull();
+  });
+
+  it('distinguishes "no own review" from "own review without a parseable ledger"', () => {
+    // Round-8 finding (two auditors independently): the deletion arm read
+    // "recovery returned null although reviews were read" as proof of no
+    // prior round, but an own review whose marker fails to parse (edited or
+    // damaged bot body, marker-less follow-up) also yields null — a
+    // persistent state, not absence. Deleting the side file there stamped
+    // the next round "round 1" mid-PR and reset the posture clock.
+    const damaged = recoverOwnLedger(
+      [review('bot', '2026-01-01T00:00:00Z', 'edited body, marker gone')],
+      'bot',
+    );
+    expect(damaged.recovered).toBeNull();
+    expect(damaged.sawOwnReview).toBe(true);
+    const absent = recoverOwnLedger(
+      [review('stranger', '2026-01-01T00:00:00Z', marker(3))],
+      'bot',
+    );
+    expect(absent.recovered).toBeNull();
+    expect(absent.sawOwnReview).toBe(false);
+    // A PENDING draft is not "seen" either — it is not a submitted review.
+    const draftOnly = recoverOwnLedger(
+      [
+        {
+          ...review('bot', '2026-01-01T00:00:00Z', marker(1)),
+          state: 'PENDING',
+        },
+      ],
+      'bot',
+    );
+    expect(draftOnly.sawOwnReview).toBe(false);
   });
 
   it('never selects a PENDING draft — an unsubmitted review is not a previous round', () => {
@@ -1209,10 +1245,11 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
-  it('a successful fetch with no ledger REMOVES the stale file whole', () => {
-    // The PR demonstrably holds no prior round for this account — another
-    // account's round counter must not stamp this account's first review
-    // "round N+1" and engage the posture on rounds it never ran.
+  it('proven absence REMOVES the stale file whole', () => {
+    // The PR demonstrably holds no prior round for this account (a walked
+    // list with no own submitted review) — another account's round counter
+    // must not stamp this account's first review "round N+1" and engage the
+    // posture on rounds it never ran.
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {

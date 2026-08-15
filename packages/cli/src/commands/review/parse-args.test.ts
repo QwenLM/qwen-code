@@ -489,6 +489,37 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
     }
   });
 
+  it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
+    // Round-8 probe: `--severity-floor=6711` reviewed the LOCAL tree while
+    // `--severity-floor 6711` rescued PR 6711 — the guard's invariant
+    // ("which codebase is reviewed cannot depend on which syntax happened
+    // to be typed") was wired into refusal only. Every spelling converges.
+    for (const raw of [
+      '--severity-floor=6711',
+      '--severity-floor 6711',
+      '--effort=6711',
+      '--severity-floor blocker --effort=6711',
+      '--severity-floor blocker --effort 6711',
+    ]) {
+      expect(parseReviewArgs(raw).target).toEqual({
+        type: 'pr-number',
+        number: 6711,
+      });
+    }
+    // Two spellings of the SAME PR are one candidate, not an ambiguity.
+    const dup = parseReviewArgs('--severity-floor 6711 --effort=6711');
+    expect(dup.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(dup.warnings.some((w) => w.includes('Ambiguous'))).toBe(false);
+  });
+
+  it('an invalid configured floor stays silent on a non-PR target', () => {
+    // Round-8 mutant: deleting the `&& isPr` gate warned every file/local
+    // review about a floor that is inert there by design.
+    const got = parseReviewArgs('src/foo.ts', { severityFloor: 'blocker' });
+    expect(got.severityFloor).toBe('auto');
+    expect(got.warnings).toEqual([]);
+  });
+
   it('an explicit auto floor is legal and overrides a configured floor for one run', () => {
     // Mutation-shown gap: dropping 'auto' from SEVERITY_FLOORS shipped
     // green while the documented one-shot override was rejected and, alone,

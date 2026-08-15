@@ -681,7 +681,23 @@ export function latestOwnLedger(
   reviews: RawReview[],
   login: string | null,
 ): RecoveredLedger | null {
-  if (!login) return null;
+  return recoverOwnLedger(reviews, login).recovered;
+}
+
+/**
+ * The full recovery outcome — `latestOwnLedger`'s answer plus whether the
+ * walk saw ANY submitted review by this login. Three states drive the side
+ * file: recovered / walked own reviews but none carried a parseable ledger
+ * (an edited or damaged bot body, a marker-less follow-up — a persistent
+ * state, NOT proof of no prior round) / no own review at all. Only the last
+ * licenses deleting the side file; the middle strips conservatively.
+ */
+export function recoverOwnLedger(
+  reviews: RawReview[],
+  login: string | null,
+): { recovered: RecoveredLedger | null; sawOwnReview: boolean } {
+  if (!login) return { recovered: null, sawOwnReview: false };
+  let sawOwnReview = false;
   let best: {
     at: string;
     id: number;
@@ -696,6 +712,7 @@ export function latestOwnLedger(
     // next round a round number, an age reference and a reviewId from state
     // the PR never showed anyone.
     if (r.state === 'PENDING') continue;
+    sawOwnReview = true;
     const ledger = parseLedger(r.body);
     if (!ledger) continue;
     const at = r.submitted_at ?? '';
@@ -712,9 +729,12 @@ export function latestOwnLedger(
       };
     }
   }
-  return best
-    ? { ledger: best.ledger, commitId: best.commitId, reviewId: best.id }
-    : null;
+  return {
+    recovered: best
+      ? { ledger: best.ledger, commitId: best.commitId, reviewId: best.id }
+      : null,
+    sawOwnReview,
+  };
 }
 
 /** What ledger recovery hands the side-file writer. */
@@ -739,10 +759,11 @@ export interface RecoveredLedger {
  *   reference and its provenance for Step 6's convergence posture. Readers
  *   of the ledger shape (compose-review's round count, Step 1's
  *   recovered-anchor check) ignore the extra keys.
- * - Not recovered, reviews POSITIVELY read (`sawReviews` — a non-empty
- *   reviews list was actually walked; an empty list is indistinguishable
- *   from a 4xx-style error envelope `ghApiAll` flattens to `[]`, and must
- *   not destroy state): the PR demonstrably
+ * - Not recovered, absence PROVEN (`noOwnReview` — a non-empty reviews list
+ *   was walked and no submitted review by this account exists in it; an
+ *   empty list may be an error envelope `ghApiAll` flattens to `[]`, and an
+ *   own review whose marker fails to parse is a persistent state — neither
+ *   proves absence, both strip): the PR demonstrably
  *   holds no prior round for this account — the file is another account's
  *   or a deleted round's leftovers, and it is REMOVED whole: carrying its
  *   round counter would stamp a first review "round N+1" and engage the
@@ -762,7 +783,7 @@ export interface RecoveredLedger {
 export function persistRecoveredLedger(
   sideFilePath: string,
   recovered: RecoveredLedger | null,
-  sawReviews: boolean,
+  noOwnReview: boolean,
 ): void {
   // Unique per process: two same-PR fetches racing on one fixed `.tmp` can
   // rename each other's bytes (A renames B's write; B's ENOENT is
@@ -804,7 +825,7 @@ export function persistRecoveredLedger(
     }
     return;
   }
-  if (sawReviews) {
+  if (noOwnReview) {
     try {
       rmSync(sideFilePath, { force: true });
     } catch {
@@ -1119,12 +1140,15 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   // Best-effort — offline/unauthenticated just means no ledger, never a failure.
   let prevRecovered: RecoveredLedger | null = null;
   let recoveryThrew = false;
+  let sawOwnReview = false;
   try {
     // `currentUser()` is a network round-trip; with no reviews on the PR there
     // is nothing for its answer to match against, so it is not made.
-    prevRecovered = reviews.length
-      ? latestOwnLedger(reviews, currentUser())
-      : null;
+    if (reviews.length) {
+      const outcome = recoverOwnLedger(reviews, currentUser());
+      prevRecovered = outcome.recovered;
+      sawOwnReview = outcome.sawOwnReview;
+    }
   } catch {
     prevRecovered = null;
     recoveryThrew = true;
@@ -1138,11 +1162,13 @@ async function runPrContext(args: PrContextArgs): Promise<void> {
   persistRecoveredLedger(
     join(dirname(out), `qwen-review-pr-${prNumber}-prev-ledger.json`),
     prevRecovered,
-    // POSITIVELY read: a non-empty list this run actually walked. An empty
-    // `reviews` may be a real review-less PR or an error envelope ghApiAll
-    // flattened to [] — indistinguishable, so it must not delete a live
-    // round counter; the strip path handles it conservatively.
-    reviews.length > 0 && !recoveryThrew,
+    // Deletion is licensed ONLY by proof of true absence: a non-empty list
+    // this run walked in which NO submitted review by this account exists.
+    // An empty `reviews` may be an error envelope ghApiAll flattened to []
+    // (indistinguishable from a review-less PR), and an own review whose
+    // marker fails to parse is a persistent state, not absence — both take
+    // the conservative strip path.
+    reviews.length > 0 && !recoveryThrew && !sawOwnReview,
   );
 
   const md = buildMarkdown(
