@@ -109,13 +109,26 @@ describe('GET /rc/sessions', () => {
 
     const res = await fetch(`${base}/rc/sessions`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      sessions: [
-        { sessionId: ROOT, forks: [FORK] },
-        { sessionId: FORK, parentSessionId: ROOT, forks: [] },
-      ],
-      truncated: false,
-    });
+    const body = (await res.json()) as {
+      sessions: unknown[];
+      truncated: boolean;
+    };
+    expect(body.truncated).toBe(false);
+    // Each item now also carries an `updatedAt` (ISO string); the list is
+    // ordered by it, so assert set membership (order-independent) + count
+    // rather than a positional deep-equal.
+    expect(body.sessions).toHaveLength(2);
+    expect(body.sessions).toEqual(
+      expect.arrayContaining([
+        { sessionId: ROOT, forks: [FORK], updatedAt: expect.any(String) },
+        {
+          sessionId: FORK,
+          parentSessionId: ROOT,
+          forks: [],
+          updatedAt: expect.any(String),
+        },
+      ]),
+    );
     expect(audit.calls).toHaveLength(1);
     expect(audit.calls[0]).toMatchObject({
       action: 'session_list_read',
@@ -149,11 +162,13 @@ describe('GET /rc/sessions', () => {
     };
     expect(body.sessions).toEqual([
       // titleSource defaults to 'manual' when the record omits it (cycle 95).
+      // updatedAt is an ISO string stat'd from the transcript file.
       {
         sessionId: ROOT,
         title: 'Refactor the auth flow',
         titleSource: 'manual',
         forks: [],
+        updatedAt: expect.any(String),
       },
     ]);
     // Privacy: the title (user content) is NEVER in the audit.
