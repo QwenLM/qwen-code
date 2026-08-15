@@ -21,6 +21,7 @@ const exampleRoot = new URL(
   '../examples/provider-extension-local/',
   import.meta.url,
 );
+const npmCli = process.env['npm_execpath'] ?? '';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -76,6 +77,20 @@ describe('local provider extension example', () => {
       'untrusted_external_context'
     ] as { items: unknown[] };
     expect(cappedEnvelope.items).toHaveLength(5);
+
+    const budgeted = renderResult(
+      Array.from({ length: 5 }, (_, index) => ({
+        id: `budget-${index}`,
+        content: 'x'.repeat(1000),
+      })),
+    );
+    const budgetedEnvelope = budgeted.structuredContent[
+      'untrusted_external_context'
+    ] as { items: Array<{ content: string }> };
+    expect(budgetedEnvelope.items.length).toBeLessThan(5);
+    expect(
+      budgetedEnvelope.items.every((item) => item.content.length > 0),
+    ).toBe(true);
   });
 
   it('uses one guarded request and accepts only valid provider items', async () => {
@@ -95,9 +110,8 @@ describe('local provider extension example', () => {
     vi.stubEnv('PROVIDER_CONTEXT_BASE_URL', 'http://127.0.0.1:3000');
     vi.stubEnv('PROVIDER_CONTEXT_TOKEN', 'secret');
 
-    await expect(
-      searchProvider({ query: 'policy', signal: AbortSignal.timeout(1000) }),
-    ).resolves.toEqual([
+    const signal = AbortSignal.timeout(1000);
+    await expect(searchProvider({ query: 'policy', signal })).resolves.toEqual([
       { id: 'one', content: 'context', score: 0.9 },
       { id: 'non-finite', content: 'context' },
     ]);
@@ -106,9 +120,59 @@ describe('local provider extension example', () => {
       new URL('http://127.0.0.1:3000/v1/context/search'),
       expect.objectContaining({
         body: JSON.stringify({ query: 'policy', limit: 5 }),
+        headers: expect.objectContaining({
+          authorization: 'Bearer secret',
+        }),
         redirect: 'manual',
+        signal,
       }),
     );
+  });
+
+  it.each([
+    ['http://attacker.example', 'secret'],
+    ['https://user:password@provider.example', 'secret'],
+    ['https://provider.example/subpath', 'secret'],
+    ['https://provider.example', '${PROVIDER_CONTEXT_TOKEN}'],
+  ])(
+    'rejects unsafe or unresolved provider configuration: %s',
+    async (baseUrl, token) => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      vi.stubEnv('PROVIDER_CONTEXT_BASE_URL', baseUrl);
+      vi.stubEnv('PROVIDER_CONTEXT_TOKEN', token);
+
+      await expect(
+        searchProvider({ query: 'policy', signal: AbortSignal.timeout(1000) }),
+      ).rejects.toThrow();
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects streamed provider responses over 1 MiB', async () => {
+    const chunk = new Uint8Array(512 * 1024);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(chunk);
+              controller.enqueue(chunk);
+              controller.enqueue(new Uint8Array(1));
+              controller.close();
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    vi.stubEnv('PROVIDER_CONTEXT_BASE_URL', 'https://provider.example');
+    vi.stubEnv('PROVIDER_CONTEXT_TOKEN', 'secret');
+
+    await expect(
+      searchProvider({ query: 'policy', signal: AbortSignal.timeout(1000) }),
+    ).rejects.toThrow('Provider response is invalid.');
   });
 
   it('rejects redirects without exposing provider details', async () => {
@@ -129,33 +193,35 @@ describe('local provider extension example', () => {
     ).rejects.toThrow('Provider request failed.');
   });
 
-  it('packs the executable referenced by the example manifest', async () => {
-    const npmCli = process.env['npm_execpath'];
-    if (!npmCli) throw new Error('npm executable is unavailable.');
-    await execFileAsync(process.execPath, [npmCli, 'run', 'build'], {
-      cwd: exampleRoot,
-    });
-    const { stdout } = await execFileAsync(
-      process.execPath,
-      [npmCli, 'pack', '--dry-run', '--json', '--ignore-scripts'],
-      { cwd: packageRoot },
-    );
-    const packs = JSON.parse(stdout) as Array<{
-      files: Array<{ path: string }>;
-    }>;
+  it.skipIf(!npmCli)(
+    'packs the executable referenced by the example manifest',
+    async () => {
+      await execFileAsync(process.execPath, [npmCli, 'run', 'build'], {
+        cwd: exampleRoot,
+      });
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        [npmCli, 'pack', '--dry-run', '--json', '--ignore-scripts'],
+        { cwd: packageRoot },
+      );
+      const packs = JSON.parse(stdout) as Array<{
+        files: Array<{ path: string }>;
+      }>;
 
-    expect(packs).toHaveLength(1);
-    expect(packs[0]?.files.map((file) => file.path)).toContain(
-      'examples/provider-extension-local/dist/main.js',
-    );
+      expect(packs).toHaveLength(1);
+      expect(packs[0]?.files.map((file) => file.path)).toContain(
+        'examples/provider-extension-local/dist/main.js',
+      );
 
-    const manifest = JSON.parse(
-      await readFile(new URL('qwen-extension.json', exampleRoot), 'utf8'),
-    ) as {
-      mcpServers: Record<string, { args: string[] }>;
-    };
-    expect(manifest.mcpServers['provider-context-local-example']?.args).toEqual(
-      ['${extensionPath}${/}dist${/}main.js'],
-    );
-  }, 30_000);
+      const manifest = JSON.parse(
+        await readFile(new URL('qwen-extension.json', exampleRoot), 'utf8'),
+      ) as {
+        mcpServers: Record<string, { args: string[] }>;
+      };
+      expect(
+        manifest.mcpServers['provider-context-local-example']?.args,
+      ).toEqual(['${extensionPath}${/}dist${/}main.js']);
+    },
+    30_000,
+  );
 });

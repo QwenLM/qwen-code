@@ -40,6 +40,10 @@ describe('External Context Provider Extension Profile v1', () => {
     const validateInput = ajv.compile(inputSchema);
     const validateOutput = ajv.compile(outputSchema);
 
+    expect(vectors.validInputs).toHaveLength(2);
+    expect(vectors.invalidInputs).toHaveLength(3);
+    expect(vectors.validOutputs).toHaveLength(2);
+    expect(vectors.invalidOutputs).toHaveLength(16);
     for (const vector of vectors.validInputs) {
       expect({ name: vector.name, valid: validateInput(vector.value) }).toEqual(
         { name: vector.name, valid: true },
@@ -69,6 +73,10 @@ describe('External Context Provider Extension Profile v1', () => {
       '../contracts/v1/test-vectors.json',
     )) as TestVectors;
 
+    expect(vectors.validInputs).toHaveLength(2);
+    expect(vectors.invalidInputs).toHaveLength(3);
+    expect(vectors.validOutputs).toHaveLength(2);
+    expect(vectors.invalidOutputs).toHaveLength(16);
     for (const vector of vectors.validInputs) {
       expect({
         name: vector.name,

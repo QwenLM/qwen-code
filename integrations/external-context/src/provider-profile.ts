@@ -46,7 +46,7 @@ function boundedString(maximumCharacters: number) {
 
 function unicodeBoundPattern(maximumCharacters: number): RegExp {
   return new RegExp(
-    `^(?:[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]|[\\s\\S]){1,${maximumCharacters}}$`,
+    `^(?:[\\uD800-\\uDBFF][\\uDC00-\\uDFFF]|[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|[^\\uD800-\\uDBFF]){1,${maximumCharacters}}$`,
     'u',
   );
 }
