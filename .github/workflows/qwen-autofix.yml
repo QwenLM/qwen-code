@@ -5344,7 +5344,14 @@ jobs:
                 mv "${WORKDIR}/deferred-findings.carry.next" \
                   "${WORKDIR}/deferred-findings.carry.json"
               else
-                echo '::warning::could not merge carried deferrals across the repair; keeping the earlier set'
+                # The only loss path in this feature without a raw dump: the
+                # newer set is discarded here and the eval watermark means
+                # nothing re-derives it, so print it before deleting. `::` is
+                # neutralized because the content is agent-written and a raw
+                # `::` at line start would be parsed as a workflow command.
+                echo '::warning::could not merge carried deferrals across the repair; keeping the earlier set. This run'"'"'s deferrals are LOST — raw content follows for manual recovery:'
+                head -c 4000 "${WORKDIR}/deferred-findings.json" | sed 's/::/;;/g'
+                echo
                 rm -f "${WORKDIR}/deferred-findings.carry.next"
               fi
               rm -f "${WORKDIR}/deferred-findings.json"

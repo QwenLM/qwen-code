@@ -8241,8 +8241,18 @@ exit 1
       prepareStep,
       reviewAddressReportStep,
     ]) {
-      expect(step).not.toContain('BASH_FUNC_*%%');
-      expect(step).not.toContain('done < <(env)');
+      // Property, not spelling: any in-shell sweep has to name BASH_FUNC and
+      // unset functions. Round 3's exact form is one of many spellings, and
+      // pinning only that form let a rewritten sweep back in (probed).
+      // Comment lines are excluded — the clean-child rationale legitimately
+      // names the channels it defends against.
+      const code = step
+        .split('\n')
+        .filter((l) => !l.trimStart().startsWith('#'))
+        .join('\n');
+      expect(code).not.toMatch(/BASH_FUNC/);
+      expect(code).not.toMatch(/\bunset -f\b/);
+      expect(code).not.toMatch(/\bhash -r\b/);
     }
     // The fork fetch and salvage fetch cannot recurse into a planted
     // submodule and execute an ext:: URL with the PAT (env-level
@@ -10421,6 +10431,14 @@ exit 1
       // R6-7: every allow-list entry that mints the child's environment is
       // pinned by name — a symmetric deletion from both children (invisible
       // to the childCore equality below) must fail here.
+      // The entries must live INSIDE the `env -i` argument list (between the
+      // launch and `bash --norc -c`): a symmetric relocation out of the
+      // child's environment keeps a bare toContain — and childCore — green.
+      const argList = step.slice(
+        step.indexOf('/usr/bin/env -i'),
+        step.indexOf('bash --norc -c'),
+      );
+      expect(argList.length).toBeGreaterThan(0);
       for (const entry of [
         'PATH="${TRUSTED_PATH}"',
         'GITHUB_TOKEN="${GITHUB_TOKEN}"',
@@ -10432,7 +10450,7 @@ exit 1
         'AUTOFIX_BOT="${AUTOFIX_BOT}"',
         'UPSERT_SHA256="${UPSERT_SHA256}"',
       ]) {
-        expect(step).toContain(entry);
+        expect(argList).toContain(entry);
       }
       // R6-8: LD_* cannot be enumerated (LD_TRACE_LOADED_OBJECTS is
       // presence-tested — even an empty assignment makes the loader print and
@@ -10455,6 +10473,14 @@ exit 1
         'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then',
       );
       expect(step).toContain('::warning::could not create a gh config dir');
+      // R8-8: and the propagation half — without the export, gh never sees
+      // the throwaway dir and falls back to the shared ~/.config/gh.
+      expect(step).toMatch(/\n\s*export GH_CONFIG_DIR\n/);
+      // R8-5: the captured output is re-emitted, so the child's warnings
+      // actually reach the log (deleting both loops was invisible).
+      expect(step).toMatch(
+        /while IFS= read -r _upsert_line; do[\s\S]*?printf '%s\\n' "\$\{_upsert_line\}"[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
+      );
       // Ordering: the digest gate runs, and ONLY on a match does the staged
       // script execute — both inside the same clean child. A reordering or a
       // gate-condition flip must fail here.
@@ -10491,13 +10517,13 @@ exit 1
     );
     // Pre-stage failures leave UPSERT_SHA256 empty: that skips with a plain
     // notice instead of imitating a tamper alarm.
-    expect(reviewAddressReportStep).toContain(
-      'deferred-findings upsert skipped: stage step never ran',
+    expect(reviewAddressReportStep).toMatch(
+      /if \[\[ -z "\$\{UPSERT_SHA256:-\}" \]\]; then[\s\S]*?deferred-findings upsert skipped: stage step never ran[\s\S]*?else[\s\S]*?\/usr\/bin\/env -i/,
     );
     // The failure path can run without POST_HANDOFF's identity check
     // (OUTCOME=fixed/noop), so the clean child verifies the PAT identity.
     expect(reviewAddressReportStep).toContain(
-      'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user',
+      'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq .login 2> /dev/null || true)"',
     );
     expect(reviewAddressReportStep).toContain(
       '[[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]',
@@ -10525,13 +10551,24 @@ exit 1
     expect(reviewAddressReportStep).toContain(
       "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
     );
-    expect(workflow).toContain(
+    const stageStep =
+      reviewAddressJob.match(
+        /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    expect(stageStep).toContain(
       'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
     );
+    // The digest must be taken AFTER the trusted copy lands, or it records
+    // whatever was already at that path — the gate's whole premise.
+    expect(
+      stageStep.indexOf(
+        'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
+      ),
+    ).toBeLessThan(stageStep.indexOf('echo "upsert_sha256='));
     // RUNNER_TEMP is agent-writable between staging and invocation, so every
     // invocation verifies the digest the stage step recorded in expression
     // context; a mismatch skips persistence (best-effort), never the round.
-    expect(workflow).toContain(
+    expect(stageStep).toContain(
       'echo "upsert_sha256=$(sha256sum "${RUNNER_TEMP}/upsert-deferred-issue.sh" | cut -d\' \' -f1)" >> "${GITHUB_OUTPUT}"',
     );
     expect(
@@ -10567,8 +10604,39 @@ exit 1
     // writes its own file and the watermark means nothing re-derives them.
     // They are carried in a sidecar the upsert unions in, and the sidecar
     // rides the artifact dump.
-    expect(reviewAddressJob).not.toMatch(
-      /rm -f \\\n(?:\s+"\$\{WORKDIR\}\/[^"]+" \\\n)*\s+"\$\{WORKDIR\}\/deferred-findings\.json"/,
+    const repairStep =
+      reviewAddressJob.match(
+        /- name: 'Repair deterministic rejection'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    expect(repairStep.length).toBeGreaterThan(0);
+    // Spelling-independent: the sibling cleanup list must not name the file
+    // in ANY form, and the file may be removed exactly once — inside the
+    // merge branch, after its content was folded into the carry sidecar.
+    const cleanupList =
+      repairStep.match(/rm -f \\\n(?:[^\n]*\\\n)*[^\n]*\n/)?.[0] ?? '';
+    expect(cleanupList).toContain('resolved-comments.txt');
+    expect(cleanupList).not.toContain('deferred-findings.json');
+    const deletions =
+      repairStep.match(/rm -f[^\n]*deferred-findings\.json/g) ?? [];
+    expect(deletions).toHaveLength(1);
+    expect(repairStep.indexOf('deferred-findings.carry.next')).toBeLessThan(
+      repairStep.search(/rm -f[^\n]*deferred-findings\.json/),
+    );
+    // R8-2: the merge internals themselves (a one-token retarget of the
+    // redirect silently truncated the carried set).
+    expect(repairStep).toContain(
+      '> "${WORKDIR}/deferred-findings.carry.next" 2> /dev/null; then',
+    );
+    expect(repairStep).toContain(
+      'mv "${WORKDIR}/deferred-findings.carry.next" \\\n                  "${WORKDIR}/deferred-findings.carry.json"',
+    );
+    expect(repairStep).toContain(
+      '::warning::could not merge carried deferrals across the repair',
+    );
+    // R8-3: that branch discards THIS run's set, so it dumps it first —
+    // `::` neutralized, like every other echo of agent-written content.
+    expect(repairStep).toMatch(
+      /could not merge carried deferrals[\s\S]*?head -c 4000 "\$\{WORKDIR\}\/deferred-findings\.json" \| sed 's\/::\/;;\/g'/,
     );
     expect(reviewAddressJob).toContain(
       'mv "${WORKDIR}/deferred-findings.json" \\\n                "${WORKDIR}/deferred-findings.carry.json"',
@@ -10749,6 +10817,10 @@ exit 1
     });
     expect(anchored.calls).toContain('api repos/o/r/issues/42/comments');
     expect(anchored.calls).toContain('- rc:3');
+    // Negative half: PR #9 carries the same marker and must never be adopted
+    // as the tracking issue (positive-only assertions passed an
+    // adopt-and-append-to-everything mutation).
+    expect(anchored.calls).not.toContain('issues/9/comments');
     // A failed body read SKIPS the round — never treated as empty history.
     const readFail = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
@@ -10883,6 +10955,13 @@ exit 1
     expect(markerless.calls).toContain('-f title=');
     expect(markerless.calls).not.toContain('issues/41/comments');
     expect(upsertDeferredScript).toContain('creator=${AUTOFIX_BOT}');
+    // The page loop's correctness rests on these: newest-first ordering makes
+    // "first match wins" find THIS PR's issue, and per_page=100 is what the
+    // short-page-means-exhausted test compares against. The recording stub
+    // serves pages by index and cannot see query parameters.
+    expect(upsertDeferredScript).toContain(
+      'per_page=100&sort=created&direction=desc&page=${lookup_page}',
+    );
     expect(upsertDeferredScript).toContain('contains($m)');
     // Marker neutralization is behavioural, not just a source pin: a comment
     // opener in agent-influenced content reaches the write call defused.
@@ -11871,8 +11950,15 @@ exit 1
     const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
     expect(escapeSites).toHaveLength(9);
     // The tenth agent-derived publish site lives in the staged
-    // upsert-deferred-issue.sh (line builder) and is pinned there.
-    expect(upsertDeferredScript).toContain("sed 's/<!--/<!\\\\-\\\\-/g'");
+    // upsert-deferred-issue.sh (line builder). Same treatment as its
+    // siblings — count AND canonical spelling, not mere presence: a no-op
+    // `\-\-` spelling once shipped past a presence-only pin.
+    const scriptEscapeSites =
+      upsertDeferredScript.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
+    expect(scriptEscapeSites).toHaveLength(1);
+    for (const site of scriptEscapeSites) {
+      expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
+    }
     for (const site of escapeSites) {
       expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
     }
