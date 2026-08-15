@@ -974,7 +974,14 @@ export function guardProbeShapes(
   ts: string,
 ): { audits: string[]; tmp: string[] } {
   return {
-    audits: [`${ts}-${reportFileName}`, `audit-${ts}.sidecar`],
+    audits: [
+      `${ts}-${reportFileName}`,
+      // The sidecar is a DIRECTORY (sidecar.json, diff.patch, untracked
+      // copies): git applies a trailing-slash re-include only to paths it
+      // knows are directories, so a file-shaped probe never sees it —
+      // probe the child file the snapshot actually writes.
+      `audit-${ts}.sidecar/sidecar.json`,
+    ],
     tmp: [
       `audit-args-${ts}.json`,
       `audit-raw-args-${ts}.txt`,

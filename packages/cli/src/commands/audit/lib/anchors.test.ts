@@ -9,7 +9,11 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseReportFindings, resolveAnchors } from './anchors.js';
+import {
+  AUDIT_ANCHOR_MAX_LINES,
+  parseReportFindings,
+  resolveAnchors,
+} from './anchors.js';
 import { buildFilesPlan, collectAuditFiles } from './files-plan.js';
 import type { FilesPlan } from './files-plan.js';
 
@@ -71,6 +75,7 @@ describe('parseReportFindings', () => {
 - Anchor: const x = 1;
 const y = x;
 - Issue: a
+- Failure scenario: b
 `;
     const findings = parseReportFindings(multi);
     expect(findings[0].anchor).toBe('const x = 1;\nconst y = x;');
@@ -123,6 +128,7 @@ const y = x;
       '- Anchor: const x = 1;',
       '- const y = x;',
       '- Issue: a',
+      '- Failure scenario: b',
     ].join('\n');
     // "- const y = x;" is snippet content, not a finding field: collection
     // ends only on a recognized field name.
@@ -152,6 +158,7 @@ const y = x;
       '   - Issue: quoted, not a field',
       'const z = x;',
       '- Issue: the real issue',
+      '- Failure scenario: b',
     ].join('\n');
     expect(parseReportFindings(embedded)[0].anchor).toBe(
       'const x = 1;\n   - Issue: quoted, not a field\nconst z = x;',
@@ -164,6 +171,7 @@ const y = x;
       '- Location: dup.ts:1',
       '- Anchor: const x = 1;',
       '- Failure scenario: trigger',
+      '### [Suggestion] next finding',
     ].join('\n');
     expect(parseReportFindings(noIssue)[0].anchor).toBe('const x = 1;');
   });
@@ -188,6 +196,7 @@ const y = x;
       '  - Anchor: const x = 1;',
       '  const y = x;',
       '  - Issue: a',
+      '- Failure scenario: b',
     ].join('\n');
     expect(parseReportFindings(indented)[0].anchor).toBe(
       'const x = 1;\nconst y = x;',
@@ -203,6 +212,7 @@ const y = x;
       'const y = x;',
       '```',
       '- Issue: a',
+      '- Failure scenario: b',
     ].join('\n');
     expect(parseReportFindings(fenced)[0].anchor).toBe(
       'const x = 1;\nconst y = x;',
@@ -215,6 +225,7 @@ const y = x;
       '- location: unique.ts:1',
       '- ANCHOR: export const uniqueToken = 42;',
       '- Failure Scenario: x',
+      '- severity: s',
     ].join('\n');
     const findings = parseReportFindings(deviated);
     expect(findings[0].locations).toEqual(['unique.ts']);
@@ -488,6 +499,7 @@ const y = x;
       '- Anchor: const x = 1; ',
       'const y = x;',
       '- Issue: a',
+      '- Failure scenario: b',
     ].join('\n');
     const findings = parseReportFindings(trailing);
     expect(findings[0].anchor).toBe('const x = 1;\nconst y = x;');
@@ -503,6 +515,7 @@ const y = x;
       '  const y = x;',
       '  ```',
       '- Issue: a',
+      '- Failure scenario: b',
     ].join('\n');
     const findings = parseReportFindings(indentedFence);
     expect(findings[0].anchor).toBe('const x = 1;\nconst y = x;');
@@ -518,6 +531,7 @@ const y = x;
       'key: value',
       '```',
       '- Issue: a',
+      '- Failure scenario: b',
     ].join('\n');
     const findings = parseReportFindings(fencedYaml);
     expect(findings).toHaveLength(1);
@@ -749,6 +763,7 @@ describe('resolveAnchors', () => {
         '  const a = 1;',
         '  const b = a;',
         '- Issue: a',
+        '- Failure scenario: b',
       ].join('\n'),
     );
     // push() dedents the needle to column 0; the file keeps its indent —
@@ -919,6 +934,7 @@ describe('resolveAnchors', () => {
         '    doIt();',
         '}',
         '- Issue: a',
+        '- Failure scenario: b',
       ].join('\n'),
     );
     expect(findings[0].anchor).toBe('    doIt();\n}');
@@ -943,6 +959,7 @@ describe('resolveAnchors', () => {
         'const a = 1;',
         'const b = 2;',
         '- Issue: a',
+        '- Failure scenario: b',
       ].join('\n'),
     );
     expect(resolveAnchors(findings, trailPlan)[0].verdict).toBe('resolved');
@@ -969,6 +986,7 @@ describe('resolveAnchors', () => {
         'const a = 1;',
         'const b = 2;',
         '- Issue: a',
+        '- Failure scenario: b',
       ].join('\n'),
     );
     expect(resolveAnchors(findings, prefixPlan)[0].verdict).toBe('resolved');
@@ -991,6 +1009,7 @@ describe('resolveAnchors', () => {
         'const x = 1;',
         'const y = x;',
         '- Issue: a',
+        '- Failure scenario: b',
       ].join('\n'),
     );
     expect(resolveAnchors(findings, midPlan)[0]).toMatchObject({
@@ -1247,5 +1266,176 @@ describe('resolveAnchors', () => {
     );
     expect(results[0].verdict).toBe('unresolved');
     expect(results[1].verdict).toBe('resolved');
+  });
+
+  it('keeps every field-shaped line quoted at EOF in the needle', () => {
+    // EOF supplies no confirming line for ANY field shape: a quoted
+    // `- Issue:` / `- Failure scenario:` / `- Severity:` last line may be
+    // snippet content, and dropping it certifies the truncated prefix —
+    // the same fail-open the round-6 Location/Anchor arm closed.
+    writeFileSync(join(dir, 'template2.ts'), 'template says\n');
+    const templatePlan = buildFilesPlan(
+      dir,
+      dir,
+      'medium',
+      collectAuditFiles(dir),
+    );
+    for (const field of ['Issue', 'Failure scenario', 'Severity']) {
+      const findings = parseReportFindings(
+        [
+          '### [Critical] eof quote',
+          '- Location: template2.ts:1',
+          '- Anchor: template says',
+          `- ${field}: hallucinated line never in the file`,
+        ].join('\n'),
+      );
+      expect(findings[0].anchor).toBe(
+        `template says\n- ${field}: hallucinated line never in the file`,
+      );
+      expect(resolveAnchors(findings, templatePlan)[0].verdict).toBe(
+        'unresolved',
+      );
+    }
+  });
+
+  it('counts an occurrence whose deepest line is a middle line', () => {
+    // The window-minimum, first-, last-, and offset bases never equal a
+    // MIDDLE line's depth: the max-indent base dedents the deepest line
+    // exactly and clamps the shallower ones (which carry no needle indent
+    // to preserve). Without it a wrapped call quoted from an indented body
+    // escapes both matchers and a correctly-anchored finding is refused.
+    writeFileSync(join(dir, 'middeep.ts'), ' a();\n  b();\n c();\n');
+    writeFileSync(join(dir, 'wrapped.ts'), ' foo(\n  bar,\n baz);\n');
+    const midPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [
+        {
+          title: 'middle deepest',
+          severity: 'Critical',
+          locations: ['middeep.ts'],
+          anchor: 'a();\nb();\nc();',
+        },
+        {
+          title: 'wrapped call',
+          severity: 'Critical',
+          locations: ['wrapped.ts'],
+          anchor: 'foo(\nbar,\nbaz);',
+        },
+      ],
+      midPlan,
+    );
+    expect(results[0]).toMatchObject({ verdict: 'resolved', matchCount: 1 });
+    expect(results[1]).toMatchObject({ verdict: 'resolved', matchCount: 1 });
+  });
+
+  it('grades a needle over the line cap unresolved without scanning', () => {
+    // The matcher is O((H-N)*N) on agent-authored input; uncapped, a 30k
+    // line needle against a 60k line file stalled the synchronous gate for
+    // 71 s and extrapolates to hours near the read cap.
+    writeFileSync(
+      join(dir, 'huge.ts'),
+      `${Array.from({ length: 2500 }, () => 'x').join('\n')}\n`,
+    );
+    const hugePlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const result = resolveAnchors(
+      [
+        {
+          title: 'oversized',
+          severity: 'Critical',
+          locations: ['huge.ts'],
+          anchor: Array.from(
+            { length: AUDIT_ANCHOR_MAX_LINES + 1 },
+            () => 'x',
+          ).join('\n'),
+        },
+      ],
+      hugePlan,
+    )[0];
+    expect(result).toMatchObject({ verdict: 'unresolved', matchCount: 0 });
+  });
+
+  it('binds a caller registered with platform-native backslashes', () => {
+    // Callers arrive absolute and platform-native (backslashed on Windows)
+    // while the parser backslash-normalizes every citation; membership
+    // compares both sides forward-slashed or no Windows caller binds. The
+    // verdict must NOT be out-of-scope: the citation names a registered
+    // caller (unreadable here, so the read arm grades it unresolved).
+    const result = resolveAnchors(
+      [
+        {
+          title: 'win caller',
+          severity: 'Critical',
+          locations: ['C:/repo/caller.ts'],
+          anchor: 'anything',
+        },
+      ],
+      plan,
+      ['C:\\repo\\caller.ts'],
+    )[0];
+    expect(result.verdict).not.toBe('out-of-scope');
+  });
+
+  it('guards the leading edge of a quoted line, not just the tail', () => {
+    // The follow rule guards the needle's trailing edge; an unguarded
+    // leading edge fuses 'bar()' into 'foobar()' and certifies a quoted
+    // line that is not in the file. The multi-line mid-line raw scan gets
+    // both edges: a hit whose preceding character is an identifier char or
+    // whose last line fuses into the file line is refused.
+    writeFileSync(join(dir, 'lead.ts'), 'foobar()\n');
+    writeFileSync(join(dir, 'leadmid1.ts'), 'x = bar() + 1;\n');
+    writeFileSync(join(dir, 'leadmid2.ts'), 'const z = obj.bar()\n');
+    writeFileSync(join(dir, 'leadmulti.ts'), 'xfoo()\nreturn x2;\n');
+    writeFileSync(join(dir, 'leadmultifuse.ts'), 'a foo()\nreturn x2;\n');
+    writeFileSync(join(dir, 'leadmultiok.ts'), 'a = foo()\nreturn x // r\n');
+    const leadPlan = buildFilesPlan(dir, dir, 'medium', collectAuditFiles(dir));
+    const results = resolveAnchors(
+      [
+        {
+          title: 'leading fusion',
+          severity: 'Critical',
+          locations: ['lead.ts'],
+          anchor: 'bar()',
+        },
+        {
+          title: 'leading boundary after space',
+          severity: 'Critical',
+          locations: ['leadmid1.ts'],
+          anchor: 'bar()',
+        },
+        {
+          title: 'leading boundary after dot',
+          severity: 'Critical',
+          locations: ['leadmid2.ts'],
+          anchor: 'bar()',
+        },
+        {
+          title: 'multi-line leading fusion',
+          severity: 'Critical',
+          locations: ['leadmulti.ts'],
+          anchor: 'foo()\nreturn x',
+        },
+        {
+          title: 'multi-line trailing fusion',
+          severity: 'Critical',
+          locations: ['leadmultifuse.ts'],
+          anchor: 'foo()\nreturn x',
+        },
+        {
+          title: 'multi-line mid-line clean',
+          severity: 'Critical',
+          locations: ['leadmultiok.ts'],
+          anchor: 'foo()\nreturn x',
+        },
+      ],
+      leadPlan,
+    );
+    expect(results[0].verdict).toBe('unresolved');
+    // Space- and dot-preceded hits are non-identifier boundaries and stay
+    // countable ('x = bar() + 1;' and 'const z = obj.bar()').
+    expect(results[1]).toMatchObject({ verdict: 'resolved', matchCount: 1 });
+    expect(results[2]).toMatchObject({ verdict: 'resolved', matchCount: 1 });
+    expect(results[3].verdict).toBe('unresolved');
+    expect(results[4].verdict).toBe('unresolved');
+    expect(results[5]).toMatchObject({ verdict: 'resolved', matchCount: 1 });
   });
 });

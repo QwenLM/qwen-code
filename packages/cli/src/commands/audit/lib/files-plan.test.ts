@@ -1471,6 +1471,20 @@ describe('git-backed checks', () => {
     );
   });
 
+  it('a directory-form sidecar re-include leaves the audits dir unprotected', () => {
+    // The sidecar is a DIRECTORY; git applies a trailing-slash re-include
+    // only to paths it knows are directories, so it is invisible to a
+    // file-shaped probe — the probe asks about a child file of the sidecar.
+    const repo = initRepo();
+    writeFileSync(
+      join(repo, '.gitignore'),
+      '.qwen/*\n!.qwen/audits/\n.qwen/audits/*\n!.qwen/audits/*.sidecar/\n',
+    );
+    expect(checkLocalOnlyGuard(repo, 'x.md').dirs[0].status).toBe(
+      'unprotected',
+    );
+  });
+
   // ':' is a reserved Win32 filename character, so the ':weird' fixture
   // directory cannot be created on Windows.
   it.skipIf(process.platform === 'win32')(
