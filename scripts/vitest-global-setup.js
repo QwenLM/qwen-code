@@ -75,32 +75,53 @@ function readManifest(packageDir) {
   );
 }
 
+// Specifiers aliased to TypeScript source in a consumer's vitest config
+// (keys of `resolve.alias`, e.g. `'@qwen-code/acp-bridge/bridgeErrors'`).
+// Dist targets behind an aliased specifier are never resolved from dist/
+// during test collection, so probing them would block runs that pass.
+// Alias keys are matched as quoted object keys containing a `/` — the only
+// such keys in these configs are specifier aliases. An unreadable config
+// yields an empty set (probe everything).
+export function aliasedSpecifiers(configPath) {
+  let source;
+  try {
+    source = readFileSync(configPath, 'utf8');
+  } catch {
+    return new Set();
+  }
+  return new Set(
+    [...source.matchAll(/'([^']*\/[^']*)':/g)].map((match) => match[1]),
+  );
+}
+
 // Every file under `dist/` that the manifest's `exports`/`main` entries
-// point at. Checking all of them (not only the '.' entry) also covers
-// unaliased subpath imports such as
-// `@qwen-code/acp-bridge/sessionRestoreTimeout`; a package whose dist is
-// missing any listed file would still break test collection. Note that dist
-// files reachable only through a root-index re-export are not listed in
-// `exports` and remain outside this probe.
-export function distEntryFiles(packageDir) {
-  const manifest = readManifest(packageDir);
+// point at, each paired with the import specifier it serves. Checking all
+// of them (not only the '.' entry) also covers unaliased subpath imports
+// such as `@qwen-code/acp-bridge/sessionRestoreTimeout`; a package whose
+// dist is missing any listed file would still break test collection. Note
+// that dist files reachable only through a root-index re-export are not
+// listed in `exports` and remain outside this probe.
+export function distEntryFiles(manifest, packageDir) {
   const files = [];
-  const collect = (target) => {
+  const name = manifest.name;
+  const collect = (specifier, target) => {
     // Wildcard pattern entries (`"./dist/*": "./dist/*"`) name no individual
     // file and cannot be enumerated here; skip them. Normalize targets without
     // a leading `./` — all guarded manifests spell `"main": "dist/index.js"`.
     if (typeof target !== 'string' || target.includes('*')) return;
     const normalized = target.startsWith('./') ? target : `./${target}`;
     if (normalized.startsWith('./dist/')) {
-      files.push(path.join(packageDir, normalized));
+      files.push({ specifier, file: path.join(packageDir, normalized) });
     }
   };
-  for (const entry of Object.values(manifest.exports ?? {})) {
-    if (typeof entry === 'string') collect(entry);
+  for (const [key, entry] of Object.entries(manifest.exports ?? {})) {
+    const specifier =
+      key === '.' ? name : `${name}/${key.replace(/^\.\//, '')}`;
+    if (typeof entry === 'string') collect(specifier, entry);
     else if (entry && typeof entry === 'object')
-      collect(entry.import ?? entry.default);
+      collect(specifier, entry.import ?? entry.default);
   }
-  collect(manifest.main);
+  collect(name, manifest.main);
   return files;
 }
 
@@ -117,15 +138,16 @@ export function findMissingPrerequisites(packageRelPath, root = repoRoot) {
     return [];
   }
 
+  const aliased = aliasedSpecifiers(path.join(root, key, 'vitest.config.ts'));
   const missing = [];
   for (const rel of distPackages ?? []) {
     const packageDir = path.join(root, rel);
     let name;
-    let entryFiles;
+    let enumerated;
     try {
       const manifest = readManifest(packageDir);
       name = manifest.name;
-      entryFiles = distEntryFiles(packageDir);
+      enumerated = distEntryFiles(manifest, packageDir);
     } catch {
       // A missing directory or unreadable manifest is itself a missing
       // prerequisite; report it through the normal exit path instead of
@@ -135,7 +157,7 @@ export function findMissingPrerequisites(packageRelPath, root = repoRoot) {
       );
       continue;
     }
-    if (entryFiles.length === 0) {
+    if (enumerated.length === 0) {
       // Zero enumeration means the manifest exposes no ./dist/ target the
       // probe understands (e.g. a require-only or nested-condition entry).
       // Fail loud instead of silently passing — a stale probe must not
@@ -144,6 +166,15 @@ export function findMissingPrerequisites(packageRelPath, root = repoRoot) {
         `  - ${rel}: package.json exposes no dist/ entry files to check` +
           ' (guard probe may be stale)',
       );
+      continue;
+    }
+    // Entries served by a source alias in the consumer's vitest config never
+    // resolve from dist/ during collection; probing them would fail runs
+    // whose aliased dist files simply have not been (re)built.
+    const entryFiles = enumerated
+      .filter(({ specifier }) => !aliased.has(specifier))
+      .map(({ file }) => file);
+    if (entryFiles.length === 0) {
       continue;
     }
     const absent = entryFiles.find((file) => !existsSync(file));
@@ -170,7 +201,13 @@ export function findMissingPrerequisites(packageRelPath, root = repoRoot) {
 }
 
 export function formatPrerequisiteMessage(missing) {
-  return [
+  const hasGenerated = missing.some((line) =>
+    line.includes('generated file does not exist'),
+  );
+  const hasStaleProbe = missing.some((line) =>
+    line.includes('guard probe may be stale'),
+  );
+  const lines = [
     '',
     'Unit-test build prerequisites are missing (fresh checkout detected):',
     '',
@@ -182,10 +219,22 @@ export function formatPrerequisiteMessage(missing) {
     '',
     '    npm run build',
     '',
-    'then re-run the tests. (To only regenerate git-commit.ts, run',
-    '"npm run generate" instead.)',
-    '',
-  ].join('\n');
+  ];
+  if (hasGenerated) {
+    lines.push(
+      'To only regenerate git-commit.ts, run "npm run generate" instead.',
+      '',
+    );
+  }
+  if (hasStaleProbe) {
+    lines.push(
+      'Note: a "guard probe may be stale" line above means the guard itself',
+      'needs updating to match the package manifest; "npm run build" alone',
+      'will not clear it.',
+      '',
+    );
+  }
+  return lines.join('\n');
 }
 
 function realpathOrSelf(p) {
@@ -224,7 +273,10 @@ export default function checkUnitTestPrerequisites(project) {
   // vitest is launched as `vitest run --root packages/cli` from elsewhere.
   // Fall back to process.cwd() when invoked outside vitest.
   const cwd = project?.config?.root ?? process.cwd();
-  const exitCode = checkAndReport({ cwd });
+  // QWEN_VITEST_GUARD_ROOT lets the tests exercise this entry point against
+  // a hermetic fixture checkout; production never sets it.
+  const root = process.env['QWEN_VITEST_GUARD_ROOT'] || undefined;
+  const exitCode = checkAndReport({ cwd, root });
   if (exitCode !== 0) {
     // Exit directly instead of throwing: a thrown error surfaces as an
     // "Unhandled Error" after vitest's reporter has already printed a

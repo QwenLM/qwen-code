@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
@@ -15,16 +16,19 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import checkUnitTestPrerequisites, {
   DIST_PREREQUISITES,
   GENERATED_PREREQUISITES,
+  aliasedSpecifiers,
   checkAndReport,
   findMissingPrerequisites,
   formatPrerequisiteMessage,
   normalizePackageKey,
-  repoRoot,
 } from '../vitest-global-setup.js';
+
+const guardUrl = new URL('../vitest-global-setup.js', import.meta.url);
 
 // Mirrors the real manifest shapes: most channel packages declare their entry
 // via exports['.'].default, while acp-bridge/web-templates use exports['.'].import.
@@ -134,11 +138,27 @@ describe('vitest-global-setup prerequisite guard', () => {
     expect(missing[0]).toContain('has not been built');
   });
 
-  it('names the fix command in the formatted message', () => {
-    const message = formatPrerequisiteMessage(['  - packages/x: nope']);
+  it('names the fix command and the git-commit remedy only when applicable', () => {
+    const withGenerated = formatPrerequisiteMessage([
+      '  - packages/cli/src/generated/git-commit.ts: generated file does not exist',
+    ]);
+    expect(withGenerated).toContain('npm run build');
+    expect(withGenerated).toContain('npm run generate');
+
+    const distOnly = formatPrerequisiteMessage([
+      '  - packages/x: workspace package "x" has not been built (missing packages/x/dist/index.js)',
+    ]);
+    expect(distOnly).toContain('npm run build');
+    expect(distOnly).not.toContain('npm run generate');
+  });
+
+  it('flags a stale probe line with its own remedy note', () => {
+    const message = formatPrerequisiteMessage([
+      '  - packages/x: package.json exposes no dist/ entry files to check (guard probe may be stale)',
+    ]);
     expect(message).toContain('npm run build');
-    expect(message).toContain('packages/x: nope');
-    expect(message).toContain('npm run generate');
+    expect(message).toContain('guard itself');
+    expect(message).toContain('will not clear it');
   });
 });
 
@@ -197,6 +217,57 @@ describe('subpath exports entries are probed', () => {
     const missing = findMissingPrerequisites('packages/cli', root);
     expect(missing).toHaveLength(1);
     expect(missing[0]).toContain('session-restore-timeout.js');
+  });
+
+  it('does not probe dist targets the consumer aliases to source', () => {
+    root = buildFixtureRoot();
+    const bridgeDir = path.join(root, 'packages/acp-bridge');
+    writeFileSync(
+      path.join(bridgeDir, 'package.json'),
+      JSON.stringify({
+        name: 'fake-acp-bridge',
+        exports: {
+          '.': { import: './dist/index.js' },
+          './aliasedSubpath': { import: './dist/aliased-subpath.js' },
+          './plainSubpath': { import: './dist/plain-subpath.js' },
+        },
+      }),
+    );
+    writeFileSync(
+      path.join(root, 'packages/cli', 'vitest.config.ts'),
+      [
+        "import { defineConfig } from 'vitest/config';",
+        'export default defineConfig({',
+        '  resolve: {',
+        '    alias: {',
+        "      'fake-acp-bridge/aliasedSubpath': '../acp-bridge/src/aliased-subpath.ts',",
+        '    },',
+        '  },',
+        '});',
+        '',
+      ].join('\n'),
+    );
+
+    // Both subpath dist files are missing, but only the unaliased one may
+    // block: the aliased specifier resolves from source during collection.
+    const missing = findMissingPrerequisites('packages/cli', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('plain-subpath.js');
+    expect(missing[0]).not.toContain('aliased-subpath.js');
+  });
+
+  it('reads the consumer alias set from its vitest config', () => {
+    root = buildFixtureRoot();
+    const configPath = path.join(root, 'packages/cli', 'vitest.config.ts');
+    writeFileSync(
+      configPath,
+      "alias: { '@qwen-code/acp-bridge/status': 'x', '@qwen-code/sdk/daemon': 'y' }",
+    );
+    const aliases = aliasedSpecifiers(configPath);
+    expect(aliases.has('@qwen-code/acp-bridge/status')).toBe(true);
+    expect(aliases.has('@qwen-code/sdk/daemon')).toBe(true);
+    // A missing config yields an empty set rather than throwing.
+    expect(aliasedSpecifiers(path.join(root, 'nope.ts'))).toEqual(new Set());
   });
 });
 
@@ -284,6 +355,21 @@ describe('DIST_PREREQUISITES stays in sync with channel-registry', () => {
   });
 });
 
+describe('vitest configs stay wired to the guard', () => {
+  it.each(['packages/cli', 'packages/core'])(
+    '%s/vitest.config.ts wires the globalSetup guard',
+    (pkg) => {
+      const configPath = fileURLToPath(
+        new URL(`../../${pkg}/vitest.config.ts`, import.meta.url),
+      );
+      const source = readFileSync(configPath, 'utf8');
+      expect(source).toContain(
+        "globalSetup: '../../scripts/vitest-global-setup.js'",
+      );
+    },
+  );
+});
+
 describe('guard probe edge cases (round 3)', () => {
   let root;
   afterEach(() => {
@@ -345,27 +431,52 @@ describe('guard probe edge cases (round 3)', () => {
   });
 });
 
+// The default export is what vitest actually invokes. These tests drive it
+// against a hermetic fixture checkout (via QWEN_VITEST_GUARD_ROOT) instead of
+// the real repository state, so they hold on an unbuilt worktree too — the
+// exact scenario the guard targets.
 describe('default export (the vitest globalSetup entry)', () => {
+  let root;
   afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+    root = undefined;
+    delete process.env['QWEN_VITEST_GUARD_ROOT'];
     vi.restoreAllMocks();
   });
 
-  it('extracts the project root and does not exit when prerequisites are ready', () => {
+  it('uses the vitest project root and exits 1 when prerequisites are missing', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/channels/base/dist/index.js'));
+    process.env['QWEN_VITEST_GUARD_ROOT'] = root;
     const exitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     checkUnitTestPrerequisites({
-      config: { root: path.join(repoRoot, 'packages/cli') },
+      config: { root: path.join(root, 'packages/cli') },
+    });
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errSpy.mock.calls[0][0]).toContain('packages/channels/base');
+  });
+
+  it('does not exit when the hermetic checkout is ready', () => {
+    root = buildFixtureRoot();
+    process.env['QWEN_VITEST_GUARD_ROOT'] = root;
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    checkUnitTestPrerequisites({
+      config: { root: path.join(root, 'packages/cli') },
     });
     expect(exitSpy).not.toHaveBeenCalled();
     expect(errSpy).not.toHaveBeenCalled();
   });
 
   it('falls back to process.cwd() when invoked without a project', () => {
-    vi.spyOn(process, 'cwd').mockReturnValue(
-      path.join(repoRoot, 'packages/cli'),
-    );
+    root = buildFixtureRoot();
+    process.env['QWEN_VITEST_GUARD_ROOT'] = root;
+    vi.spyOn(process, 'cwd').mockReturnValue(path.join(root, 'packages/cli'));
     const exitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined);
@@ -373,5 +484,40 @@ describe('default export (the vitest globalSetup entry)', () => {
     checkUnitTestPrerequisites(undefined);
     expect(exitSpy).not.toHaveBeenCalled();
     expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  // Subprocess-level coverage: a real `node` process runs the default export
+  // end to end, so neutralizing `process.exit` or breaking the root
+  // derivation flips the observable exit status.
+  function runGuardSubprocess(cwd) {
+    return spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import guard from ${JSON.stringify(guardUrl.href)}; guard();`,
+      ],
+      {
+        cwd,
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VITEST_GUARD_ROOT: root },
+      },
+    );
+  }
+
+  it('subprocess: exits 1 and prints the fix command on a broken checkout', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/channels/base/dist/index.js'));
+    const res = runGuardSubprocess(path.join(root, 'packages/cli'));
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('npm run build');
+    expect(res.stderr).toContain('packages/channels/base');
+  });
+
+  it('subprocess: exits 0 silently on a ready checkout', () => {
+    root = buildFixtureRoot();
+    const res = runGuardSubprocess(path.join(root, 'packages/cli'));
+    expect(res.status).toBe(0);
+    expect(res.stderr).toBe('');
   });
 });
