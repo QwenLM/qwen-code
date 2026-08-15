@@ -2756,14 +2756,22 @@ jobs:
           # narrowing the gate to n/a. A git failure here is pre-build
           # infrastructure and must fail the step loudly; only a no-match
           # grep may produce an empty list.
-          # core.quotePath=false: with the default, a non-ASCII filename is
-          # emitted C-quoted and silently fails the extension grep below,
-          # narrowing the gate without a skip-log entry.
-          files="$(git -c core.quotePath=false diff --name-only --diff-filter=ACMR 'HEAD^1' HEAD)"
-          printf '%s\n' "$files" \
-            | grep -E '\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$' \
-            > "${RUNNER_TEMP:?}/flake-gate-files" || true
-          echo "Recorded $(grep -c . "$RUNNER_TEMP/flake-gate-files" || true) changed test file(s) for the flakiness gate."
+          # NUL-delimited END TO END (-z / grep -z / gate `read -d ''`):
+          # line-based intake silently dropped every filename git C-quotes —
+          # quotePath=false only stops quoting of bytes >= 0x80, while ASCII
+          # specials (backslash, tab, quote, control chars, and the
+          # line-breaking newline itself) stay quoted and fail a `$`-anchored
+          # line grep with no skip-log entry. NUL is the one byte a path
+          # cannot contain. NOTE: the git output must never pass through a
+          # command substitution — `$( )` strips NUL bytes.
+          git -c core.quotePath=false diff -z --name-only --diff-filter=ACMR 'HEAD^1' HEAD \
+            > "${RUNNER_TEMP:?}/flake-gate-files-all"
+          # .mts/.cts included: vitest's default include set collects them.
+          grep -zE '\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$' \
+            "$RUNNER_TEMP/flake-gate-files-all" \
+            > "$RUNNER_TEMP/flake-gate-files" || true
+          rm -f "$RUNNER_TEMP/flake-gate-files-all"
+          echo "Recorded $(tr -cd '\0' < "$RUNNER_TEMP/flake-gate-files" | wc -c) changed test file(s) for the flakiness gate."
 
       - name: 'Clear stale npm cache'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2951,7 +2959,13 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
           LOG="${RUNNER_TEMP:?}/flake-gate.log"
           LIST="$RUNNER_TEMP/flake-gate-files"
+          # Per-invocation detail (round lines, failure tails) goes to a
+          # SEPARATE file and is appended after the verdict: the publisher
+          # embeds the FIRST 10,000 chars of the log, so the per-file matrix
+          # and verdict must sit ahead of detail that can outgrow the cap.
+          DETAIL="$RUNNER_TEMP/flake-gate-detail"
           : > "$LOG"
+          : > "$DETAIL"
           finish() {
             # Outputs carry FIXED strings and counters only — file paths are
             # PR-controlled text and belong in the log, which the publisher
@@ -2959,6 +2973,13 @@ jobs:
             echo "flake_verdict=$1" >> "$GITHUB_OUTPUT"
             echo "flake_summary=$2" >> "$GITHUB_OUTPUT"
             printf '\nverdict: %s\nsummary: %s\n' "$1" "$2" >> "$LOG"
+            # Detail LAST: the publisher embeds the first 10,000 chars, and
+            # the matrix/verdict must never be truncated away behind
+            # failure tails (full copy stays in the artifact).
+            if [ -s "$DETAIL" ]; then
+              printf -- '\n--- per-invocation detail (full copy in the artifact) ---\n' >> "$LOG"
+              cat "$DETAIL" >> "$LOG"
+            fi
             echo "Flakiness gate: $1 — $2" >> "$GITHUB_STEP_SUMMARY"
             GATE_DONE=1
             exit 0
@@ -3015,7 +3036,9 @@ jobs:
             [ -f "$1/vitest.workspace.ts" ] && return 0
             return 1
           }
-          while IFS= read -r f; do
+          # NUL-delimited to match the record step: `read -d ''` is the one
+          # framing a filename cannot break out of.
+          while IFS= read -r -d '' f; do
             [ -n "$f" ] || continue
             if [ ! -f "$f" ]; then
               add_skip "$f" 'not present in the merge tree, skipped'
@@ -3102,9 +3125,18 @@ jobs:
           # survive) drops the untracked residue `checkout -- .` never
           # touches — lock files, output dirs a test creates in round 1.
           reset_round_state() {
+            # Kill FIRST, then restore — a live daemon can re-dirty the tree
+            # after the checkout. One-shot SIGTERM races slow-draining
+            # daemons, so SIGKILL with a bounded wait, zombies disregarded
+            # (same reasoning as the agent step's process guard).
+            pkill -KILL -u node 2>/dev/null || true
+            for _ in 1 2 3; do
+              [ -n "$(ps -o pid=,stat= -u node 2>/dev/null | awk '$2 !~ /^Z/')" ] || break
+              sleep 1
+              pkill -KILL -u node 2>/dev/null || true
+            done
             runuser -u node -- git checkout -- . 2>/dev/null || true
             runuser -u node -- git clean -fd 2>/dev/null || true
-            pkill -u node || true
           }
 
           declare -a results=()
@@ -3112,6 +3144,7 @@ jobs:
           rounds_done=0
           timed_out=false
           infra_exits=0
+          uncollected=0
           round=1
           # Reset BEFORE round 1 too: PR lifecycle scripts (npm ci/build,
           # run as node) may have mutated the tree since the list was
@@ -3143,21 +3176,31 @@ jobs:
               # Timeout/signal exits (124, 128+N) are infrastructure events —
               # a runner cap or an OOM kill — not test outcomes: recorded as
               # F they would publish a fake `flaky` next to any pass.
+              # Zero-collection is its own class (`N`): a file the runner's
+              # include set rejects fails every round without one test
+              # executing — reporting that as consistent-fail would publish
+              # "deterministic, CI owns it" with both clauses false. The
+              # marker is matched from PR-controlled output, but faking it
+              # can only SUPPRESS a demotion the PR could already dodge by
+              # deleting its tests — one-way authority holds.
               mark='P'
               if [ "$status" -eq 124 ] || [ "$status" -gt 128 ]; then
                 mark='I'
                 infra_exits=$((infra_exits + 1))
+              elif [ "$status" -ne 0 ] && grep -q 'No test files found' "$out"; then
+                mark='N'
+                uncollected=$((uncollected + 1))
               elif [ "$status" -ne 0 ]; then
                 mark='F'
               fi
               results[$i]="${results[$i]:-}${mark}"
-              printf 'round %s · %s: %s (exit %s)\n' "$round" "${group_labels[$i]}" "$mark" "$status" >> "$LOG"
+              printf 'round %s · %s: %s (exit %s)\n' "$round" "${group_labels[$i]}" "$mark" "$status" >> "$DETAIL"
               if [ "$status" -ne 0 ]; then
                 {
                   printf -- '--- output tail · round %s · %s ---\n' "$round" "${group_labels[$i]}"
                   tail -c 8000 "$out"
                   printf '\n'
-                } >> "$LOG"
+                } >> "$DETAIL"
               fi
             done
             # Restore the equivalent of a clean checkout before the next
@@ -3172,11 +3215,13 @@ jobs:
 
           flaky=0
           failing=0
+          ncoll=0
           for i in "${!group_labels[@]}"; do
             case "${results[$i]:-}" in
               *P*F*|*F*P*) flaky=$((flaky + 1)) ;;
               *P*) : ;;
               *F*) failing=$((failing + 1)) ;;
+              *N*) ncoll=$((ncoll + 1)) ;;
             esac
           done
           printf '\nper-file results (P=pass F=fail I=infra-exit, one letter per run):\n' >> "$LOG"
@@ -3196,10 +3241,18 @@ jobs:
           if [ "$failing" -gt 0 ]; then
             finish consistent-fail "${failing} of ${total} changed test file(s) failed identically in every round — deterministic, so CI owns that signal"
           fi
+          if [ "$ncoll" -gt 0 ] && [ "$ncoll" -eq "$total" ]; then
+            # Every file hit a runner include-set mismatch: claiming these
+            # rounds as sampling would publish evidence about tests that
+            # never executed.
+            finish n/a "none of the ${total} changed test file(s) were collected by their runner (include-set mismatch — reasons in the log)"
+          fi
           if [ "$timed_out" = true ]; then
             finish timeout "only ${rounds_done} of ${ROUNDS} rounds fit the 15-minute budget; the completed rounds agreed"
           fi
-          finish pass "${total} changed test file(s) x ${rounds_done} identical rounds, no divergence"
+          pass_note=''
+          [ "$ncoll" -gt 0 ] && pass_note=" (${ncoll} not collected by the runner — see the log)"
+          finish pass "${total} changed test file(s) x ${rounds_done} identical rounds, no divergence${pass_note}"
 
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
@@ -4677,6 +4730,13 @@ jobs:
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
+                if [ ! -f "$FLAKE_LOG" ]; then
+                  # emit_block no-ops on a missing file: without this note
+                  # the demotion's only evidence pointer dangles when the
+                  # staging step failed (its continue-on-error keeps the
+                  # job green precisely so the verdict survives).
+                  printf 'The flakiness gate log could not be staged into the result artifact — the per-round matrix is in the gate step output of the workflow run log.\n\n'
+                fi
               fi
               printf '<details>\n<summary>中文 — 判定：%s · %s</summary>\n\n' "$QUAL_ZH" "${HEADLINE_ZH:-$HEADLINE}"
               if [ "${VERDICT:-}" = 'pass' ]; then
@@ -4695,6 +4755,9 @@ jobs:
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"
+                if [ ! -f "$FLAKE_LOG" ]; then
+                  printf '抖动门日志未能暂存进结果产物——各轮结果矩阵请查看工作流运行日志中 gate step 的输出。\n\n'
+                fi
               fi
               printf '</details>\n\n'
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then

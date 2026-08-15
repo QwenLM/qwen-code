@@ -829,56 +829,74 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       prepareIdx < flakeIdx,
       'the gate needs node_modules, so it must run after install/build',
     );
+    // And before the agent: the sampled tree must be the built tree the
+    // agent verifies, not one the agent era has already mutated.
+    assert.ok(
+      flakeIdx < verifyJob.steps.indexOf(agentStep),
+      'the gate must sample before the agent runs',
+    );
+    // The record step must fire on every run the gate can fire on — a
+    // narrower `if:` here silently starves the gate into `error`.
+    assert.equal(
+      recordStep.if,
+      "steps.pr.outputs.decision == 'run'",
+      'the record step must run whenever the lane runs',
+    );
+    // NUL-delimited end to end (round 5): quotePath=false only stops
+    // quoting of bytes >= 0x80; ASCII specials (backslash, tab, quote,
+    // control chars) stay C-quoted and silently failed a $-anchored line
+    // grep. Exact-line pins: the git statement must stand alone (a
+    // pipeline or a command substitution would swallow the exit status or
+    // the NUL bytes respectively), and the grep must read the file and
+    // carry the full extension set (.mts/.cts included — vitest's default
+    // include collects them).
     assert.match(
       recordStep.run,
-      /HEAD\^1/,
-      'diff must be against the merge base',
+      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMR 'HEAD\^1' HEAD \\$/m,
+      'the diff must be NUL-delimited, against the merge base, standalone',
     );
     assert.match(
       recordStep.run,
-      /git -c core\.quotePath=false diff --name-only/,
-      'non-ASCII filenames must not be C-quoted out of the gate list',
+      /^\s*> "\$\{RUNNER_TEMP:\?\}\/flake-gate-files-all"$/m,
+      'the raw diff must land in a file — $( ) strips NUL bytes',
     );
-    // The "two statements, not a pipeline" property is load-bearing: a git
-    // failure must fail the step loudly; only a no-match grep may yield an
-    // empty list. A `git diff ... | grep ... || true` pipeline would
-    // swallow the failure as "no changed test files" and certify the PR
-    // with an n/a gate.
-    // Exact-line pin (round-4 R2-P1): the earlier `[^|)]` separator class
-    // admitted `;`/`&` status swallowing inside the substitution, and a
-    // `git diff` adjacency check can never match the mandated `-c` form.
-    // Pinning the whole assignment leaves no room for any separator.
-    assert.match(
-      recordStep.run,
-      /^\s*files="\$\(git -c core\.quotePath=false diff --name-only --diff-filter=ACMR 'HEAD\^1' HEAD\)"$/m,
-      'git diff must run as a standalone, exactly-shaped assignment — no pipeline, no `;`/`&` status swallowing',
-    );
-    // The intake extension set is load-bearing: dropping `mjs` would
-    // silently drop .github/scripts/*.test.mjs files from the gate list in
-    // production — behavioral scenarios plant the list by hand and cannot
-    // see the record step narrow.
     assert.ok(
       recordStep.run.includes(
-        "grep -E '\\.(test|spec)\\.(ts|tsx|js|jsx|mjs|cjs)$'",
+        "grep -zE '\\.(test|spec)\\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$'",
       ),
-      'the intake extension set must stay pinned',
+      'the NUL-record grep must carry the full extension set',
     );
     assert.match(
       recordStep.run,
-      /flake-gate-files/,
-      'the record step must write the list where the gate reads it',
+      /^\s*> "\$RUNNER_TEMP\/flake-gate-files" \|\| true$/m,
+      'only a no-match grep may yield an empty list, into the exact handoff path',
+    );
+    assert.doesNotMatch(
+      recordStep.run
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n'),
+      /git[^\n]*diff[^\n]*\|/,
+      'a git failure must never be swallowable by a pipeline',
     );
     assert.match(
       flakeStep.run,
-      /flake-gate-files/,
-      'the gate must read the recorded list, not re-derive the diff',
+      /read -r -d '' f/,
+      'the gate must consume the list NUL-delimited — the one framing a filename cannot break',
     );
-    // Word-based, not adjacency: `git -c … diff` is still a re-derivation.
-    // The gate's own `git checkout`/`git clean` reset lines stay legal.
+    // Word-based and continuation-proof (round 5): `git -c … diff`, a
+    // backslash-continued `git \⏎ diff`, and log/show/whatchanged
+    // --name-only are all re-derivations. The gate's own `git checkout`/
+    // `git clean` reset lines stay legal.
     assert.doesNotMatch(
-      flakeStep.run,
+      flakeStep.run.replace(/\\\n/g, ' '),
       /\bgit\b[^\n]*\bdiff\b/,
       'the gate must not re-derive the diff from post-build git metadata in any spelling',
+    );
+    assert.doesNotMatch(
+      flakeStep.run.replace(/\\\n/g, ' '),
+      /\bgit\b[^\n]*\b(log|show|whatchanged)\b[^\n]*--name-only/,
+      'nor via history-walking verbs',
     );
   });
 
@@ -895,9 +913,16 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /^\s*timeout -k 30 600 runuser -u node -- \\$/m,
       'PR test code must run as the build user under the per-invocation timeout cap',
     );
-    assert.match(
-      flakeStep.run,
-      /unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL/,
+    // Presence AND position: the strip must precede the first invocation,
+    // or the credentials are already in the child env when PR code runs.
+    const unsetIdx = flakeStep.run.indexOf(
+      'unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL',
+    );
+    const firstInvocation = flakeStep.run.search(
+      /^\s*timeout -k 30 600 runuser -u node -- \\$/m,
+    );
+    assert.ok(
+      unsetIdx !== -1 && firstInvocation !== -1 && unsetIdx < firstInvocation,
       'cache-service credentials must be stripped before PR test code runs',
     );
     assert.match(
@@ -912,10 +937,35 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       ['FLAKE_ROUNDS', 'GH_TOKEN', 'GITHUB_TOKEN'],
       'the gate env must stay tokens-blanked and secret-free',
     );
+    // Keys AND the one non-blank value: FLAKE_ROUNDS must come from the
+    // repo variable, not a hardcoded count or a PR-influenced expression.
+    assert.equal(
+      flakeStep.env.FLAKE_ROUNDS,
+      '${{ vars.QWEN_VERIFY_FLAKE_ROUNDS }}',
+      'round count must be operator-controlled',
+    );
     assert.match(
       flakeStep.run,
       /NODE_OPTIONS='--max-old-space-size=3072' CI=true TMPDIR="\$inv_tmp"/,
       'child env must pin CI parity, the heap limit, and the per-invocation TMPDIR',
+    );
+    // The per-invocation temp dir must be recreated fresh and handed to
+    // the build user — a shared or stale TMPDIR is exactly the cross-round
+    // cache leakage the reset exists to prevent.
+    assert.match(
+      flakeStep.run,
+      /^\s*rm -rf "\$inv_tmp"$/m,
+      'inv_tmp must be flushed per invocation',
+    );
+    assert.match(
+      flakeStep.run,
+      /^\s*mkdir -p "\$inv_tmp"$/m,
+      'inv_tmp must be recreated per invocation',
+    );
+    assert.match(
+      flakeStep.run,
+      /^\s*chown node:node "\$inv_tmp"$/m,
+      'inv_tmp must be writable by the build user',
     );
     assert.match(
       flakeStep.run,
@@ -958,10 +1008,23 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /^\s*runuser -u node -- git clean -fd 2>\/dev\/null \|\| true$/m,
       'untracked round residue must be cleaned without touching gitignored build outputs',
     );
+    // Kill FIRST (a live daemon can re-dirty the tree after the checkout),
+    // with SIGKILL + a bounded wait — one-shot SIGTERM races slow-draining
+    // daemons (round 5), the same reasoning as the agent step's guard.
+    const resetKill = flakeStep.run.search(
+      /^\s*pkill -KILL -u node 2>\/dev\/null \|\| true$/m,
+    );
+    const resetCheckout = flakeStep.run.search(
+      /^\s*runuser -u node -- git checkout/m,
+    );
+    assert.ok(
+      resetKill !== -1 && resetCheckout !== -1 && resetKill < resetCheckout,
+      'the reset must SIGKILL leftover test-user processes BEFORE restoring the tree',
+    );
     assert.match(
       flakeStep.run,
-      /^\s*pkill -u node \|\| true$/m,
-      'each round must tear down leftover test-user processes',
+      /ps -o pid=,stat= -u node[^\n]*awk '\$2 !~ \/\^Z\/'/,
+      'the kill must wait out survivors, zombies disregarded',
     );
     // And the reset must also run BEFORE round 1: lifecycle scripts (npm
     // ci/build, run as node) mutate the tree between list-record and the
@@ -1042,15 +1105,33 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // green with `cp` reordered before the unlinks, reopening the planted
     // FIFO/symlink hazard. Kill racers → drop a planted dir/symlink at the
     // directory level → recreate → unlink the destination entry → copy.
+    // Line-anchored (round 5): unanchored substrings are satisfied by
+    // comments, and the guard's REACTION (the directory-level rm) must be
+    // part of the chain — an inert guard body lets mkdir/cp write through
+    // a planted symlink.
     const sr = stageStep.run;
-    const iPkill = sr.indexOf('pkill -KILL -u node');
-    const iDirGuard = sr.search(/\[ -L "\$RUNNER_TEMP\/verify-results" \]/);
-    const iMkdir = sr.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
-    const iRmDst = sr.indexOf(
-      'rm -rf -- "$RUNNER_TEMP/verify-results/flake-gate.log"',
+    const iPkill = sr.search(/^\s*pkill -KILL -u node/m);
+    const iDirGuard = sr.search(
+      /^\s*if \[ -L "\$RUNNER_TEMP\/verify-results" \] \|\|$/m,
     );
-    const iCp = sr.indexOf(
-      'cp -f "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"',
+    const iMkdir = sr.search(/^\s*mkdir -p "\$RUNNER_TEMP\/verify-results"$/m);
+    const iRmDst = sr.search(
+      /^\s*rm -rf -- "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"$/m,
+    );
+    const iCp = sr.search(
+      /^\s*cp -f "\$RUNNER_TEMP\/flake-gate\.log" "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"$/m,
+    );
+    // The guard must cover BOTH halves (symlink and non-directory) and
+    // must actually remove the entry it detects.
+    assert.match(
+      sr,
+      /\[ -L "\$RUNNER_TEMP\/verify-results" \] \|\|\s*\n\s*\{ \[ -e "\$RUNNER_TEMP\/verify-results" \] && \[ ! -d "\$RUNNER_TEMP\/verify-results" \]; \}/,
+      'the guard must catch symlinks AND non-directory plants',
+    );
+    assert.match(
+      sr,
+      /\[ -L "\$RUNNER_TEMP\/verify-results" \][\s\S]{0,200}?rm -rf -- "\$RUNNER_TEMP\/verify-results"$/m,
+      'the guard must REMOVE the planted entry, not merely detect it',
     );
     for (const [label, idx] of [
       ['pkill', iPkill],
@@ -1134,6 +1215,14 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /❌ not passed — non-deterministic tests \(flakiness gate\)/,
       'flaky must still demote the headline without the artifact',
     );
+    // The branch's only input: DOWNLOAD_OUTCOME must stay wired to the
+    // download step's outcome, or the branch is unreachable and the
+    // full-report path lies about artifacts that never arrived.
+    assert.equal(
+      publishStep.env.DOWNLOAD_OUTCOME,
+      '${{ steps.download.outcome }}',
+      'the download-failure branch input must stay wired',
+    );
   });
 
   it('the verify job timeout still covers agent + prepare + gate', () => {
@@ -1174,7 +1263,15 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   // (signal kill) — T/K model infrastructure exits, not test failures.
   const STUB_TESTRUNNER = [
     '#!/bin/bash',
+    // Round-5 guards baked into EVERY default-runner scenario: PR test code
+    // must never see the runner-injection files (env -u strip), and the
+    // operand must resolve from the invocation cwd (pins the `cd` into the
+    // owning package and the %q quoting for every arm).
+    'for v in GITHUB_OUTPUT GITHUB_STATE GITHUB_ENV GITHUB_PATH GITHUB_STEP_SUMMARY; do',
+    '  [ -z "${!v:-}" ] || { echo "runner-injection env leaked: $v"; exit 97; }',
+    'done',
     'f="${@: -1}"',
+    '[ -f "$f" ] || { echo "operand not resolvable from $PWD: $f"; exit 96; }',
     'key="$(basename "$f")"',
     'n_file="$FLAKE_SEQ_DIR/.count-$key"',
     'n=$(cat "$n_file" 2>/dev/null || echo 0)',
@@ -1205,9 +1302,12 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     'exec "$@"',
     '',
   ].join('\n');
-  // pkill is stubbed for the harness's sake, not the gate's: the real
-  // binary would kill processes owned by whoever runs these tests.
+  // pkill/ps are stubbed for the harness's sake, not the gate's: the real
+  // pkill would kill processes owned by whoever runs these tests, and a
+  // real `ps -u node` on a box with a live node user would spin the
+  // reset's wait loop.
   const STUB_PKILL = ['#!/bin/bash', 'exit 0', ''].join('\n');
+  const STUB_PS = ['#!/bin/bash', 'exit 0', ''].join('\n');
 
   const scenarioRoot = mkdtempSync(join(tmpdir(), 'flake-behavioral-'));
   after(() => rmSync(scenarioRoot, { recursive: true, force: true }));
@@ -1231,7 +1331,17 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       mkdirSync(dirname(join(ws, p)), { recursive: true });
       writeFileSync(join(ws, p), content);
     }
-    if (list !== null) writeFileSync(join(rt, 'flake-gate-files'), list);
+    if (list !== null) {
+      // Scenarios describe lists as newline text; the wire format is
+      // NUL-delimited (the record step emits `git diff -z` through
+      // `grep -z`), so convert here.
+      const framed = list
+        .split('\n')
+        .filter(Boolean)
+        .map((f) => `${f}\u0000`)
+        .join('');
+      writeFileSync(join(rt, 'flake-gate-files'), framed);
+    }
     for (const [k, v] of Object.entries(sequences)) {
       writeFileSync(join(seqDir, k), v);
     }
@@ -1264,6 +1374,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       node: STUB_TESTRUNNER,
       timeout: STUB_TIMEOUT,
       pkill: STUB_PKILL,
+      ps: STUB_PS,
       ...stubs,
     };
     for (const [name, content] of Object.entries(stubSet)) {
@@ -1311,7 +1422,13 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     } catch {
       // a scenario may legitimately abort before creating the log
     }
-    return { res, outputs, log };
+    let summary = '';
+    try {
+      summary = readFileSync(join(rt, 'github-summary'), 'utf8');
+    } catch {
+      // ditto
+    }
+    return { res, outputs, log, summary };
   };
 
   const UNIT = {
@@ -1320,12 +1437,19 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
   };
 
   it('all-pass rounds land as `pass` with exit 0', () => {
-    const { res, outputs } = runGate({
+    const { res, outputs, summary } = runGate({
       layout: UNIT,
       list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(outputs.flake_verdict, 'pass');
+    // Exact counters (round 5), not just the verdict word — and the step
+    // summary line finish() owes the run must actually be written.
+    assert.equal(
+      outputs.flake_summary,
+      '2 changed test file(s) x 5 identical rounds, no divergence',
+    );
+    assert.match(summary, /Flakiness gate: pass — 2 changed test file\(s\)/);
   });
 
   it('per-file P/F alternation is `flaky` even next to a consistently failing file, and the wrapper -e does not kill the step', () => {
@@ -1342,6 +1466,27 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.equal(outputs.flake_verdict, 'flaky');
     assert.match(log, /a\.test\.js: FFFFF/);
     assert.match(log, /b\.test\.js: PFPFP/);
+    // The publisher embeds only the FIRST 10,000 chars: the matrix and
+    // verdict must precede the failure tails or the demotion's promised
+    // evidence is truncated away in exactly the flaky runs it points at.
+    const matrixAt = log.indexOf('per-file results');
+    const verdictAt = log.indexOf('\nverdict: flaky');
+    const detailAt = log.indexOf('--- per-invocation detail');
+    assert.ok(
+      matrixAt !== -1 && verdictAt !== -1 && detailAt !== -1,
+      'log must carry matrix, verdict, and detail sections',
+    );
+    assert.ok(
+      matrixAt < verdictAt && verdictAt < detailAt,
+      'matrix and verdict must precede the failure detail',
+    );
+    // And the failure tails themselves — the content that can outgrow the
+    // embed cap — must all sit behind the verdict, not just the marker.
+    const firstTail = log.indexOf('--- output tail');
+    assert.ok(
+      firstTail !== -1 && firstTail > verdictAt,
+      'failure tails must never precede the matrix/verdict',
+    );
     // Gate outputs are embedded UNESCAPED into the published comment: they
     // must stay fixed text plus counters, never PR-controlled strings.
     assert.match(
@@ -1364,6 +1509,10 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     });
     assert.equal(res.status, 0, `gate died under the wrapper: ${res.stderr}`);
     assert.equal(outputs.flake_verdict, 'consistent-fail');
+    assert.equal(
+      outputs.flake_summary,
+      '1 of 1 changed test file(s) failed identically in every round — deterministic, so CI owns that signal',
+    );
   });
 
   it('timeout/signal exits are infrastructure, never F marks or fake flakiness', () => {
@@ -1475,21 +1624,23 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     assert.match(log, /marker\.test\.js: PPPPP/);
   });
 
+  // Scripted clock shared by the wall-budget scenarios: one value per
+  // `date +%s` call, last value repeating.
+  const STUB_DATE = [
+    '#!/bin/bash',
+    'n_file="$FLAKE_SEQ_DIR/.count-date"',
+    'n=$(cat "$n_file" 2>/dev/null || echo 0)',
+    'echo $((n+1)) > "$n_file"',
+    'mapfile -t vals < "$FLAKE_SEQ_DIR/dates"',
+    'i=$n',
+    '[ "$i" -ge "${#vals[@]}" ] && i=$((${#vals[@]} - 1))',
+    'echo "${vals[$i]}"',
+    '',
+  ].join('\n');
+
   it('wall-budget expiry before two full rounds is the informational timeout verdict', () => {
-    // A scripted `date` stub drives the clock: deadline init at 0 (so the
-    // budget ends at 900), round 1 checked at 100 and run, round 2 checked
-    // at 1000 — expired with only one full round done.
-    const STUB_DATE = [
-      '#!/bin/bash',
-      'n_file="$FLAKE_SEQ_DIR/.count-date"',
-      'n=$(cat "$n_file" 2>/dev/null || echo 0)',
-      'echo $((n+1)) > "$n_file"',
-      'mapfile -t vals < "$FLAKE_SEQ_DIR/dates"',
-      'i=$n',
-      '[ "$i" -ge "${#vals[@]}" ] && i=$((${#vals[@]} - 1))',
-      'echo "${vals[$i]}"',
-      '',
-    ].join('\n');
+    // Deadline init at 0 (so the budget ends at 900), round 1 checked at
+    // 100 and run, round 2 checked at 1000 — expired, one full round done.
     const one = runGate({
       layout: { 'scripts/tests/a.test.js': '' },
       list: 'scripts/tests/a.test.js\n',
@@ -1528,6 +1679,121 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       log,
       /has\\ space\.test\.js/,
       'the logged command must carry the escaped, single operand',
+    );
+  });
+
+  it('hostile filenames survive the generic-package and node --test arms too', () => {
+    // Round 5: tame names quote to byte-identical output, so a per-arm
+    // weakening of %q was invisible while only scripts/tests carried the
+    // hostile fixtures. The stub's operand-resolution guard makes a
+    // word-split fail loudly in any arm.
+    const { res, outputs, log } = runGate({
+      layout: {
+        'packages/pkga/package.json': '{}',
+        'packages/pkga/vitest.config.ts': '',
+        'packages/pkga/src/has space.test.ts': '',
+        '.github/scripts/al so.test.mjs': '',
+      },
+      list: 'packages/pkga/src/has space.test.ts\n.github/scripts/al so.test.mjs\n',
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(
+      log,
+      /\(cd packages\/pkga\) npx --no-install vitest run \.\/src\/has\\ space\.test\.ts/,
+      'the generic arm must quote its operand',
+    );
+    assert.match(
+      log,
+      /node --test \.\/\.github\/scripts\/al\\ so\.test\.mjs/,
+      'the node --test arm must quote its operand',
+    );
+  });
+
+  it('a mid-round wall-budget expiry stops the remaining files of that round', () => {
+    // Two files, clock 0/100/1000: file a is checked at 100 and runs, file
+    // b is checked at 1000 — the deadline gates every INVOCATION, not just
+    // round boundaries. Hoisting the check to the round loop would run
+    // every remaining file after expiry (up to N×10 min via the caps),
+    // blowing the ~25-minute budget the job timeout accounting relies on.
+    const { res, outputs, log } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\nscripts/tests/b.test.js\n',
+      stubs: { date: STUB_DATE },
+      sequences: { dates: '0\n100\n1000\n' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'timeout');
+    assert.match(outputs.flake_summary, /before two full rounds/);
+    assert.ok(
+      !log.includes('round 1 · scripts/tests/b.test.js'),
+      'the second file must never run after the budget expired',
+    );
+  });
+
+  it('an observed divergence outranks a later wall-budget expiry', () => {
+    // Divergence needs no full round count: once PF exists the verdict is
+    // flaky even when the clock then expires — the flaky check must stay
+    // ahead of the timeout branches.
+    const { res, outputs } = runGate({
+      layout: { 'scripts/tests/a.test.js': '' },
+      list: 'scripts/tests/a.test.js\n',
+      stubs: { date: STUB_DATE },
+      sequences: { 'a.test.js': 'PF', dates: '0\n100\n200\n1000\n' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'flaky');
+  });
+
+  it('an infra exit between a P and an F does not mask the divergence', () => {
+    // Marks P,I,F,P,I from a cycled PTF sequence: the I letters are
+    // neutral — the P..F subsequence is still non-determinism.
+    const { res, outputs, log } = runGate({
+      layout: { 'scripts/tests/a.test.js': '' },
+      list: 'scripts/tests/a.test.js\n',
+      sequences: { 'a.test.js': 'PTF' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'flaky');
+    assert.match(log, /a\.test\.js: PIFPI/);
+  });
+
+  it('zero-collection is reported as not-collected, never as consistent-fail', () => {
+    // A file the runner's include set rejects exits 1 every round with
+    // "No test files found" — publishing that as "deterministic, CI owns
+    // it" would be false on both clauses (round 5). All-uncollected lands
+    // n/a; a mixed run passes with the not-collected count in the summary.
+    const STUB_UNCOLLECTED = [
+      '#!/bin/bash',
+      'echo "No test files found, exiting with code 1"',
+      'exit 1',
+      '',
+    ].join('\n');
+    const alone = runGate({
+      layout: { 'scripts/tests/a.test.js': '' },
+      list: 'scripts/tests/a.test.js\n',
+      stubs: { npx: STUB_UNCOLLECTED },
+    });
+    assert.equal(alone.res.status, 0, alone.res.stderr);
+    assert.equal(alone.outputs.flake_verdict, 'n/a');
+    assert.match(
+      alone.outputs.flake_summary,
+      /none of the 1 changed test file\(s\) were collected/,
+    );
+    assert.match(alone.log, /a\.test\.js: NNNNN/);
+    const mixed = runGate({
+      layout: {
+        'scripts/tests/a.test.js': '',
+        '.github/scripts/ok.test.mjs': '',
+      },
+      list: 'scripts/tests/a.test.js\n.github/scripts/ok.test.mjs\n',
+      stubs: { npx: STUB_UNCOLLECTED },
+    });
+    assert.equal(mixed.res.status, 0, mixed.res.stderr);
+    assert.equal(mixed.outputs.flake_verdict, 'pass');
+    assert.match(
+      mixed.outputs.flake_summary,
+      /\(1 not collected by the runner — see the log\)$/,
     );
   });
 
@@ -1572,11 +1838,24 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
         'integrations/external-context/package.json': '{}',
         'integrations/external-context/vitest.config.ts': '',
         'integrations/external-context/src/y.test.ts': '',
+        'packages/wspkg/package.json': '{}',
+        'packages/wspkg/vitest.workspace.ts': '',
+        'packages/wspkg/src/z.test.ts': '',
       },
-      list: 'packages/webui/src/x.test.ts\nintegrations/external-context/src/y.test.ts\n',
+      list: [
+        'packages/webui/src/x.test.ts',
+        'integrations/external-context/src/y.test.ts',
+        'packages/wspkg/src/z.test.ts',
+        '',
+      ].join('\n'),
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(outputs.flake_verdict, 'pass');
+    assert.match(
+      log,
+      /\(cd packages\/wspkg\) npx --no-install vitest run \.\/src\/z\.test\.ts/,
+      'a vitest.workspace.ts-only package must be entered and run',
+    );
     assert.match(
       log,
       /\(cd packages\/webui\) npx --no-install vitest run \.\/src\/x\.test\.ts/,
@@ -1731,7 +2010,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
             "FLAKE_LINE=''",
             "FLAKE_LINE_ZH=''",
             block[0],
-            'printf \'%s|%s|%s|%s\' "$QUAL" "$HEADLINE" "$QUAL_ZH" "$HEADLINE_ZH"',
+            'printf \'%s|%s|%s|%s|%s\' "$QUAL" "$HEADLINE" "$QUAL_ZH" "$HEADLINE_ZH" "$FLAKE_LINE"',
           ].join('\n'),
         ],
         {
@@ -1751,23 +2030,38 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     // is the ONE verdict a collapsed-details reader sees — if the _ZH
     // assignments drop, a demoted PR renders `判定：✅ 通过` in Chinese
     // while the English headline says ❌.
-    for (const v of [
-      '',
-      'pass',
-      'n/a',
-      'consistent-fail',
-      'timeout',
-      'error',
+    // The fifth field pins the gate STATUS LINE (round 5): informational
+    // verdicts must render their line without touching the headline, and
+    // the flaky line must carry the ❌.
+    for (const [v, line] of [
+      ['', ''],
+      ['pass', 'Flakiness gate: ✅ 1 of 2 changed test file(s) diverged'],
+      [
+        'n/a',
+        'Flakiness gate: not applicable — 1 of 2 changed test file(s) diverged',
+      ],
+      [
+        'consistent-fail',
+        'Flakiness gate: ⚠️ consistent-fail — 1 of 2 changed test file(s) diverged',
+      ],
+      [
+        'timeout',
+        'Flakiness gate: ⚠️ timeout — 1 of 2 changed test file(s) diverged',
+      ],
+      [
+        'error',
+        'Flakiness gate: ⚠️ error — 1 of 2 changed test file(s) diverged',
+      ],
     ]) {
       assert.equal(
         drive(v),
-        '✅ passed|merge-ready (agent verdict)|✅ 通过|可合入',
+        `✅ passed|merge-ready (agent verdict)|✅ 通过|可合入|${line}`,
         `'${v}' must not touch the headline in either language`,
       );
     }
     assert.equal(
       drive('flaky'),
-      '❌ not passed|non-deterministic tests (flakiness gate)|❌ 不通过|测试结果不确定（抖动门）',
+      '❌ not passed|non-deterministic tests (flakiness gate)|❌ 不通过|测试结果不确定（抖动门）|Flakiness gate: ❌ 1 of 2 changed test file(s) diverged',
       'flaky must demote in BOTH languages — deleting either pair has to fail this test',
     );
   });
