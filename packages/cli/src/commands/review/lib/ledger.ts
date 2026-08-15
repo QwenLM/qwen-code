@@ -84,6 +84,15 @@ export interface Ledger {
  */
 const SHA_RE = /^[0-9a-f]{7,64}$/;
 
+/**
+ * Grammar of a ledger finding id (`R<round>-<n>`). Shared by every site
+ * that reads carried ids — compose-review's re-post prefix parser and
+ * presubmit's carried-id extractor — so the two ends cannot drift: a
+ * divergence makes re-posts read as plain overlaps and get dropped,
+ * silently re-creating #9208.
+ */
+export const LEDGER_ID_TOKEN = String.raw`R\d+-\d+`;
+
 /** Caps keep the marker a footnote, never a payload: GitHub's body limit is
  *  65,536 chars and the marker rides inside it. Every cap binds BOTH halves —
  *  the serializer so the write side is bounded, the parser so a hand-edited

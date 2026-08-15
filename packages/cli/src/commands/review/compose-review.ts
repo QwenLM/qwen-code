@@ -60,6 +60,7 @@ import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
+  LEDGER_ID_TOKEN,
   serializeLedger,
   type Ledger,
   type LedgerFinding,
@@ -2384,7 +2385,11 @@ export const composeReviewCommand: CommandModule = {
  * rides in, instead of renumbering the entry to a fresh `R<round>-<n>` the
  * report never used.
  */
-const CARRIED_ID_RE = /^(R\d+-\d+)[:.)\]]?(?=\s|$)\s*/;
+// Composed from the shared ledger token so the extractor in presubmit.ts
+// and this parser cannot drift (#9212 review).
+const CARRIED_ID_RE = new RegExp(
+  `^(${LEDGER_ID_TOKEN})[:.)\\]]?(?=\\s|$)\\s*`,
+);
 
 /**
  * The next round's ledger: every finding this review is posting as its own —

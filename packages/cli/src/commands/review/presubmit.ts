@@ -22,6 +22,7 @@ import {
   setGhHost,
 } from './lib/gh.js';
 import { severityOf } from './lib/inline-counts.js';
+import { LEDGER_ID_TOKEN } from './lib/ledger.js';
 
 interface FindingAnchor {
   path: string;
@@ -48,8 +49,12 @@ interface CommentSummary {
   matchedIds?: string[];
 }
 
-/** Ledger ids look like `R3-2` — `R<round>-<n>`. */
-const CARRIED_ID_PATTERN = /\bR\d+-\d+\b/g;
+/** Ledger ids look like `R3-2` — `R<round>-<n>`; the token lives in
+ *  lib/ledger.ts so this extractor and compose-review's prefix parser
+ *  cannot drift (#9212 review). */
+const CARRIED_ID_PATTERN = new RegExp(`\\b${LEDGER_ID_TOKEN}\\b`, 'g');
+/** Exact-shape check for ids read from the --new-findings file. */
+const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 
 function extractCarriedIds(body: string): string[] {
   const found = body.match(CARRIED_ID_PATTERN);
@@ -153,8 +158,8 @@ interface PresubmitArgs {
  * treats an unknown finding set as at-risk, so a malformed file downgrades
  * the verdict rather than proving a false all-clear. A shorter-than-real list
  * would be the dangerous outcome (a dropped finding reads as disjoint), so
- * any entry lacking a string `path` — or carrying a non-string `id` — rejects
- * the WHOLE file rather than being skipped.
+ * any entry lacking a string `path` — or carrying a non-string or
+ * misshapen `id` — rejects the WHOLE file rather than being skipped.
  */
 export function parseFindingsFile(path: string): FindingAnchor[] | null {
   let parsed: unknown;
@@ -174,10 +179,16 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
       return null;
     }
     const e = entry as { path: string; line?: unknown; id?: unknown };
-    // Same fail-safe as `path`: an `id` of the wrong type is a malformed file,
-    // and silently ignoring it would let a carried re-post read as a fresh
-    // duplicate at the very location it belongs.
-    if (e.id !== undefined && typeof e.id !== 'string') return null;
+    // Same fail-safe as `path`: an `id` of the wrong type or shape is a
+    // malformed file, and silently ignoring it would let a carried re-post
+    // read as a fresh duplicate at the very location it belongs (a typo'd
+    // id can never match the extractor, silently disabling the exemption).
+    if (
+      e.id !== undefined &&
+      (typeof e.id !== 'string' || !LEDGER_ID_SHAPE.test(e.id))
+    ) {
+      return null;
+    }
     out.push({
       path: e.path,
       line: typeof e.line === 'number' ? e.line : 0,
@@ -418,6 +429,7 @@ function classifyExistingComments(
   repliedToIds: Set<number>,
   newFindings: FindingAnchor[],
   commitSha: string,
+  currentUserLogin: string,
 ) {
   const buckets: Record<
     'stale' | 'resolved' | 'overlap' | 'repost' | 'noConflict',
@@ -459,7 +471,16 @@ function classifyExistingComments(
       // marks the re-post target and exempts that finding from the drop.
       buckets.overlap.push(summary);
       const wantedIds = carriedIdsByLocation.get(`${c.path}:${c.line}`);
-      if (wantedIds) {
+      // Ledger ids are per-account — two reviewers of the same PR keep two
+      // independent ledgers, each with its own `R2-1` — so only THIS
+      // account's comments can carry a re-post of its own finding. A
+      // different account's colliding id at the same line must stay a
+      // plain location overlap (#9212 review).
+      if (
+        wantedIds &&
+        currentUserLogin !== '' &&
+        (c.user?.login ?? '').toLowerCase() === currentUserLogin.toLowerCase()
+      ) {
         const matchedIds = extractCarriedIds(c.body || '').filter((id) =>
           wantedIds.has(id),
         );
@@ -633,6 +654,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     repliedToIds,
     newFindings ?? [],
     commitSha,
+    me,
   );
 
   // --- Downgrade decisions ----------------------------------------------
@@ -757,7 +779,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          'Path to a JSON file shaped as [{path, line}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings.',
+          'Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding\'s carried ledger id (`R<round>-<n>`); an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);

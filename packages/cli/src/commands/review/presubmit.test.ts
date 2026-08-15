@@ -364,6 +364,27 @@ describe('presubmitCommand', () => {
     }
   });
 
+  // Shared by both existing-comment classification describes; the wider
+  // `id?` entry type covers the carried-id (#9208) tests unchanged.
+  async function presubmitWithComments(
+    comments: Array<Record<string, unknown>>,
+    newFindings: Array<{ path: string; line: number; id?: string }>,
+  ) {
+    ghApiAllMock.mockReturnValue(comments);
+    ghApiMock.mockReturnValue(null);
+    readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler({
+      ...baseArgs,
+      'new-findings': '/tmp/findings.json',
+    } as unknown as Parameters<typeof handler>[0]);
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    return JSON.parse(String(content));
+  }
+
   it('sets downgradeApprove — not just a reason — when every check was skipped', async () => {
     // The bug this guards was found by dogfooding /review on this very change:
     // `downgradeReasons` gained a "CI did not run" entry while `downgradeApprove`
@@ -703,24 +724,6 @@ describe('presubmitCommand', () => {
     // visual duplicate while a live comment sat on the same (path, line).
     // Authorship of the reviewing account's own top-level comments is the
     // footer-independent fallback.
-    async function presubmitWithComments(
-      comments: Array<Record<string, unknown>>,
-      newFindings: Array<{ path: string; line: number }>,
-    ) {
-      ghApiAllMock.mockReturnValue(comments);
-      ghApiMock.mockReturnValue(null);
-      readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
-      const handler = presubmitCommand.handler;
-      if (!handler) throw new Error('presubmit handler missing');
-      await handler({
-        ...baseArgs,
-        'new-findings': '/tmp/findings.json',
-      } as unknown as Parameters<typeof handler>[0]);
-      const [, content] = writeFileSyncMock.mock.calls.find(
-        ([path]) => path === '/tmp/presubmit.json',
-      ) ?? [null, null];
-      return JSON.parse(String(content));
-    }
 
     const FINDINGS = [{ path: 'a.ts', line: 12 }];
 
@@ -861,24 +864,6 @@ describe('presubmitCommand', () => {
     // `R<round>-<n>` id appearing in the existing comment at the same
     // location; those comments are additionally bucketed as `repost` with the
     // matched ids so the drop rule can exempt them.
-    async function presubmitWithComments(
-      comments: Array<Record<string, unknown>>,
-      newFindings: Array<{ path: string; line: number; id?: string }>,
-    ) {
-      ghApiAllMock.mockReturnValue(comments);
-      ghApiMock.mockReturnValue(null);
-      readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
-      const handler = presubmitCommand.handler;
-      if (!handler) throw new Error('presubmit handler missing');
-      await handler({
-        ...baseArgs,
-        'new-findings': '/tmp/findings.json',
-      } as unknown as Parameters<typeof handler>[0]);
-      const [, content] = writeFileSyncMock.mock.calls.find(
-        ([path]) => path === '/tmp/presubmit.json',
-      ) ?? [null, null];
-      return JSON.parse(String(content));
-    }
 
     const CARRIED_COMMENT = {
       id: 7,
@@ -912,6 +897,33 @@ describe('presubmitCommand', () => {
         ],
       );
       expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('does not treat a different account\'s colliding id as a re-post', async () => {
+      // Ledger ids are per-account: another reviewer's `R3-2` at the same
+      // line is a plain location overlap, not a re-post target — exempting
+      // it would post the duplicate the gate exists to prevent.
+      const result = await presubmitWithComments(
+        [{ ...CARRIED_COMMENT, user: { login: 'maintainer-dev' } }],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(0);
+    });
+
+    it('extracts the carried id from beyond the 80-char summary slice', async () => {
+      const longPrefix = 'x'.repeat(90);
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: `**[Critical]** ${longPrefix} R3-2: claim _— model via Qwen Code /review_`,
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
       expect(result.existingComments.byBucket.repost).toBe(1);
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
@@ -1120,6 +1132,12 @@ describe('parseFindingsFile (via mocked fs)', () => {
       [{ path: 'a.ts', line: 5, id: 'R3-2' }],
     ],
     ['[{"path":"a.ts","line":5,"id":42}]', null],
+    // Present-but-misshapen ids are rejected too: a typo'd id can never
+    // match the extractor, and accepting it would silently disable the
+    // re-post exemption (#9212 review).
+    ['[{"path":"a.ts","line":5,"id":"r3-2"}]', null],
+    ['[{"path":"a.ts","line":5,"id":"R3-2 "}]', null],
+    ['[{"path":"a.ts","line":5,"id":""}]', null],
     ['[]', []],
   ];
   it.each(cases)('rejects/normalizes %s', (raw, expected) => {
