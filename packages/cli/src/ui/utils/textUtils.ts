@@ -41,8 +41,7 @@ export const TEXT_CACHE_MAX_ENTRIES = 500;
 
 /**
  * Evict oldest entry if a cache reaches the soft cap.
- * Uses single-entry eviction to preserve hot data. Map iteration order is
- * insertion order, so the first key is the oldest.
+ * Map iteration order is insertion order, so the first key is the oldest.
  */
 function evictOldestTextCacheEntry<K, V>(cache: Map<K, V>): void {
   if (cache.size >= TEXT_CACHE_MAX_ENTRIES) {

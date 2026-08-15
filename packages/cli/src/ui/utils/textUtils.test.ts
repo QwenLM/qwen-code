@@ -402,12 +402,20 @@ describe('textUtils', () => {
   });
 
   describe('text cache bounds', () => {
+    it('does not grow the caches for ASCII fast-path input', () => {
+      const before = __getTextUtilsCacheSizes();
+      getCachedStringWidth('plain-ascii-input');
+      toCodePoints('plain-ascii-input');
+      expect(__getTextUtilsCacheSizes()).toEqual(before);
+    });
+
     it('bounds the code points cache and keeps results correct', () => {
       const probe = (i: number) => `cache-bound-probe-${i}-é`;
       for (let i = 0; i < TEXT_CACHE_MAX_ENTRIES + 50; i++) {
         toCodePoints(probe(i));
       }
 
+      expect(TEXT_CACHE_MAX_ENTRIES).toBe(500);
       expect(__getTextUtilsCacheSizes().codePoints).toBe(
         TEXT_CACHE_MAX_ENTRIES,
       );
@@ -430,13 +438,6 @@ describe('textUtils', () => {
 
       expect(getCachedStringWidth('héllo')).toBe(5);
       expect(getCachedStringWidth('目标')).toBe(4);
-    });
-
-    it('does not grow the caches for ASCII fast-path input', () => {
-      const before = __getTextUtilsCacheSizes();
-      getCachedStringWidth('plain-ascii-input');
-      toCodePoints('plain-ascii-input');
-      expect(__getTextUtilsCacheSizes()).toEqual(before);
     });
   });
 });
