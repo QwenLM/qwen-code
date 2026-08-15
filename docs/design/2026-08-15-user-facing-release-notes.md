@@ -92,8 +92,9 @@ highlights call, and adds one **themes** call:
   catch-all theme rendered last ("Other Changes" / "其他变更").
 
 All three calls share the existing retry/backoff/deadline machinery.
-`max_tokens` scales with batch size for summaries since output roughly
-doubles with the Chinese field.
+The themes call scales `max_tokens` with the entry count (capped at 8192);
+summaries and highlights keep the fixed 4096 budget, which leaves headroom
+for every reachable summaries batch (at most 8 entries × English + Chinese).
 
 ### 2. Rendering: v2 layout
 
@@ -118,7 +119,7 @@ doubles with the Chinese field.
 
 <details><summary>Complete Change List (N pull requests)</summary>
 
-#### Features
+### Features
 - web-shell: improve compact tool activity ([#8973](…)) by @ytahdn
 …
 </details>
@@ -183,7 +184,10 @@ visible in the Actions run without failing the release.
 `generate-changelog.js` accepts markers `v1` and `v2`. For v2 bodies it:
 
 - unwraps `<details><summary>…</summary>` into a heading and drops the
-  closing tag (a text changelog has no collapse affordance),
+  closing tag (a text changelog has no collapse affordance); the heading is
+  emitted at `##` so the demotion lands it at `###`, the same sibling rank
+  v1's `## Complete Change List` reaches, keeping one skeleton across v1/v2
+  releases in the same file,
 - drops image lines,
 - otherwise applies the existing heading demotion.
 

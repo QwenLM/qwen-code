@@ -399,16 +399,22 @@ function validateThemes(entries, response) {
     if (!Array.isArray(theme.items)) {
       throw new Error('Each theme must list its pull requests in items.');
     }
-    const items = theme.items.map((number) => {
+    const items = [];
+    const seen = new Set();
+    for (const number of theme.items) {
       if (!expected.has(number)) {
         throw new Error(`Unknown pull request in theme: ${number}`);
+      }
+      if (seen.has(number)) {
+        continue;
       }
       if (assigned.has(number)) {
         throw new Error(`Pull request assigned to two themes: ${number}`);
       }
+      seen.add(number);
       assigned.add(number);
-      return number;
-    });
+      items.push(number);
+    }
     if (items.length > 0) {
       themes.push({ title, titleZh, intro, introZh, items });
     }
@@ -592,9 +598,7 @@ function promptFor(request) {
         'Preserve concrete user-facing names such as commands, shortcuts, settings, and measured improvements when the input supports them.',
       ].join(' '),
       user: JSON.stringify({ pullRequests: request.entries }),
-      // Output carries an English and a Chinese sentence per PR; scale the
-      // token budget with the batch instead of one fixed ceiling.
-      maxTokens: Math.max(4096, 512 + request.entries.length * 384),
+      maxTokens: 4096,
     };
   }
   if (request.kind === 'highlights') {
@@ -768,7 +772,7 @@ export async function generateReleaseNotes({
         warnings: ['Model configuration is unavailable.'],
       };
   const usedAi =
-    ai.themes !== null ||
+    (ai.themes?.length ?? 0) > 0 ||
     ai.highlights.length > 0 ||
     entries.some((entry) => ai.summaries.get(entry.number) !== entry.title);
   const newContributors = parseNewContributors(generatedBody);
@@ -919,10 +923,16 @@ export function renderReleaseNotesV2({
   );
   const isBreaking = (number) =>
     classifyChange(entriesByNumber.get(number)) === 'Breaking Changes';
-  const zhText = (number) =>
-    summariesZh.get(number) ||
-    summaries.get(number) ||
-    normalizeAppendixTitle(entriesByNumber.get(number)?.title || '');
+  const displaySummary = (number) => {
+    const entry = entriesByNumber.get(number);
+    const summary = summaries.get(number);
+    // A summary equal to the raw title is a validation fallback, not model
+    // text; normalize it like the appendix so degraded items stay uniform.
+    return summary && summary !== entry.title
+      ? summary
+      : normalizeAppendixTitle(entry.title);
+  };
+  const zhText = (number) => summariesZh.get(number) || displaySummary(number);
   const highlightLine = (text, highlight) => {
     const links = prLinks(highlight.prs || [], entriesByNumber);
     return `- ${text}${links ? ` (${links})` : ''}`;
@@ -946,12 +956,7 @@ export function renderReleaseNotesV2({
     lines.push('No known breaking changes.', '');
   } else {
     for (const entry of breaking) {
-      lines.push(
-        renderChangeLine(
-          entry,
-          summaries.get(entry.number) || normalizeAppendixTitle(entry.title),
-        ),
-      );
+      lines.push(renderChangeLine(entry, displaySummary(entry.number)));
       const zh = summariesZh.get(entry.number);
       if (zh) {
         lines.push(`  - ${zh}`);
@@ -994,11 +999,7 @@ export function renderReleaseNotesV2({
     }
     for (const number of theme.items) {
       const entry = entriesByNumber.get(number);
-      lines.push(
-        `- ${
-          summaries.get(number) || normalizeAppendixTitle(entry.title)
-        } ([#${number}](${entry.url}))`,
-      );
+      lines.push(`- ${displaySummary(number)} ([#${number}](${entry.url}))`);
       const entryImages = (images.get(number) || []).slice(0, imageBudget);
       imageBudget -= entryImages.length;
       for (const image of entryImages) {
@@ -1010,18 +1011,24 @@ export function renderReleaseNotesV2({
     lines.push('');
   }
 
-  // Skip the Chinese block entirely when nothing was translated; repeating
-  // the English digest under a Chinese heading would be misleading. A zh
-  // field that equals its English counterpart is a fallback, not a
+  // Skip the Chinese block entirely when nothing translated renders inside
+  // it; repeating the English digest under a Chinese heading would be
+  // misleading. Derive the flag from the rendered themes and items, not the
+  // raw model output: zh content living only on breaking entries (already
+  // bilingual above) or on filtered themes must not switch the block on. A
+  // zh field that equals its English counterpart is a fallback, not a
   // translation.
+  const renderedItemNumbers = new Set(
+    allThemes.flatMap((theme) => theme.items),
+  );
   const hasChinese =
-    summariesZh.size > 0 ||
     highlights.some((highlight) => highlight.textZh !== highlight.text) ||
-    themes.some(
+    digestThemes.some(
       (theme) =>
         theme.titleZh !== theme.title ||
         (theme.introZh !== '' && theme.introZh !== theme.intro),
-    );
+    ) ||
+    [...renderedItemNumbers].some((number) => summariesZh.has(number));
   if (hasChinese) {
     lines.push('---', '', '## 中文摘要', '');
     if (highlights.length > 0) {
@@ -1059,7 +1066,7 @@ export function renderReleaseNotesV2({
     if (categoryEntries.length === 0) {
       continue;
     }
-    lines.push(`#### ${category}`, '');
+    lines.push(`### ${category}`, '');
     for (const entry of categoryEntries) {
       lines.push(renderAppendixLine(entry));
     }
@@ -1084,6 +1091,17 @@ export function renderReleaseNotesV2({
   return lines.join('\n');
 }
 
+// The types generate-changelog.js formatEntry strips; anything else keeps
+// its prefix because the Internal Changes heading alone does not name it.
+const APPENDIX_STRIP_TYPES = new Set([
+  'feat',
+  'fix',
+  'perf',
+  'docs',
+  'refactor',
+  'revert',
+]);
+
 /**
  * Appendix lines use the conventional-commit subject with its redundant type
  * keyword stripped ("feat(web-shell): x" → "web-shell: x") so fallback titles
@@ -1092,18 +1110,14 @@ export function renderReleaseNotesV2({
  */
 export function normalizeAppendixTitle(title) {
   const match = /^(\w+)(?:\(([^)]*)\))?!?:\s*(.+)$/.exec(title.trim());
-  if (!match) {
+  if (!match || !APPENDIX_STRIP_TYPES.has(match[1].toLowerCase())) {
     return title.trim();
   }
   return match[2] ? `${match[2]}: ${match[3]}` : match[3];
 }
 
 function renderAppendixLine(entry) {
-  const author = entry.author ? ` by @${entry.author}` : '';
-  const coAuthors = (entry.coAuthors || [])
-    .map((coAuthor) => ` with @${coAuthor}`)
-    .join('');
-  return `- ${normalizeAppendixTitle(entry.title)} ([#${entry.number}](${entry.url}))${author}${coAuthors}`;
+  return renderChangeLine(entry, normalizeAppendixTitle(entry.title));
 }
 
 function validateRepo(repo) {

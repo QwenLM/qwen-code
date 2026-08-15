@@ -162,7 +162,9 @@ export function transformCuratedLine(line, version) {
   }
   const summary = /^\s*<summary>([\s\S]*?)<\/summary>\s*$/.exec(line);
   if (summary) {
-    return [`### ${summary[1]}`];
+    // Emit at ## so the heading demotion below lands the unwrapped appendix
+    // at ### — the same sibling rank v1's "Complete Change List" reaches.
+    return [`## ${summary[1]}`];
   }
   return [line];
 }

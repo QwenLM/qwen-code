@@ -300,7 +300,15 @@ describe('normalizeAppendixTitle', () => {
       'keep workspace picker suggestions closed',
     ],
     ['feat(core)!: drop legacy flag', 'core: drop legacy flag'],
+    ['refactor(core): rework session storage', 'core: rework session storage'],
+    ['docs: explain session search', 'explain session search'],
     ['Update README', 'Update README'],
+    // Types the changelog's formatEntry does not strip keep their prefix:
+    // the Internal Changes heading alone does not name ci/test/security.
+    ['ci: bump action cache', 'ci: bump action cache'],
+    ['security: patch CVE-2026-1234', 'security: patch CVE-2026-1234'],
+    ['test: cover retry paths', 'test: cover retry paths'],
+    ['chore(deps): bump @google/genai', 'chore(deps): bump @google/genai'],
   ])('normalizes %j to %j', (title, expected) => {
     expect(normalizeAppendixTitle(title)).toBe(expected);
   });
@@ -395,7 +403,7 @@ describe('renderReleaseNotesV2', () => {
     expect(markdown).toContain(
       `web-shell: upload files ([#1](${PR(1)})) by @alice`,
     );
-    expect(markdown).toContain('#### Internal Changes');
+    expect(markdown).toContain('### Internal Changes');
     expect(markdown).not.toContain('v1 endpoint ([#4]');
     expect(markdown).toContain('</details>');
     expect(markdown).toContain(
@@ -550,6 +558,38 @@ describe('renderReleaseNotesV2', () => {
     expect(markdown).not.toContain('Only breaking');
     expect(markdown).not.toContain('仅破坏性');
   });
+
+  it('omits the Chinese block when translations exist only on breaking entries', () => {
+    const markdown = renderReleaseNotesV2({
+      ...base,
+      summariesZh: new Map([[4, '移除旧版 v1 API 端点。']]),
+      highlights: [],
+      themes: [],
+    });
+
+    // The breaking section keeps its bilingual sub-line...
+    expect(markdown).toContain('  - 移除旧版 v1 API 端点。');
+    // ...but nothing translated renders inside the block, so it stays omitted.
+    expect(markdown).not.toContain('## 中文摘要');
+  });
+
+  it('omits the Chinese block for an all-breaking release', () => {
+    const markdown = renderReleaseNotesV2({
+      entries: [entry(4, 'feat(api)!: drop v1 endpoint', ['breaking-change'])],
+      summaries: new Map([[4, 'Removes the legacy v1 API endpoint.']]),
+      summariesZh: new Map([[4, '移除旧版 v1 API 端点。']]),
+      highlights: [],
+      themes: [
+        { title: 'API', titleZh: '接口', intro: '', introZh: '', items: [4] },
+      ],
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(markdown).toContain('  - 移除旧版 v1 API 端点。');
+    expect(markdown).not.toContain('## 中文摘要');
+  });
 });
 
 describe('generateAiContent themes', () => {
@@ -594,6 +634,28 @@ describe('generateAiContent themes', () => {
     expect(duplicated.warnings[0]).toMatch(
       /Themes fallback:.*assigned to two themes: 1/,
     );
+  });
+
+  it('dedupes a pull request repeated inside one theme', async () => {
+    const entries = [entry(1, 'feat: one'), entry(2, 'feat: two')];
+
+    const result = await generateAiContent(
+      entries,
+      themeComplete([
+        {
+          title: 'A',
+          titleZh: '甲',
+          intro: '',
+          introZh: '',
+          items: [1, 1, 2],
+        },
+      ]),
+    );
+
+    expect(result.themes).toEqual([
+      { title: 'A', titleZh: '甲', intro: '', introZh: '', items: [1, 2] },
+    ]);
+    expect(result.warnings).toEqual([]);
   });
 
   it('rejects more than eight themes', async () => {
@@ -1147,6 +1209,84 @@ describe('generateReleaseNotes', () => {
     );
     expect(result.usedAi).toBe(true);
     expect(result.warnings).toEqual([]);
+  });
+
+  it('does not report AI output when no model text renders', async () => {
+    const generatedBody = [
+      "## What's Changed",
+      `* feat(cli): add search by @alice in ${PR(1)}`,
+    ].join('\n');
+    const complete = async (request) => {
+      if (request.kind === 'summaries') {
+        return '{not-json';
+      }
+      if (request.kind === 'highlights') {
+        return JSON.stringify({ highlights: [] });
+      }
+      return JSON.stringify({ themes: [] });
+    };
+
+    const result = await generateReleaseNotes({
+      generatedBody,
+      metadata: [],
+      complete,
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(result.markdown).toContain('<!-- qwen-release-notes:v2 -->');
+    expect(result.usedAi).toBe(false);
+    expect(result.warnings[0]).toMatch(/Summary batch fallback/);
+  });
+
+  it('normalizes fallback titles in the v2 digest like the appendix', async () => {
+    const generatedBody = [
+      "## What's Changed",
+      `* feat(web-shell): upload files by @alice in ${PR(1)}`,
+      `* fix(core): preserve tool results by @bob in ${PR(2)}`,
+    ].join('\n');
+    const complete = async (request) => {
+      if (request.kind === 'summaries') {
+        return JSON.stringify({
+          summaries: [
+            { pr: 1, summary: 'Upload files.', summaryZh: '上传文件。' },
+            {
+              pr: 2,
+              summary: 'See https://example.com/design for details.',
+            },
+          ],
+        });
+      }
+      if (request.kind === 'highlights') {
+        return JSON.stringify({ highlights: [] });
+      }
+      return JSON.stringify({
+        themes: [
+          {
+            title: 'Work',
+            titleZh: '工作',
+            intro: '',
+            introZh: '',
+            items: [1, 2],
+          },
+        ],
+      });
+    };
+
+    const result = await generateReleaseNotes({
+      generatedBody,
+      metadata: [],
+      complete,
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(result.markdown).toContain(
+      `core: preserve tool results ([#2](${PR(2)}))`,
+    );
+    expect(result.markdown).not.toContain('fix(core): preserve tool results');
   });
 
   it('falls back to the v1 layout when the themes call fails', async () => {

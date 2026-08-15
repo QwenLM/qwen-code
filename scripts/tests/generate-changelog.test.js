@@ -323,7 +323,7 @@ describe('formatRelease', () => {
         '<details>',
         '<summary>Complete Change List (2 pull requests)</summary>',
         '',
-        '#### Features',
+        '### Features',
         '',
         '- web-shell: upload files ([#2](https://example.com/pr/2)) by @alice',
         '',
@@ -338,9 +338,12 @@ describe('formatRelease', () => {
     expect(block).toContain('### Web Shell');
     expect(block).toContain('### 中文摘要');
     expect(block).toContain('#### 亮点');
-    // The collapsed appendix becomes a plain heading and keeps its entries.
-    expect(block).toContain('#### Complete Change List (2 pull requests)');
-    expect(block).toContain('##### Features');
+    // The collapsed appendix becomes a plain heading and keeps its entries,
+    // landing at the same sibling rank v1's Complete Change List reaches.
+    expect(block).toContain('\n### Complete Change List (2 pull requests)\n');
+    expect(block).toContain('\n#### Features\n');
+    expect(block).not.toContain('#### Complete Change List');
+    expect(block).not.toContain('##### Features');
     expect(block).toContain(
       'web-shell: upload files ([#2](https://example.com/pr/2)) by @alice',
     );
