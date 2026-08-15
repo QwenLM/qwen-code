@@ -79,6 +79,7 @@ interface FetchedPlan {
   mergeBaseSha?: unknown;
   diffPath?: unknown;
   files?: unknown;
+  incremental?: unknown;
 }
 
 /**
@@ -88,15 +89,28 @@ interface FetchedPlan {
 export interface IncrementalScope {
   /** Full sha of the previous clean round's head — the range's left side. */
   anchor: string;
-  /** Files changed in `anchor..head` — reviewed on their incremental hunks. */
+  /**
+   * Files changed in `anchor..head`. The interdiff decides only WHICH files
+   * these are; their hunks in the composite are the full `mergeBase..head`
+   * change. Since-anchor hunks were tried first and reverted: a fix round
+   * that RESTORES lines the previous round changed produces interdiff hunks
+   * that exist in no hunk of the PR's own diff, and an inline comment
+   * anchored on one 422s the whole posted review, all-or-nothing. Full-range
+   * hunks are a subset of the PR diff by construction, so every anchor a
+   * chunk agent produces stays anchorable.
+   */
   deltaFiles: string[];
   /**
    * Still-clean files pulled back in by the one-hop widening, each with the
    * changed files it imports — the seam its brief directs the agent at.
    */
   interaction: Array<{ path: string; importsChanged: string[] }>;
-  /** Source files the previous round cleared that this scope leaves out. */
-  contextFiles: string[];
+  /**
+   * How many still-clean source files this scope leaves out. A count, not a
+   * list: nothing downstream reads the names, and on a large PR the list
+   * alone measured 23 KB against the plan's one-read budget.
+   */
+  contextFileCount: number;
   /** Where the full-range diff still is, for a reader who needs the whole PR. */
   fullDiffPath: string | null;
 }
@@ -136,11 +150,45 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
+  if (typeof plan.incremental === 'object' && plan.incremental !== null) {
+    // A second rescope of an already-rescoped plan would derive candidates
+    // from the already-shrunk file list (files widened out in round N can
+    // never re-enter) and repoint `fullDiffPath` at the incremental diff it
+    // is about to overwrite. The plan of record for a rescope is always a
+    // fresh fetch.
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      'rescope: the plan is already rescoped — re-run fetch-pr to restore ' +
+        'the full-range plan first. Continue with the full-range review.',
+    );
+    return;
+  }
+  // `plan.files` is the candidate universe for the widening AND the proof the
+  // fetch captured anything at all. Normalising a malformed list to [] would
+  // silently drop every interaction candidate and still exit 0 — a truncated
+  // plan must keep the safe full review instead.
+  const planFilesRaw = plan.files;
+  if (!Array.isArray(planFilesRaw) || planFilesRaw.length === 0) {
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      'rescope: the plan carries no usable `files[]` (missing, malformed, or ' +
+        'empty) — cannot widen safely. Continue with the full-range plan.',
+    );
+    return;
+  }
 
   // Anchor validation is re-done HERE, not trusted from the caller: a sha that
   // is not in this history would hand `git diff` a range that reviews the
   // wrong code, which is the one failure mode this feature must never have.
-  const anchorFull = gitOpt('rev-parse', `${args.anchor}^{commit}`);
+  // Every git call is pinned to the plan's worktree with `-C`: pathspecs
+  // resolve against git's cwd, and from a subdirectory an unmatched pathspec
+  // exits 0 with EMPTY output — hunks silently vanish instead of failing.
+  const anchorFull = gitOpt(
+    '-C',
+    worktreePath,
+    'rev-parse',
+    `${args.anchor}^{commit}`,
+  );
   if (anchorFull === null) {
     fail(
       RESCOPE_EXIT_FULL_RANGE,
@@ -158,7 +206,16 @@ function runRescope(args: RescopeArgs): void {
     );
     return;
   }
-  if (gitOpt('merge-base', '--is-ancestor', anchorFull, fetchedSha) === null) {
+  if (
+    gitOpt(
+      '-C',
+      worktreePath,
+      'merge-base',
+      '--is-ancestor',
+      anchorFull,
+      fetchedSha,
+    ) === null
+  ) {
     fail(
       RESCOPE_EXIT_FULL_RANGE,
       `rescope: anchor ${args.anchor} is not an ancestor of the fetched head ` +
@@ -168,9 +225,14 @@ function runRescope(args: RescopeArgs): void {
     return;
   }
 
+  // The interdiff decides only WHICH files changed since the anchor — see
+  // `IncrementalScope.deltaFiles` for why their hunks are captured full-range
+  // instead of from this diff.
   let interdiff: Buffer;
   try {
     interdiff = gitRaw(
+      '-C',
+      worktreePath,
       ...PINNED_DIFF_CONFIG,
       'diff',
       ...PINNED_DIFF_FLAGS,
@@ -201,13 +263,11 @@ function runRescope(args: RescopeArgs): void {
   // dependents stay out: re-running tests is `build-test`'s job, and prose
   // does not call functions. Reads come from the worktree — the post-change
   // state is the state whose interactions are in question.
-  const planFiles = Array.isArray(plan.files)
-    ? (plan.files as Array<{
-        path?: unknown;
-        kind?: unknown;
-        binary?: unknown;
-      }>)
-    : [];
+  const planFiles = planFilesRaw as Array<{
+    path?: unknown;
+    kind?: unknown;
+    binary?: unknown;
+  }>;
   const candidates = planFiles
     .filter(
       (f): f is { path: string; kind: string; binary?: boolean } =>
@@ -236,29 +296,31 @@ function runRescope(args: RescopeArgs): void {
     packages,
   );
 
-  let interactionDiff: Buffer = Buffer.alloc(0);
-  if (interaction.size > 0) {
-    try {
-      interactionDiff = gitRaw(
-        LITERAL_PATHSPECS,
-        ...PINNED_DIFF_CONFIG,
-        'diff',
-        ...PINNED_DIFF_FLAGS,
-        `${mergeBaseSha}..${fetchedSha}`,
-        '--',
-        ...interaction.keys(),
-      );
-    } catch (err) {
-      fail(
-        RESCOPE_EXIT_FULL_RANGE,
-        `rescope: could not capture the interaction files' diff: ` +
-          `${(err as Error).message}. Continue with the full-range plan.`,
-      );
-      return;
-    }
+  // ONE capture, full-range, scoped to delta ∪ interaction: every hunk in
+  // the composite is a hunk of the PR's own diff, so downstream comment
+  // anchoring can never produce a line GitHub refuses.
+  let composite: Buffer;
+  try {
+    composite = gitRaw(
+      '-C',
+      worktreePath,
+      LITERAL_PATHSPECS,
+      ...PINNED_DIFF_CONFIG,
+      'diff',
+      ...PINNED_DIFF_FLAGS,
+      `${mergeBaseSha}..${fetchedSha}`,
+      '--',
+      ...deltaFiles,
+      ...interaction.keys(),
+    );
+  } catch (err) {
+    fail(
+      RESCOPE_EXIT_FULL_RANGE,
+      `rescope: could not capture the scoped files' diff: ` +
+        `${(err as Error).message}. Continue with the full-range plan.`,
+    );
+    return;
   }
-
-  const composite = Buffer.concat([interdiff, interactionDiff]);
   let diffPlan;
   try {
     diffPlan = buildDiffPlan(composite.toString('utf8'), args.maxChunkLines);
@@ -283,7 +345,7 @@ function runRescope(args: RescopeArgs): void {
       path,
       importsChanged,
     })),
-    contextFiles: candidates.filter((p) => !interaction.has(p)),
+    contextFileCount: candidates.filter((p) => !interaction.has(p)).length,
     fullDiffPath: typeof plan.diffPath === 'string' ? plan.diffPath : null,
   };
 
@@ -312,7 +374,7 @@ function runRescope(args: RescopeArgs): void {
     `Incremental scope since ${anchorFull.slice(0, 12)}: ` +
       `${deltaFiles.length} changed file(s), ${interaction.size} ` +
       `interaction file(s) (one import hop), ` +
-      `${incremental.contextFiles.length} clean file(s) left out of scope; ` +
+      `${incremental.contextFileCount} clean file(s) left out of scope; ` +
       `${diffPlan.diffLines} diff line(s) -> ${diffPlan.chunks.length} chunk(s).`,
   );
   warnOnReportSize(out, READ_FILE_CHAR_CAP);

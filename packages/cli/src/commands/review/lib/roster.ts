@@ -159,6 +159,26 @@ export function hasExecutableScript(plan: RosterPlan): boolean {
 }
 
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
+/**
+ * The interaction-file paths of a rescoped plan, defensively parsed — the
+ * plan is disk JSON, and a malformed block must widen the roster (invariant
+ * agents run), never narrow it.
+ */
+function incrementalInteractionPaths(plan: RosterPlan): Set<string> {
+  const raw = (plan as { incremental?: unknown }).incremental as
+    | { interaction?: unknown }
+    | null
+    | undefined;
+  const out = new Set<string>();
+  if (raw && Array.isArray(raw.interaction)) {
+    for (const e of raw.interaction) {
+      const path = (e as { path?: unknown } | null)?.path;
+      if (typeof path === 'string' && path.length > 0) out.add(path);
+    }
+  }
+  return out;
+}
+
 function heavyFiles(plan: RosterPlan): string[] {
   const files = Array.isArray(plan.files) ? plan.files : [];
   return files
@@ -267,8 +287,16 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // them. Requiring them there demanded agents the review was never meant to launch,
   // and `check-coverage` then exit-3'd an otherwise-complete small PR. Gate the loop
   // on the topology that actually runs them.
+  // An incremental plan's INTERACTION files get no invariant agents even when
+  // heavy: `heavy` is computed from the file's full-range slice, which for an
+  // interaction file is exactly the code the previous round already cleared —
+  // three whole-file agents re-walking it from scratch is the re-review the
+  // incremental scope exists to avoid, and the chunk agent for the same file
+  // is briefed for the seam only. Delta files keep them: their change is live.
+  const interactionPaths = incrementalInteractionPaths(plan);
   if (isTerritoryFanOut(plan)) {
     for (const file of heavyFiles(plan)) {
+      if (interactionPaths.has(file)) continue;
       add('invariant-a', file);
       add('invariant-b', file);
       add('invariant-c', file);

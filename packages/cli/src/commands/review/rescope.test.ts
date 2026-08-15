@@ -163,20 +163,30 @@ describe('rescope', () => {
     expect(plan.incremental.interaction).toEqual([
       { path: CALLER, importsChanged: [CHANGED] },
     ]);
-    expect(plan.incremental.contextFiles).toContain(BYSTANDER);
+    expect(plan.incremental.contextFileCount).toBe(1);
     expect(plan.incremental.fullDiffPath).toBe(
       '.qwen/tmp/qwen-review-pr-7-diff.txt',
     );
+    expect(plan['diffPathAbsolute']).toBe(
+      join(repo, '.qwen/tmp/qwen-review-pr-7-diff-incremental.txt'),
+    );
 
-    // The composite diff: changed.ts carries ONLY the round-2 hunk (v2 -> v3,
-    // not the PR's v1 -> v2), caller.ts carries its full-range hunks, and the
-    // bystander appears nowhere.
+    // The composite diff: BOTH scoped files carry their full-range hunks —
+    // the interdiff only chose the delta file NAMES. changed.ts therefore
+    // shows v1 -> v3 (not the round-2 v2 -> v3 slice: an interdiff hunk that
+    // restores earlier lines exists in no hunk of the PR diff and 422s
+    // comment anchoring), and the bystander appears nowhere.
     const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
     expect(diff).toContain('+export const v = 3;');
-    expect(diff).toContain('-export const v = 2;');
-    expect(diff).not.toContain('-export const v = 1;');
+    expect(diff).toContain('-export const v = 1;');
+    expect(diff).not.toContain('const v = 2;');
     expect(diff).toContain('+export const c = v + 1;');
     expect(diff).not.toContain('bystander');
+    // The superseded full-range diff file stays intact for `fullDiffPath`
+    // readers — a successful rescope must not consume what it supersedes.
+    expect(
+      readFileSync(join(repo, plan.incremental.fullDiffPath!), 'utf8'),
+    ).toContain('bystander');
 
     // The plan's chunks/files were rebuilt from the composite by the shared
     // builders — the same shapes every downstream reader already parses.
@@ -245,5 +255,188 @@ describe('rescope', () => {
     expect(plan.incremental.deltaFiles).toEqual([BYSTANDER]);
     expect(plan.incremental.interaction).toEqual([]);
     expect(plan.files.map((f) => f.path)).toEqual([BYSTANDER]);
+  });
+});
+
+describe('rescope — contract pins from review findings', () => {
+  it('pins the exit-code LITERALS the skill prose branches on', () => {
+    // The skill hardcodes 3 = "nothing new, stop" and any-other = "full
+    // range". A swap of the two constants keeps every symbolic assertion
+    // green while refusals start STOPPING the round — the skip-instead-of-
+    // fallback failure the module header forbids.
+    expect(RESCOPE_EXIT_FULL_RANGE).toBe(2);
+    expect(RESCOPE_EXIT_NOTHING_NEW).toBe(3);
+  });
+
+  it('honours --out: the rescoped plan lands there, the input stays byte-identical', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const before = readFileSync(planPath, 'utf8');
+    const outPath = join(repo, 'rescoped.json');
+    (rescopeCommand.handler as (argv: unknown) => void)({
+      plan: planPath,
+      anchor,
+      out: outPath,
+      maxChunkLines: 400,
+    });
+    expect(process.exitCode ?? 0).toBe(0);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
+    const out = JSON.parse(readFileSync(outPath, 'utf8')) as RescopedPlan;
+    expect(out.incremental.deltaFiles).toEqual([CHANGED]);
+  });
+
+  it('same-sha exit 3 leaves the plan byte-identical', () => {
+    const { base, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    const before = readFileSync(planPath, 'utf8');
+    run(planPath, head);
+    expect(process.exitCode).toBe(RESCOPE_EXIT_NOTHING_NEW);
+    expect(readFileSync(planPath, 'utf8')).toBe(before);
+  });
+
+  it('widens exactly ONE hop — a two-link chain does not flood-fill', () => {
+    const { base } = seedHistory();
+    // deep.ts imports caller.ts (which imports changed.ts). Both links are in
+    // the PR (touched in a follow-up commit) so both are plan candidates.
+    write(
+      'packages/app/src/deep.ts',
+      "import { c } from './caller.js';\nexport const d = c;\n",
+    );
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'add deep');
+    const anchor2 = git('rev-parse', 'HEAD');
+    write(CHANGED, 'export const v = 9;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'fix again');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor2);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    expect(plan.incremental.deltaFiles).toEqual([CHANGED]);
+    expect(plan.incremental.interaction.map((e) => e.path)).toEqual([CALLER]);
+    // deep.ts is two hops out: context, not interaction.
+    expect(plan.incremental.contextFileCount).toBeGreaterThan(0);
+  });
+
+  it('a test-file dependent stays OUT of the interaction set', () => {
+    const { base } = seedHistory();
+    write(
+      'packages/app/src/caller.test.ts',
+      "import { v } from './changed.js';\nexport const t = v;\n",
+    );
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'add test dependent');
+    const anchor2 = git('rev-parse', 'HEAD');
+    write(CHANGED, 'export const v = 9;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'fix');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor2);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    expect(plan.incremental.interaction.map((e) => e.path)).toEqual([CALLER]);
+  });
+
+  it('widens across workspace packages through a bare package specifier', () => {
+    const { base } = seedHistory();
+    write('packages/app/src/index.ts', 'export const entry = 1;\n');
+    write('packages/lib/package.json', JSON.stringify({ name: '@t/lib' }));
+    write(
+      'packages/lib/src/user.ts',
+      "import { entry } from '@t/app';\nexport const u = entry;\n",
+    );
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'add cross-package user');
+    const anchor2 = git('rev-parse', 'HEAD');
+    write('packages/app/src/index.ts', 'export const entry = 2;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'change entry');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base, head2);
+    run(planPath, anchor2);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    expect(plan.incremental.interaction).toEqual([
+      {
+        path: 'packages/lib/src/user.ts',
+        importsChanged: ['packages/app/src/index.ts'],
+      },
+    ]);
+  });
+
+  it('preserves post-image line counts and heaviness in the rescoped plan', () => {
+    seedHistory();
+    // A large file whose round-1 change rewrites most of it: heavy by the
+    // rewrite-ratio branch. The fix touches it again so it is delta.
+    const bigV1 =
+      Array.from({ length: 600 }, (_, i) => `export const a${i} = 1;`).join(
+        '\n',
+      ) + '\n';
+    write('packages/app/src/big.ts', bigV1);
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'seed big');
+    const base2 = git('rev-parse', 'HEAD');
+    const bigV2 =
+      Array.from({ length: 600 }, (_, i) => `export const a${i} = 2;`).join(
+        '\n',
+      ) + '\n';
+    write('packages/app/src/big.ts', bigV2);
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'round 1 rewrites big');
+    const anchor2 = git('rev-parse', 'HEAD');
+    write('packages/app/src/big.ts', bigV2.replace('a0 = 2', 'a0 = 3'));
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'fix big');
+    const head2 = git('rev-parse', 'HEAD');
+    const planPath = writeFetchedPlan(base2, head2);
+    run(planPath, anchor2);
+    expect(process.exitCode ?? 0).toBe(0);
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as RescopedPlan;
+    const big = (
+      plan.files as Array<{
+        path: string;
+        fileLines?: number;
+        heavy?: boolean;
+        addedRanges?: unknown;
+      }>
+    ).find((f) => f.path === 'packages/app/src/big.ts')!;
+    // The degradation rescope exists to prevent: a null post-image resolver
+    // zeroes fileLines and heavy never fires — invariant agents vanish.
+    expect(big.fileLines).toBe(600);
+    expect(big.heavy).toBe(true);
+    expect(big.addedRanges).toBeDefined();
+  });
+
+  it('refuses an already-rescoped plan and a plan with unusable files[]', () => {
+    const { base, anchor, head } = seedHistory();
+    const planPath = writeFetchedPlan(base, head);
+    run(planPath, anchor);
+    expect(process.exitCode ?? 0).toBe(0);
+    const after = readFileSync(planPath, 'utf8');
+    process.exitCode = undefined;
+    run(planPath, anchor);
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath, 'utf8')).toBe(after);
+
+    process.exitCode = undefined;
+    const planPath2 = writeFetchedPlan(base, head);
+    const mangled = JSON.parse(readFileSync(planPath2, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    mangled['files'] = 'nope';
+    writeFileSync(planPath2, JSON.stringify(mangled));
+    const before = readFileSync(planPath2, 'utf8');
+    run(planPath2, anchor);
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+    expect(readFileSync(planPath2, 'utf8')).toBe(before);
+  });
+
+  it('an unreadable plan path exits 2, not a throw', () => {
+    seedHistory();
+    run(join(repo, 'no-such-plan.json'), 'HEAD');
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
   });
 });

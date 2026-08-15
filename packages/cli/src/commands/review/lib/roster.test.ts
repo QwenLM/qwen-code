@@ -412,6 +412,36 @@ describe('requiredAgents — Step 3B', () => {
     );
     expect(keys(heavy)).not.toContain('invariant-a--src/small.ts');
   });
+
+  it('a heavy INTERACTION file in an incremental plan gets no invariant agents', () => {
+    // `heavy` is computed from the file's full-range slice, which for an
+    // interaction file is the code the previous round already cleared —
+    // three from-scratch whole-file walks are the re-review incremental
+    // scope exists to avoid. A heavy DELTA file keeps them; a malformed
+    // block widens (both keep them), never narrows.
+    const base = {
+      ...BIG,
+      files: [
+        { path: 'src/delta.ts', kind: 'source', removedLines: 9, heavy: true },
+        { path: 'src/seam.ts', kind: 'source', removedLines: 9, heavy: true },
+      ],
+    };
+    const incremental = {
+      ...base,
+      incremental: {
+        anchor: 'abc1234def567890',
+        deltaFiles: ['src/delta.ts'],
+        interaction: [
+          { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+        ],
+      },
+    };
+    const k = keys(incremental as typeof base);
+    expect(k).toContain('invariant-a--src/delta.ts');
+    expect(k).not.toContain('invariant-a--src/seam.ts');
+    const mangled = { ...base, incremental: { interaction: 'nope' } };
+    expect(keys(mangled as typeof base)).toContain('invariant-a--src/seam.ts');
+  });
 });
 
 describe('a heavy file in a Step-3A-sized diff', () => {

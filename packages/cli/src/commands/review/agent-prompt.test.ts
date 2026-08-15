@@ -4694,7 +4694,7 @@ describe('incremental-scope briefs', () => {
       interaction: [
         { path: 'src/caller.ts', importsChanged: ['src/changed.ts'] },
       ],
-      contextFiles: ['src/bystander.ts'],
+      contextFileCount: 1,
       fullDiffPath: '.qwen/tmp/qwen-review-pr-7-diff.txt',
     },
   };
@@ -4724,8 +4724,59 @@ describe('incremental-scope briefs', () => {
     expect(buildRoleBrief(PLAN, '2')).not.toContain('Incremental round');
   });
 
-  it('a malformed incremental block degrades to full-scope briefs', () => {
-    const mangled = { ...INCREMENTAL_PLAN, incremental: { anchor: 42 } };
-    expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
+  it('a malformed incremental block degrades to full-scope briefs — chunk AND role', () => {
+    for (const bad of [
+      { anchor: 42 },
+      // Valid anchor, but no scope list survives validation: rendering the
+      // frame with zero bullets is not a degrade, it is a confusion.
+      { anchor: 'abc1234def567890', deltaFiles: [], interaction: [] },
+      // An interaction entry whose edges were all invalid names a seam
+      // pointing at nothing ("because it imports , which changed").
+      {
+        anchor: 'abc1234def567890',
+        deltaFiles: [],
+        interaction: [{ path: 'src/caller.ts', importsChanged: [42] }],
+      },
+    ]) {
+      const mangled = { ...INCREMENTAL_PLAN, incremental: bad };
+      expect(buildChunkAgentPrompt(mangled, 1)).not.toContain('INCREMENTAL');
+      expect(buildRoleBrief(mangled, '2')).not.toContain('Incremental round');
+    }
+  });
+
+  it('a mixed delta+interaction chunk renders BOTH scope bullets', () => {
+    // rescope's composite is cut on line count, not scope class, so one
+    // chunk can straddle the two kinds; an else-if between the bullet
+    // branches would silently drop the seam brief for exactly that chunk.
+    const mixed = {
+      ...INCREMENTAL_PLAN,
+      chunks: [
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 20,
+          lines: 20,
+          chars: 800,
+          maxLineChars: 80,
+          oversized: false,
+          files: [
+            { path: 'src/changed.ts', newStart: 1, newEnd: 10 },
+            { path: 'src/caller.ts', newStart: 1, newEnd: 10 },
+          ],
+        },
+      ],
+    };
+    const p = buildChunkAgentPrompt(mixed, 1);
+    expect(p).toContain('changed since the last round');
+    expect(p).toContain('INTERACTION only');
+    expect(p).toContain('the scope class WINS');
+  });
+
+  it('whole-diff briefs name each file with its scope class', () => {
+    const p = buildRoleBrief(INCREMENTAL_PLAN, '2');
+    expect(p).toContain(
+      'Changed since the last round (full review): src/changed.ts.',
+    );
+    expect(p).toContain('src/caller.ts (imports src/changed.ts)');
   });
 });

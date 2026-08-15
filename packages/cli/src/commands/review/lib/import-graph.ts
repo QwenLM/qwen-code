@@ -29,6 +29,11 @@
 // - Bare workspace-package imports (`@scope/pkg` with no subpath) resolve only
 //   to the conventional entry candidates (`src/index.*`, `index.*`). A package
 //   with an exports map pointing elsewhere contributes no edge, same floor.
+// - `tsconfig` path aliases (`@/lib/utils`), `package.json#exports` subpath
+//   rewrites, and declaration-file references are not consulted — each is a
+//   per-repo config surface this scanner deliberately does not parse. Every
+//   one of these is a missed edge, never a wrong edge: the file simply keeps
+//   the pre-widening floor.
 //
 // The scan reads files from the review worktree (post-change state), because
 // the question is whether the caller AS IT NOW STANDS uses what changed.
@@ -76,7 +81,13 @@ export function scanImportSpecifiers(source: string): string[] {
  * the directory-index forms.
  */
 const EXT_MAP: ReadonlyArray<[RegExp, string]> = [
+  // BOTH TS source extensions for an emitted `.js`: under `react-jsx` a
+  // `.tsx` file also emits `.js`, and this repo's UI layer imports
+  // `./App.js` while only `App.tsx` exists. Measured before the second row
+  // was added: 921 of 6,200 relative `.js` specifiers under packages/cli/src
+  // named `.tsx` targets no edge could ever reach.
   [/\.js$/, '.ts'],
+  [/\.js$/, '.tsx'],
   [/\.jsx$/, '.tsx'],
   [/\.mjs$/, '.mts'],
   [/\.cjs$/, '.cts'],
@@ -99,7 +110,9 @@ function candidatesFor(base: string): string[] {
 /** POSIX-normalise a joined path and refuse escapes above the repo root. */
 function repoJoin(dir: string, spec: string): string | null {
   const joined = nodePath.posix.normalize(nodePath.posix.join(dir, spec));
-  return joined.startsWith('..') ? null : joined;
+  // Segment-exact: a legal directory that merely BEGINS with two dots
+  // (`..config/mod`) is not an escape, and `startsWith('..')` called it one.
+  return joined === '..' || joined.startsWith('../') ? null : joined;
 }
 
 /**
@@ -146,8 +159,12 @@ export function resolveSpecifier(
       const base = pkg.dir === '' ? sub : `${pkg.dir}/${sub}`;
       for (const c of candidatesFor(base)) if (membership.has(c)) return c;
       // Deep imports into a package's emitted tree (`dist/…`) name build
-      // output; try the conventional source root before giving up.
-      const srcBase = pkg.dir === '' ? `src/${sub}` : `${pkg.dir}/src/${sub}`;
+      // output; strip that segment and try the conventional source root.
+      // Without the strip the remap produced `<pkg>/src/dist/…`, which
+      // matches no source path — the branch's one stated purpose was dead.
+      const srcSub = sub.startsWith('dist/') ? sub.slice('dist/'.length) : sub;
+      const srcBase =
+        pkg.dir === '' ? `src/${srcSub}` : `${pkg.dir}/src/${srcSub}`;
       for (const c of candidatesFor(srcBase)) if (membership.has(c)) return c;
       return null;
     }

@@ -152,6 +152,38 @@ interface IncrementalScope {
   interaction: Array<{ path: string; importsChanged: string[] }>;
 }
 
+/**
+ * The per-file scope lists a whole-diff brief renders under its incremental
+ * frame. Capped per class: past the cap the tail is counted, not listed —
+ * the plan's own `incremental` block remains the complete record.
+ */
+const SCOPE_LIST_CAP = 30;
+function scopeFileLists(incremental: IncrementalScope): string[] {
+  const cap = <T>(items: T[], render: (item: T) => string): string => {
+    const shown = items.slice(0, SCOPE_LIST_CAP).map(render);
+    const rest = items.length - SCOPE_LIST_CAP;
+    return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+  };
+  const out: string[] = [];
+  if (incremental.deltaFiles.length > 0) {
+    out.push(
+      `Changed since the last round (full review): ` +
+        `${cap(incremental.deltaFiles, inertPath)}.`,
+    );
+  }
+  if (incremental.interaction.length > 0) {
+    out.push(
+      `Interaction only (cleared last round; check the seam with what each ` +
+        `imports): ${cap(
+          incremental.interaction,
+          (e) =>
+            `${inertPath(e.path)} (imports ${e.importsChanged.map(inertPath).join(', ')})`,
+        )}.`,
+    );
+  }
+  return out;
+}
+
 function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
   const raw = report.incremental as
     | {
@@ -170,16 +202,25 @@ function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
           (e): e is { path: string; importsChanged?: unknown } =>
             !!e &&
             typeof (e as { path?: unknown }).path === 'string' &&
-            (e as { path: string }).path.length > 0,
+            (e as { path: string }).path.length > 0 &&
+            // An interaction entry IS its edge: with no surviving
+            // importsChanged the brief would read "because it imports ,
+            // which changed" — a seam pointing at nothing.
+            strings((e as { importsChanged?: unknown }).importsChanged).length >
+              0,
         )
         .map((e) => ({
           path: e.path,
           importsChanged: strings(e.importsChanged),
         }))
     : [];
+  const deltaFiles = strings(raw.deltaFiles);
+  // Degrade-to-full-scope means DEGRADE: a block whose lists all failed
+  // validation must not render an incremental frame with zero scope bullets.
+  if (deltaFiles.length === 0 && interaction.length === 0) return null;
   return {
     anchor: raw.anchor,
-    deltaFiles: strings(raw.deltaFiles),
+    deltaFiles,
     interaction,
   };
 }
@@ -594,7 +635,8 @@ export function buildChunkAgentPrompt(
         ...deltaHere.map(
           (p) =>
             `- ${inertPath(p)} — **changed since the last round**: its hunks here are ` +
-            `the change under review; review them in full, as usual.`,
+            `its full change against the PR base (the previous round's clean verdict ` +
+            `no longer covers this file); review them in full, as usual.`,
         ),
       );
     }
@@ -610,6 +652,17 @@ export function buildChunkAgentPrompt(
             `answer that. Do not re-review the rest of this file's diff from scratch, and ` +
             `do not report defects in it that the change it imports does not affect.`,
         ),
+      );
+      lines.push(
+        // The generic duties below this block (the line-by-line walk, the
+        // deletion audit, every-dimension ownership) predate incremental
+        // scope and address the ordinary case. Without this sentence an
+        // agent obeys whichever instruction it read last — measured in
+        // review: told "interaction only", then told "audit all deletions
+        // in your territory", it re-opened round-1 findings.
+        `Where those general duties below conflict with a file's scope class ` +
+          `above, the scope class WINS: for an interaction file, every duty ` +
+          `applies only to its interaction surface with what changed.`,
       );
     }
     parts.push(...lines);
@@ -935,6 +988,13 @@ function diffReadingBlock(
             `reviewed clean last round and is deliberately absent; do not go find it. ` +
             `A defect in absent code is reportable only when a change IN this diff is ` +
             `what makes it wrong now.`,
+          '',
+          // A whole-diff reader must know WHICH file carries which scope —
+          // told only that the two classes coexist, it cannot tell the file
+          // owed a full review from the one owed a seam check. Capped so a
+          // wide round cannot flood the brief; the chunk briefs always carry
+          // their own files' classes in full.
+          ...scopeFileLists(incremental),
           '',
         ]
       : []),

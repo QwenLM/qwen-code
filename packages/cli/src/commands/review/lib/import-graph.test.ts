@@ -107,6 +107,54 @@ describe('resolveSpecifier', () => {
     ).toBe('packages/core/src/util/x.ts');
   });
 
+  it('maps an emitted .js specifier to a .tsx source — the UI layer convention', () => {
+    const uiFiles = new Set(['packages/cli/src/ui/App.tsx']);
+    expect(
+      resolveSpecifier(
+        'packages/cli/src/ui/AppContainer.tsx',
+        './App.js',
+        uiFiles,
+      ),
+    ).toBe('packages/cli/src/ui/App.tsx');
+  });
+
+  it('resolves .mjs to .mts and root-package (dir: "") specifiers', () => {
+    const rootFiles = new Set(['src/index.ts', 'src/util/x.ts', 'mod.mts']);
+    const rootPkg = [{ name: 'root', dir: '' }];
+    expect(resolveSpecifier('a.ts', './mod.mjs', rootFiles)).toBe('mod.mts');
+    expect(resolveSpecifier('a.ts', 'root', rootFiles, rootPkg)).toBe(
+      'src/index.ts',
+    );
+    expect(
+      resolveSpecifier('a.ts', 'root/src/util/x.js', rootFiles, rootPkg),
+    ).toBe('src/util/x.ts');
+  });
+
+  it('strips the dist/ segment on emitted-tree deep imports', () => {
+    const distFiles = new Set(['packages/core/src/utils/foo.ts']);
+    const distPkgs = [{ name: '@qwen/core', dir: 'packages/core' }];
+    expect(
+      resolveSpecifier(
+        'a.ts',
+        '@qwen/core/dist/utils/foo.js',
+        distFiles,
+        distPkgs,
+      ),
+    ).toBe('packages/core/src/utils/foo.ts');
+  });
+
+  it('a directory that merely BEGINS with dots is not a root escape', () => {
+    const dotFiles = new Set(['..config/mod.ts']);
+    expect(resolveSpecifier('a.ts', './..config/mod.js', dotFiles)).toBe(
+      '..config/mod.ts',
+    );
+    // Separating case for the guard itself: membership CONTAINS the escaping
+    // path, so only repoJoin's refusal produces the null.
+    expect(
+      resolveSpecifier('a.ts', '../../x', new Set(['../../x.ts'])),
+    ).toBeNull();
+  });
+
   it('returns null outside membership, above the root, and for unknown packages', () => {
     expect(
       resolveSpecifier('packages/cli/src/z.ts', './missing', files),
@@ -140,6 +188,18 @@ describe('dependentsOfChanged', () => {
     expect(out.size).toBe(0);
   });
 
+  it('consults the packages argument for cross-package edges', () => {
+    const out = dependentsOfChanged(
+      new Set(['packages/core/src/index.ts']),
+      ['packages/cli/src/z.ts'],
+      () => "import { x } from '@qwen/core';",
+      [{ name: '@qwen/core', dir: 'packages/core' }],
+    );
+    expect([...out.entries()]).toEqual([
+      ['packages/cli/src/z.ts', ['packages/core/src/index.ts']],
+    ]);
+  });
+
   it('an unreadable candidate contributes no edge and no crash', () => {
     const out = dependentsOfChanged(
       new Set(['src/changed.ts']),
@@ -171,9 +231,15 @@ describe('discoverWorkspacePackages', () => {
   });
 
   it('is fail-quiet on malformed or nameless manifests', () => {
-    const pkgs = discoverWorkspacePackages(['pkg/src/a.ts'], (p) =>
-      p === 'pkg/package.json' ? 'not json' : null,
-    );
-    expect(pkgs).toEqual([]);
+    for (const manifest of [
+      'not json',
+      JSON.stringify({ name: '' }),
+      JSON.stringify({}),
+    ]) {
+      const pkgs = discoverWorkspacePackages(['pkg/src/a.ts'], (p) =>
+        p === 'pkg/package.json' ? manifest : null,
+      );
+      expect(pkgs).toEqual([]);
+    }
   });
 });
