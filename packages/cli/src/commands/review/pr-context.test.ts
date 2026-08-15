@@ -1036,17 +1036,19 @@ describe('latestOwnLedger', () => {
     expect(ledger?.round).toBe(4);
   });
 
-  it('carries the anchor sha through the recovery seam intact', () => {
+  it('carries the anchor sha and model through the recovery seam intact', () => {
     // The PR's payoff depends on this seam: posted marker → latestOwnLedger →
     // the prev-ledger side file (a JSON.stringify of exactly this return).
     // A future normalization that projects the return onto known fields
-    // would silently drop `sha` with every other test still green; this
-    // pins the recovered object, anchor included.
+    // would silently drop `sha` — or `model`, which the same-model gate
+    // reads off the very same object — with every other test still green;
+    // this pins the recovered object, both anchor fields included.
     const anchored: Ledger = {
       v: 1,
       round: 2,
       findings: [{ id: 'R2-1', sev: 'C', file: 'a.ts', title: 't' }],
       sha: 'abc1234def567890',
+      model: 'qwen3.7-max',
     };
     const recovered = latestOwnLedger(
       [

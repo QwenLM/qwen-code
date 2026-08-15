@@ -450,6 +450,14 @@ describe('rescope — contract pins from review findings', () => {
     run(join(repo, 'no-such-plan.json'), 'HEAD');
     expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
   });
+
+  it('a plan that parses to JSON null exits 2, not a TypeError', () => {
+    seedHistory();
+    const nullPlan = join(repo, 'null-plan.json');
+    writeFileSync(nullPlan, 'null');
+    run(nullPlan, 'HEAD');
+    expect(process.exitCode).toBe(RESCOPE_EXIT_FULL_RANGE);
+  });
 });
 
 describe('rescope — verdict transfer after a rebase', () => {

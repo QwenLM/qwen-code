@@ -158,9 +158,44 @@ interface IncrementalScope {
  * frame. Capped per class: past the cap the tail is counted, not listed —
  * the plan's own `incremental` block remains the complete record.
  */
+/**
+ * The per-file scope bullets for ONE chunk's files — uncapped, because the
+ * agent holding that chunk is the sole reviewer of those files and has no
+ * other source for their class.
+ */
+function chunkScopeBullets(
+  incremental: IncrementalScope,
+  chunk: DiffChunk | undefined,
+): string[] {
+  if (!chunk) return [];
+  const paths = new Set(
+    (Array.isArray(chunk.files) ? chunk.files : [])
+      .map((f) => f?.path)
+      .filter((p): p is string => typeof p === 'string'),
+  );
+  const delta = incremental.deltaFiles.filter((p) => paths.has(p));
+  const seam = incremental.interaction.filter((e) => paths.has(e.path));
+  if (delta.length === 0 && seam.length === 0) return [];
+  return [
+    "Your territory's files, by scope class:",
+    ...delta.map(
+      (p) =>
+        `- ${inertPath(p)} — **changed since the last round**: review its hunks in full.`,
+    ),
+    ...seam.map(
+      (e) =>
+        `- ${inertPath(e.path)} — **interaction only**: cleared last round, back in ` +
+        `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}. ` +
+        `Review that seam, not the rest of its diff.`,
+    ),
+  ];
+}
+
 const SCOPE_LIST_CAP = 30;
-/** Edge lists are capped per entry too — the entry cap alone still let one
- *  interaction row carry hundreds of imports into every brief. */
+/** Edge lists are capped per entry in the WHOLE-DIFF frame — the entry cap
+ *  alone still let one interaction row carry hundreds of imports into every
+ *  brief. The chunk-level bullets are uncapped on purpose: that agent is the
+ *  sole reviewer of its files' seams and has nowhere to recover a tail. */
 const SCOPE_EDGE_CAP = 8;
 function cappedEdges(edges: readonly string[]): string {
   const shown = edges.slice(0, SCOPE_EDGE_CAP).map(inertPath);
@@ -656,7 +691,8 @@ export function buildChunkAgentPrompt(
         ...seamHere.map(
           (e) =>
             `- ${inertPath(e.path)} — **unchanged, cleared by the previous round**, back in ` +
-            `scope because it imports ${cappedEdges(e.importsChanged)}, which ` +
+            `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}, ` +
+            `which ` +
             `changed. Review the INTERACTION only: do this file's uses of what it imports ` +
             `still hold — signatures, argument contracts, invariants, error behaviour — ` +
             `now that the imported side moved? Read the changed side from the worktree to ` +
@@ -1014,6 +1050,20 @@ function diffReadingBlock(
           // wide round cannot flood the brief; the chunk briefs always carry
           // their own files' classes in full.
           ...scopeFileLists(incremental),
+          '',
+        ]
+      : []),
+    // A CHUNK-scoped role brief (the reverse auditors) owns one territory and
+    // is its sole reviewer: the capped global list above can elide its own
+    // files past entry 30, leaving the agent no way to learn their class or
+    // recover the tail. Its own files are therefore listed in full, exactly
+    // as the bare chunk agent's brief lists them.
+    ...(incremental && scoped
+      ? [
+          ...chunkScopeBullets(
+            incremental,
+            chunks.find((c) => c.id === chunkId),
+          ),
           '',
         ]
       : []),

@@ -19,6 +19,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -421,6 +422,12 @@ describe('capture-local — round-3 findings', () => {
     write(CHANGED, 'export const v = 1;\n');
     write('sub/keep.ts', 'export const k = 1;\n');
     mkdirSync(join(repo, 'sub'), { recursive: true });
+    // PLANT the plumbing at the SUBDIRECTORY path the review writes it to:
+    // without these the assertion below passes over an empty set and proves
+    // nothing (measured — it survived removing the cwd-aware prefixes).
+    write('sub/.qwen/tmp/qwen-review-parse-args.json', '{}\n');
+    write('sub/.qwen/review-cache/local.json', '{}\n');
+    write('sub/.qwen/reviews/2026-01-01-local.md', '# report\n');
     const prev = process.cwd();
     process.chdir(join(repo, 'sub'));
     try {
@@ -463,18 +470,13 @@ describe('capture-local — round-3 findings', () => {
       // Two targets that differ only in invalid-UTF-8 bytes: a lossy decode
       // collapses both to U+FFFD and the identity would hold still.
       const linkPath = join(repo, 'src/link');
-      execFileSync('ln', [
-        '-sfn',
-        Buffer.from([0xff, 0x2e, 0x74]).toString('latin1'),
-        linkPath,
-      ]);
+      // Buffer targets: `execFileSync`/`ln` re-encode a JS string as UTF-8
+      // and never put the invalid bytes on disk — the shape this fix exists
+      // for would go untested.
+      symlinkSync(Buffer.from([0xff, 0x2e, 0x74]), linkPath);
       const cachePath = promoteCandidate(capture(), 'model-a');
       rmSync(linkPath);
-      execFileSync('ln', [
-        '-sfn',
-        Buffer.from([0xfe, 0x2e, 0x74]).toString('latin1'),
-        linkPath,
-      ]);
+      symlinkSync(Buffer.from([0xfe, 0x2e, 0x74]), linkPath);
       const plan = capture({ cache: cachePath, model: 'model-a' });
       expect(plan.incremental!.deltaFiles).toContain('src/link');
     },

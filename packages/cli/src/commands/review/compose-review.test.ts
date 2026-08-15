@@ -1763,6 +1763,67 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it('injects the session model into the marker — QWEN_CODE_MODEL reaches the anchor (wiring)', async () => {
+    // The certifying identity must be the model the session ACTUALLY runs —
+    // Config publishes it per session, the shell tool injects it into this
+    // subprocess — not the id the state JSON typed. Dropping the runtime
+    // argument from the handler's composeReview call leaves the pure-function
+    // tests green while the posted anchor is certified by the typed id again.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-runtime-model-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const outPath = join(dir, 'composed.json');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({
+        modelId: 'typed-by-the-model',
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+        }),
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 3, body: '**[Suggestion]** prefer x' },
+      ]),
+      'utf8',
+    );
+    // The handler strips `env` off the state JSON, so coverage resolves the
+    // fixture transcripts from the process environment.
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    const prevModel = process.env['QWEN_CODE_MODEL'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = ENV['QWEN_CODE_PROJECT_DIR'];
+    process.env['QWEN_CODE_SESSION_ID'] = ENV['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_MODEL'] = 'the-session-model';
+    try {
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      const ledger = parseLedger(written.body)!;
+      expect(ledger.sha).toBe('deadbeef00112233');
+      expect(ledger.model).toBe('the-session-model');
+    } finally {
+      for (const [key, prev] of [
+        ['QWEN_CODE_PROJECT_DIR', prevDir],
+        ['QWEN_CODE_SESSION_ID', prevSession],
+        ['QWEN_CODE_MODEL', prevModel],
+      ] as const) {
+        if (prev === undefined) delete process.env[key];
+        else process.env[key] = prev;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('pins the persisted footer to the inherited startup version, not the resolved one', async () => {
     // Same pin as `submit`: a shared runner rewrites installs under running
     // processes, so the version resolved at compose time can disagree with
@@ -4355,6 +4416,96 @@ describe('the ledger marker reaches the POSTED body', () => {
     const ledger = parseLedger(r.body)!;
     expect(ledger.sha).toBe('deadbeef00112233');
     expect(ledger.model).toBe(MODEL);
+  });
+
+  it('attribution off: the marker withholds the model WITH the footer', () => {
+    // `review.attribution` is "whether the posted review names its model".
+    // The footer is the visible half; the marker rides the same posted body,
+    // so a model id inside it publishes exactly what the setting removes —
+    // readable through the API and the raw-body edit view — on a write this
+    // module calls public and irreversible. Withheld, the anchor degrades to
+    // the skill's specified fail-safe: absent model → mismatch → full-range.
+    const r = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+        }),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      false,
+    );
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.sha).toBe('deadbeef00112233');
+    expect(ledger.model).toBeUndefined();
+    expect(r.body).not.toContain(MODEL);
+  });
+
+  it('attribution off, modelId absent: the marker SURVIVES — only the model is withheld', () => {
+    // Attribution off skips the `modelId is required` validation, so a state
+    // JSON without the field is legal on a clean round. A marker path that
+    // threw on it would drop the WHOLE marker, not just the model: the round
+    // counter resets (the next round re-issues ids the PR already carries)
+    // and the findings work list is lost. Measured: deleting the typeof guard
+    // survived the suite, so this pins the branch by name.
+    const r = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+        }),
+        env: ENV,
+        modelId: undefined as unknown as string,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      false,
+    );
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.sha).toBe('deadbeef00112233');
+    expect(ledger.model).toBeUndefined();
+  });
+
+  it('the anchor carries the RUNTIME identity — injected at the CLI boundary, never typed by the model', () => {
+    // The certifying model used to be `input.modelId` — a field of the
+    // model-written state JSON. A review running under one model could type
+    // another's id, and the posted anchor would certify the range to a model
+    // that never reviewed it: a later run of that model accepts `sha..HEAD`
+    // and skips the earlier code. The boundaries now inject the identity the
+    // session ACTUALLY runs (Config publishes QWEN_CODE_MODEL); the typed
+    // field is only the fallback for runs no session published.
+    const r = composeReview(
+      {
+        planPath: coveredPlan(['verify', 'reverse-audit'], {
+          prNumber: 8255,
+          fetchedSha: 'deadbeef00112233',
+        }),
+        env: ENV,
+        modelId: 'typed-by-the-model',
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+      },
+      'unknown',
+      true,
+      'the-session-model',
+    );
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.sha).toBe('deadbeef00112233');
+    expect(ledger.model).toBe('the-session-model');
   });
 
   it('withholds the model WITH the sha on a capped round — it qualifies the anchor, nothing else', () => {

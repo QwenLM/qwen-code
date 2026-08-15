@@ -380,8 +380,11 @@ export function captureLocalDiff(opts: {
     const selfDirs = ['.qwen/tmp', '.qwen/review-cache', '.qwen/reviews']
       .flatMap((d) => (cwdPrefix === '' ? [d] : [d, `${cwdPrefix}/${d}`]))
       // A cwd outside the repo (or above it) yields a `..` prefix that names
-      // nothing `ls-files` can return; keep the root form only.
-      .filter((d) => !d.startsWith('..'));
+      // nothing `ls-files` can return; keep the root form only. Segment-exact,
+      // for the reason `toRepoPathspec` records below: a directory literally
+      // named `..config` is not an escape, and dropping its prefix would put
+      // the plumbing back in the capture.
+      .filter((d) => d !== '..' && !d.startsWith('../'));
     const candidates = listUntracked(repoRoot, pathspec).filter(
       (p) => !selfDirs.some((d) => p === d || p.startsWith(`${d}/`)),
     );

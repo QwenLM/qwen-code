@@ -176,10 +176,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // TOCTOU guard: the diff was snapshotted before the hashes were computed,
   // and an editor save landing in that window makes the candidate certify
   // bytes THIS round never reviewed — the one uncertainty in this module
-  // that failed OPEN. Re-capture and compare: identical bytes prove the
-  // tree held still across the window; anything else withholds the
+  // that failed OPEN. Re-capture and compare: differing bytes withhold the
   // candidate (the plan still reviews the FIRST capture), which only costs
-  // the next round its incremental scoping.
+  // the next round its incremental scoping. Endpoint comparison, so a
+  // write-then-revert entirely inside the window is invisible to it — that
+  // shape leaves the reviewed bytes and the hashed bytes equal anyway, so
+  // the certificate stays true; what it cannot catch is a revert that
+  // restores DIFFERENT bytes, a shape no editor produces by accident.
   const recapture = captureLocalDiff({
     file,
     includeUntracked: args.untracked,

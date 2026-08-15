@@ -194,7 +194,12 @@ export interface ComposeReviewInput {
    * handler strips it, as it does `env` and `prBodyFetcher`).
    */
   draftedComments?: Array<{ path?: unknown; line?: unknown; body?: unknown }>;
-  /** Model id for the footer, e.g. `qwen3.7-max`. */
+  /**
+   * Model id for the footer, e.g. `qwen3.7-max`. The marker's anchor takes
+   * the session-published identity instead when the CLI boundary injects one
+   * (`composeReview`'s `runtimeModelId`); this field is its fallback for runs
+   * no session published, and what the visible footer names either way.
+   */
   modelId: string;
 }
 
@@ -474,6 +479,14 @@ export function composeReview(
   input: ComposeReviewInput,
   cliVersion = 'unknown',
   attribution = true,
+  /**
+   * The model identity the RUNTIME publishes as active — `QWEN_CODE_MODEL`,
+   * injected by the two CLI boundaries from the environment the session
+   * exports. The marker's anchor certifies with THIS, never with the
+   * model-written state field alone; `input.modelId` is the fallback for
+   * runs no session published. Undefined in tests that call this directly.
+   */
+  runtimeModelId?: string,
 ): ComposeReviewResult {
   const result = composeReviewBody(input, cliVersion, attribution);
   // The ledger marker rides the body THIS function returns, because this — not
@@ -481,7 +494,12 @@ export function composeReview(
   // handler left the feature inert end to end: the marker reached only the
   // composed JSON on disk, which nothing in the posting path reads, so no
   // posted review ever carried one and every round recovered `null`.
-  const marker = ledgerMarkerFor(input, result.cappedBy);
+  const marker = ledgerMarkerFor(
+    input,
+    result.cappedBy,
+    attribution,
+    runtimeModelId,
+  );
   return marker ? { ...result, body: `${result.body}\n\n${marker}` } : result;
 }
 
@@ -493,6 +511,8 @@ export function composeReview(
 function ledgerMarkerFor(
   input: ComposeReviewInput,
   cappedBy: string[],
+  attribution: boolean,
+  runtimeModelId: string | undefined,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -545,13 +565,23 @@ function ledgerMarkerFor(
         : undefined;
     // The anchor's same-model qualifier: "clean up to `sha`" is THIS model's
     // verdict, and Step 1's recovered-anchor gate refuses to scope another
-    // model's round to it. Checked here rather than trusted: the boundary
-    // validation of `modelId` runs only when attribution is on, and the
-    // marker rides either way. The serializer writes it only beside a sha.
-    const model =
-      typeof input.modelId === 'string' && input.modelId.trim() !== ''
-        ? input.modelId.trim()
-        : undefined;
+    // model's round to it. The identity is the one the RUNTIME published —
+    // the boundaries inject it, a model cannot type it — with the
+    // model-written field only as the fallback for runs no session published
+    // (and boundary-validated then whenever attribution is on): a review
+    // running under one model could otherwise type another's id and certify
+    // the range to a model that never reviewed it. Withheld entirely when
+    // attribution is off: the setting's contract is "whether the posted
+    // review names its model", the marker rides the posted body, and a
+    // suppression the footer honours must reach the invisible half too — the
+    // anchor then degrades to the skill's absent-model fail-safe. The
+    // serializer writes it only beside a sha.
+    const runtime =
+      typeof runtimeModelId === 'string' ? runtimeModelId.trim() : '';
+    const declared =
+      typeof input.modelId === 'string' ? input.modelId.trim() : '';
+    const certifying = runtime !== '' ? runtime : declared;
+    const model = attribution && certifying !== '' ? certifying : undefined;
     return serializeLedger({
       ...buildLedger(
         prevRound + 1,
@@ -2352,6 +2382,10 @@ export const composeReviewCommand: CommandModule = {
       footerVersion(process.env['QWEN_CODE_STARTUP_VERSION']) ??
         (await getCliVersion()),
       operatorReviewSettings().attribution,
+      // The anchor's certifying identity is the model the session ACTUALLY
+      // runs — Config publishes it per session, the shell tool injects it
+      // into this subprocess — not the id the state JSON typed.
+      process.env['QWEN_CODE_MODEL'],
     );
     // The exact terminal verdict, persisted beside the fields it is computed
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
