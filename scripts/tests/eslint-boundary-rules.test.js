@@ -174,6 +174,56 @@ describe('eslint cli serve boundary rules', () => {
     );
   });
 
+  // Round 6 (remaining entrances): percent-encoded segments, static
+  // traversal twins, and the leading-literal-segment dynamic spelling.
+  it('rejects percent-encoded and static-traversal boundary entrances', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+
+    // Node percent-decodes segments when mapping to the filesystem, so
+    // raw-text patterns cannot see through %73 === 's'.
+    await expectServeBoundaryError(acp, "import '../%73erve/index.js';");
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { await import('../%73erve/index.js'); }",
+    );
+
+    // Static twins of the blocked dynamic spellings.
+    await expectServeBoundaryError(acp, "import './../serve/index.js';");
+    await expectServeBoundaryError(
+      acp,
+      "import '../runtime/../serve/index.js';",
+    );
+    await expectServeBoundaryError(acp, "import '..//serve/index.js';");
+  });
+
+  it('rejects a leading literal segment before the traversal run', async () => {
+    await expectServeBoundaryError(
+      'packages/cli/src/acp-integration/boundary-fixture.ts',
+      "export async function load() { await import('foo/../../../serve/index.js'); }",
+    );
+  });
+
+  // vitest module-loading calls resolve (and without a factory load) the
+  // real module, so the boundary applies to them too.
+  it('rejects serve specifiers in vitest module-loading calls', async () => {
+    const acp = 'packages/cli/src/acp-integration/boundary-fixture.ts';
+    await expectServeBoundaryError(
+      acp,
+      "vi.mock('../../serve/live/live-task-service.js');",
+    );
+    await expectServeBoundaryError(
+      acp,
+      "export async function load() { return vi.importActual('../../serve/live/live-task-service.js'); }",
+    );
+
+    // A non-serve vi.mock stays silent on the boundary.
+    const [result] = await lintCliFile(acp, "vi.mock('../utils/foo.js');");
+    const boundaryHits = result.messages.filter((message) =>
+      message.message.includes('serve'),
+    );
+    expect(boundaryHits).toEqual([]);
+  });
+
   // R5-7: third-party packages whose name contains `serve` must not be
   // caught by the boundary (the old `**/serve*` globs matched them).
   it('allows third-party serve-named packages', async () => {

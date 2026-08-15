@@ -49,6 +49,10 @@ const serveDynamicImportPatterns = [
   // Spellings routing through intermediate or traversal segments:
   // ../runtime/../serve/x, ../foo/../../../serve/x, ..//foo//serve, ...
   String.raw`^(?:\.\x2f+|\.\.\x2f+)+(?:[^\x2f]+\x2f+)+serve(?:\x2f|$)`,
+  // A traversal run landing on serve from ANY position — covers a leading
+  // literal segment (foo/../../../serve/x) that the dot-slash-anchored
+  // patterns miss (round-6 entrance).
+  String.raw`(?:^|\x2f)(?:\.\.\x2f+)+serve(?:\x2f|$)`,
 ];
 
 // Computed dynamic-import sources cannot be statically checked against the
@@ -58,6 +62,20 @@ const FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE =
   'Dynamically computed import sources cannot be checked against the serve/ ' +
   'boundary. Use a string-literal specifier so the boundary rule can see ' +
   'the target (#8084, #9146).';
+
+// Node percent-decodes path segments when mapping the resolved URL to the
+// filesystem (`../%73erve/index.js` loads serve/), while these selectors
+// match raw specifier text — so any `%` in a guarded-tree specifier is
+// rejected outright instead of pattern-matched (round-6 entrance).
+const SERVE_BOUNDARY_PERCENT_MESSAGE =
+  'Percent-encoded path segments bypass the serve/ boundary check; use the ' +
+  'canonical specifier spelling (#8084).';
+
+// vitest's module-loading call APIs resolve (and, without a factory, load)
+// the real module — same boundary, CallExpression shape (round-6
+// suggestion: vi.mock/doMock/importActual/importMock).
+const vitestModuleLoadingCallSelector =
+  'CallExpression[callee.object.name="vi"][callee.property.name=/^(?:mock|doMock|importActual|importMock)$/]';
 
 const restrictedServeDynamicImports = (message) => [
   ...serveDynamicImportPatterns.flatMap((pattern) => [
@@ -69,6 +87,22 @@ const restrictedServeDynamicImports = (message) => [
       selector: `ImportExpression[source.quasis.0.value.cooked=/${pattern}/]`,
       message,
     },
+    // Static spellings must pass the same regexes: the depth-enumerated
+    // no-restricted-imports globs only see canonical forms, while
+    // `./../serve`, `..//serve`, and traversal-through-intermediate static
+    // imports resolve to serve/ just the same (round-6 entrances).
+    {
+      selector: `ImportDeclaration[source.value=/${pattern}/]`,
+      message,
+    },
+    {
+      selector: `ExportNamedDeclaration[source.value=/${pattern}/]`,
+      message,
+    },
+    {
+      selector: `ExportAllDeclaration[source.value=/${pattern}/]`,
+      message,
+    },
     {
       // @typescript-eslint wraps the specifier in a TSLiteralType: the string
       // lives at argument.literal.value, NOT argument.value (probe-verified;
@@ -76,7 +110,29 @@ const restrictedServeDynamicImports = (message) => [
       selector: `TSImportType[argument.literal.value=/${pattern}/]`,
       message,
     },
+    // vitest module-loading calls (see vitestModuleLoadingCallSelector).
+    {
+      selector: `${vitestModuleLoadingCallSelector}[arguments.0.value=/${pattern}/]`,
+      message,
+    },
+    {
+      selector: `${vitestModuleLoadingCallSelector}[arguments.0.quasis.0.value.cooked=/${pattern}/]`,
+      message,
+    },
   ]),
+  // Percent-encoded segments (see SERVE_BOUNDARY_PERCENT_MESSAGE).
+  ...[
+    'ImportExpression[source.value=/%/]',
+    'ImportExpression[source.quasis.0.value.cooked=/%/]',
+    'ImportDeclaration[source.value=/%/]',
+    'ExportNamedDeclaration[source.value=/%/]',
+    'ExportAllDeclaration[source.value=/%/]',
+    'TSImportType[argument.literal.value=/%/]',
+    `${vitestModuleLoadingCallSelector}[arguments.0.value=/%/]`,
+  ].map((selector) => ({
+    selector,
+    message: SERVE_BOUNDARY_PERCENT_MESSAGE,
+  })),
   // Fail-closed: concatenation, `new URL(...)`, template literals containing
   // expressions, and any other computed source cannot be proven safe
   // statically (rounds 2-6 each demonstrated a new entrance). Pure template
@@ -91,6 +147,14 @@ const restrictedServeDynamicImports = (message) => [
   },
   {
     selector: 'ImportExpression[source.type="TemplateLiteral"][source.expressions.0]',
+    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
+  },
+  {
+    selector: `${vitestModuleLoadingCallSelector}:not([arguments.0.type="Literal"]):not([arguments.0.type="TemplateLiteral"])`,
+    message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
+  },
+  {
+    selector: `${vitestModuleLoadingCallSelector}[arguments.0.type="TemplateLiteral"][arguments.0.expressions.0]`,
     message: FAIL_CLOSED_DYNAMIC_IMPORT_MESSAGE,
   },
 ];
