@@ -26,7 +26,11 @@ import { join } from 'node:path';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
 import { recoverFindings, recoverFindingsCommand } from './recover-findings.js';
-import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import {
+  promptRecordDir,
+  briefPath,
+  findingsFilePath,
+} from './lib/prompt-record.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
 
 let dir: string;
@@ -310,6 +314,82 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     expect(r.recoveredKeys).toEqual([]);
   });
 
+  it('refuses a CHUNK agent that opened its brief but never the diff', () => {
+    // Coverage requires `diffToolCalls > 0` of a chunk-assigned record. The
+    // recovery bar was `openedBrief || diffToolCalls > 0`, so this agent's
+    // plausible prose over zero diff lines was written into the recovery file
+    // and its key left `missingKeys` — the resumed run then never relaunches
+    // it.
+    const prompt = built('chunk-2');
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, 'chunk-2')],
+      finalText: 'No issues found in chunk 2.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
+  });
+
+  it('refuses a NON-chunk agent that opened the diff but never its brief', () => {
+    // The mirror direction: a reverse-audit brief carries the method and the
+    // cumulative findings list, so an auditor that never opened it did not
+    // perform the audit however much of the diff it read.
+    const prompt = built('reverse-audit');
+    transcript('S0', 'a0', prompt, {
+      opens: [DIFF],
+      finalText: 'Audit complete; nothing further.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
+  });
+
+  it('requires the findings list a verifier was told to read', () => {
+    // The floor the compose-time gate applies to the same key. Without it,
+    // recovery certifies a verifier that skipped the read and compose then
+    // rules the very same key `findings-unread`.
+    const key = 'verify';
+    const prompt = built(key);
+    const findings = findingsFilePath(plan, key);
+    writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, key)],
+      finalText: 'Verified.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual(
+      [],
+    );
+
+    // ...and it recovers once the list was actually opened.
+    transcript('S0', 'a1', prompt, {
+      opens: [briefPath(plan, key), findings],
+      finalText: 'Verified, with the list read.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      key,
+    ]);
+  });
+
+  it('does not veto an auditor that QUOTES an uncoverable declaration', () => {
+    // The brief instructs verbatim quoting of the evidence, so a certified
+    // auditor's text legitimately contains the line. Applied raw, the veto
+    // matched the quotation, dropped the round from recovery, and regressed
+    // `latestReverseAuditRound` — restarting the audit loop a round early.
+    const key = 'reverse-audit--round-2--abc123def456';
+    const prompt = built(key);
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, key)],
+      finalText:
+        'Reviewed the round-1 declarations. One of them reads:\n' +
+        'Uncoverable: chunk 1 — a line exceeds the read limit\n' +
+        'That declaration is sound.',
+    });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([key]);
+    expect(r.latestReverseAuditRound).toBe(2);
+  });
+
   it('fences findings files by the run epoch', () => {
     // Nothing clears the record dir: a PREVIOUS review of the same PR leaves
     // its rounds' lists behind, and restoring one would hand a resumed run a
@@ -372,16 +452,25 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     ).toBe(1);
   });
 
-  it('discloses an unreadable record dir instead of printing as empty', () => {
-    const recordDir = promptRecordDir(plan);
-    chmodSync(recordDir, 0o000);
-    try {
-      const r = recoverFindings({ plan, out: out() }, ENV);
-      expect(r.recordDirUnreadable).not.toBeNull();
-    } finally {
-      chmodSync(recordDir, 0o755);
-    }
-  });
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'discloses an unreadable record dir instead of printing as empty',
+    () => {
+      // Guarded like every sibling chmod fixture in this suite: as uid 0 the
+      // permission bits are bypassed and the directory stays readable, and on
+      // Windows chmod on a directory only toggles the read-only attribute —
+      // in both cases `recordDirUnreadable` stays null and this fails on a
+      // required merge-queue leg for a reason that has nothing to do with the
+      // code.
+      const recordDir = promptRecordDir(plan);
+      chmodSync(recordDir, 0o000);
+      try {
+        const r = recoverFindings({ plan, out: out() }, ENV);
+        expect(r.recordDirUnreadable).not.toBeNull();
+      } finally {
+        chmodSync(recordDir, 0o755);
+      }
+    },
+  );
 
   it('exits 1 when the transcript infrastructure is missing entirely', () => {
     const handler = recoverFindingsCommand.handler as (a: unknown) => void;

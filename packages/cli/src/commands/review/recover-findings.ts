@@ -20,7 +20,7 @@
 // hard failure is missing transcript infrastructure — a resume with no
 // evidence to read should say so rather than print an empty recovery.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
@@ -37,8 +37,10 @@ import {
   flattenPrompt,
   promptLines,
   briefPath,
+  findingsFilePath,
 } from './lib/prompt-record.js';
 import { priorSessionIds } from './lib/run-ledger.js';
+import { assignedChunk } from './lib/coverage.js';
 import { readBudgetStop, type BudgetStop } from './lib/deadline.js';
 
 interface RecoverFindingsArgs {
@@ -87,16 +89,59 @@ const ROUND_IN_KEY_RE = /--round-(\d+)(?:--|$)/;
  */
 const UNCOVERABLE_RE = /^\s*Uncoverable:\s*chunk\s+(\d+)\b/im;
 
+/**
+ * Certify one transcript against one built prompt — the SAME bar the live
+ * pipeline holds a launch to, branch for branch.
+ *
+ * It used to be a re-implementation, and re-implementing a bar means drifting
+ * from it. `openedBrief || diffToolCalls > 0` certified three things the
+ * pipeline refuses: a chunk agent that opened its brief and never the diff
+ * (coverage requires the diff read for a chunk-assigned record), a
+ * verify/reverse-audit agent that opened the diff and never its brief (the
+ * brief carries the method and the cumulative findings list), and a verifier
+ * that skipped the findings-list read the compose-time gate requires of the
+ * same key. Each handed the resumed orchestrator uncertified prose labelled
+ * as certified.
+ */
+/** `chunk-13` → 13. The KEY is the assignment here, not a prose match. */
+function chunkOfKey(key: string): number | null {
+  const m = /^chunk-(\d+)$/.exec(key);
+  return m ? Number(m[1]) : null;
+}
+
 function meetsBar(rec: AgentRecord, planPath: string, key: string): boolean {
-  // The same veto coverage applies: a return that declares a chunk
-  // unreachable is a disclosed gap, not a result to hand the resumed run as
-  // recovered work.
-  if (UNCOVERABLE_RE.test(rec.finalText)) return false;
-  const briefNeedle = JSON.stringify(briefPath(planPath, key));
+  // Coverage infers the assignment from the launch prompt because that is all
+  // it has; recovery is matching a record to a KEY the CLI built, which says
+  // the same thing directly. Fall back to the prompt for a record whose key
+  // does not name a chunk.
+  const chunk = chunkOfKey(key) ?? assignedChunk(rec);
+  // The veto is chunk-SCOPED, as it is in coverage's walk: there the regex is
+  // applied to an agent's own declaration about its own chunk. Applied raw to
+  // any final text, it also matches a QUOTATION — and quoting the evidence
+  // verbatim is exactly what a reverse-audit brief instructs. A certified
+  // auditor that quoted an `Uncoverable:` line was dropped from recovery, and
+  // `latestReverseAuditRound` regressed with it, restarting the audit loop a
+  // round early.
+  const declared = UNCOVERABLE_RE.exec(rec.finalText);
+  if (declared !== null && chunk !== null && Number(declared[1]) === chunk) {
+    return false;
+  }
   const openedBrief = rec.successfulCallArgs.some((a) =>
-    a.includes(briefNeedle),
+    a.includes(JSON.stringify(briefPath(planPath, key))),
   );
-  return openedBrief || rec.diffToolCalls > 0;
+  if (chunk !== null) {
+    // A chunk agent's proof is the diff it opened, not the brief it was
+    // pointed at.
+    return rec.diffToolCalls > 0;
+  }
+  // Every other role: the brief, plus — where the pipeline demands it of this
+  // key — the findings list the brief tells it to read.
+  if (!openedBrief) return false;
+  const findingsPath = findingsFilePath(planPath, key);
+  if (!existsSync(findingsPath)) return true;
+  return rec.successfulReadFileArgs.some((a) =>
+    a.includes(JSON.stringify(findingsPath)),
+  );
 }
 
 export function recoverFindings(

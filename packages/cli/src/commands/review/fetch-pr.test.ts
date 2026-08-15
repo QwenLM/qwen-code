@@ -315,6 +315,7 @@ vi.mock('./lib/run-ledger.js', async (importOriginal) => {
     ...actual,
     appendRunSession: vi.fn(),
     priorSessionIds: vi.fn(() => []),
+    sessionEntryCount: vi.fn(() => 0),
     readResumeMarker: vi.fn(() => ({
       schemaVersion: 1,
       resumes: [],
@@ -3168,15 +3169,18 @@ describe('fetch-pr --resume', () => {
     // clearAllMocks resets call history but NOT implementations; re-assert
     // the ledger defaults so a mockReturnValue set by one test cannot leak
     // into the next — the same discipline the fs mock above follows.
-    const { priorSessionIds, readResumeMarker } = await import(
-      './lib/run-ledger.js'
-    );
+    const { priorSessionIds, readResumeMarker, sessionEntryCount } =
+      await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
+    vi.mocked(sessionEntryCount).mockImplementation(() => 0);
     vi.mocked(readResumeMarker).mockImplementation(() => ({
       schemaVersion: 1,
       resumes: [],
       restarts: [],
     }));
+    // The cap's marker term excludes THIS session, so these tests need a
+    // current session id for it to exclude.
+    vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
   });
 
   async function run(extraArgs: Record<string, unknown> = {}) {
@@ -3305,12 +3309,34 @@ describe('fetch-pr --resume', () => {
   it('cross-caps the resume count on the session ledger — a deleted marker does not reset it', async () => {
     // Marker reads empty (deleted), but the ledger names three sessions:
     // the original plus two resumes. The cap must read as spent.
-    const { priorSessionIds } = await import('./lib/run-ledger.js');
-    vi.mocked(priorSessionIds).mockReturnValue(['S1', 'S2', 'S3']);
+    // Read UNGATED: the gated accessor cannot answer at ruling time, because
+    // the record that satisfies its gate is written only after the ruling.
+    const { sessionEntryCount } = await import('./lib/run-ledger.js');
+    vi.mocked(sessionEntryCount).mockReturnValue(3);
     await run();
     expect(reportWritten()).toBe(true);
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
+  });
+
+  it('does not count the CURRENT session against its own resume cap', async () => {
+    // A same-session retry of the last permitted resume is that same resume —
+    // `recordResume` dedupes on exactly this. Counting the session's own
+    // marker entry refused the retry as `resume-cap`, and the fall-through
+    // then force-removed the worktree and rewrote the plan, fencing out every
+    // attempt's evidence: a review restarted from zero by a retry.
+    const { readResumeMarker } = await import('./lib/run-ledger.js');
+    vi.mocked(readResumeMarker).mockReturnValue({
+      schemaVersion: 1,
+      resumes: [
+        { sessionId: 'S-prev', atMs: Date.now() },
+        { sessionId: 'S-test', atMs: Date.now() },
+      ],
+      restarts: [],
+    });
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toMatchObject({ resumed: true });
   });
 
   it('refuses on an explicit effort different from the recorded run', async () => {
@@ -3431,15 +3457,18 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     vi.mocked(gitOpt).mockImplementation((...args: string[]) =>
       args.includes('status') ? '' : 'f00df00df00d',
     );
-    const { priorSessionIds, readResumeMarker } = await import(
-      './lib/run-ledger.js'
-    );
+    const { priorSessionIds, readResumeMarker, sessionEntryCount } =
+      await import('./lib/run-ledger.js');
     vi.mocked(priorSessionIds).mockImplementation(() => []);
+    vi.mocked(sessionEntryCount).mockImplementation(() => 0);
     vi.mocked(readResumeMarker).mockImplementation(() => ({
       schemaVersion: 1,
       resumes: [],
       restarts: [],
     }));
+    // The cap's marker term excludes THIS session, so these tests need a
+    // current session id for it to exclude.
+    vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
   });
 
   async function run(extra: Record<string, unknown> = {}) {

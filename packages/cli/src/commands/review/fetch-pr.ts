@@ -67,7 +67,7 @@ import { operatorReviewSettings } from './lib/review-settings.js';
 import { SHA_RE } from './lib/ledger.js';
 import {
   appendRunSession,
-  priorSessionIds,
+  sessionEntryCount,
   readResumeMarker,
   recordResume,
   recordRestart,
@@ -657,7 +657,27 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
   // session ledger cross-caps it — a deleted marker must not read as an
   // unspent cap while the ledger still names every session that ran. The
   // ledger's first entry is the original run's own session, not a resume.
-  const ledgerResumes = Math.max(0, priorSessionIds(out).length - 1);
+  // UNGATED: `priorSessionIds` is gated on this session already being a
+  // recorded resume, and that record is written only after the ruling below
+  // passes — so read through the gate this term was zero at every ruling, and
+  // the two-counter cap it was supposed to backstop collapsed to one counter
+  // that deleting `resume.json` resets. A count is not evidence.
+  //
+  // Minus one: the ledger's first entry is the original run's own session,
+  // which is not a resume.
+  const ledgerResumes = Math.max(0, sessionEntryCount(out) - 1);
+  // The current session is excluded from BOTH terms or neither. `recordResume`
+  // dedupes per session — a second `--resume` in the same session is the same
+  // resume — so counting this session's own marker entry refuses its retry as
+  // `resume-cap`, and the fall-through then force-removes the worktree and
+  // rewrites the plan, fencing out every attempt's evidence. A retry of the
+  // last permitted resume must be that same resume, not one past the cap.
+  const currentSessionId = process.env['QWEN_CODE_SESSION_ID']
+    ?.trim()
+    .toLowerCase();
+  const markerResumes = marker.resumes.filter(
+    (r) => r.sessionId.toLowerCase() !== currentSessionId,
+  ).length;
   // `--porcelain` prints nothing on a clean tree. A null (the command could
   // not run at all) is treated as dirty by `assessResume`: an unverifiable
   // tree is not a clean one.
@@ -668,7 +688,7 @@ function tryResume(args: FetchPrArgs, wt: string): ResumeOutcome {
     worktreeClean: status === null ? null : status.trim() === '',
     diffSha256OnDisk: sha256OfFile(tmpFile(`pr-${prNumber}`, 'diff.txt')),
     liveHeadSha,
-    resumeCount: Math.max(marker.resumes.length, ledgerResumes),
+    resumeCount: Math.max(markerResumes, ledgerResumes),
     requestedEffort: args.effort ?? null,
   });
   if (!ruling.ok) {

@@ -281,7 +281,7 @@ const DIGEST_WINDOW_MS = 5000;
 export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
 
 /** The chunk this agent owns, when it was launched to own one. */
-function assignedChunk(rec: AgentRecord): number | null {
+export function assignedChunk(rec: AgentRecord): number | null {
   const m = CHUNK_RE.exec(rec.launchPrompt);
   return m ? Number(m[1]) : null;
 }
