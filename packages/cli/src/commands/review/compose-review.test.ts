@@ -1568,6 +1568,36 @@ describe('composeReview — input validation (the producer is a model that omits
     ).toThrow(/suggestionsInline/);
   });
 
+  it('accepts suggestionsDiscarded as the discarded list itself, counted by length (#9209)', () => {
+    // The skill describes the field as the discarded suggestions ("Suggestions
+    // whose anchors failed offline validation or the 422 recovery"), which reads
+    // like a list — a run that followed the prose handed over `[]` and failed at
+    // compose time, hours into the run. Accept the array form as its length.
+    expect(
+      composeReview(base({ suggestionsDiscarded: [] })).body,
+    ).not.toContain('Suggestion-level finding(s) could not be');
+    expect(
+      composeReview(
+        base({
+          suggestionsDiscarded: ['a.ts: could not anchor', 'b.ts: 422'],
+        }),
+      ).body,
+    ).toContain('2 Suggestion-level finding(s) could not be');
+    // A count still validates exactly as before.
+    expect(composeReview(base({ suggestionsDiscarded: 2 })).body).toContain(
+      '2 Suggestion-level finding(s) could not be',
+    );
+  });
+
+  it('still rejects a suggestionsDiscarded array with non-string entries (#9209)', () => {
+    expect(() =>
+      composeReview({
+        suggestionsDiscarded: [1, 2] as unknown as number,
+        modelId: MODEL,
+      }),
+    ).toThrow(/suggestionsDiscarded/);
+  });
+
   it('rejects a non-array list field and a missing or blank modelId', () => {
     expect(() =>
       composeReview({

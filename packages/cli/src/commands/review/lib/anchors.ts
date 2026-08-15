@@ -50,7 +50,15 @@ export type MatchTier =
   | 'exact-context'
   /** Matched only after normalising indentation. */
   | 'loose-added'
-  | 'loose-context';
+  | 'loose-context'
+  /**
+   * Matched only as a substring of a longer hunk line (#9209). Paragraph
+   * lines — SKILL.md, generated tables — hand the resolver mid-line snippets
+   * that can never equal a whole line; the reported line CONTAINS the
+   * snippet rather than being the snippet.
+   */
+  | 'substring-added'
+  | 'substring-context';
 
 export interface AnchorResolution {
   status: 'resolved' | 'unmatched';
@@ -324,6 +332,39 @@ function pick(cands: Candidate[], claimedLine?: number): Candidate | null {
 }
 
 /**
+ * Shorter than this, a "snippet" is a wisp — `the`, `st.` — that half the
+ * lines of a prose file contain. Matching one would be a guess dressed as a
+ * resolution, so the substring tier keeps a floor (#9209).
+ */
+const SUBSTRING_MIN_FRAGMENT_LENGTH = 4;
+
+/**
+ * Every line CONTAINING `fragment` as a substring, the last-resort tier for
+ * files whose lines are paragraphs (#9209): a mid-line snippet of a
+ * multi-kilobyte Markdown line can never equal a whole line, and before this
+ * tier every such anchor came back UNMATCHED. The candidate is the whole
+ * containing line — GitHub hangs the comment there — reported with the same
+ * added/context distinction and ambiguity discipline as the tiers above: a
+ * fragment held by two lines is undecided, never guessed.
+ */
+function substringCandidates(
+  hay: NewSideLine[],
+  fragment: string,
+): Candidate[] {
+  const out: Candidate[] = [];
+  for (const cell of hay) {
+    if (normalizeExact(cell.text).includes(fragment)) {
+      out.push({
+        startLine: cell.newLine,
+        line: cell.newLine,
+        added: cell.added,
+      });
+    }
+  }
+  return out;
+}
+
+/**
  * Resolve one anchor snippet to a line range in the post-change file.
  *
  * `claimedLine` is the number the agent reported. It is never trusted as the
@@ -411,6 +452,49 @@ export function resolveAnchor(
           ? { drift: Math.abs(startLine - claimedLine) }
           : {}),
       } as AnchorResolution;
+    }
+  }
+
+  // Last-resort substring tier (#9209): reached only when NO whole-line
+  // reading matched anything — a stronger interpretation that found
+  // candidates and could not choose between them already returned unmatched
+  // above, and stays undecided here too. Offered to the FAITHFUL reading
+  // only, for the same reason loose matching is: a substring containment is
+  // itself an inference about position within the line, and letting a
+  // marker-stripped guess then match by containment would stack two guesses
+  // into what looks like a confident answer. A multi-line snippet cannot sit
+  // inside one line, so only a single-line reading qualifies.
+  {
+    const needle = variants[0];
+    if (needle.length === 1) {
+      const fragment = normalizeLoose(needle[0]);
+      if (fragment.length >= SUBSTRING_MIN_FRAGMENT_LENGTH) {
+        const cands = substringCandidates(newSideLines, fragment);
+        if (cands.length > 0) {
+          const best = pick(cands, claimedLine);
+          if (!best) {
+            return {
+              status: 'unmatched',
+              reason:
+                'the snippet sits inside more than one long line and nothing ' +
+                'distinguishes them — quote a longer stretch of the line, or ' +
+                'give the line number you mean so the nearest containing line ' +
+                'can be chosen',
+            };
+          }
+          return {
+            status: 'resolved',
+            line: best.line,
+            startLine: best.startLine,
+            matchCount: cands.length,
+            tier: best.added ? 'substring-added' : 'substring-context',
+            ambiguous: cands.length > 1,
+            ...(claimedLine !== undefined
+              ? { drift: Math.abs(best.startLine - claimedLine) }
+              : {}),
+          } as AnchorResolution;
+        }
+      }
     }
   }
 

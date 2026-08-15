@@ -123,8 +123,13 @@ export interface ComposeReviewInput {
    * toward `C` exactly like anchored Criticals.
    */
   bodyCriticals?: string[];
-  /** Suggestions discarded as unanchorable (offline validation or 422). */
-  suggestionsDiscarded?: number;
+  /**
+   * Suggestions discarded as unanchorable (offline validation or 422) — a
+   * count, or the discarded list itself (counted by its length), because the
+   * skill describes the field as the discarded suggestions and a run that
+   * follows the prose hands over the array (#9209).
+   */
+  suggestionsDiscarded?: number | readonly string[];
   /**
    * Existing Criticals already on the PR whose Step 6 re-check landed on
    * `cannot tell` — one line each (location + what could not be decided).
@@ -443,6 +448,25 @@ function toCount(value: unknown, field: string): number {
   return value;
 }
 
+/**
+ * `toCount` for a field the skill describes as the ITEMS themselves: the
+ * producer that follows the prose hands over the list, and refusing it at
+ * compose time fails a multi-hour run at the finish line over a shape the
+ * skill's own wording invited (#9209). Count the list by its length; a count
+ * still validates exactly as `toCount`.
+ */
+function toCountOrLength(value: unknown, field: string): number {
+  if (Array.isArray(value)) {
+    if (value.some((v) => typeof v !== 'string')) {
+      throw new TypeError(
+        `compose-review: ${field} must be a non-negative integer or an array of strings, got ${JSON.stringify(value)}`,
+      );
+    }
+    return value.length;
+  }
+  return toCount(value, field);
+}
+
 function toStringList(value: unknown, field: string): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
@@ -581,7 +605,7 @@ function composeReviewBody(
   const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals')
     .map(stripReviewFooter)
     .filter((entry) => entry.trim() !== '');
-  const suggestionsDiscarded = toCount(
+  const suggestionsDiscarded = toCountOrLength(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
   );

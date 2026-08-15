@@ -579,3 +579,83 @@ describe('resolveAnchors (batch)', () => {
     }
   });
 });
+
+describe('resolveAnchor — substring fallback (#9209)', () => {
+  // Files whose lines are PARAGRAPHS — SKILL.md is the case that surfaced this:
+  // a multi-kilobyte line the resolver used to answer UNMATCHED for every
+  // mid-line snippet of.
+  //
+  //   10  ` # Guide`                              context
+  //   11  `+Long paragraph one: the retry counter` added (long)
+  //   12  `+Long paragraph two: the retry counter` added (long)
+  //   13  ` End of the guide.`                     context
+  const MD_DIFF = [
+    'diff --git a/SKILL.md b/SKILL.md',
+    'index 1111111..2222222 100644',
+    '--- a/SKILL.md',
+    '+++ b/SKILL.md',
+    '@@ -10,2 +10,4 @@',
+    ' # Guide',
+    '-Old paragraph the diff deletes entirely for the guide.',
+    '+Long paragraph one: the retry counter is never reset after a successful request, so the next request inherits the stale attempts value and fails fast.',
+    '+Long paragraph two: the retry counter is read before it is validated anywhere, and the stale attempts value leaks into the next request as well.',
+    ' End of the guide.',
+    '',
+  ].join('\n');
+
+  const md = () => lines(MD_DIFF, 'SKILL.md');
+
+  it('resolves a mid-line fragment to the line that contains it', () => {
+    // Present in exactly one long line: a faithful whole-line match can never
+    // see it, so this is the substring tier's job.
+    const r = resolveAnchor(md(), 'inherits the stale attempts value');
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 11,
+      startLine: 11,
+      tier: 'substring-added',
+      matchCount: 1,
+      ambiguous: false,
+    });
+  });
+
+  it('is ambiguous when the fragment sits in two long lines, and a claim breaks the tie', () => {
+    // "the retry counter" appears in BOTH long lines. With nothing to choose,
+    // the resolver must not guess; with a claim it picks the nearest line but
+    // must still report the ambiguity.
+    expect(resolveAnchor(md(), 'the retry counter')).toMatchObject({
+      status: 'unmatched',
+    });
+    expect(resolveAnchor(md(), 'the retry counter', 12)).toMatchObject({
+      status: 'resolved',
+      line: 12,
+      tier: 'substring-added',
+      ambiguous: true,
+      matchCount: 2,
+    });
+  });
+
+  it('still resolves on a context line, reported as such', () => {
+    const r = resolveAnchor(md(), 'End of the guide');
+    expect(r).toMatchObject({
+      status: 'resolved',
+      line: 13,
+      tier: 'substring-context',
+    });
+  });
+
+  it('does not let a tiny fragment match — a 3-char snippet is not an anchor', () => {
+    // "st." sits inside exactly ONE long line, so without the minimum-length
+    // guard the substring tier would resolve it — matching a 3-char wisp is a
+    // guess dressed as a resolution. The fallback keeps a minimum fragment
+    // length.
+    expect(resolveAnchor(md(), 'st.')).toMatchObject({ status: 'unmatched' });
+  });
+
+  it('whole-line matches keep winning over the substring tier', () => {
+    // An exact whole-line match must come back exact, not substring — the
+    // fallback is a last resort, not a parallel path.
+    const r = resolveAnchor(md(), '# Guide');
+    expect(r).toMatchObject({ status: 'resolved', tier: 'exact-context' });
+  });
+});

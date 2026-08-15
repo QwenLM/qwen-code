@@ -194,6 +194,22 @@ function oneOf<T extends string>(
     : undefined;
 }
 
+/**
+ * The finding format the pipeline itself hands to every finder mandates the
+ * BRACKETED tag — `Source: [probe]` — so a faithful producer writes
+ * `source: "[probe]"` into the artifact. The bare-enum validator then refused
+ * the pipeline's own output shape with a hard error at the last gate (#9209).
+ * Strip one pair of enclosing brackets (and the padding around and inside
+ * them) before matching; anything the strip cannot place on the ladder still
+ * fails exactly as before, so no new value is admitted.
+ */
+function normalizeSourceTag(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  const m = trimmed.match(/^\[\s*([^[\]]*)\s*\]$/);
+  return m ? m[1].trim() : trimmed;
+}
+
 function parseLocations(
   o: Record<string, unknown>,
   index: number,
@@ -303,7 +319,7 @@ export function validateFindings(raw: unknown): Finding[] {
     const source =
       o['source'] === undefined
         ? ('review' as Source)
-        : oneOf(o['source'], SOURCES);
+        : oneOf(normalizeSourceTag(o['source']), SOURCES);
     if (!source) {
       fail(
         i,

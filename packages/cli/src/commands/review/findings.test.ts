@@ -70,6 +70,27 @@ describe('validateFindings', () => {
     expect(f.confidence).toBe('high');
   });
 
+  it('normalizes the bracketed source tags the finding format itself mandates (#9209)', () => {
+    // FINDING_FORMAT tells agents to write `Source: [probe]`, so artifacts
+    // arrive carrying the brackets — the validator used to refuse its own
+    // pipeline's shape with a hard error at the last gate.
+    for (const source of SOURCES) {
+      const [f] = validateFindings([{ ...base, source: `[${source}]` }]);
+      expect(f.source).toBe(source);
+      const padded = validateFindings([{ ...base, source: ` [ ${source} ] ` }]);
+      expect(padded[0].source).toBe(source);
+    }
+  });
+
+  it('still rejects a source the bracket strip cannot place on the ladder (#9209)', () => {
+    expect(() => validateFindings([{ ...base, source: '[bogus]' }])).toThrow(
+      /source/,
+    );
+    expect(() => validateFindings([{ ...base, source: '[]' }])).toThrow(
+      /source/,
+    );
+  });
+
   it('accepts snake_case for the fields the prose format spells with a space', () => {
     const [f] = validateFindings([
       {

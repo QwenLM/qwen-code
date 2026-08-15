@@ -2803,6 +2803,17 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toContain('**Anchor:**');
   });
 
+  it('a finding-filing brief carries the off-diff anchor rule (#9209)', () => {
+    // A defect in a file the diff does not touch cannot be anchored on that
+    // file — the resolver only searches the diff. Before this rule reached the
+    // agents, runs improvised; now the brief tells them to anchor on the
+    // change that makes it wrong and name the real target in the body. A brief
+    // that drops this sentence sends finders back to improvising.
+    const p = buildRoleBrief(PLAN, 'reverse-audit');
+    expect(p).toContain('the resolver only searches the diff');
+    expect(p).toContain('name the real target file');
+  });
+
   it('scopes a per-chunk reverse-audit brief to its one chunk, not the whole diff', () => {
     // The brief is what the agent is told to obey. If it listed every chunk and said
     // "walk it chunk by chunk", a `--chunk 14` auditor would read the whole diff the

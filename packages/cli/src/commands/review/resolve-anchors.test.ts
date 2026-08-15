@@ -135,6 +135,54 @@ describe('resolve-anchors (command boundary)', () => {
     });
   });
 
+  it('counts substring-tier resolutions in the stats (#9209)', () => {
+    // Paragraph files — SKILL.md — hand the resolver mid-line fragments; the
+    // substring tier resolves them and the stats must say how many leaned on
+    // it, the same visibility `loose` gets.
+    const mdDiff = [
+      'diff --git a/SKILL.md b/SKILL.md',
+      '--- a/SKILL.md',
+      '+++ b/SKILL.md',
+      '@@ -1,1 +1,2 @@',
+      ' # Title',
+      '+One enormous paragraph line: the retry counter is never reset after success, so the next request inherits the stale attempts value.',
+      '',
+    ].join('\n');
+    const diff = join(dir, 'diff.txt');
+    const input = join(dir, 'in.json');
+    const out = join(dir, 'out.json');
+    writeFileSync(diff, mdDiff);
+    writeFileSync(
+      input,
+      JSON.stringify([
+        {
+          id: 'a',
+          path: 'SKILL.md',
+          anchor: 'inherits the stale attempts value',
+        },
+      ]),
+    );
+    (resolveAnchorsCommand.handler as (a: unknown) => void)({
+      diff,
+      input,
+      out,
+    });
+    const report = JSON.parse(readFileSync(out, 'utf8')) as {
+      resolved: Array<Record<string, unknown>>;
+      stats: Record<string, number>;
+    };
+    expect(report.resolved[0]).toMatchObject({
+      status: 'resolved',
+      tier: 'substring-added',
+    });
+    expect(report.stats).toMatchObject({
+      total: 1,
+      resolved: 1,
+      substring: 1,
+      loose: 0,
+    });
+  });
+
   it('fails loudly on malformed input rather than resolving part of it', () => {
     expect(() => run([{ id: 'a', path: 'src/pay.ts' }])).toThrow(/"anchor"/);
   });

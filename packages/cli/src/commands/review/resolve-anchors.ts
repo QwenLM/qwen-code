@@ -141,6 +141,10 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
       // finding is fine; the agent's counting was not. Worth seeing.
       drifted: resolved.filter((r) => (r.drift ?? 0) > 0).length,
       loose: resolved.filter((r) => r.tier?.startsWith('loose')).length,
+      // The line CONTAINS the snippet rather than being it — paragraph lines
+      // (#9209). Like `loose`, a signal that the resolution leaned on a
+      // fallback, worth seeing.
+      substring: resolved.filter((r) => r.tier?.startsWith('substring')).length,
     },
   };
 
@@ -158,6 +162,9 @@ function runResolveAnchors(args: ResolveAnchorsArgs): void {
       (s.ambiguous ? `, ${s.ambiguous} ambiguous` : '') +
       (s.loose
         ? `, ${s.loose} matched only after normalising indentation`
+        : '') +
+      (s.substring
+        ? `, ${s.substring} matched only as a substring of a longer line`
         : '') +
       (s.unmatched ? `, ${s.unmatched} UNMATCHED` : ''),
   );
