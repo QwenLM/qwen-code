@@ -50,6 +50,9 @@ gh_err_reset() { [[ -n "${GH_ERR}" ]] && : > "${GH_ERR}"; }
 # moves run 1's deferrals to this sidecar so they are not lost when run 2
 # writes its own file. Both are unioned below (the line builder dedupes).
 CARRY="${WORKDIR}/deferred-findings.carry.json"
+# This round's own file, kept under its own name: FINDINGS is repointed at the
+# merged set below, and the shape gate needs a valid fallback to retry with.
+OWN_FINDINGS="${WORKDIR}/deferred-findings.json"
 
 # Every abort below is PERMANENT for these findings: the eval watermark
 # filters this round's feedback out of every later round, and the next run's
@@ -58,20 +61,22 @@ CARRY="${WORKDIR}/deferred-findings.carry.json"
 # `::` is neutralized in the dump: the content is agent-influenced and a
 # raw `::` at line start would be parsed as a workflow command (same reason
 # `<!--` is neutralized at every publish site).
+dump_file() {
+  [[ -s "$1" ]] || return 0
+  local size
+  size="$(wc -c < "$1" 2> /dev/null | tr -d ' ')"
+  if [[ -n "${size}" ]] && (( size > 4000 )); then
+    echo "--- $1 (first 4000 of ${size} bytes — TRUNCATED; the full file is in this run's artifact dump)"
+  else
+    echo "--- $1"
+  fi
+  head -c 4000 "$1" | sed 's/::/;;/g'
+  echo
+}
 lost() {
   echo "::warning::$1 — these findings are LOST (watermark-gated — no later round re-derives them). Raw deferrals follow for manual recovery:"
-  for f in "${FINDINGS}" "${CARRY}"; do
-    [[ -s "${f}" ]] || continue
-    local size
-    size="$(wc -c < "${f}" 2> /dev/null | tr -d ' ')"
-    if [[ -n "${size}" ]] && (( size > 4000 )); then
-      echo "--- ${f} (first 4000 of ${size} bytes — TRUNCATED; the full file is in this run's artifact dump)"
-    else
-      echo "--- ${f}"
-    fi
-    head -c 4000 "${f}" | sed 's/::/;;/g'
-    echo
-  done
+  dump_file "${FINDINGS}"
+  dump_file "${CARRY}"
 }
 
 if [[ -s "${CARRY}" ]]; then
@@ -80,17 +85,14 @@ if [[ -s "${CARRY}" ]]; then
       lost 'could not create a temp file to merge the carried deferrals'
       exit 0
     fi
+    # This round FIRST: jq's unique_by keeps the first element of each group
+    # in original order, so a finding re-emitted by run 2 wins over run 1's
+    # carried copy. Swapping these two arguments silently pins the stale text.
     if jq -s 'add' "${FINDINGS}" "${CARRY}" > "${MERGED}" 2> /dev/null; then
       FINDINGS="${MERGED}"
     else
-      CARRY_SIZE="$(wc -c < "${CARRY}" 2> /dev/null | tr -d ' ')"
-      if [[ -n "${CARRY_SIZE}" ]] && (( CARRY_SIZE > 4000 )); then
-        echo "::warning::could not merge the carried deferrals; persisting only this round's. The carried set follows, TRUNCATED at 4000 of ${CARRY_SIZE} bytes (full file in the artifact dump):"
-      else
-        echo "::warning::could not merge the carried deferrals; persisting only this round's (the carried ones are dumped below)"
-      fi
-      head -c 4000 "${CARRY}" | sed 's/::/;;/g'
-      echo
+      echo "::warning::could not merge the carried deferrals; persisting only this round's. The carried set is LOST — raw content follows:"
+      dump_file "${CARRY}"
     fi
   else
     FINDINGS="${CARRY}"
@@ -112,19 +114,33 @@ fi
 # (e.g. 1e21 -> "1e+21"): the "+" is a regex-active byte in the line-anchored
 # dedupe below and never index-matches an integer resolved id. Comment ids
 # are ~10 digits, far under the bound.
-if ! jq -e 'type == "array" and length > 0 and all(.[];
+shape_ok() {
+  jq -e 'type == "array" and length > 0 and all(.[];
     (.id | type == "number" and . == floor and . > 0 and . < 9007199254740992
       and (tostring | test("^[0-9]+$")))
     and (.reason | type == "string")
     and ((.source | type) as $t | $t == "null"
       or ($t == "string"
         and (.source | IN("review_comment", "review", "issue_comment"))))
-    and (.path | type | . == "null" or . == "string"))' "${FINDINGS}" > /dev/null 2>&1; then
+    and (.path | type | . == "null" or . == "string"))' "$1" > /dev/null 2>&1
+}
+if ! shape_ok "${FINDINGS}"; then
+  # A carried sidecar that parses but fails the gate must not take THIS
+  # round's valid deferrals down with it — the unparseable-carry branch above
+  # already persists this round only, and this is the same situation one step
+  # later. Retry with this round's own file when the merged set is the one at
+  # fault.
+  if [[ "${FINDINGS}" != "${OWN_FINDINGS}" ]] && shape_ok "${OWN_FINDINGS}"; then
+    echo "::warning::the carried deferrals are malformed; persisting only this round's. The carried set is LOST — raw content follows:"
+    dump_file "${CARRY}"
+    FINDINGS="${OWN_FINDINGS}"
+  else
   # `.path | type` (not `.path // "?"`): `//` treats false as absent, so a
   # present-but-non-string `false` would otherwise be coerced to "?" against
   # this gate's own "fail loudly" contract.
-  lost 'deferred findings are malformed (this round and/or the carried sidecar)'
-  exit 0
+    lost 'deferred findings are malformed (this round and/or the carried sidecar)'
+    exit 0
+  fi
 fi
 
 MARKER="<!-- autofix-deferred pr=${PR} -->"

@@ -8253,6 +8253,15 @@ exit 1
       expect(code).not.toMatch(/BASH_FUNC/);
       expect(code).not.toMatch(/\bunset -f\b/);
       expect(code).not.toMatch(/\bhash -r\b/);
+      // The other enumeration families a sweep gets rewritten into: alias
+      // clearing, trap resets, and per-name proxy/loader unsets. Isolation is
+      // the clean child's job, not a list maintained in the tainted shell.
+      expect(code).not.toMatch(/\bunalias\b/);
+      expect(code).not.toMatch(/expand_aliases/);
+      expect(code).not.toMatch(/\btrap -\b/);
+      expect(code).not.toMatch(
+        /\bunset [A-Z_ ]*\b(?:HTTPS?_PROXY|SSL_CERT_[A-Z]+|BASH_ENV)\b/,
+      );
     }
     // The fork fetch and salvage fetch cannot recurse into a planted
     // submodule and execute an ext:: URL with the PAT (env-level
@@ -10636,9 +10645,12 @@ exit 1
     // R5-5: both --paginate sites are pinned at the source (the recording gh
     // stub ignores the flag). Dropping either silently truncates the lookup
     // or the dedupe corpus.
-    // Only the tracking issue's OWN comments are paginated now; the issue
-    // lookup is a bounded, early-exit page loop (a full --paginate there
-    // re-downloaded the bot's entire lifetime corpus every defer round).
+    // Exactly ONE paginated call remains — the tracking issue's own comments,
+    // which is bounded by that issue. The lookup is a bounded, early-exit page
+    // loop instead (a full --paginate there re-downloaded the bot's entire
+    // lifetime corpus on every defer round). The flag is anchored to the
+    // comments call, so relocating it to the lookup fails even though the
+    // count is unchanged.
     expect(
       upsertDeferredScript
         .split('\n')
@@ -10646,6 +10658,9 @@ exit 1
           (l) => !l.trimStart().startsWith('#') && l.includes('--paginate'),
         ),
     ).toHaveLength(1);
+    expect(upsertDeferredScript).toMatch(
+      /issues\/\$\{ISSUE_NUM\}\/comments\?per_page=100"[\s\S]{0,40}--paginate/,
+    );
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
       expect(step).toContain(
         "UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'",
@@ -10679,16 +10694,36 @@ exit 1
       repairStep.match(/rm -f \\\n(?:[^\n]*\\\n)*[^\n]*\n/)?.[0] ?? '';
     expect(cleanupList).toContain('resolved-comments.txt');
     expect(cleanupList).not.toContain('deferred-findings.json');
+    // Any rm spelling, single- or multi-line, -f or -rf: the file may be
+    // removed exactly once, and only after its content reached the sidecar.
     const deletions =
-      repairStep.match(/rm -f[^\n]*deferred-findings\.json/g) ?? [];
+      repairStep.match(
+        /rm -[rf]+(?:[^\n]*\\\n)*[^\n]*deferred-findings\.json/g,
+      ) ?? [];
     expect(deletions).toHaveLength(1);
+    // …and no OTHER multi-line rm list may name it either (cleanupList only
+    // inspects the first such list).
+    for (const list of repairStep.match(
+      /rm -[rf]+ \\\n(?:[^\n]*\\\n)*[^\n]*\n/g,
+    ) ?? []) {
+      expect(list).not.toContain('deferred-findings.json');
+    }
     expect(repairStep.indexOf('deferred-findings.carry.next')).toBeLessThan(
       repairStep.search(/rm -f[^\n]*deferred-findings\.json/),
     );
     // R8-2: the merge internals themselves (a one-token retarget of the
     // redirect silently truncated the carried set).
-    expect(repairStep).toContain(
-      '> "${WORKDIR}/deferred-findings.carry.next" 2> /dev/null; then',
+    // Both inputs of the repair-side union, in order: carry first, then this
+    // round's (the sidecar is the accumulated history there). The old
+    // assertion was also satisfied by the else-branch `mv` line.
+    expect(repairStep).toMatch(
+      /jq -s 'add' "\$\{WORKDIR\}\/deferred-findings\.carry\.json" \\\n\s*"\$\{WORKDIR\}\/deferred-findings\.json" \\\n\s*> "\$\{WORKDIR\}\/deferred-findings\.carry\.next" 2> \/dev\/null; then/,
+    );
+    // R9-20: the script-side union is the freshness guarantee — this round
+    // first, so unique_by (first-of-group, original order) keeps the fresh
+    // text when run 2 re-emits a carried id.
+    expect(upsertDeferredScript).toContain(
+      'jq -s \'add\' "${FINDINGS}" "${CARRY}" > "${MERGED}"',
     );
     expect(repairStep).toContain(
       'mv "${WORKDIR}/deferred-findings.carry.next" \\\n                  "${WORKDIR}/deferred-findings.carry.json"',
@@ -10806,6 +10841,9 @@ exit 1
         ['.github/scripts/upsert-deferred-issue.sh'],
         {
           encoding: 'utf8',
+          // spawnSync blocks the event loop, so vitest's async timeout cannot
+          // fire — bound each subprocess directly against a hung runner.
+          timeout: 30_000,
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
@@ -11197,6 +11235,76 @@ exit 1
         '[{"id":77,"source":"review","reason":"same"},{"id":77,"source":"review","reason":"same"}]',
     });
     expect(identicalTwice.calls.split('- rv:77 ').length - 1).toBe(1);
+    // R9-19: the SKILL documents review_comment as the default when omitted,
+    // so the explicit spelling must be accepted too (and is pinned in SKILL).
+    const explicitDefault = runUpsert({
+      findings: '[{"id":41,"source":"review_comment","reason":"explicit"}]',
+    });
+    expect(explicitDefault.calls).toContain('- rc:41 ');
+    expect(skill).toContain('review_comment');
+    // R9-14: which findings survive the 20-item cap is decided by the sort
+    // order of the dedupe, not the agent's write order. Feed DESCENDING ids
+    // across two sources so the two orders disagree, and pin the survivors.
+    const capOrder = runUpsert({
+      findings: JSON.stringify(
+        Array.from({ length: 12 }, (_, i) => ({
+          id: 100 - i,
+          source: 'review',
+          reason: `r${100 - i}`,
+        })).concat(
+          Array.from({ length: 12 }, (_, i) => ({
+            id: 200 - i,
+            reason: `c${200 - i}`,
+          })),
+        ),
+      ),
+    });
+    expect(capOrder.out).toContain('persisting 20 of 24');
+    // MEASURED, not assumed: unique_by sorts by [source, id] ("review" <
+    // "review_comment"), so the survivors are all 12 rv plus rc:189-196 —
+    // the four rc records written FIRST (197-200) are the ones dropped, and
+    // rc:189, written LAST, survives. Input order and survivor order really
+    // do disagree.
+    expect(capOrder.calls).toContain('- rc:189 ');
+    expect(capOrder.calls).not.toContain('- rc:200 ');
+    expect(capOrder.out).toContain('- rc:200 ');
+    expect(capOrder.calls).toContain('- rv:89 ');
+    expect(capOrder.calls).toContain('- rv:100 ');
+    // R9-15 / R9-18: a carried sidecar that PARSES but fails the shape gate
+    // must not take this round's valid deferrals with it — the unparseable
+    // branch already persists this round only, and this is the same
+    // situation one step later.
+    const poisonedCarry = runUpsert({
+      findings: '[{"id":7,"reason":"this round is fine"}]',
+      carry: '[{"id":-1,"reason":"carried but invalid"}]',
+    });
+    expect(poisonedCarry.out).toContain('the carried deferrals are malformed');
+    expect(poisonedCarry.out).toContain('carried but invalid');
+    expect(poisonedCarry.calls).toContain('- rc:7 ');
+    // An UNPARSEABLE carry takes the same route through the merge branch.
+    const unparseableCarry = runUpsert({
+      findings: '[{"id":7,"reason":"this round is fine"}]',
+      carry: 'not json at all',
+    });
+    expect(unparseableCarry.out).toContain(
+      'could not merge the carried deferrals',
+    );
+    expect(unparseableCarry.calls).toContain('- rc:7 ');
+    // But a bad set of OUR OWN is still a loud, total abort.
+    const poisonedOwn = runUpsert({
+      findings: '[{"id":-1,"reason":"bad"}]',
+      carry: '[{"id":8,"reason":"carried ok"}]',
+    });
+    expect(poisonedOwn.out).toContain('are LOST');
+    expect(poisonedOwn.calls).toBe('');
+    // R9-20 behaviourally: a duplicate id in both files keeps THIS round's
+    // text (the union puts it first and unique_by keeps first-of-group).
+    const freshWins = runUpsert({
+      findings: '[{"id":9,"reason":"fresh"}]',
+      carry: '[{"id":9,"reason":"stale"}]',
+    });
+    expect(freshWins.calls).toContain('fresh');
+    expect(freshWins.calls).not.toContain('stale');
     // An unknown source value fails the gate loudly rather than silently
     // rendering under the default prefix.
     const badSource = runUpsert({
