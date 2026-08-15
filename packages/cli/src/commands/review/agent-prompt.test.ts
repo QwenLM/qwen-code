@@ -48,6 +48,7 @@ import {
   TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   readRoundStamps,
+  stampRound,
 } from './lib/deadline.js';
 import {
   buildChunkAgentPrompt,
@@ -4355,6 +4356,82 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       .join('\n');
     expect(msg).toContain('CONVERGED');
   });
+
+  it('the #9242 note stays below the convergence gate — a converged round notes nothing', () => {
+    // A plan whose own numbers say Step 3A: rounds 1 and 2 note the
+    // mismatch as they build, but round 3 converges and builds nothing —
+    // the note must not claim "Proceeding" for a round the gate refuses.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 800 }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    (writeStderrLine as unknown as Mock).mockClear();
+    const out = runRound(3);
+
+    expect(process.exitCode).toBe(5);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).not.toContain('Step 3A');
+  });
+
+  it('the #9242 note stays below the round-cap gate — a refused round notes nothing', () => {
+    // Same duty at the other gate: round 4 is refused at the reduced cap,
+    // builds nothing, and the note must not say "Proceeding" for it.
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        ...PLAN,
+        srcDiffLines: 100,
+        diffLines: 800,
+        budget: { reverseAuditRounds: 3 },
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: YIELD, 14: YIELD, 15: YIELD });
+    answerRound(3, { 13: YIELD, 14: YIELD, 15: YIELD });
+    (writeStderrLine as unknown as Mock).mockClear();
+    const out = runRound(4);
+
+    expect(process.exitCode).toBe(4);
+    expect(out).toBe('');
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(msg).toContain('ROUND CAP');
+    expect(msg).not.toContain('Step 3A');
+  });
+
+  it('the #9242 note cites the auditors actually scheduled, not every chunk', () => {
+    // Chunk 13 retires off rounds 1 and 2, so round 3 builds two auditors;
+    // the note must agree with the same call's "2 auditors required" header.
+    writeFileSync(
+      plan,
+      JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 800 }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: YIELD, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: YIELD, 15: YIELD });
+    (writeStderrLine as unknown as Mock).mockClear();
+    const out = runRound(3);
+
+    expect(out).toContain('2 auditors required this round');
+    const note = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => String(c[0]))
+      .find((line) => line.includes('Step 3A'));
+    expect(note).toBeDefined();
+    expect(note).toContain('2 chunk auditors');
+    expect(note).not.toContain('3 chunk auditors');
+  });
 });
 
 describe('the tool budget in the briefs', () => {
@@ -4762,5 +4839,163 @@ describe('the verify gate — compose survives a budget stop', () => {
     const plan = verifyCall();
     expect(process.exitCode).toBeUndefined();
     expect(readRecordedPrompts(plan).size).toBe(1);
+  });
+});
+
+describe('--all-chunks topology anomaly note (#9242)', () => {
+  // The 3A→whole-diff / 3B→`--all-chunks` routing exists only as SKILL.md
+  // prose; nothing in the CLI enforces it. A plan whose own size fields say
+  // Step 3A (one whole-diff auditor per round, and the round-cap tier is
+  // priced for that) can still be fanned out one auditor per chunk — a
+  // doctored plan, or an orchestrator that took the wrong fork. Refusal
+  // would collateral-damage legitimate repair paths, so the CLI notes the
+  // mismatch on stderr and proceeds; the orchestrator owes an explanation
+  // for a deliberate one.
+
+  function runAllChunksWith(planPatch: Record<string, unknown>): void {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-topology-'));
+    process.exitCode = undefined;
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify({ ...PLAN, ...planPatch }));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (writeStderrLine as unknown as Mock).mockClear();
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        findings,
+        round: 1,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const stderrLines = () =>
+    ((writeStderrLine as unknown as Mock).mock.calls as unknown[][]).map(
+      (call) => String(call[0]),
+    );
+
+  function runChunkWith(planPatch: Record<string, unknown>): void {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-topology-chunk-'));
+    process.exitCode = undefined;
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify({ ...PLAN, ...planPatch }));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (writeStderrLine as unknown as Mock).mockClear();
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        chunk: 13,
+        findings,
+        round: 1,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('notes the mismatch when the plan numbers say 3A but --all-chunks fans out per chunk', () => {
+    // PLAN carries chunks 13, 14, 15; size fields well inside the 3A gate
+    // (src <= 500 && total <= 3200).
+    runAllChunksWith({ srcDiffLines: 100, diffLines: 800 });
+    const note = stderrLines().find((line) => line.includes('Step 3A'));
+    expect(note).toBeDefined();
+    expect(note).toContain('3 chunk auditors');
+    // Pin the echoed numbers to their labels — the fixture's asymmetric
+    // values discriminate a swap of the two interpolations.
+    expect(note).toContain('srcDiffLines=100');
+    expect(note).toContain('diffLines=800');
+    // Purely diagnostic: the round is still built, nothing refused.
+    expect(process.exitCode).toBeUndefined();
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('3 auditors required this round');
+  });
+
+  it('stays silent for a territory fan-out plan — the normal 3B path', () => {
+    runAllChunksWith({ srcDiffLines: 5000, diffLines: 6000 });
+    expect(stderrLines().some((line) => line.includes('Step 3A'))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('stays silent when the plan carries no size fields — unknown is not a mismatch', () => {
+    runAllChunksWith({});
+    expect(stderrLines().some((line) => line.includes('Step 3A'))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('stays silent when exactly one size field is declared — partial knowledge is unknown topology', () => {
+    // diffLines is genuinely unknown here and could exceed the 3200 gate —
+    // the fan-out may be owed, so the one declared number cannot establish
+    // a mismatch. Pins the guard's operator: with `||` this fired and
+    // echoed `diffLines=undefined`.
+    runAllChunksWith({ srcDiffLines: 100 });
+    expect(stderrLines().some((line) => line.includes('Step 3A'))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('3 auditors required this round');
+  });
+
+  it('stays silent for explicit JSON nulls — null is an absent number too', () => {
+    // `isTerritoryFanOut` coerces null through the same `?? 0` it uses for
+    // absent fields, so the presence guard must read null as absent as well.
+    runAllChunksWith({ srcDiffLines: null, diffLines: null });
+    expect(stderrLines().some((line) => line.includes('Step 3A'))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('notes the mismatch on an unstamped --chunk build too — the twin fan-out path', () => {
+    // A round can also be built one `--chunk` call at a time; without an
+    // admission stamp that is construction, not repair, and the same
+    // mismatch must not ride through it silently.
+    runChunkWith({ srcDiffLines: 100, diffLines: 800 });
+    const note = stderrLines().find((line) => line.includes('Step 3A'));
+    expect(note).toBeDefined();
+    expect(note).toContain('--chunk 13');
+    expect(note).toContain('srcDiffLines=100');
+    expect(note).toContain('diffLines=800');
+    expect(process.exitCode).toBeUndefined();
+    const printed = (writeStdoutLine as unknown as Mock).mock
+      .calls[0][0] as string;
+    expect(printed).toContain('--chunk-13--round-1--');
+  });
+
+  it('stays silent for a stamped --chunk rebuild — its round was ruled on at admission', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-topology-stamp-'));
+    process.exitCode = undefined;
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({ ...PLAN, srcDiffLines: 100, diffLines: 800 }),
+      );
+      stampRound(plan, 1);
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (writeStderrLine as unknown as Mock).mockClear();
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        chunk: 13,
+        findings,
+        round: 1,
+      });
+      expect(stderrLines().some((line) => line.includes('Step 3A'))).toBe(
+        false,
+      );
+      expect(process.exitCode).toBeUndefined();
+      expect((writeStdoutLine as unknown as Mock).mock.calls).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
