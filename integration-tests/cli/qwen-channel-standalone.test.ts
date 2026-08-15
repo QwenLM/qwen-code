@@ -343,6 +343,11 @@ describePosix(
         JSON.stringify({ [workspace]: 'TRUST_FOLDER' }),
         'utf-8',
       );
+      // `serve --channel all` reserves the channel-service pidfile for
+      // ANY selection, so this child writes it too: the clean shutdown
+      // must remove it, or the stale reservation can abort the next boot
+      // with channel_service_conflict (#8975).
+      const pidFile = path.join(qwenHome, 'channels', 'service.pid');
 
       child = spawn(
         process.execPath,
@@ -401,9 +406,33 @@ describePosix(
       // Zero configured channels: the committed worker runs with no channels.
       expect(control.workers?.[0]?.channels).toEqual([]);
 
+      // Settling window mirroring the standalone siblings: a serve that
+      // self-exits ~1-2s after reporting zero-channel running must fail
+      // HERE, not get preempted by the SIGTERM below — the graceful-exit
+      // assertions accept a self-exit identically to a clean shutdown
+      // (#8975).
+      await sleep(2000);
+
       // Liveness: the server process is still up after the checks.
       expect(child.exitCode).toBeNull();
       expect(child.signalCode).toBeNull();
+
+      // Re-poll the control state after the settling window: the first
+      // poll is a single-instant snapshot, and a zero-channel worker
+      // crash after that instant is crash-restarted by the supervisor
+      // with the serve process staying alive — so the process-level
+      // liveness check above cannot see a dead or crash-looping worker
+      // (#8975).
+      await pollHttp(`${baseUrl}/workspace/channel`, (_status, body) => {
+        const state = body as ControlState;
+        return (
+          state.enabled === true &&
+          state.transition === 'idle' &&
+          Array.isArray(state.workers) &&
+          state.workers.length > 0 &&
+          state.workers[0]!.state === 'running'
+        );
+      });
 
       const exited = new Promise<{
         code: number | null;
@@ -415,6 +444,7 @@ describePosix(
       const { code, signal } = await exited;
       expect(signal).toBeNull();
       expect(code).toBe(0);
+      expect(existsSync(pidFile)).toBe(false);
       child = undefined;
     }, 120000);
   },
@@ -573,7 +603,59 @@ describe('qwen channel stop → start round trip (#8975)', () => {
       expect(code).toBe(0);
     }
     child = undefined;
-  }, 120000);
+
+    // Phase 4: an explicit by-name start clears the stop record and the
+    // channel connects again — the inverse half of "Stopped channels stay
+    // stopped UNTIL STARTED AGAIN BY NAME". Every other service spawn in
+    // this file is a bare `channel start`, so the record-clearing write
+    // half has no cross-process coverage elsewhere: the unit suite mocks
+    // both halves apart (#8975).
+    child = spawn(process.execPath, [CLI_BIN, 'channel', 'start', 'mockbot'], {
+      cwd: workspace,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    // The by-name path (startSingle) connects first, then reports
+    // "is running" — it does not emit the startAll "connected." line.
+    await waitForLine(child, '[Channel] "mockbot" is running.');
+    // Stop via SIGTERM: a plain shutdown persists no stop record, so the
+    // bare start below must run the channel again.
+    const byNameExited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const byNameShutdown = await byNameExited;
+    if (isPosix) {
+      expect(byNameShutdown.signal).toBeNull();
+      expect(byNameShutdown.code).toBe(0);
+    }
+    child = undefined;
+
+    // Phase 5: the next bare start runs the channel — the by-name start
+    // cleared the record, so neither the skip line nor the zero-channel
+    // serve may appear (#8975).
+    child = spawnService();
+    await waitForLine(child, '[Channel] Running 1 channel(s).');
+    expect(observeChild(child).output).not.toContain(
+      '"mockbot" skipped (stopped before restart)',
+    );
+    const finalExited = new Promise<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>((resolve) => {
+      child!.once('exit', (code, signal) => resolve({ code, signal }));
+    });
+    child.kill('SIGTERM');
+    const finalShutdown = await finalExited;
+    if (isPosix) {
+      expect(finalShutdown.signal).toBeNull();
+      expect(finalShutdown.code).toBe(0);
+    }
+    child = undefined;
+  }, 180000);
 
   // The legacy global-file handoff (R11-38): recordStoppedChannels
   // dual-writes the stop record into the legacy global file FOR THIS —
@@ -925,6 +1007,12 @@ describe('qwen serve --channel all stop → restart round trip (#8975)', () => {
       },
     )) as ControlState;
     expect(restored.workers?.[0]?.channels).toEqual([]);
+    // Settling window mirroring the standalone siblings: a serve that
+    // self-exits ~1-2s after reporting zero-channel running must fail
+    // HERE, not get preempted by the SIGTERM below — the graceful-exit
+    // assertions accept a self-exit identically to a clean shutdown
+    // (#8975).
+    await sleep(2000);
     expect(child.exitCode).toBeNull();
     expect(child.signalCode).toBeNull();
 

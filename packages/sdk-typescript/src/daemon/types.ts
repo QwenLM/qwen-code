@@ -3225,13 +3225,17 @@ export interface DaemonChannelWorkerStartErrorResponse {
  * durability-loss signal as the success side: `statePersisted` is present
  * (and `false`) only when the stop failed AND its torn-down `stopped`
  * record also failed to persist — a later `--channel all` restart may bring
- * the channels back (#8975). Consumers previously had to cast
- * `DaemonHttpError.body: unknown` to read it (R11-19).
+ * the channels back (#8975). `DaemonHttpError.body` is declared
+ * `unknown`; cast it to this type to read the fields. `state` rides every
+ * structured stop error body that carries the loss signal (the daemon
+ * appends its control state to the stop-relevant error codes); it is
+ * optional because per-channel management error bodies carry no state.
  */
 export interface DaemonChannelStopErrorResponse {
   error: string;
   code: string;
   statePersisted?: boolean;
+  state?: DaemonChannelControlState;
 }
 
 /**

@@ -154,8 +154,39 @@ function unlinkPidFile(filePath: string): boolean {
   }
 }
 
-/** Check if a process is alive. */
+/**
+ * True only when the process is CONFIRMED dead. `kill(pid, 0)` throwing
+ * EPERM means the process EXISTS but belongs to another user — it is
+ * alive; treating EPERM as dead made `readServiceInfo` report a live
+ * shared-HOME service as crashed, and the stop crash-path then recorded
+ * its RUNNING channels as stopped (#8975). Only ESRCH proves death; an
+ * invalid pid counts as dead (there is nothing to preserve).
+ */
+function isProcessDead(pid: number): boolean {
+  if (!isValidPid(pid)) {
+    return true;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
+/** Check if a process is alive (EPERM = alive, see `isProcessDead`). */
 function isProcessAlive(pid: number): boolean {
+  return !isProcessDead(pid);
+}
+
+/**
+ * True when the process is alive AND signalable by this user. A live pid
+ * that raises EPERM belongs to another user (a shared HOME/QWEN_HOME):
+ * callers must not signal it, must not unlink its pidfile, and must not
+ * record its channels as stopped (#8975).
+ */
+export function isProcessSignalable(pid: number): boolean {
   if (!isValidPid(pid)) {
     return false;
   }
@@ -214,7 +245,9 @@ export function readServiceInfo(): ServiceInfo | null {
   }
 
   if (!isProcessAlive(info.pid)) {
-    // Stale PID — process is dead, clean up
+    // Stale PID — process is confirmed dead (ESRCH), clean up. An EPERM
+    // pid is ALIVE under another user: keep the file and report the
+    // service as running (#8975).
     unlinkPidFile(filePath);
     return null;
   }

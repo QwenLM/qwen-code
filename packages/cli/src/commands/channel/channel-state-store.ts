@@ -1,9 +1,4 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-} from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
   atomicWriteFileSync,
@@ -39,20 +34,22 @@ interface ChannelStateFile {
   adoptedLegacy?: Record<string, ChannelRuntimeState>;
   /**
    * The legacy file's `generation` at the last adoption sync (R11-14).
-   * A content diff alone cannot see a re-stop whose entry set is
-   * unchanged: the only legacy writer is this PR's own no-workspace stop
-   * fallback (the file is introduced by this PR, so older releases never
-   * write it), and it echoes the WHOLE stored map on every stop —
-   * re-stopping an already-stopped channel re-asserts the same entries.
-   * The snapshot matches, so the merge loop would drop the re-stop and
-   * the explicitly re-stopped channel resurrects on `--channel all`.
-   * Every store rewrite bumps `generation`, so a generation DIFFERENT
-   * from the recorded one while the content still equals the snapshot
-   * proves a re-stop rewrite re-asserting the whole map — snapshot-
-   * identical entries are re-applied too. (A rewrite that CHANGES the
-   * content stays on the plain content diff — the unchanged entries were
-   * not re-asserted, and re-applying them would override an explicit
-   * restart, the R9-3 hazard.) The mtime-based watermark this replaced
+   * A content diff alone cannot see a re-stop: the only legacy writer is
+   * this PR's own no-workspace stop fallback (the file is introduced by
+   * this PR, so older releases never write it), and it echoes the WHOLE
+   * stored map on every stop — re-stopping an already-stopped channel
+   * re-asserts the same entries. The snapshot matches, so the merge loop
+   * would drop the re-stop and the explicitly re-stopped channel
+   * resurrects on `--channel all`. Every store rewrite bumps
+   * `generation`, so the watermark scopes the re-stop detection: when
+   * the generation moved MORE than the number of entries added since the
+   * snapshot, at least one content-preserving rewrite (a re-stop)
+   * happened, and snapshot-identical entries are re-applied even if a
+   * concurrent new stop also changed the entry set. A moved-but-content-
+   * equal generation is the zero-added-entries special case. Re-applying
+   * is limited to snapshot-identical entries, so an explicit restart
+   * recorded since still wins over a stale adopted stop (the R9-3
+   * direction stays closed). The mtime-based watermark this replaced
    * was unreliable in both directions: coarse-mtime filesystems
    * (exFAT/FAT32 2 s, some NFS/SMB 1 s) hid real rewrites, and any
    * external `touch`/backup re-materialization with unchanged bytes
@@ -211,21 +208,34 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
   const channels: Record<string, ChannelRuntimeState> =
     target?.channels ?? Object.create(null);
   const snapshot = target?.adoptedLegacy;
-  // A snapshot-identical entry is re-applied only on an entry-set-
-  // unchanged rewrite of the legacy file: the moved generation proves a
-  // rewrite happened since the snapshot was recorded, and unchanged
-  // content means the rewrite re-asserted exactly the adopted map — a
-  // re-stop (see the function doc). Without a recorded generation (a file
-  // written before watermark recording) the content-only diff stands for
-  // this sync; the write below starts recording. The generation lives in
-  // the content, so external mtime bumps (touch, backup restore) cannot
-  // forge the signal and coarse-mtime filesystems cannot hide a real
-  // rewrite (R11-14).
+  // A rewrite of the legacy file re-asserts snapshot-identical entries:
+  // the only legacy writer (this PR's own no-workspace stop fallback)
+  // echoes the WHOLE stored map on every write and bumps the generation,
+  // so a rewrite is a re-stop signal even when it also CHANGES the
+  // content. Scope the detection by the watermark: when the generation
+  // moved MORE than the number of entries added since the snapshot, at
+  // least one content-preserving rewrite happened in between — a re-stop
+  // of an adopted entry that the plain content diff cannot see (a
+  // concurrent new stop otherwise masks it, resurrecting the re-stopped
+  // channel on the next `--channel all` — the exact #8975 regression).
+  // An entry-set-UNCHANGED rewrite is the special case where the delta
+  // exceeds zero added entries. A negative recorded watermark predates
+  // generation recording: rewrites before the first stamped generation
+  // cannot be counted, so keep the content-only diff there (R11-14). The
+  // generation lives in the content, so external mtime bumps (touch,
+  // backup restore) cannot forge the signal and coarse-mtime filesystems
+  // cannot hide a real rewrite.
+  const addedSinceSnapshot = snapshot
+    ? Object.keys(legacyChannels).filter((name) => snapshot[name] === undefined)
+        .length
+    : 0;
   const legacyRewritten =
     snapshot !== undefined &&
     target?.adoptedLegacyGeneration !== undefined &&
     target.adoptedLegacyGeneration !== legacyGeneration &&
-    sameChannelMaps(snapshot, legacyChannels);
+    (target.adoptedLegacyGeneration >= 0
+      ? legacyGeneration - target.adoptedLegacyGeneration > addedSinceSnapshot
+      : sameChannelMaps(snapshot, legacyChannels));
   const merged: string[] = [];
   // A corrupt/unreadable target is treated as empty by design, so reseed
   // it from the whole legacy map; a valid target without a snapshot
@@ -238,13 +248,13 @@ export function adoptLegacyChannelState(workspaceCwd: string): void {
         channels[name] = state;
         merged.push(name);
       } else if (legacyRewritten && channels[name] !== state) {
-        // Entry-set-unchanged rewrite since the snapshot (see the
-        // function doc): content cannot distinguish it from 'unchanged
-        // since adoption', but the moved generation proves a rewrite, and
-        // the only legacy writer — this PR's own no-workspace stop
-        // fallback — echoes the WHOLE stored map on every stop, so the
-        // rewrite re-asserts every entry. Treat the re-assertion as a
-        // stop event over an explicit restart recorded since (R10-5).
+        // Rewrite detected since the snapshot (see the watermark logic
+        // above): the moved generation proves at least one content-
+        // preserving rewrite — a re-stop — and the only legacy writer
+        // (this PR's own no-workspace stop fallback) echoes the WHOLE
+        // stored map on every stop, so the rewrite re-asserts every
+        // entry. Treat the re-assertion as a stop event over an explicit
+        // restart recorded since (R10-5).
         // Accepted trade-off: the echo cannot say WHICH entry the stop
         // touched, so a no-op re-stop of one already-stopped channel
         // also re-stops explicitly restarted siblings in every adopted
@@ -343,10 +353,7 @@ function parseStateFile(raw: string): ParsedStateFile | undefined {
   ) {
     result.adoptedLegacyGeneration = file.adoptedLegacyGeneration;
   }
-  if (
-    typeof file.generation === 'number' &&
-    Number.isFinite(file.generation)
-  ) {
+  if (typeof file.generation === 'number' && Number.isFinite(file.generation)) {
     result.generation = file.generation;
   }
   return result;
@@ -530,15 +537,35 @@ export class ChannelStateStore {
    * ambiguous (e.g. a transient settings read recovering to empty) and
    * destroying every recorded `stopped` entry would resurrect exactly the
    * channels #8975 must keep stopped.
+   *
+   * With `preserveAdopted`, names present in the file's `adoptedLegacy`
+   * snapshot are exempt: those stops were recorded in ANOTHER workspace or
+   * an older release (the population the legacy file exists to serve) and
+   * only adopted here. Deleting them is doubly fatal — the adoption
+   * snapshot still equals the legacy entry afterwards, so the merge never
+   * re-applies the lost stop, and the explicitly stopped channel connects
+   * on every later start once it is configured (#8975). They survive until
+   * this workspace's own lifecycle touches them (an explicit by-name start
+   * records `active`). Locally recorded entries are still pruned, keeping
+   * the removed-and-re-added-starts-fresh semantic for this workspace's
+   * own stops.
    */
   prune(
     configuredNames: readonly string[],
+    opts: { preserveAdopted?: boolean } = {},
   ): Record<string, ChannelRuntimeState> {
     const states = this.readAll();
     if (configuredNames.length === 0) return states;
     const configured = new Set(configuredNames);
-    const stale = Object.keys(states).filter((name) => !configured.has(name));
+    let stale = Object.keys(states).filter((name) => !configured.has(name));
     if (stale.length === 0) return states;
+    if (opts.preserveAdopted) {
+      const adopted = this.readFileFull()?.adoptedLegacy;
+      if (adopted) {
+        stale = stale.filter((name) => adopted[name] === undefined);
+        if (stale.length === 0) return states;
+      }
+    }
     this.applyChange((channels) => {
       for (const name of stale) {
         delete channels[name];

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedSettings } from '../../config/settings.js';
+import * as stdioHelpers from '../../utils/stdioHelpers.js';
 import {
   channelLoopPath,
   daemonChannelLoopPath,
@@ -109,9 +110,34 @@ describe('loadChannelsConfig (#8975)', () => {
     return { merged: { channels } } as unknown as LoadedSettings;
   }
 
+  // The reserved-name warning rides the real best-effort sink, which
+  // installs a process-wide no-op stderr 'error' guard when nothing else
+  // listens (R12-8) and never removes it. Drop exactly the listeners the
+  // test attached so the process-wide stderr state leaks into no later
+  // test file running in the same worker (the R12-17 discipline).
+  let stderrErrorListenersBefore: Set<(...args: unknown[]) => void>;
+
   beforeEach(() => {
     // The reserved-name warning dedup is process-scoped (R11-15).
     resetReservedNameWarningsForTesting();
+    stderrErrorListenersBefore = new Set(
+      process.stderr.listeners('error') as Array<(...args: unknown[]) => void>,
+    );
+  });
+
+  afterEach(() => {
+    for (const listener of process.stderr.listeners('error')) {
+      if (
+        !stderrErrorListenersBefore.has(
+          listener as (...args: unknown[]) => void,
+        )
+      ) {
+        process.stderr.removeListener(
+          'error',
+          listener as (...args: unknown[]) => void,
+        );
+      }
+    }
   });
 
   it('returns the configured channels on a hardened null-prototype copy (R11-31)', () => {
@@ -134,7 +160,7 @@ describe('loadChannelsConfig (#8975)', () => {
     );
   });
 
-  it('warns once per process per workspace for a reserved name (R11-15)', () => {
+  it('warns once per process per (workspace, name) pair for a reserved name (R11-15, R12-33)', () => {
     // The deferred webhook auth path calls loadChannelsConfig per request;
     // an unresolved hand-edited entry must not add an identical stderr
     // line per webhook POST.
@@ -144,6 +170,7 @@ describe('loadChannelsConfig (#8975)', () => {
 
     try {
       const entry = { all: { type: 'telegram' } };
+      // The SAME entry twice warns once.
       loadChannelsConfig('/workspace', settingsWith(entry));
       loadChannelsConfig('/workspace', settingsWith(entry));
       expect(writeSpy).toHaveBeenCalledTimes(1);
@@ -151,8 +178,67 @@ describe('loadChannelsConfig (#8975)', () => {
       // A different workspace warns independently.
       loadChannelsConfig('/other', settingsWith(entry));
       expect(writeSpy).toHaveBeenCalledTimes(2);
+
+      // Two DIFFERENTLY-SPELLED reserved variants are two distinct
+      // (workspace, name) pairs, so each warns once (R12-33):
+      // isAllChannelSelectionName matches on the TRIMMED name, so ` all`
+      // is a reserved variant too — a workspace-keyed dedup set silenced
+      // every later variant after the first, and a user who edits
+      // settings to a differently-spelled reserved key got a silently
+      // never-connecting channel with nothing in the logs explaining why.
+      // 'all' already warned for /workspace above, so only ' all' is new.
+      loadChannelsConfig(
+        '/workspace',
+        settingsWith({
+          all: { type: 'telegram' },
+          ' all': { type: 'telegram' },
+        }),
+      );
+      expect(writeSpy).toHaveBeenCalledTimes(3);
+      // Repeating the SAME pair stays silent.
+      loadChannelsConfig(
+        '/workspace',
+        settingsWith({
+          all: { type: 'telegram' },
+          ' all': { type: 'telegram' },
+        }),
+      );
+      expect(writeSpy).toHaveBeenCalledTimes(3);
     } finally {
       writeSpy.mockRestore();
+    }
+  });
+
+  it('routes the reserved-name warning through the guarded stderr sink (R12-8)', () => {
+    // The warning fires on EVERY launch of a worker whose settings keep
+    // the reserved entry, and the daemon supervisor spawns a fresh
+    // process per launch: on the loud `writeStderrLine`, a failing
+    // stderr target (full disk, dead redirect) raises an ASYNCHRONOUS
+    // stderr 'error' event that kills the process past any try/catch —
+    // a tolerated config becomes a crash loop bounded only by the
+    // restart budget. Pin the sink choice: the guarded best-effort
+    // wrapper, never the loud sink.
+    const bestEffortSpy = vi
+      .spyOn(stdioHelpers, 'writeStderrLineBestEffort')
+      .mockImplementation(() => {});
+    const loudSpy = vi
+      .spyOn(stdioHelpers, 'writeStderrLine')
+      .mockImplementation(() => {});
+
+    try {
+      loadChannelsConfig(
+        '/workspace',
+        settingsWith({ all: { type: 'telegram' } }),
+      );
+
+      expect(bestEffortSpy).toHaveBeenCalledTimes(1);
+      expect(bestEffortSpy).toHaveBeenCalledWith(
+        expect.stringContaining('the name is reserved'),
+      );
+      expect(loudSpy).not.toHaveBeenCalled();
+    } finally {
+      bestEffortSpy.mockRestore();
+      loudSpy.mockRestore();
     }
   });
 

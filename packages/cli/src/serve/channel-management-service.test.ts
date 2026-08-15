@@ -1110,6 +1110,39 @@ describe('createChannelManagementService', () => {
     expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'stopped');
   });
 
+  it('matches a restored workspace reported in canonical form (R9-4)', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    // Divergent-canonical twin of the restoredHere tests above: group
+    // entries carry CANONICAL cwds, so a symlinked workspace reports its
+    // restore under the canonical form while the service opts carry the
+    // raw path. The comparison must canonicalize BOTH sides — degrading
+    // it to raw string equality misses the restore and records `stopped`
+    // for a channel the rollback is relaunching, which the next
+    // `--channel all` start then skips (#8975).
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new ChannelWorkerControlError('channel_worker_start_failed', 'boom', {
+        rolledBack: false,
+        restoredWorkspaces: [`/canonical${WORKSPACE}`, '/ws/other'],
+      }),
+    );
+    mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+      p === WORKSPACE ? `/canonical${WORKSPACE}` : path.resolve(p),
+    );
+
+    try {
+      await expect(service.stop('bot')).rejects.toMatchObject({
+        code: 'channel_worker_start_failed',
+      });
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreTrySetMany).not.toHaveBeenCalled();
+  });
+
   it('reports a crash-dead worker channel as error, not stopped (R9-5)', async () => {
     const { service, manager } = setup({ committedNames: [] });
     // A worker that crash-looped until its restart budget exhausted is
@@ -1242,6 +1275,183 @@ describe('createChannelManagementService', () => {
       code: 'channel_worker_not_enabled',
     });
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('clears a persisted stopped record before a crash-dead restart recovers (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // Same terminal-failed shape as the R9-5 recovery tests: the restart
+    // reconciles the workspace with the still-committed selection, and a
+    // mode-`all` relaunch's restore filter skips exactly the channels
+    // carrying a `stopped` record. Seed that record in the daemon state
+    // store: the restart must clear it BEFORE the reconcile, or it
+    // resolves success while the channel stays down (#8975).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+    mockChannelStateStore.mockImplementation((filePath: string) => ({
+      readAll: vi.fn(() =>
+        filePath === daemonChannelRuntimeStatePath(WORKSPACE)
+          ? { bot: 'stopped' }
+          : {},
+      ),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: (name: string, state: 'active' | 'stopped') => {
+        try {
+          mockChannelStateStoreSet(name, state);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      trySetMany: mockChannelStateStoreTrySetMany,
+    }));
+
+    await service.restart('bot');
+
+    expect(mockChannelStateStore).toHaveBeenCalledWith(
+      daemonChannelRuntimeStatePath(WORKSPACE),
+    );
+    expect(mockChannelStateStoreSet).toHaveBeenCalledWith('bot', 'active');
+    // The clear must land BEFORE the reconcile: a relaunched worker's
+    // restore filter reads the record at launch, so a later write would
+    // be too late (#8975).
+    expect(mockChannelStateStoreSet).toHaveBeenCalledBefore(
+      manager.reloadWorkspace,
+    );
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+  });
+
+  it('leaves a restart of a crash-dead channel without a stopped record untouched (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // No `stopped` record seeded: the clear is a read-only no-op there,
+    // and a recovery that does not depend on the write must not fail on
+    // it (#8975).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await service.restart('bot');
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+  });
+
+  it('rejects a crash-dead restart when the stopped record cannot be cleared (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // The record IS `stopped` and the clear fails (the same disk
+    // condition that fails stops): failing loudly is the only honest
+    // outcome — reporting a recovery the relaunched worker will not
+    // honor would strand the channel down behind a 200 (#8975).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+    mockChannelStateStore.mockImplementation((filePath: string) => ({
+      readAll: vi.fn(() =>
+        filePath === daemonChannelRuntimeStatePath(WORKSPACE)
+          ? { bot: 'stopped' }
+          : {},
+      ),
+      set: mockChannelStateStoreSet,
+      setMany: vi.fn(),
+      trySet: (name: string, state: 'active' | 'stopped') => {
+        try {
+          mockChannelStateStoreSet(name, state);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      trySetMany: mockChannelStateStoreTrySetMany,
+    }));
+    mockChannelStateStoreSet.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    await expect(service.restart('bot')).rejects.toMatchObject({
+      code: 'channel_state_persist_failed',
+    });
+
+    // The reconcile must not run once the clear failed.
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('still recovers a crash-dead channel under divergent canonical forms (R9-5)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // Divergent-canonical twin of the R9-5 recovery tests: the terminal
+    // worker carries the CANONICAL workspaceCwd (a symlinked workspace)
+    // while the service opts carry the raw path. terminalFailedWorkerFor
+    // must canonicalize both sides — degrading it to raw string equality
+    // misses the dead owner, so the crash-dead channel keeps the 409
+    // instead of recovering through reloadWorkspace (#8975).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: `/canonical${WORKSPACE}`,
+          primary: true,
+        },
+      ],
+    });
+    mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+      p === WORKSPACE ? `/canonical${WORKSPACE}` : path.resolve(p),
+    );
+
+    try {
+      await service.restart('bot');
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
+
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
   });
 
   it('records a confirmed stop during a starting window (R9-27)', async () => {
@@ -1581,6 +1791,48 @@ describe('createChannelManagementService', () => {
     expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
   });
 
+  it('keeps the starting-window guard actionable under divergent canonical forms (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // Divergent-canonical twin of the starting-window tests: the
+    // starting worker carries the CANONICAL workspaceCwd (a symlinked
+    // workspace) while the service opts carry the raw path. The guard
+    // must canonicalize both sides — degrading it to raw string equality
+    // misses the starting worker, so an unconfirmable stop gets recorded
+    // instead of the 409, and the relaunching worker overwrites the
+    // record (#8975).
+    manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'all' },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'starting',
+          channels: ['all'],
+          workspaceId: 'primary',
+          workspaceCwd: `/canonical${WORKSPACE}`,
+          primary: true,
+        },
+      ],
+    });
+    mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+      p === WORKSPACE ? `/canonical${WORKSPACE}` : path.resolve(p),
+    );
+
+    try {
+      await expect(service.stop('bot')).rejects.toMatchObject({
+        code: 'channel_worker_starting',
+      });
+    } finally {
+      mockCanonicalizeWorkspace.mockImplementation((p: string) =>
+        path.resolve(p),
+      );
+    }
+
+    expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
+  });
+
   it('still records an idempotent stop when no worker is starting (#8975)', async () => {
     const { service, manager } = setup({ committedNames: [] });
     manager.setChannelEnabled.mockResolvedValueOnce({ changed: false });
@@ -1695,6 +1947,39 @@ describe('createChannelManagementService', () => {
       code: 'channel_worker_not_enabled',
     });
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('routes a per-channel start of a crash-dead worker channel through the workspace reload (#8975)', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+    // Terminal-failed shape (same fixture as the R9-5 restart tests):
+    // the dead worker's names are excluded from committedChannelNames(),
+    // so the enable path would rebuild the GLOBAL selection from the
+    // filtered committed names — collapsing a mode-`all` commitment to
+    // names-mode, relaunching healthy workspaces' live workers and
+    // laundering the crash diagnostic into a clean `stopped`. The start
+    // must take the workspace-scoped reload route restart() uses instead,
+    // leaving the committed selection intact (#8975).
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names', names: ['bot'] },
+      transition: 'idle',
+      workers: [
+        {
+          enabled: true,
+          state: 'failed',
+          channels: ['bot'],
+          error: 'Channel worker restart budget exhausted.',
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+      ],
+    });
+
+    await service.start('bot');
+
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
   it('rejects an inactive cross-workspace start before lifecycle mutation', async () => {

@@ -262,6 +262,7 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_service_conflict', 409],
   ['channel_worker_start_failed', 502],
   ['channel_worker_stop_failed', 500],
+  ['channel_state_persist_failed', 500],
   ['daemon_draining', 503],
   ['channel_worker_unavailable', 503],
 ]);

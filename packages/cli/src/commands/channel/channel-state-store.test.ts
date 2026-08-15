@@ -145,6 +145,28 @@ describe('adoptLegacyChannelState (#8975)', () => {
     mkdirSync(channelsDir, { recursive: true });
   });
 
+  // The adoption failure paths warn through the real default sink, which
+  // attaches the process-wide no-op stderr 'error' guard on first fire and
+  // never removes it. The threads pool reuses workers across test files,
+  // so a leaked guard swallows genuine async stderr errors in later files
+  // AND makes the default-warning-path pins start with listenerCount >= 1,
+  // skipping the very attach they document (#8975). Snapshot/restore the
+  // listener set around each test.
+  let stderrErrorListenersBefore = new Set<unknown>();
+  beforeEach(() => {
+    stderrErrorListenersBefore = new Set(process.stderr.listeners('error'));
+  });
+  afterEach(() => {
+    for (const listener of process.stderr.listeners('error')) {
+      if (!stderrErrorListenersBefore.has(listener)) {
+        process.stderr.removeListener(
+          'error',
+          listener as (...args: unknown[]) => void,
+        );
+      }
+    }
+  });
+
   it('seeds the workspace file from the legacy global file and keeps it for later workspaces', () => {
     const legacyBody = JSON.stringify({
       version: 1,
@@ -405,7 +427,21 @@ describe('adoptLegacyChannelState (#8975)', () => {
   });
 
   it('does nothing when no legacy file exists', () => {
-    adoptLegacyChannelState(workspace);
+    // The common case for every user who has never recorded a stop must
+    // stay silent on stderr: a dropped early-return would let ENOENT fall
+    // into the read catch and warn 'recorded stops may not be honored' on
+    // every clean `--channel all` start — a false alarm on every clean
+    // startup (the R9-10 hazard class).
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((() => true) as typeof process.stderr.write);
+
+    try {
+      adoptLegacyChannelState(workspace);
+      expect(writeSpy).not.toHaveBeenCalled();
+    } finally {
+      writeSpy.mockRestore();
+    }
     expect(existsSync(workspacePath)).toBe(false);
   });
 
@@ -594,6 +630,12 @@ describe('adoptLegacyChannelState (#8975)', () => {
     // No write was attempted: the obstacle stands untouched (pin via the
     // mock, since the directory survives an atomic-write failure too).
     expect(mockAtomicWriteFileSync).not.toHaveBeenCalled();
+    // ...and it STILL stands — a cleanup of the unreadable target would
+    // destroy records whose content is UNKNOWN (not corrupt): the next
+    // start would reseed from legacy only and this workspace's own
+    // recorded stops would resurrect (#8975).
+    expect(existsSync(workspacePath)).toBe(true);
+    expect(statSync(workspacePath).isDirectory()).toBe(true);
 
     // Once the condition clears, adoption proceeds normally.
     rmSync(workspacePath, { recursive: true, force: true });
@@ -713,6 +755,57 @@ describe('adoptLegacyChannelState (#8975)', () => {
     const beforeInode = statSync(workspacePath).ino;
     adoptLegacyChannelState(workspace);
     expect(statSync(workspacePath).ino).toBe(beforeInode);
+  });
+
+  it('honors a re-stop masked by a concurrent entry-set-changing rewrite (#8975)', () => {
+    // The no-workspace stop fallback echoes the WHOLE stored map on every
+    // write, so a re-stop rewrite re-asserts the unchanged entries even
+    // when a CONCURRENT new stop also changes the entry set. The plain
+    // content diff merges only the new stop and drops the re-stop — the
+    // re-stopped channel resurrects on the next `--channel all`, the exact
+    // #8975 regression. The generation watermark scopes the detection: it
+    // moved MORE than the number of entries added since the snapshot,
+    // proving a content-preserving rewrite (the re-stop) happened in
+    // between. Legacy created through the store so a generation is
+    // recorded from the start.
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    // Between two syncs: a re-stop of telegram (content-preserving
+    // rewrite, generation bumps) AND a new stop of feishu (the entry set
+    // changes).
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    new ChannelStateStore(legacyPath).set('feishu', 'stopped');
+
+    adoptLegacyChannelState(workspace);
+
+    // The re-stop survives the concurrent new stop.
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'stopped',
+      feishu: 'stopped',
+    });
+  });
+
+  it('does not mistake a single new stop for a re-stop rewrite (#8975)', () => {
+    // Control twin of the pin above: one rewrite adding exactly one entry
+    // moves the generation by exactly the number of entries added since
+    // the snapshot — no content-preserving rewrite happened, so the
+    // snapshot-identical entries must NOT be re-applied over an explicit
+    // restart (the R9-3 direction stays closed).
+    new ChannelStateStore(legacyPath).set('telegram', 'stopped');
+    adoptLegacyChannelState(workspace);
+    // An explicit restart recorded after adoption.
+    new ChannelStateStore(workspacePath).set('telegram', 'active');
+    // One new stop only: generation delta 1, one entry added.
+    new ChannelStateStore(legacyPath).set('feishu', 'stopped');
+
+    adoptLegacyChannelState(workspace);
+
+    expect(new ChannelStateStore(workspacePath).readAll()).toEqual({
+      telegram: 'active',
+      feishu: 'stopped',
+    });
   });
 
   it('detects a re-stop rewrite even when the mtime does not move (R11-14)', () => {
@@ -959,7 +1052,9 @@ describe('ChannelStateStore', () => {
 
   it('treats a corrupt file as empty and recovers on next write', () => {
     writeFileSync(filePath, '{not json', 'utf-8');
-    const store = new ChannelStateStore(filePath);
+    // Not about the default sink: override it, or the discard warning
+    // leaks the process-wide stderr 'error' guard into later tests.
+    const store = new ChannelStateStore(filePath, { onWarning: vi.fn() });
 
     expect(store.readAll()).toEqual({});
 
@@ -1075,7 +1170,11 @@ describe('ChannelStateStore', () => {
     const readError = new Error('EBUSY') as NodeJS.ErrnoException;
     readError.code = 'EBUSY';
     let failRead = true;
+    // Not about the default sink: override it, or the failed-write
+    // warning leaks the process-wide stderr 'error' guard into later
+    // tests.
     const store = new ChannelStateStore(filePath, {
+      onWarning: vi.fn(),
       _testReadFileSync: (p) => {
         if (failRead) throw readError;
         return readFileSync(p, 'utf-8');
@@ -1356,6 +1455,7 @@ describe('ChannelStateStore', () => {
         .spyOn(process.stderr, 'write')
         .mockImplementation((() => true) as typeof process.stderr.write);
 
+      const listenersBefore = new Set(process.stderr.listeners('error'));
       try {
         new ChannelStateStore(filePath).readAll();
         expect(writeSpy).toHaveBeenCalledWith(
@@ -1363,6 +1463,16 @@ describe('ChannelStateStore', () => {
         );
       } finally {
         writeSpy.mockRestore();
+        // Drop exactly the guard listener this test attached, so the
+        // process-wide stderr state is the same as before the test.
+        for (const listener of process.stderr.listeners('error')) {
+          if (!listenersBefore.has(listener)) {
+            process.stderr.removeListener(
+              'error',
+              listener as (...args: unknown[]) => void,
+            );
+          }
+        }
       }
     });
   });
@@ -1472,6 +1582,81 @@ describe('ChannelStateStore', () => {
       });
     });
 
+    it('exempts adopted stops from pruning with preserveAdopted (#8975)', () => {
+      // An adopted stop was recorded in ANOTHER workspace or an older
+      // release — the population the legacy file exists to serve. Pruning
+      // it for an unconfigured channel is doubly fatal: the adoption
+      // snapshot still equals the legacy entry afterwards, so no later
+      // merge ever re-applies the lost stop, and the explicitly stopped
+      // channel connects on every start once it is configured.
+      // preserveAdopted exempts snapshot names from the prune; locally
+      // recorded entries are still pruned, keeping the
+      // removed-and-re-added-starts-fresh semantic for this workspace's
+      // own stops.
+      writeFileSync(
+        filePath,
+        JSON.stringify(
+          {
+            version: 1,
+            generation: 0,
+            channels: { telegram: 'stopped', feishu: 'stopped' },
+            adoptedLegacy: { telegram: 'stopped' },
+            adoptedLegacyGeneration: 0,
+          },
+          null,
+          2,
+        ),
+        'utf-8',
+      );
+      const store = new ChannelStateStore(filePath);
+
+      const states = store.prune(['discord'], { preserveAdopted: true });
+
+      // telegram (adopted, unconfigured) survives; feishu (locally
+      // recorded, absent from the snapshot, unconfigured) is pruned.
+      expect(states).toEqual({ telegram: 'stopped' });
+      expect(new ChannelStateStore(filePath).readAll()).toEqual({
+        telegram: 'stopped',
+      });
+      // The snapshot survives the prune write, so a later sync can still
+      // re-merge the adopted stop (R10-7 shape).
+      expect(JSON.parse(readFileSync(filePath, 'utf-8'))).toEqual({
+        version: 1,
+        generation: 1,
+        channels: { telegram: 'stopped' },
+        adoptedLegacy: { telegram: 'stopped' },
+        adoptedLegacyGeneration: 0,
+      });
+    });
+
+    it('still deletes adopted entries on the default prune without opts (#8975)', () => {
+      // Unchanged legacy behavior for callers that do not opt in: the
+      // default prune treats every unconfigured entry alike, adopted or
+      // not. Pin both poles so a preserveAdopted change cannot silently
+      // flip the default.
+      writeFileSync(
+        filePath,
+        JSON.stringify(
+          {
+            version: 1,
+            generation: 0,
+            channels: { telegram: 'stopped', feishu: 'stopped' },
+            adoptedLegacy: { telegram: 'stopped' },
+            adoptedLegacyGeneration: 0,
+          },
+          null,
+          2,
+        ),
+        'utf-8',
+      );
+      const store = new ChannelStateStore(filePath);
+
+      const states = store.prune(['discord']);
+
+      expect(states).toEqual({});
+      expect(new ChannelStateStore(filePath).readAll()).toEqual({});
+    });
+
     it('throws on write failure so callers can fall back to readAll (#8975)', () => {
       // prune is deliberately NOT throw-safe on writes: both production
       // callers (daemon-worker, start) catch the throw and fall back to
@@ -1550,6 +1735,33 @@ describe('ChannelStateStore', () => {
       ['__proto__']: 'stopped',
     });
   });
+
+  it('adopts a legacy channel literally named __proto__ (#8975)', () => {
+    // Adoption sibling of the store round-trip above: the merge
+    // accumulator must stay null-prototype — a plain {} drops `__proto__`
+    // entries through the Object.prototype.__proto__ setter, so a
+    // no-workspace stop of that name never lands in any workspace file
+    // and resurrects on the next all-start. `__proto__` is legitimate
+    // config (the reserved filter rejects only `all`).
+    const legacyPath = channelRuntimeStatePath();
+    const protoWorkspacePath = channelRuntimeStatePath('/workspace/proto');
+    mkdirSync(dirname(legacyPath), { recursive: true });
+    // JSON.parse/stringify round-trips `__proto__` as an own data key
+    // (never the prototype setter), seeding the legacy file safely.
+    writeFileSync(
+      legacyPath,
+      JSON.stringify(
+        JSON.parse('{"version":1,"channels":{"__proto__":"stopped"}}'),
+      ),
+      'utf-8',
+    );
+
+    adoptLegacyChannelState('/workspace/proto');
+
+    expect(new ChannelStateStore(protoWorkspacePath).readAll()).toEqual({
+      ['__proto__']: 'stopped',
+    });
+  });
 });
 
 describe('selectActiveChannels (#8975)', () => {
@@ -1593,9 +1805,11 @@ describe('selectActiveChannels (#8975)', () => {
   it('strips the full control set, not just newlines, from skip names (R11-41)', () => {
     // The oracle above could be satisfied by a newline-only cleanup; pin
     // the rest of sanitizeLogText's strip set at this call site: a carriage
-    // return (line overwrite) and an ESC (ANSI/OSC injection) must not
-    // reach the rendered message, because both production callers write the
-    // skip notice straight to stdout.
+    // return (line overwrite), an ESC (ANSI/OSC injection) and the C1/
+    // Unicode line breaks (NEL U+0085, U+2028/U+2029) must not reach the
+    // rendered message, because both production callers write the skip
+    // notice straight to stdout — every one of them forges or corrupts a
+    // log line (a stripped CR mapped to a real LF is a forgery too).
     const onSkipped = vi.fn();
     const evilName = 'evil\r\u001b[2J';
 
@@ -1604,7 +1818,50 @@ describe('selectActiveChannels (#8975)', () => {
     expect(onSkipped).toHaveBeenCalledTimes(1);
     const message = onSkipped.mock.calls[0]![0] as string;
     expect(message).not.toContain('\r');
+    expect(message).not.toContain('\n');
     expect(message).not.toContain('\u001b');
+    expect(message).toContain('skipped (stopped before restart)');
+
+    // The C1/Unicode line-break layer: NEL and the line/paragraph
+    // separators render as newlines, so a narrower cleanup that handles
+    // ASCII controls but passes them re-opens the same forgery (#8975).
+    const unicodeName = 'evil\u0085x\u2028y\u2029z';
+
+    selectActiveChannels(
+      [unicodeName],
+      { [unicodeName]: 'stopped' },
+      onSkipped,
+    );
+
+    expect(onSkipped).toHaveBeenCalledTimes(2);
+    const unicodeMessage = onSkipped.mock.calls[1]![0] as string;
+    expect(unicodeMessage).not.toContain('\u0085');
+    expect(unicodeMessage).not.toContain('\u2028');
+    expect(unicodeMessage).not.toContain('\u2029');
+    expect(unicodeMessage).toContain('skipped (stopped before restart)');
+  });
+
+  it('caps the rendered skip name at 128 code points (#8975)', () => {
+    // A stopped channel with a >128-code-point settings key (pasted
+    // garbage, shared/managed settings) must not be echoed in full to
+    // stdout on every `--channel all` start — the unbounded single-line
+    // log growth the cap exists to prevent. Pin the cap at THIS call
+    // site: both wiring suites mock selectActiveChannels outright.
+    const onSkipped = vi.fn();
+    const longName = 'x'.repeat(200);
+
+    const selected = selectActiveChannels(
+      [longName],
+      { [longName]: 'stopped' },
+      onSkipped,
+    );
+
+    expect(selected).toEqual([]);
+    expect(onSkipped).toHaveBeenCalledTimes(1);
+    const message = onSkipped.mock.calls[0]![0] as string;
+    // Exactly 128 code points of the name survive the cap.
+    expect(message).toContain('x'.repeat(128));
+    expect(message).not.toContain('x'.repeat(129));
     expect(message).toContain('skipped (stopped before restart)');
   });
 });

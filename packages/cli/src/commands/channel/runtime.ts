@@ -15,7 +15,11 @@ import type {
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import { isAllChannelSelectionName } from '../../serve/channel-selection.js';
-import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineBestEffort,
+  writeStdoutLine,
+} from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from '../extensions/utils.js';
 import { getPlugin, registerPlugin } from './channel-registry.js';
 import { parseChannelConfig } from './config-utils.js';
@@ -82,16 +86,23 @@ export function channelLoopPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }
 
-// Workspaces already warned about a reserved channel name this process
-// (R11-15): `loadChannelsConfig` runs per-request on the deferred webhook
-// auth path (readDeferredWebhookSecret), so without dedup one unresolved
-// hand-edited entry grows stderr by an identical line per webhook POST,
-// burying real diagnostics while the runtime stays deferred.
-const reservedNameWarnedWorkspaces = new Set<string>();
+// (workspace, name) pairs already warned about a reserved channel name
+// this process (R11-15): `loadChannelsConfig` runs per-request on the
+// deferred webhook auth path (readDeferredWebhookSecret), so without
+// dedup one unresolved hand-edited entry grows stderr by an identical
+// line per webhook POST, burying real diagnostics while the runtime
+// stays deferred. Key on the PAIR, not the workspace: `all`, ` all` and
+// `all ` are all reserved variants, and a workspace-keyed set silences
+// every later variant once one warned — a user who edits settings to a
+// differently-spelled reserved key then gets a silently
+// never-connecting channel with nothing in the logs explaining why.
+// The NUL separator cannot occur in a path or a settings key as parsed
+// here, so the pair cannot collide (#8975).
+const reservedNameWarnedEntries = new Set<string>();
 
-/** Test seam (R11-15): forget the warned-workspace dedup set. */
+/** Test seam (R11-15): forget the warned-entry dedup set. */
 export function resetReservedNameWarningsForTesting(): void {
-  reservedNameWarnedWorkspaces.clear();
+  reservedNameWarnedEntries.clear();
 }
 
 export function loadChannelsConfig(
@@ -124,9 +135,16 @@ export function loadChannelsConfig(
   const filtered: Record<string, unknown> = Object.create(null);
   for (const [name, config] of Object.entries(channels)) {
     if (isAllChannelSelectionName(name)) {
-      if (!reservedNameWarnedWorkspaces.has(cwd)) {
-        reservedNameWarnedWorkspaces.add(cwd);
-        writeStderrLine(
+      const dedupKey = `${cwd}\u0000${name}`;
+      if (!reservedNameWarnedEntries.has(dedupKey)) {
+        reservedNameWarnedEntries.add(dedupKey);
+        // Best-effort sink: this warning fires on EVERY launch of a
+        // worker whose settings keep the reserved entry, and the daemon
+        // supervisor spawns a fresh process per launch — a loud write to
+        // a failing stderr target raises an async 'error' event that
+        // kills the process past any try/catch, turning a tolerated
+        // config into a crash loop bounded only by the restart budget.
+        writeStderrLineBestEffort(
           `[Channel] Warning: ignoring channel "${sanitizeLogText(name, 128)}" — the name is reserved for the whole-channel selection (#8975).`,
         );
       }

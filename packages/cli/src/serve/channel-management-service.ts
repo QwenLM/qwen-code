@@ -330,6 +330,28 @@ export function createChannelManagementService(
     }
   };
 
+  // An explicit by-name start/restart must clear any persisted `stopped`
+  // record first: the recovery reconcile can relaunch a mode-`all`
+  // worker, whose restore filter skips exactly the channels carrying a
+  // `stopped` record — without the clear, the reconcile resolves success
+  // while the channel stays down. Read first so the failure is precise:
+  // when the record is not `stopped` there is nothing to clear and a
+  // failing write must not block a recovery that does not depend on it;
+  // when it IS `stopped` and the clear fails, fail loudly instead of
+  // reporting a start the relaunched worker will not honor (#8975).
+  const clearStoppedRecord = (name: string): void => {
+    const store = new ChannelStateStore(
+      daemonChannelRuntimeStatePath(canonicalForGuard(opts.workspaceCwd)),
+    );
+    if (store.readAll()[name] !== 'stopped') return;
+    if (!store.trySet(name, 'active')) {
+      throw new ChannelManagementError(
+        'channel_state_persist_failed',
+        `Channel "${name}" cannot be started: its persisted stopped record could not be cleared, so a whole-selection worker would skip it on relaunch.`,
+      );
+    }
+  };
+
   const runtimeFor = (name: string): ChannelRuntimeState => {
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
@@ -603,6 +625,30 @@ export function createChannelManagementService(
         );
       }
       assertWorkspaceConfig(persisted.channels[name]!);
+      // A crash-dead (budget-exhausted) worker's channel is not
+      // committed, so the enable path would rebuild the GLOBAL selection
+      // from the filtered committed names: with a mode-`all` commitment
+      // that collapses it to names-mode — healthy workspaces' selections
+      // are rewritten and their live workers stopped+relaunched, the dead
+      // worker's OTHER channels are excluded until daemon restart, and
+      // the replacement entry launders the crash diagnostic into a clean
+      // `stopped`. Route through the workspace-scoped reload restart()
+      // uses instead: it replaces only the dead entry, resets the budget,
+      // and keeps the committed selection intact (#8975).
+      if (
+        !workspaceCommittedNames().includes(name) &&
+        terminalFailedWorkerFor(name)
+      ) {
+        clearStoppedRecord(name);
+        try {
+          await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
+          diagnostics.delete(name);
+        } catch (error) {
+          diagnostics.set(name, diagnostic(error));
+          throw error;
+        }
+        return resultFor(name, persisted);
+      }
       await opts.manager.setChannelEnabled(
         { name, workspaceCwd: opts.workspaceCwd },
         true,
@@ -761,6 +807,13 @@ export function createChannelManagementService(
         );
       }
       assertOwnedRuntime(name);
+      // A crash-dead channel recovered in mode-`all` reconciles with the
+      // still-committed whole selection: the relaunched worker's restore
+      // filter skips exactly the channel whose `stopped` record an
+      // explicit stop persisted — restart() would resolve success while
+      // the channel stays down. Clear the record before the reconcile so
+      // the recovery it reports is real (#8975).
+      clearStoppedRecord(name);
       try {
         await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
         diagnostics.delete(name);

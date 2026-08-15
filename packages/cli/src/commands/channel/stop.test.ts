@@ -5,7 +5,9 @@ const mockPeekServiceInfo = vi.hoisted(() => vi.fn());
 const mockSignalService = vi.hoisted(() => vi.fn());
 const mockWaitForExit = vi.hoisted(() => vi.fn());
 const mockRemoveServiceInfo = vi.hoisted(() => vi.fn());
+const mockIsProcessSignalable = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLineBestEffort = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockStopChannelWorker = vi.hoisted(() => vi.fn());
 const mockDaemonClient = vi.hoisted(() =>
@@ -63,6 +65,7 @@ vi.mock('./pidfile.js', () => ({
   signalService: mockSignalService,
   waitForExit: mockWaitForExit,
   removeServiceInfo: mockRemoveServiceInfo,
+  isProcessSignalable: mockIsProcessSignalable,
 }));
 
 vi.mock('./channel-state-store.js', () => ({
@@ -72,10 +75,13 @@ vi.mock('./channel-state-store.js', () => ({
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
-  // Same observable output as the loud sink; only the EPIPE-crash
-  // resilience differs, and that behavior is pinned in stdioHelpers.test
-  // (R11-13). Aliasing keeps the message pins on one call history.
-  writeStdoutLineBestEffort: mockWriteStdoutLine,
+  // OWN mock, de-aliased from the loud sink (R12-3): with a shared mock,
+  // swapping a best-effort diagnostic (the persistence-loss warnings) back
+  // to the loud `writeStdoutLine` ships every pin green, while in
+  // production a failing stdout target raises the async stdout 'error'
+  // event and kills the stop mid-teardown. The EPIPE-crash resilience of
+  // the real helper itself is pinned in stdioHelpers.test (R11-13).
+  writeStdoutLineBestEffort: mockWriteStdoutLineBestEffort,
   writeStderrLine: mockWriteStderrLine,
 }));
 
@@ -89,6 +95,9 @@ async function invokeStop(argv: Record<string, unknown> = {}): Promise<void> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The common case: the service runs as THIS user, so it is signalable.
+  // The EPERM other-user branch (R12-48) overrides this to false.
+  mockIsProcessSignalable.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -122,6 +131,42 @@ describe('stopCommand', () => {
     expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
     expect(mockChannelStateStore).not.toHaveBeenCalled();
     expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses to stop a live service owned by another user and records nothing (R12-48)', async () => {
+    // A shared HOME/QWEN_HOME where the service runs as user B: user A's
+    // `kill(B_pid, 0)` raises EPERM. readServiceInfo must then RETURN the
+    // info (EPERM proves the process ALIVE — only ESRCH proves death), and
+    // stop must refuse without touching anything: signalling is impossible,
+    // recording the RUNNING channels as stopped would durably corrupt a
+    // service this command never touched, and the pidfile belongs to the
+    // live process (#8975).
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+      workspaceCwd: '/workspace/a',
+    });
+    mockIsProcessSignalable.mockReturnValue(false);
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    await expect(invokeStop()).rejects.toThrow('process.exit: 1');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('running under a different user'),
+    );
+    // NO channel-state write — scoped or legacy: the crash-path record is
+    // exactly what the pre-fix EPERM-as-dead misjudgment produced (#8975).
+    expect(mockChannelRuntimeStatePath).not.toHaveBeenCalled();
+    expect(mockChannelStateStore).not.toHaveBeenCalled();
+    expect(mockChannelStateStoreSetMany).not.toHaveBeenCalled();
+    // The pidfile belongs to the live process and must stay on disk.
+    expect(mockRemoveServiceInfo).not.toHaveBeenCalled();
+    // No signal may be sent to another user's process.
+    expect(mockSignalService).not.toHaveBeenCalled();
   });
 
   it('stops daemon-managed channels remotely without touching the pidfile', async () => {
@@ -180,6 +225,16 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
+    // Negative twin of the changed:true loss-warning test (R12-34):
+    // conditioning the warning on `!result.changed` would print a false
+    // persistence-loss alarm on every repeated/idempotent stop — the
+    // exact loss signal #8975 depends on, devalued (the R9-20 class).
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(0);
     // Message-before-exit ordering, twin of the changed:true test
@@ -209,11 +264,18 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Daemon-managed channels stopped.',
     );
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // Sink pin (R12-3): the loss warning rides the best-effort sink — a
+    // warning write must not terminate the process when stdout is already
+    // failing (the same failing-target condition that lost the record).
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
-    // Mirror-pin the stream (R9-22, R11-32): the loss warning is a stdout
-    // diagnostic; a dual-stream emission refactor must not ship green.
+    // Mirror-pin the sink AND the stream (R9-22, R11-32, R12-3): the loss
+    // warning is a best-effort stdout diagnostic; a refactor moving it to
+    // the loud sink or to stderr must not ship green.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
@@ -223,12 +285,13 @@ describe('stopCommand', () => {
     // warning must be surfaced BEFORE the exit — relocating it below
     // process.exit(...) would keep this test green while killing the
     // warning in production (#8975).
-    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
-      String(args[0]).includes('could not persist the stopped record'),
+    const warningCall = mockWriteStdoutLineBestEffort.mock.calls.findIndex(
+      (args) =>
+        String(args[0]).includes('could not persist the stopped record'),
     );
     expect(warningCall).toBeGreaterThanOrEqual(0);
     expect(
-      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+      mockWriteStdoutLineBestEffort.mock.invocationCallOrder[warningCall],
     ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
@@ -251,12 +314,24 @@ describe('stopCommand', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('stop failed'),
     );
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // Pin the FIXED prefix too (R12-20): the variable tail is the mocked
+    // rejection's own message; a regression altering or dropping the
+    // daemon-managed-vs-standalone prefix ships green against the tail
+    // alone.
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to stop daemon-managed channels: '),
+    );
+    // Sink pin (R12-3): the loss warning rides the best-effort sink.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
-    // Mirror-pin the stream (R9-22, R11-32): the stop-failure diagnostic
-    // is the stderr half; the loss warning must not ALSO land on stderr.
+    // Mirror-pin the sink AND the stream (R9-22, R11-32, R12-3): the
+    // stop-failure diagnostic is the stderr half; the loss warning must
+    // not ALSO land on stderr or on the loud stdout sink.
     expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(process.exit).toHaveBeenCalledWith(1);
@@ -264,12 +339,13 @@ describe('stopCommand', () => {
     // exit. A throwing exit mock is not usable here (the surrounding
     // daemon catch would re-exit 1), so assert invocationCallOrder with
     // the no-op mock instead (#8975).
-    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
-      String(args[0]).includes('could not persist the stopped record'),
+    const warningCall = mockWriteStdoutLineBestEffort.mock.calls.findIndex(
+      (args) =>
+        String(args[0]).includes('could not persist the stopped record'),
     );
     expect(warningCall).toBeGreaterThanOrEqual(0);
     expect(
-      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+      mockWriteStdoutLineBestEffort.mock.invocationCallOrder[warningCall],
     ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
@@ -282,6 +358,10 @@ describe('stopCommand', () => {
     await invokeStop({ 'daemon-url': 'http://daemon:9' });
 
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    // Sink twin (R12-3): the real warning sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
 
@@ -305,6 +385,9 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     // Warning-silence is pinned above, but the EXIT CODE of the
     // body-duck-typing gate was not: a mutation letting the gate influence
     // the exit code (exit 0 when a body is present without
@@ -322,6 +405,11 @@ describe('stopCommand', () => {
 
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('stop failed'),
+    );
+    // The FIXED prefix carries the daemon-managed-vs-standalone
+    // distinction; only the tail is the variable part (R12-20).
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to stop daemon-managed channels: '),
     );
     expect(mockReadServiceInfo).not.toHaveBeenCalled();
     expect(process.exit).toHaveBeenCalledWith(1);
@@ -371,10 +459,25 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+    // Sink twin (R12-3): the real warning sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     // A semantically successful stop must exit 0: callers running `qwen
     // channel stop` under `set -e` or in && chains (CI teardown scripts)
     // abort on a non-zero exit exactly where the stop succeeded (R9-21).
     expect(process.exit).toHaveBeenCalledWith(0);
+    // 'Service stopped.' is the only completion trace of a clean stop: it
+    // must precede the exit, pinned exactly like its 'stay stopped'
+    // sibling below — the no-op exit mock records a relocated-below-exit
+    // write, which ships green while production exits silently (R12-21).
+    const stoppedCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Service stopped.'),
+    );
+    expect(stoppedCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[stoppedCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
     // The no-op exit mock lets execution continue past process.exit, so it
     // cannot pin ordering by itself: the final message must be emitted
     // BEFORE the exit — relocating the write below process.exit ships
@@ -572,13 +675,20 @@ describe('stopCommand', () => {
 
     // The success message claims a durable stop; a swallowed write failure
     // must not print it, or the resurrection comes as a surprise (#8975).
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // Sink pin (R12-3): the loss notice rides the best-effort sink — it
+    // fires exactly when the disk is failing.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       expect.stringContaining('Could not record the crashed service channels'),
     );
     // Mirror-pin the ternary's other half like the live-path failure test:
     // a refactor emitting both messages on a lost record must fail here.
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('Recorded the crashed service channels'),
+    );
+    // Sink mirror (R12-3): the loss notice must not ALSO land on the loud
+    // stdout sink.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('Could not record the crashed service channels'),
     );
     // A lost record still exits 0: the service IS dead and the loss was
     // warned about — failing the exit aborts `set -e` teardown exactly
@@ -587,12 +697,15 @@ describe('stopCommand', () => {
     // Message-before-exit ordering, twin of the success-path pin: the
     // loss warning is the only trace that `--channel all` may resurrect
     // the channels (R10-19).
-    const lossCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
-      String(args[0]).includes('Could not record the crashed service channels'),
+    const lossCall = mockWriteStdoutLineBestEffort.mock.calls.findIndex(
+      (args) =>
+        String(args[0]).includes(
+          'Could not record the crashed service channels',
+        ),
     );
-    expect(mockWriteStdoutLine.mock.invocationCallOrder[lossCall]).toBeLessThan(
-      vi.mocked(process.exit).mock.invocationCallOrder[0]!,
-    );
+    expect(
+      mockWriteStdoutLineBestEffort.mock.invocationCallOrder[lossCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('does not persist for a crashed serve-owned or empty pidfile (#8975)', async () => {
@@ -680,6 +793,16 @@ describe('stopCommand', () => {
       'No channel service is running.',
     );
     expect(process.exit).toHaveBeenCalledWith(0);
+    // The completion message must precede the exit, twin of the clean
+    // stop's pin: under the no-op exit mock a relocated-below-exit write
+    // ships green while production exits silently (R12-21).
+    const stoppedCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Service stopped.'),
+    );
+    expect(stoppedCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[stoppedCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
   it('falls back to the legacy global file for crashed older pidfiles (#8975)', async () => {
@@ -759,8 +882,9 @@ describe('stopCommand', () => {
     expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGTERM');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service stopped.');
     // The "stay stopped" message claims a durable stop; a swallowed write
-    // failure must surface the contrary warning instead (#8975).
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // failure must surface the contrary warning instead (#8975). Sink pin
+    // (R12-3): the warning rides the best-effort sink.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     // Mirror-pin the ternary's other half: production's final message is a
@@ -770,15 +894,32 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('stay stopped'),
     );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('stay stopped'),
+    );
+    // Sink mirror (R12-3): the warning must not ALSO land on the loud
+    // stdout sink.
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     // A lost record still exits 0 (the service IS stopped and the loss
     // was warned about) — and the warning must precede the exit (R9-21,
     // R9-23).
     expect(process.exit).toHaveBeenCalledWith(0);
-    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
-      String(args[0]).includes('could not persist the stopped record'),
+    // 'Service stopped.' must precede the exit too (R12-21).
+    const stoppedCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Service stopped.'),
+    );
+    expect(stoppedCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[stoppedCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
+    const warningCall = mockWriteStdoutLineBestEffort.mock.calls.findIndex(
+      (args) =>
+        String(args[0]).includes('could not persist the stopped record'),
     );
     expect(
-      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+      mockWriteStdoutLineBestEffort.mock.invocationCallOrder[warningCall],
     ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
@@ -809,12 +950,19 @@ describe('stopCommand', () => {
     await invokeStop();
 
     expect(mockChannelStateStoreSetMany).toHaveBeenCalledTimes(2);
-    // The loss must replace the durable-stop message, not join it.
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // The loss must replace the durable-stop message, not join it. Sink
+    // pin (R12-3): the warning rides the best-effort sink.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('stay stopped'),
+    );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('stay stopped'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
     );
     // A lost record still exits 0 (the service IS stopped; R9-21).
     expect(process.exit).toHaveBeenCalledWith(0);
@@ -859,7 +1007,22 @@ describe('stopCommand', () => {
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
+    // Sink twin (R12-3): the real warning sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     expect(process.exit).toHaveBeenCalledWith(0);
+    // 'Service killed.' is the only completion trace of an escalated stop:
+    // it must precede the exit, pinned like its 'Service stopped.' twins —
+    // under the no-op exit mock a relocated-below-exit write ships green
+    // while production exits silently (R12-21).
+    const killedCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Service killed.'),
+    );
+    expect(killedCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[killedCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
     // The final message must be emitted BEFORE the exit (R9-23).
     const finalMessageCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
       String(args[0]).includes('stay stopped'),
@@ -888,19 +1051,36 @@ describe('stopCommand', () => {
 
     expect(mockSignalService).toHaveBeenCalledWith(1234, 'SIGKILL');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith('Service killed.');
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // Sink pin (R12-3): the warning rides the best-effort sink.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('stay stopped'),
     );
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      expect.stringContaining('stay stopped'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
     expect(process.exit).toHaveBeenCalledWith(0);
+    // 'Service killed.' must precede the exit, twin of the escalated
+    // stop's pin (R12-21).
+    const killedCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
+      String(args[0]).includes('Service killed.'),
+    );
+    expect(killedCall).toBeGreaterThanOrEqual(0);
+    expect(
+      mockWriteStdoutLine.mock.invocationCallOrder[killedCall],
+    ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
     // The warning must precede the exit (R9-23).
-    const warningCall = mockWriteStdoutLine.mock.calls.findIndex((args) =>
-      String(args[0]).includes('could not persist the stopped record'),
+    const warningCall = mockWriteStdoutLineBestEffort.mock.calls.findIndex(
+      (args) =>
+        String(args[0]).includes('could not persist the stopped record'),
     );
     expect(
-      mockWriteStdoutLine.mock.invocationCallOrder[warningCall],
+      mockWriteStdoutLineBestEffort.mock.invocationCallOrder[warningCall],
     ).toBeLessThan(vi.mocked(process.exit).mock.invocationCallOrder[0]!);
   });
 
@@ -927,7 +1107,11 @@ describe('stopCommand', () => {
 
     await expect(invokeStop()).rejects.toThrow('process.exit: 0');
 
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // Sink pin (R12-3): the warning rides the best-effort sink.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
@@ -956,6 +1140,10 @@ describe('stopCommand', () => {
     // The record persisted, so only the signal failure is reported — the
     // persistence warning would be a false alarm here.
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not persist the stopped record'),
+    );
+    // Sink twin (R12-3): the real warning sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
       expect.stringContaining('could not persist the stopped record'),
     );
     expect(mockRemoveServiceInfo).toHaveBeenCalled();

@@ -544,17 +544,24 @@ async function startAll(
   let states: Record<string, ChannelRuntimeState>;
   try {
     // Drop entries for channels removed from settings so they cannot be
-    // skipped forever by a stale `stopped` record.
-    states = stateStore.prune(configuredNames);
+    // skipped forever by a stale `stopped` record. Adopted legacy stops
+    // are exempt: they were recorded in another workspace or an older
+    // release, and pruning them here lets the snapshot shield the loss
+    // from ever re-merging (#8975).
+    states = stateStore.prune(configuredNames, { preserveAdopted: true });
   } catch {
-    // prune throws only on write failure; the recorded states are still
-    // readable — fall back, but surface that persistence is broken so a
-    // later resurrection of stale entries has a traceable cause (#8975).
-    // Best-effort sink (R11-13).
-    writeStdoutLineBestEffort(
-      '[Channel] Warning: failed to update channel state; falling back to recorded states.',
-    );
+    // prune throws on ANY store failure — a transient READ failure
+    // (applyChange rethrows every non-ENOENT read error) as well as a
+    // write failure. Fall back to whatever is still readable; when that
+    // is empty, say so: selecting from an empty map treats every
+    // configured channel as active, including explicitly stopped ones
+    // (#8975). Best-effort sink (R11-13).
     states = stateStore.readAll();
+    writeStdoutLineBestEffort(
+      Object.keys(states).length === 0
+        ? '[Channel] Warning: no recorded channel state readable; treating all channels as active.'
+        : '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+    );
   }
   // Skip notices are best-effort diagnostics: route them through the
   // guarded sink so a dead stdout reader cannot kill the start (R11-13).

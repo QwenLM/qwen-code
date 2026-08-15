@@ -255,8 +255,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // durability signal disappears from the typed surface. Compiled under
     // tsconfig.typetest.json, which this package's `test:ci` script runs,
     // so the required PR test jobs (root fans `npm run test:ci` out to
-    // the workspaces) enforce it (R9-29, wired into the PR gate for
-    // R10-37).
+    // the workspaces) enforce it.
     expectTypeOf<DaemonChannelStopResult>().toEqualTypeOf<{
       changed: boolean;
       state: DaemonChannelControlState;
@@ -278,14 +277,14 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(typeof Public.DaemonClient.prototype.stopWorkspaceChannel).toBe(
       'function',
     );
-    // The workspace-scoped client carries the same stop method (R11-4):
+    // The workspace-scoped client carries the same stop method:
     // pin its existence too, or a regression dropping it from the
     // workspace client ships green while the daemon-client pin holds.
     expect(
       typeof Public.WorkspaceDaemonClient.prototype.stopWorkspaceChannel,
     ).toBe('function');
-    // Tie the method's declared return type to the shape pinned above
-    // (R11-4): the shape assertion exercises the standalone type
+    // Tie the method's declared return type to the shape pinned above:
+    // the shape assertion exercises the standalone type
     // declaration and the prototype checks only test existence, so a
     // return-type regression to the sibling methods'
     // `Promise<DaemonChannelMutationResult>` (startWorkspaceChannel /
@@ -301,13 +300,29 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
         typeof Public.WorkspaceDaemonClient.prototype.stopWorkspaceChannel
       >
     >().resolves.toEqualTypeOf<DaemonChannelStopInstanceResult>();
-    // #8975 / R11-19: pin the typed FAILED-stop body's SHAPE — consumers
-    // read `statePersisted` off `DaemonHttpError.body` without casting;
-    // `not.toBeNever()` stays green if the shape degrades.
+    // The whole-selection stop method needs the same binding pin:
+    // `statePersisted` is typed for the whole-selection stop on
+    // `DaemonClient.stopChannelWorker`'s `Promise<DaemonChannelStopResult>`,
+    // and the standalone shape assertion below tests the TYPE, not the
+    // method binding — a refactor swapping the declared return type for
+    // any other existing result type compiles and ships green while typed
+    // SDK consumers lose `statePersisted` (the CLI duck-types the import,
+    // so nothing else catches it).
+    expect(typeof Public.DaemonClient.prototype.stopChannelWorker).toBe(
+      'function',
+    );
+    expectTypeOf<
+      ReturnType<typeof Public.DaemonClient.prototype.stopChannelWorker>
+    >().resolves.toEqualTypeOf<DaemonChannelStopResult>();
+    // #8975: pin the typed FAILED-stop body's SHAPE — consumers cast
+    // `DaemonHttpError.body` to it to read the durability-loss signal;
+    // `not.toBeNever()` stays green if the shape degrades. `state` rides
+    // every structured stop error body that carries the loss signal.
     expectTypeOf<DaemonChannelStopErrorResponse>().toEqualTypeOf<{
       error: string;
       code: string;
       statePersisted?: boolean;
+      state?: DaemonChannelControlState;
     }>();
     expectTypeOf<DaemonChannelWorkerStartErrorResponse>().not.toBeNever();
     expectTypeOf<DaemonChannelStartupFailure>().toEqualTypeOf<DaemonEntryChannelStartupFailure>();

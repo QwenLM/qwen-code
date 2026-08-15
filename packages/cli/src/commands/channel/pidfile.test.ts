@@ -103,11 +103,21 @@ import {
   removeServiceInfo,
   removeServeServiceInfo,
   signalService,
+  isProcessSignalable,
   waitForExit,
 } from './pidfile.js';
 
 // We need to mock process.kill for isProcessAlive / signalService
 const originalKill = process.kill;
+
+// Real Node `process.kill(pid, 0)` rejections carry an errno `.code`; the
+// liveness helpers key on `code === 'ESRCH'` to tell a CONFIRMED-dead pid
+// apart from an alive-but-unsignalable one (EPERM, #8975). Mirror that.
+function errnoError(code: 'ESRCH' | 'EPERM'): NodeJS.ErrnoException {
+  const err = new Error(code) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
 
 function getPidFilePath() {
   return join(mockGlobalQwenDir, 'channels', 'service.pid');
@@ -220,7 +230,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
       // A dead process: readServiceInfo unlinks and returns null, but the
       // peek must still capture the channels for the crashed-service stop.
       const deadPid = (): never => {
-        throw new Error('ESRCH');
+        throw errnoError('ESRCH');
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       process.kill = vi.fn(deadPid) as any;
@@ -235,6 +245,36 @@ describe('writeServiceInfo + readServiceInfo', () => {
 
       expect(readServiceInfo()).toBeNull();
       expect(filePath in fsStore).toBe(false);
+    });
+
+    it('treats an EPERM pid as ALIVE under another user (#8975)', () => {
+      // `kill(pid, 0)` throwing EPERM means the process EXISTS but belongs
+      // to another user (a shared HOME/QWEN_HOME). The old code lumped it
+      // with ESRCH, reported the live service as crashed, and the stop
+      // crash-path recorded its RUNNING channels as stopped. readServiceInfo
+      // must return the info and keep the pidfile; isProcessSignalable is
+      // the guard that tells the stop it cannot act (#8975).
+      const filePath = getPidFilePath();
+      fsStore[filePath] = JSON.stringify({
+        owner: 'channel',
+        pid: 424242,
+        startedAt: new Date().toISOString(),
+        channels: ['telegram'],
+        workspaceCwd: '/workspace/a',
+      });
+       
+      process.kill = vi.fn((): never => {
+        throw errnoError('EPERM');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      }) as any;
+
+      expect(readServiceInfo()).toMatchObject({
+        owner: 'channel',
+        pid: 424242,
+        channels: ['telegram'],
+      });
+      expect(filePath in fsStore).toBe(true);
+      expect(isProcessSignalable(424242)).toBe(false);
     });
 
     it('returns null for a missing or corrupt pidfile', () => {
@@ -568,7 +608,7 @@ describe('writeServiceInfo + readServiceInfo', () => {
     // Now simulate dead process
 
     process.kill = vi.fn(() => {
-      throw new Error('ESRCH');
+      throw errnoError('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
 
@@ -649,7 +689,7 @@ describe('signalService', () => {
 
   it('returns false when process is not found', () => {
     process.kill = vi.fn(() => {
-      throw new Error('ESRCH');
+      throw errnoError('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
     expect(signalService(9999)).toBe(false);
@@ -670,10 +710,41 @@ describe('signalService', () => {
   });
 });
 
+describe('isProcessSignalable (#8975)', () => {
+  it('returns true for a live, signalable process', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    expect(isProcessSignalable(1234)).toBe(true);
+  });
+
+  it('returns false on ESRCH (confirmed dead)', () => {
+    process.kill = vi.fn(() => {
+      throw errnoError('ESRCH');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+    expect(isProcessSignalable(9999)).toBe(false);
+  });
+
+  it('returns false on EPERM (alive but owned by another user)', () => {
+    process.kill = vi.fn(() => {
+      throw errnoError('EPERM');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+    expect(isProcessSignalable(424242)).toBe(false);
+  });
+
+  it('returns false for an invalid pid without signaling', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+    expect(isProcessSignalable(0)).toBe(false);
+    expect(process.kill).not.toHaveBeenCalled();
+  });
+});
+
 describe('waitForExit', () => {
   it('returns true immediately if process is already dead', async () => {
     process.kill = vi.fn(() => {
-      throw new Error('ESRCH');
+      throw errnoError('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
 
@@ -695,7 +766,7 @@ describe('waitForExit', () => {
     let alive = true;
 
     process.kill = vi.fn(() => {
-      if (!alive) throw new Error('ESRCH');
+      if (!alive) throw errnoError('ESRCH');
       return true;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }) as any;
@@ -707,6 +778,20 @@ describe('waitForExit', () => {
 
     const result = await waitForExit(1234, 2000, 50);
     expect(result).toBe(true);
+  });
+
+  it('keeps waiting (times out) for an alive-but-EPERM pid (#8975)', async () => {
+    // Another user's process can never be observed as dead from here;
+    // waitForExit must not report it exited, or the stop path proceeds as
+    // if the service tore down. EPERM is "still running", so the poll
+    // runs to the timeout and reports false (#8975).
+    process.kill = vi.fn(() => {
+      throw errnoError('EPERM');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+
+    const result = await waitForExit(424242, 150, 50);
+    expect(result).toBe(false);
   });
 
   it('returns false on timeout when process stays alive', async () => {

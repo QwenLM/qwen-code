@@ -9,6 +9,7 @@ import {
   channelRuntimeStatePath,
 } from './channel-state-store.js';
 import {
+  isProcessSignalable,
   peekServiceInfo,
   readServiceInfo,
   signalService,
@@ -169,6 +170,19 @@ export const stopCommand: CommandModule<unknown, StopArgs> = {
       }
       process.exit(0);
       return;
+    }
+
+    if (!isProcessSignalable(info.pid)) {
+      // Alive but owned by another user (EPERM — a service running under
+      // a different account on a shared HOME/QWEN_HOME). We cannot signal
+      // it, so stop it from that user's session: recording its RUNNING
+      // channels as stopped here would durably corrupt a service this
+      // command never touched, and the pidfile belongs to the live
+      // process, so it must not be unlinked either (#8975).
+      writeStderrLine(
+        `Channel service (PID ${info.pid}) is running under a different user. Stop it from that user's session.`,
+      );
+      process.exit(1);
     }
 
     if (info.owner === 'serve') {

@@ -106,6 +106,7 @@ const mockChannelRuntimeStatePath = vi.hoisted(() =>
 const mockAdoptLegacyChannelState = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLineBestEffort = vi.hoisted(() => vi.fn());
 const mockFindCliEntryPath = vi.hoisted(() => vi.fn());
 const mockParseChannelConfig = vi.hoisted(() => vi.fn());
 const mockGetPlugin = vi.hoisted(() => vi.fn());
@@ -217,10 +218,14 @@ vi.mock('./channel-state-store.js', () => ({
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
-  // Same observable output as the loud sink; only the EPIPE-crash
-  // resilience differs, and that behavior is pinned in stdioHelpers.test
-  // (R11-13). Aliasing keeps the message pins on one call history.
-  writeStdoutLineBestEffort: mockWriteStdoutLine,
+  // OWN mock, de-aliased from the loud sink (R12-3): with a shared mock,
+  // swapping a best-effort diagnostic (the prune-fallback warning, the
+  // skip notices, the active-record loss warning) back to the loud
+  // `writeStdoutLine` ships every pin green, while in production a
+  // failing stdout target raises the async stdout 'error' event and kills
+  // the start mid-flight. The EPIPE-crash resilience of the real helper
+  // itself is pinned in stdioHelpers.test (R11-13).
+  writeStdoutLineBestEffort: mockWriteStdoutLineBestEffort,
 }));
 
 vi.mock('./config-utils.js', () => ({
@@ -394,6 +399,44 @@ describe('startCommand.handler', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('managed by qwen serve'),
     );
+    expect(mockBridgeStart).not.toHaveBeenCalled();
+  });
+
+  it('refuses to start when a standalone service is already running (#8975)', async () => {
+    // The standalone branch of checkDuplicateInstance, twin of the
+    // serve-owned test above: its guidance is the only place users learn
+    // the #8975 stop-then-skip semantics on this error path, so the
+    // rewritten lines must be pinned — a mangled or dropped guidance
+    // ships green otherwise (R12-16).
+    mockReadServiceInfo.mockReturnValue({
+      owner: 'channel',
+      pid: 1234,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      channels: ['telegram'],
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Channel service is already running'),
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'A standalone service hosts the channels it was started with; exit it (Ctrl+C, or "qwen channel stop") before starting a different channel set.',
+    );
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Note: "qwen channel stop" records the running channels as stopped, so a later "qwen channel start" skips them until each is started again by name.',
+    );
+    // The duplicate-instance abort must precede full setup: no bridge
+    // child may be spawned on this path (R12-16).
     expect(mockBridgeStart).not.toHaveBeenCalled();
   });
 
@@ -1558,10 +1601,12 @@ describe('startCommand.handler', () => {
           | NodeJS.Timeout
           | undefined;
 
-        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        // Sink pins (R12-3): the skip notices ride the best-effort sink —
+        // a dead stdout reader must not kill the start (R11-13).
+        expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
           '[Channel] "telegram" skipped (stopped before restart)',
         );
-        expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
           '[Channel] "feishu" skipped (stopped before restart)',
         );
         // Pin the FULL message: the recovery-guidance suffix is the only
@@ -1593,10 +1638,16 @@ describe('startCommand.handler', () => {
         // configured set is a read-side cleanup, not a state flip, and a
         // refactor skipping prune exactly in this branch would strand stale
         // `stopped` entries for channels removed from settings (#8975).
-        expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
-          'telegram',
-          'feishu',
-        ]);
+        // Adopted legacy stops are exempt from that cleanup (#8975,
+        // R12-47 fix); pin the option so a plain prune() call here fails.
+        expect(mockChannelStateStorePrune).toHaveBeenCalledWith(
+          ['telegram', 'feishu'],
+          { preserveAdopted: true },
+        );
+        // Uniqueness pin, mirroring the daemon-worker suite (R12-15): an
+        // additional wrong-path prune call alongside the right one ships
+        // green against the membership pin alone.
+        expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
         // Startup no longer exits when every channel is stopped.
         expect(exitSpy).not.toHaveBeenCalled();
 
@@ -1695,20 +1746,84 @@ describe('startCommand.handler', () => {
         exitSpy.mockRestore();
       }
 
-      // The fallback read still drives the restore filter.
-      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      // The fallback read still drives the restore filter. Sink pin
+      // (R12-3): the skip notice rides the best-effort sink.
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
         '[Channel] "feishu" skipped (stopped before restart)',
       );
       // A silent fallback would hide that persistence is broken: stale
       // entries survive and a re-added channel is skipped forever with
       // no diagnostic tracing the cause — the daemon-side twin asserts
-      // this warning too (#8975).
-      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      // this warning too (#8975). Sink pin (R12-3): the warning rides
+      // the best-effort sink — it fires exactly when the disk is
+      // failing.
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+      expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
         '[Channel] Warning: failed to update channel state; falling back to recorded states.',
       );
       expect(mockCreateChannel).toHaveBeenCalledTimes(1);
       expect(mockCreateChannel).toHaveBeenCalledWith(
         'telegram',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
+    });
+
+    it('treats all channels as active when prune fails and nothing is readable (R12-13)', async () => {
+      // prune throws on ANY store failure — a transient READ failure as
+      // well as a write failure — and the fallback readAll() can then
+      // return an EMPTY map while channels are explicitly stopped. The
+      // warning must say so: selecting from an empty map treats every
+      // configured channel as active, including the stopped ones, and
+      // claiming 'falling back to recorded states' there would be a lie
+      // (#8975). Mirror of the daemon-worker twin.
+      mockLoadSettings.mockReturnValue({
+        merged: {
+          channels: {
+            telegram: { type: 'telegram' },
+            feishu: { type: 'feishu' },
+          },
+        },
+      });
+      mockChannelStateStorePrune.mockImplementationOnce(() => {
+        throw new Error('EBUSY');
+      });
+      mockChannelStateStoreReadAll.mockReturnValue({});
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new Error(`process.exit: ${String(code)}`);
+      });
+
+      try {
+        // Default connect rejection ends startAll at the connectedCount check.
+        await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+      } finally {
+        exitSpy.mockRestore();
+      }
+
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+        '[Channel] Warning: no recorded channel state readable; treating all channels as active.',
+      );
+      // Mirror-pin the ternary's other half: with an empty fallback the
+      // recorded-states wording must NOT appear (#8975).
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
+      // Nothing is skipped: ALL configured channels are selected.
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        expect.stringContaining('skipped (stopped before restart)'),
+      );
+      expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'telegram',
+        mockParsedChannelConfig,
+        expect.any(Object),
+        expect.any(Object),
+      );
+      expect(mockCreateChannel).toHaveBeenCalledWith(
+        'feishu',
         mockParsedChannelConfig,
         expect.any(Object),
         expect.any(Object),
@@ -1736,23 +1851,31 @@ describe('startCommand.handler', () => {
         exitSpy.mockRestore();
       }
 
-      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      // Sink pin (R12-3): the skip notice rides the best-effort sink.
+      expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
         '[Channel] "feishu" skipped (stopped before restart)',
       );
       // One-sided warning pin: the prune-fallback warning is pinned on the
       // failure path above; a prune-success startup must NOT emit it —
       // emitting it on every normal startup drowns the genuine warning
-      // the test above says must stay traceable (R9-14).
+      // the test above says must stay traceable (R9-14). Sink twin
+      // (R12-3): the real warning sink is the best-effort one.
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
       expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
         '[Channel] Warning: failed to update channel state; falling back to recorded states.',
       );
       // prune receives every configured name, including the skipped one: a
       // post-selection list would wipe the skipped channel's stopped record
-      // and resurrect it on the next start (#8975).
-      expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
-        'telegram',
-        'feishu',
-      ]);
+      // and resurrect it on the next start (#8975). Adopted legacy stops
+      // are exempt from that cleanup (#8975, R12-47 fix).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledWith(
+        ['telegram', 'feishu'],
+        { preserveAdopted: true },
+      );
+      // Uniqueness pin, mirroring the daemon-worker suite (R12-15).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
       expect(mockCreateChannel).toHaveBeenCalledTimes(1);
       expect(mockCreateChannel).toHaveBeenCalledWith(
         'telegram',
@@ -1884,6 +2007,7 @@ describe('startCommand.handler', () => {
       // batched `active` write (and its false skip-consequence warning)
       // was pure noise on the startup critical path (R9-19).
       expect(mockAdoptLegacyChannelState).toHaveBeenCalledWith(process.cwd());
+      expect(mockAdoptLegacyChannelState).toHaveBeenCalledTimes(1);
       expect(mockChannelRuntimeStatePath).toHaveBeenCalledWith(process.cwd());
       // ...and the store is constructed with the path the helper returns
       // for THAT argument — a split here reads/writes a different file
@@ -1893,12 +2017,21 @@ describe('startCommand.handler', () => {
       expect(mockChannelStateStore).toHaveBeenCalledWith(
         `/tmp/qwen-home/channels/standalone/${process.cwd()}/channel-state.json`,
       );
+      // Uniqueness pins, mirroring the daemon-worker suite (R12-15): the
+      // membership pins above are satisfied by an additional wrong-path
+      // store construction or path derivation alongside the right one —
+      // a read/write store split ships green against membership alone.
+      expect(mockChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
+      expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
       // prune receives the FULL configured set: a partial list would wipe
       // the stopped records of exactly the skipped channels (#8975).
-      expect(mockChannelStateStorePrune).toHaveBeenCalledWith([
-        'telegram',
-        'feishu',
-      ]);
+      // Adopted legacy stops are exempt from that cleanup (#8975, R12-47
+      // fix).
+      expect(mockChannelStateStorePrune).toHaveBeenCalledWith(
+        ['telegram', 'feishu'],
+        { preserveAdopted: true },
+      );
+      expect(mockChannelStateStorePrune).toHaveBeenCalledTimes(1);
       // Adoption must run before the state read, or startAll reads the
       // still-empty workspace file and overwrites the legacy stops (#8975).
       expect(
@@ -1910,7 +2043,11 @@ describe('startCommand.handler', () => {
       expect(mockChannelStateStoreSet).not.toHaveBeenCalled();
       // One-sided warning pin: the removed batched write's warning must
       // not fire on a successful startup — a false data-loss alarm on
-      // every normal start (R9-18).
+      // every normal start (R9-18). Sink twin (R12-3): the real warning
+      // sink is the best-effort one.
+      expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+        '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+      );
       expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
         '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
       );
@@ -1988,6 +2125,10 @@ describe('startCommand.handler', () => {
     // One-sided warning pin: the persistence-failure warning is pinned on
     // the failure twin below; a successful named start must NOT fire it —
     // a false data-loss alarm on every successful restart-by-name (R9-18).
+    // Sink twin (R12-3): the real warning sink is the best-effort one.
+    expect(mockWriteStdoutLineBestEffort).not.toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
     expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
     );
@@ -2005,6 +2146,12 @@ describe('startCommand.handler', () => {
     expect(mockChannelStateStore).toHaveBeenCalledWith(
       `/tmp/qwen-home/channels/standalone/${process.cwd()}/channel-state.json`,
     );
+    // Uniqueness pins, mirroring the daemon-worker suite (R12-15): an
+    // additional wrong-path adoption/store construction alongside the
+    // right one ships green against the membership pins alone.
+    expect(mockAdoptLegacyChannelState).toHaveBeenCalledTimes(1);
+    expect(mockChannelRuntimeStatePath).toHaveBeenCalledTimes(1);
+    expect(mockChannelStateStore).toHaveBeenCalledTimes(1);
     expect(
       mockAdoptLegacyChannelState.mock.invocationCallOrder[0],
     ).toBeLessThan(mockChannelStateStoreSet.mock.invocationCallOrder[0]!);
@@ -2077,8 +2224,13 @@ describe('startCommand.handler', () => {
     );
     // The loss must still be surfaced like the stop direction does: a
     // stale `stopped` record would re-skip the explicitly restarted
-    // channel on the next `--channel all` restore (#8975).
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+    // channel on the next `--channel all` restore (#8975). Sink pin
+    // (R12-3): the warning rides the best-effort sink — it fires exactly
+    // when the disk is failing.
+    expect(mockWriteStdoutLineBestEffort).toHaveBeenCalledWith(
+      '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
+    );
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
       '[Channel] Warning: could not persist the active record; --channel all may still skip this channel.',
     );
   });

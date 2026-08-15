@@ -282,6 +282,11 @@ describe('DELETE /workspace/channel', () => {
 
     expect(response.status).toBe(500);
     expect(mockChannelStateStoreInstances).toHaveLength(0);
+    // No state write was even attempted, so the 500 body must not carry
+    // the loss flag: the CLI's --daemon-url stop catch warns on
+    // statePersisted === false, and a defaulted flag would print a false
+    // durability alarm on every ordinary stop failure (#8975).
+    expect(response.body).not.toHaveProperty('statePersisted');
   });
 
   it('records nothing when no channels were running', async () => {

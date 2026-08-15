@@ -1072,6 +1072,19 @@ describe('createChannelWorkerSupervisor', () => {
     firstChild.emit('exit', 1, null);
     await vi.advanceTimersByTimeAsync(10);
 
+    // The re-spawn argv is built from the UNCHANGED selection, not the
+    // carried names: a crashed mode-`all` workspace must relaunch with
+    // `--channel all` so the restore filter picks up channels enabled in
+    // settings while the worker was down (and drops removed ones).
+    // Routing the carried `requestedChannels` into the restart argv would
+    // relaunch with a frozen pre-crash name list (#8975).
+    expect(spawnWorker).toHaveBeenNthCalledWith(
+      2,
+      process.execPath,
+      ['/repo/dist/index.js', 'channel', 'daemon-worker', '--channel', 'all'],
+      expect.anything(),
+    );
+
     // During the restart's starting window `channels` reverts to the
     // `['all']` launch placeholder; the real names committed before the
     // crash ride along in `requestedChannels` (the connected set in
@@ -1401,6 +1414,12 @@ describe('createChannelWorkerSupervisor', () => {
     expect(terminal.adapters).toBeUndefined();
     expect(terminal.lastConnectedChannels).toEqual(['telegram']);
     expect(terminal.lastRequestedChannels).toEqual(['telegram']);
+    // The exact discriminator the manager's isTerminalFailedWorker gates
+    // on for the dead-name computation and the stop-side starting guard:
+    // budget exhaustion must leave NO restart scheduled, or the worker
+    // reads as still-relaunching and its stops get blocked with
+    // channel_worker_starting (#8975).
+    expect(terminal.nextRestartAt).toBeUndefined();
   });
 
   it('carries the ATTEMPTED set in lastRequestedChannels when attempted ≠ connected (R10-22)', async () => {

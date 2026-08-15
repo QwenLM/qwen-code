@@ -1268,6 +1268,66 @@ describe('createChannelWorkerManager', () => {
     ]);
   });
 
+  it('records nothing when a mode-names stop lands before the first ready report (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    // The mode-names window BEFORE the first ready report: the selection
+    // names ride in `requestedChannels`/`channels` from launch, but no
+    // connected set exists yet (`lastConnectedChannels` undefined).
+    // Falling back to the attempted set there would persist
+    // never-connected channels as explicitly `stopped`, skipping them on
+    // every later `--channel all` until manually started — contradicting
+    // this capture's contract that only actually-connected channels are
+    // recorded (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'starting',
+        channels: ['telegram', 'feishu'],
+        requestedChannels: ['telegram', 'feishu'],
+        lastConnectedChannels: undefined,
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toBeUndefined();
+    // Empty capture must not short-circuit the tear-down (zombie shape,
+    // see the degraded-canonicalization twin) (#8975).
+    expect(group.stop).toHaveBeenCalledTimes(1);
+    expect(test.manager.state()).toMatchObject({ enabled: false });
+  });
+
+  it('captures the attempted set once the worker is running with no carried connected set (#8975)', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+    // Control twin of the pre-ready test above: the SAME snapshot with
+    // `state: 'running'` has committed its channels via a ready report,
+    // so the fallback to `channels` is authoritative and both names are
+    // captured (#8975).
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'running',
+        channels: ['telegram', 'feishu'],
+        requestedChannels: ['telegram', 'feishu'],
+        lastConnectedChannels: undefined,
+      }),
+    ]);
+
+    const result = await test.manager.stopSelection();
+
+    expect(result.stoppedChannels).toEqual([
+      { workspaceCwd: PRIMARY, names: ['telegram', 'feishu'] },
+    ]);
+  });
+
   it('unions the post-stop capture when a crash-restart ready commits during tear-down (#8975)', async () => {
     const group = fakeGroup();
     const test = setup(group);
@@ -1372,13 +1432,25 @@ describe('createChannelWorkerManager', () => {
         channels: ['all'],
         requestedChannels: ['telegram'],
         lastConnectedChannels: ['telegram'],
+        // The dead-name computation's internal input (R9-6) must strip
+        // from the control state alongside lastConnectedChannels —
+        // narrowing the strip to the connected set leaks it on every
+        // GET/PUT/DELETE /workspace/channel response (#8975).
+        lastRequestedChannels: ['telegram'],
       }),
     ]);
 
     const state = test.manager.state();
 
     expect(state.workers[0]).not.toHaveProperty('lastConnectedChannels');
+    expect(state.workers[0]).not.toHaveProperty('lastRequestedChannels');
+    // Positive survival pin on the clone path: stripping the internal
+    // fields must not delete SDK-declared fields — an over-strip ships
+    // the control state without the fields the SDK's
+    // DaemonChannelWorkerSnapshot declares (#8975).
     expect(state.workers[0]).toMatchObject({
+      state: 'starting',
+      channels: ['all'],
       requestedChannels: ['telegram'],
     });
 
@@ -1429,15 +1501,36 @@ describe('createChannelWorkerManager', () => {
     expect(test.manager.snapshots()[0]).not.toHaveProperty(
       'lastRequestedChannels',
     );
+    // Positive survival pins on the clone path: the strip must delete
+    // ONLY the internal fields — an over-strip (an allow-list forgetting
+    // `channels`/`state`, or one stray extra delete) keeps every
+    // absence assertion green while the HTTP responses ship without the
+    // fields the SDK's DaemonChannelWorkerSnapshot declares (#8975).
+    expect(test.manager.primarySnapshot()).toMatchObject({
+      channels: ['telegram'],
+      state: 'running',
+    });
+    expect(test.manager.snapshots()[0]).toMatchObject({
+      channels: ['telegram'],
+      state: 'running',
+    });
     const reloaded = await test.manager.reload();
     expect(reloaded).not.toHaveProperty('lastConnectedChannels');
     expect(reloaded).not.toHaveProperty('lastRequestedChannels');
+    expect(reloaded).toMatchObject({
+      channels: ['telegram'],
+      state: 'running',
+    });
     const reloadedWorkspace = await test.manager.reloadWorkspace(
       PRIMARY,
       'telegram',
     );
     expect(reloadedWorkspace).not.toHaveProperty('lastConnectedChannels');
     expect(reloadedWorkspace).not.toHaveProperty('lastRequestedChannels');
+    expect(reloadedWorkspace).toMatchObject({
+      channels: ['telegram'],
+      state: 'running',
+    });
     // The capture's input is intact.
     expect(group.snapshots()[0]).toHaveProperty('lastConnectedChannels', [
       'telegram',
@@ -1552,6 +1645,42 @@ describe('createChannelWorkerManager', () => {
 
     // The scheduled restart keeps the worker NON-terminal: its names stay
     // committed.
+    expect(test.manager.committedChannelNames()).toEqual(['telegram']);
+
+    const result = await test.manager.setChannelEnabled(
+      { name: 'telegram', workspaceCwd: PRIMARY },
+      true,
+    );
+    // Idempotent: no replacement reconcile against the mid-relaunch
+    // worker.
+    expect(result).toMatchObject({ changed: false });
+    expect(group.reconcile).not.toHaveBeenCalled();
+  });
+
+  it('keeps a crashed-but-restart-scheduled mode-all worker committed (R11-37)', async () => {
+    // Mode-all twin of the boundary test above: the mode-`all` branch of
+    // committedChannelNames uses the same isTerminalFailedWorker
+    // predicate but reads its names from the worker snapshots, so
+    // widening the skip to every failed worker drops a scheduled-restart
+    // worker's names during the backoff window — committedChannelNames()
+    // returns [] and a per-channel start rebuilds a replacement selection
+    // against the mid-relaunch worker (the R11-v5 defect shape) instead
+    // of idempotently returning {changed: false} (#8975).
+    const group = fakeGroup({ isHealthy: vi.fn(() => false) });
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'all' });
+    vi.mocked(group.snapshots).mockReturnValue([
+      workerSnapshot({
+        state: 'failed',
+        channels: ['all'],
+        requestedChannels: ['telegram'],
+        nextRestartAt: new Date(Date.now() + 5000).toISOString(),
+        error: 'Channel worker crashed; restart scheduled.',
+      }),
+    ]);
+
+    // The scheduled restart keeps the worker NON-terminal: its carried
+    // names stay committed.
     expect(test.manager.committedChannelNames()).toEqual(['telegram']);
 
     const result = await test.manager.setChannelEnabled(

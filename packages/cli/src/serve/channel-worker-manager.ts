@@ -317,7 +317,18 @@ function stoppedChannelsByWorkspace(
     // launch placeholder/attempted set would pin never-run channels as
     // explicitly stopped (#8975).
     if (!worker.requestedChannels && !worker.lastConnectedChannels) continue;
-    const connected = new Set(worker.lastConnectedChannels ?? worker.channels);
+    // Fall back to `channels` ONLY once the worker is `running` (a ready
+    // report has committed it): before the first ready — the mode-names
+    // startup window, and crash-restarts that never came back ready —
+    // `channels` is still the ATTEMPTED set, and capturing it would
+    // persist never-connected channels as explicitly `stopped`, skipping
+    // them on every later `--channel all` until manually started. That
+    // contradicts this capture's contract ("only channels that actually
+    // connected are captured"), so record nothing there instead (#8975).
+    const connected = new Set(
+      worker.lastConnectedChannels ??
+        (worker.state === 'running' ? worker.channels : []),
+    );
     const names = (
       worker.requestedChannels ??
       worker.lastConnectedChannels ??

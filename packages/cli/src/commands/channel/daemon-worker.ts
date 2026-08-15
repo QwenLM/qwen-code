@@ -480,14 +480,18 @@ export async function runChannelDaemonWorker(
       states =
         names.length > 0 ? stateStore.prune(names) : stateStore.readAll();
     } catch {
-      // prune throws only on write failure; the recorded states are still
-      // readable — fall back, but surface that persistence is broken so a
-      // later resurrection of stale entries has a traceable cause (#8975).
-      // Best-effort sink (R11-13).
-      writeStdoutLineBestEffort(
-        '[Channel] Warning: failed to update channel state; falling back to recorded states.',
-      );
+      // prune throws on ANY store failure — a transient READ failure
+      // (applyChange rethrows every non-ENOENT read error) as well as a
+      // write failure. Fall back to whatever is still readable; when that
+      // is empty, say so: selecting from an empty map treats every
+      // configured channel as active, including explicitly stopped ones
+      // (#8975). Best-effort sink (R11-13).
       states = stateStore.readAll();
+      writeStdoutLineBestEffort(
+        Object.keys(states).length === 0
+          ? '[Channel] Warning: no recorded channel state readable; treating all channels as active.'
+          : '[Channel] Warning: failed to update channel state; falling back to recorded states.',
+      );
     }
     // Skip notices are best-effort diagnostics: a dead stdout reader must
     // not kill the worker start (R11-13).
