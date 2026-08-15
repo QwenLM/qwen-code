@@ -662,13 +662,16 @@ function SidebarSessionSurface({
             aria-label={label}
             data-web-shell-collapsed-session-trigger
             onPointerEnter={() => {
-              pointerOpenRef.current = true;
+              // Only an open initiated by the pointer uses hover semantics;
+              // a graze over a keyboard-opened switcher must not suppress
+              // focus restoration when it later closes.
+              if (!open) pointerOpenRef.current = true;
               cancelClose();
               changeOpen(true);
             }}
             onPointerLeave={closeAfterDelay}
             onPointerDown={() => {
-              pointerOpenRef.current = true;
+              if (!open) pointerOpenRef.current = true;
             }}
             onClick={(event) => {
               event.preventDefault();
@@ -704,10 +707,7 @@ function SidebarSessionSurface({
             if (pointerOpenRef.current) event.preventDefault();
             pointerOpenRef.current = false;
           }}
-          onPointerEnter={() => {
-            pointerOpenRef.current = true;
-            cancelClose();
-          }}
+          onPointerEnter={cancelClose}
           onPointerLeave={closeAfterDelay}
           onInteractOutside={(event) => {
             const originalTarget = event.detail.originalEvent.composedPath()[0];
@@ -1725,14 +1725,16 @@ export function WebShellSidebar({
   useEffect(() => {
     if (!collapsed) {
       setCollapsedSessionsOpen(false);
-    } else {
+    } else if (!collapsedSessionsOpen) {
       // A stale open search would otherwise mount its autofocused input
       // inside the collapsed hover popover and steal focus from the
-      // composer on every hover-open.
+      // composer on every hover-open, so reset it whenever the collapsed
+      // surface is not showing (sidebar collapse, session click, hover-out,
+      // or dismissal).
       setSearchOpen(false);
       setSearchQuery('');
     }
-  }, [collapsed]);
+  }, [collapsed, collapsedSessionsOpen]);
 
   const hasRunningSession = useMemo(
     () => sessions.some((session) => session.hasActivePrompt),
@@ -3413,6 +3415,7 @@ export function WebShellSidebar({
                       <DropdownMenuGroup>
                         {showArchivedRename && (
                           <DropdownMenuItem
+                            disabled={busy}
                             onSelect={() => handleRenameFromMenu(session)}
                           >
                             <PencilIcon />
@@ -4890,7 +4893,7 @@ export function WebShellSidebar({
                                           }
                                         }}
                                       >
-                                        <PlusIcon size={18} strokeWidth={1.4} />
+                                        <PlusIcon size={16} strokeWidth={1.2} />
                                       </button>
                                     )}
                                     <button

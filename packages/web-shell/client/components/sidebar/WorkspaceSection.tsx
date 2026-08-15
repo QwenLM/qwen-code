@@ -176,8 +176,10 @@ export function WorkspaceSection({
   }, [controlledExpanded, workspace.id]);
 
   useEffect(() => {
-    if (!expanded) setShowAllSessions(false);
-  }, [expanded]);
+    // The five-row preview is scoped per source; reset the one-shot
+    // show-all when the section collapses or the source changes.
+    setShowAllSessions(false);
+  }, [expanded, sourceType]);
 
   // The render site keys this component by workspace id, so an id change
   // always remounts and the lazy useState initializer re-reads storage.

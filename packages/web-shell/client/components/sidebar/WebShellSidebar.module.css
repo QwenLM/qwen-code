@@ -403,9 +403,11 @@
   gap: 8px;
   margin-right: -12px;
   padding-right: 12px;
-  /* The footer overlays the bottom of this scroll area; keep the last row
-     scrollable clear of it so rows stay hoverable. */
-  padding-bottom: 40px;
+  /* End the scroll port above the footer overlay so rows can never sit
+     under it (padding inside the scroll port would not: the port itself
+     still reaches the footer and rows parked at its bottom edge stay
+     unhoverable). */
+  margin-bottom: 40px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -528,7 +530,6 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding-bottom: 44px;
   overflow: visible;
 }
 
@@ -1512,6 +1513,7 @@
   gap: 2px;
   margin-right: 0;
   padding-right: 0;
+  margin-bottom: 220px;
 }
 
 .collapsed .newTaskNav {
@@ -1528,7 +1530,6 @@
   width: 100%;
   margin-right: 0;
   padding-right: 0;
-  padding-bottom: 220px;
 }
 
 .collapsed .footer {

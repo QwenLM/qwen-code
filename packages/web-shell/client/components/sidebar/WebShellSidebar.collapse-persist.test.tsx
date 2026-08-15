@@ -894,4 +894,127 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(after).not.toBeNull();
     expect(after?.dataset.state).toBe('open');
   });
+
+  it('resets the search when the collapsed switcher closes on session selection', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(switcher).not.toBeNull();
+    const searchButton = switcher!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(switcher!.querySelector('input')).not.toBeNull();
+
+    // Selecting a session closes the switcher; the stale search state must
+    // not survive to the next hover-open (it would remount the autofocused
+    // input and steal focus from the composer).
+    const row = Array.from(
+      switcher!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('API review'));
+    expect(row).not.toBeUndefined();
+    act(() => {
+      row!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project');
+    expect(
+      document.querySelector('[data-web-shell-collapsed-session-switcher]'),
+    ).toBeNull();
+
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    const reopened = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(reopened).not.toBeNull();
+    expect(reopened!.querySelector('input')).toBeNull();
+  });
+
+  it('keeps keyboard semantics when a pointer grazes the open switcher', async () => {
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    expect(trigger).not.toBeNull();
+
+    // Keyboard open: Enter activates the focused trigger; the keydown marks
+    // the open as keyboard-initiated before the click opens the popover.
+    act(() => {
+      trigger!.focus();
+    });
+    act(() => {
+      trigger!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    act(() => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(switcher?.dataset.state).toBe('open');
+
+    // A mouse graze over the content must not convert the keyboard-opened
+    // switcher to pointer semantics.
+    act(() => {
+      switcher!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+
+    const searchButton = switcher!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => {
+      searchButton!.focus();
+    });
+    expect(document.activeElement).toBe(searchButton);
+
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    // Radix dispatches the close-time focus restoration from a 0ms timer.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const after = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    expect(after === null || after.dataset.state === 'closed').toBe(true);
+    // Focus must return to the trigger, not drop to the body.
+    expect(document.activeElement).toBe(trigger);
+  });
 });

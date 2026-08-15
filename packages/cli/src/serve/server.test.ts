@@ -22899,6 +22899,8 @@ describe('createServeApp', () => {
     it.each([
       [{}, 'displayName'],
       [{ displayName: 123 }, 'displayName'],
+      [{ displayName: '' }, 'displayName'],
+      [{ displayName: '   ' }, 'displayName'],
       [{ displayName: 'bad\nname' }, 'displayName'],
     ] as const)(
       'rejects invalid workspace metadata %#',
@@ -22916,6 +22918,28 @@ describe('createServeApp', () => {
         expect(secondaryBridge.updateMetadataCalls).toEqual([]);
       },
     );
+
+    it('clamps workspace metadata displayName to 256 characters', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/session-A/metadata',
+        ),
+      ).send({ displayName: 'x'.repeat(300) });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        displayName: 'x'.repeat(256),
+      });
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          metadata: { displayName: 'x'.repeat(256) },
+        },
+      ]);
+    });
 
     it('rejects metadata updates for an untrusted workspace', async () => {
       const secondaryBridge = fakeBridge();

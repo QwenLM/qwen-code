@@ -4060,6 +4060,14 @@ export function registerSessionRoutes(
       }
       try {
         const displayName = rawDisplayName.slice(0, 256);
+        if (displayName.trim() === '') {
+          // An empty name would append an empty custom_title record to
+          // persisted sessions, which the title readers disagree on.
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not be empty',
+          );
+        }
         if (
           Array.from(displayName).some((character) => {
             const code = character.charCodeAt(0);
