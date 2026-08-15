@@ -663,11 +663,87 @@ describe('reverseAuditRoundCap — the one reader of the plan field', () => {
         reverseAuditRoundCap({ ...HUGE, budget: { reverseAuditRounds: bad } }),
       ).toBe(3);
     }
-    // A plan written before the budget existed gets its topology's tier, not
-    // another topology's number: an old plan errs toward more auditing.
+    // A plan with no `reverseAuditRounds` at all reads as its tier. A plan
+    // that HAS one in band keeps it — see the legacy-value test below.
     expect(reverseAuditRoundCap(SMALL)).toBe(10);
     expect(reverseAuditRoundCap({ ...SMALL, budget: {} })).toBe(10);
     expect(reverseAuditRoundCap(HUGE)).toBe(3);
+  });
+
+  it('rejects an in-band NON-INTEGER — the only guard that can catch it', () => {
+    // 2.5 above never reaches `Number.isInteger`: the `>= 3` floor rejects it
+    // first, so deleting the integer guard leaves the whole suite green and
+    // `reverseAuditRounds: 3.5` becomes a cap of 3.5. These values sit inside
+    // every tier's band, so the integer check is the ONLY thing between them
+    // and a fractional round cap.
+    expect(
+      reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: 3.5 } }),
+    ).toBe(10);
+    expect(
+      reverseAuditRoundCap({ ...LARGE, budget: { reverseAuditRounds: 4.5 } }),
+    ).toBe(5);
+  });
+
+  it('honours a legacy in-band value instead of migrating it to the tier', () => {
+    // A CLI that predates tiering wrote 5, and 5 is inside a 3A plan's [3, 10]
+    // band. The plan states a number; a reader of a CLI-written field does not
+    // get to override it. Only an absent or out-of-band value reaches the tier
+    // — pinning the claim the doc comment used to get wrong in the other
+    // direction ("a legacy 3A plan gets the ten rounds its topology earns").
+    expect(
+      reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: 5 } }),
+    ).toBe(5);
+    expect(
+      reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: 3 } }),
+    ).toBe(3);
+  });
+
+  it('treats a COERCIBLE garbage size as unsized, not as a zero-line diff', () => {
+    // `Number()` turns each of these into a finite 0, so a coerce-then-
+    // isFinite check calls them usable and hands the plan the SMALL tier —
+    // ten rounds, the most expensive cap — for a plan whose size is not
+    // known. `JSON.stringify` writes a NaN line count as `null`, so this is
+    // the shape the corrupted plan actually arrives in.
+    for (const bad of [null, '', false, [], -5, '1', '3000'] as unknown[]) {
+      expect(reverseAuditRoundCap({ srcDiffLines: bad, diffLines: bad })).toBe(
+        5,
+      );
+      // …including when only ONE of the pair is garbage.
+      expect(reverseAuditRoundCap({ srcDiffLines: 100, diffLines: bad })).toBe(
+        5,
+      );
+      expect(reverseAuditRoundCap({ srcDiffLines: bad, diffLines: 100 })).toBe(
+        5,
+      );
+    }
+    // A numeric-string size must not buy a tier a hand edit could not: "1"
+    // would otherwise coerce a 5,800-line plan into the SMALL tier through
+    // the very clamp that exists to stop it.
+    expect(
+      reverseAuditRoundCap({
+        srcDiffLines: '1',
+        diffLines: '1',
+        budget: { reverseAuditRounds: 10 },
+      }),
+    ).toBe(5);
+    // Zero is a real size — an empty diff is a small diff, not an unsized one.
+    expect(reverseAuditRoundCap({ srcDiffLines: 0, diffLines: 0 })).toBe(10);
+  });
+
+  it('does not let reviewBudget RECORD a tier for a size it never received', () => {
+    // The write path is the other half: `sane()` launders garbage into 0, and
+    // 0 is a perfectly good small diff, so sizing the tier from the saned pair
+    // persisted ten rounds into the plan where the flat cap persisted five.
+    for (const bad of [Number.NaN, -5, Number.POSITIVE_INFINITY]) {
+      expect(
+        reviewBudget({ srcDiffLines: bad, diffLines: bad }).reverseAuditRounds,
+      ).toBe(5);
+    }
+    expect(reviewBudget({} as never).reverseAuditRounds).toBe(5);
+    // …while a genuinely empty diff still records the small tier.
+    expect(
+      reviewBudget({ srcDiffLines: 0, diffLines: 0 }).reverseAuditRounds,
+    ).toBe(10);
   });
 
   it('reads a plan with no usable size as the large tier — today’s value', () => {

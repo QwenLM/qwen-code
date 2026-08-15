@@ -97,7 +97,7 @@ Requiring two consecutive dry rounds makes a single lazy or context-starved agen
 
 ### Why the round cap is per topology
 
-Five was one number standing in for three prices. What the cap bounds is a **round**, and a round costs one auditor on 3A, one auditor per non-retired chunk on 3B, and ~90 minutes on a huge diff. That is two orders of magnitude across the topologies a single cap had to serve, so it was necessarily wrong at one end: too loose to bound the huge case — which is why `HUGE_REVERSE_AUDIT_ROUNDS` had to be carved out of it — and, at the other end, tight enough on 3A to stop loops that were still confirming Criticals, for a saving of about five calls out of a 17-23-call review.
+Five was one number standing in for three prices. What the cap bounds is a **round**, and a round costs one auditor on 3A, one auditor per non-retired chunk on 3B, and ~90 minutes on a huge diff. That is two orders of magnitude across the topologies a single cap had to serve, so it was necessarily wrong at one end: too loose to bound the huge case — which is why `HUGE_REVERSE_AUDIT_ROUNDS` had to be carved out of it — and, at the other end, tight enough on 3A to stop loops that were still confirming Criticals, for a saving of about five calls out of a review that cost 17-23 of them before this change.
 
 The asymmetry that decides it is the one this whole design is built on: a missed issue costs another `/review` iteration, and per-run cost is the cheaper side of that trade (see "Competitors" below). On 3A the marginal round is a single agent; on huge it is an hour and a half of a six-hour ceiling. The cap should say so.
 
@@ -717,7 +717,7 @@ For a PR with 15 findings:
 
 > Dependency: [Fork Subagent proposal](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report-p0-p1-core.md#2-fork-subagentp0)
 
-**Current problem:** Each of the ~17-28 LLM calls (14-16 review + sharded verify + 2-10 reverse audit rounds) creates a new subagent from scratch. At ~52K per agent (50K system + 2K task), that is ~880K-1.2M input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters even more under the current 14-agent design than under the original 5-agent design. (Effort levels bound the cost from the other side: low runs spawn no subagents at all, and medium spawns the reduced fan-out.)
+**Current problem:** Each of the ~17-28 LLM calls (14-16 review + sharded verify + 2-10 reverse audit rounds) creates a new subagent from scratch. At ~52K per agent (50K system + 2K task), that is ~880K-1.5M input tokens with massive redundancy. The cost grew along with the agent count — Fork Subagent matters even more under the current 14-agent design than under the original 5-agent design. (Effort levels bound the cost from the other side: low runs spawn no subagents at all, and medium spawns the reduced fan-out.)
 
 **Fork Subagent solution:** Instead of creating independent subagents, fork the current conversation. All forks inherit the parent's full context (system prompt, conversation history, Step 1/1.1/1.5 results) and share a prompt cache prefix. The API caches the common prefix once; each fork only pays for its unique delta (~2K per agent).
 
@@ -725,13 +725,13 @@ For a PR with 15 findings:
 Current (independent subagents):
   Agent 1: [50K system] + [2K task]  = 52K
   Agent 2: [50K system] + [2K task]  = 52K
-  ...× 17-23 agents                 = ~880K-1.2M total input tokens
+  ...× 17-28 agents                 = ~880K-1.5M total input tokens
 
 With Fork + prompt cache sharing:
   Cached prefix: [50K system + conversation history]  (cached once)
   Fork 1: [cache hit] + [2K delta]   = ~2K effective
   Fork 2: [cache hit] + [2K delta]   = ~2K effective
-  ...× 17-23 forks                  = ~50K cached + ~34-46K delta = ~84-96K total
+  ...× 17-28 forks                  = ~50K cached + ~34-56K delta = ~84-106K total
 ```
 
 **Additional benefits for /review:**
@@ -741,7 +741,7 @@ With Fork + prompt cache sharing:
 - Verification and reverse audit agents inherit all prior findings naturally
 - Agent 6 personas can fork from a shared diff-loaded base, paying only the persona-framing delta
 
-**Estimated savings:** ~88-92% token reduction (~780K-1.1M → ~80-92K) with zero quality impact. The savings ratio is now even more compelling than under the 5-agent design.
+**Estimated savings:** ~90-93% token reduction (~880K-1.5M → ~84-106K) with zero quality impact. The savings ratio is now even more compelling than under the 5-agent design.
 
 **Why not implemented now:** Fork Subagent requires changes to the Qwen Code core (`AgentTool`, `forkSubagent.ts`, `CacheSafeParams`). This is a platform-level feature (~400 lines, ~5 days), not a /review-specific change. When available, /review should be updated to use fork instead of independent subagents.
 

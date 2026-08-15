@@ -228,18 +228,55 @@ export function isTerritoryFanOut(plan: DiffSize): boolean {
  * safe direction for a bound (the rest of this module's fallbacks err toward
  * more *coverage*; this one errs toward less *cost*, because an unsized plan
  * could be the 5,800-line one).
+ *
+ * **Usability is judged before coercion, not after.** `Number()` turns `null`,
+ * `''`, `false` and `[]` into a finite `0`, so a coerce-then-`isFinite` check
+ * calls them usable and hands a plan whose sizes are unknowable the SMALL
+ * tier — the most expensive one — while the sibling `{}` correctly falls back.
+ * That shape is not hypothetical: `JSON.stringify` writes a `NaN` line count
+ * as `null`, so the corrupted plan this fallback exists for arrives looking
+ * exactly like a zero-line diff. A numeric-string size (`"1"`) coerces too,
+ * which would have let a hand-edited huge plan reach the SMALL tier through
+ * the very clamp `reverseAuditRoundCap` adds to prevent it.
  */
 export function reverseAuditRoundTier(size: DiffSize): number {
-  const src = Number(size?.srcDiffLines);
-  const total = Number(size?.diffLines);
-  if (!Number.isFinite(src) || !Number.isFinite(total)) {
+  const src = size?.srcDiffLines;
+  const total = size?.diffLines;
+  if (!usableLineCount(src) || !usableLineCount(total)) {
     return LARGE_REVERSE_AUDIT_ROUNDS;
   }
-  const effective = Math.max(sane(src), Math.floor(sane(total) / 8));
+  const effective = effectiveLines(src, total);
   if (effective >= HUGE_DIFF_FLOOR) return HUGE_REVERSE_AUDIT_ROUNDS;
   return isTerritoryFanOut(size)
     ? LARGE_REVERSE_AUDIT_ROUNDS
     : SMALL_REVERSE_AUDIT_ROUNDS;
+}
+
+/**
+ * A line count this module is willing to size a plan from: a real, finite,
+ * non-negative `number`. Everything else — absent, `null`, a numeric string, a
+ * boolean, `NaN`, `Infinity`, a negative — is a plan whose size is not known,
+ * which is a different fact from a plan whose size is zero.
+ *
+ * Deliberately NOT shared with `sane()` below, which answers the opposite
+ * question. `sane()` launders garbage into `0` because its readers (angles,
+ * the sweep, the tool budget) have a safe floor to land on; the tier has no
+ * such floor — landing on `0` there means "small diff", the costliest cap.
+ */
+function usableLineCount(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0;
+}
+
+/**
+ * The plan's source-weighted line-span measure, in one place.
+ *
+ * A diff that is *all* non-source (docs, a lockfile) still has lines somebody
+ * has to read, so a large non-source diff counts at a coarser eighth rate.
+ * Both size tiers in this module read it, and two copies of it are two size
+ * measures that can drift apart inside one budget object.
+ */
+function effectiveLines(src: number, total: number): number {
+  return Math.max(src, Math.floor(total / 8));
 }
 
 /** Below this, "one domain dominates the diff" is not a finding about the diff. */
@@ -277,13 +314,7 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
   const src = sane(input.srcDiffLines);
   const total = sane(input.diffLines);
 
-  // Size is read from source lines, with one exception: a diff that is *all*
-  // non-source (a docs-only or lockfile-only change) still has lines somebody
-  // has to read, and reading them with three angles when there are two thousand
-  // of them is the dilution this budget exists to avoid. So a large non-source
-  // diff earns angles too, at a much coarser rate — prose carries less that a
-  // reviewer can get wrong, not none.
-  const effective = Math.max(src, Math.floor(total / 8));
+  const effective = effectiveLines(src, total);
 
   const extraAngles = Math.floor(effective / LINES_PER_ANGLE);
   const inlineAngles = clamp(
@@ -309,10 +340,12 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
       MIN_AGENT_TOOL_BUDGET,
       MAX_AGENT_TOOL_BUDGET,
     ),
-    reverseAuditRounds: reverseAuditRoundTier({
-      srcDiffLines: src,
-      diffLines: total,
-    }),
+    // The RAW input, not the `sane()`d pair above. `sane()` launders a garbled
+    // count into `0`, and `0` is a perfectly good small diff — so sizing the
+    // tier from it would record the SMALL tier's ten rounds for a plan whose
+    // size failed to arrive, where the flat cap recorded five. The tier does
+    // its own usability check precisely so this call can hand it the truth.
+    reverseAuditRounds: reverseAuditRoundTier(input),
   };
 }
 
@@ -324,17 +357,29 @@ export function reviewBudget(input: BudgetInput): ReviewBudget {
  * not the schedule's).
  *
  * It takes the whole plan, not `plan.budget`, because the accepted range is
- * now the plan's **own topology tier** rather than a global band. That buys
- * two things one band could not:
+ * now the plan's **own topology tier** rather than a global band. What that
+ * buys, stated as what actually happens rather than as a slogan:
  *
- *  - **A plan without the field** — an older CLI's — reads as its tier, so a
- *    3A plan written before tiering gets the ten rounds its topology earns
- *    instead of a 3B number. The pre-existing promise holds: an old plan errs
- *    toward more auditing, never less.
  *  - **A hand-edited plan cannot cross tiers.** The field is CLI-written and
  *    nothing here is the caller's to override; clamping to the tier means a
  *    `reverseAuditRounds: 10` typed into a 5,800-line plan buys nothing,
  *    which a single upper bound of ten would have honoured.
+ *  - **A plan with no `reverseAuditRounds` at all** — a pre-budget CLI's —
+ *    reads as its topology's tier instead of one flat number.
+ *
+ * Two things this does NOT do, both of which an earlier draft of this comment
+ * claimed and the code never did:
+ *
+ *  - It does **not** upgrade a legacy small plan to ten. A CLI that predates
+ *    tiering wrote `reverseAuditRounds: 5`, and 5 is inside a 3A plan's
+ *    `[3, 10]` band, so it is honoured as 5. Only an absent or out-of-band
+ *    value ever reaches the tier. Migrating in-band values would mean
+ *    overriding a number the plan states, which is the one thing a reader of
+ *    a CLI-written field must not do.
+ *  - It does **not** always err toward more auditing. A field-less **huge**
+ *    plan now reads 3 where the flat fallback read 5 — deliberately less: the
+ *    huge tier is a finishability ruling, and the reviews it exists for are
+ *    the ones that ran six hours and posted nothing.
  *
  * The range stays floored at `HUGE_REVERSE_AUDIT_ROUNDS`, the smallest cap
  * the CLI ever writes. A value of one or two is out of band (a hand-edited
