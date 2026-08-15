@@ -16,6 +16,7 @@ import type {
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonUiSessionActions,
+  DaemonUnrecognizedDiagnostic,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
@@ -3267,8 +3268,10 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let diagnostics: readonly DaemonUnrecognizedDiagnostic[] = [];
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      diagnostics = useDaemonTranscriptState().unrecognizedDiagnostics;
       return null;
     }
 
@@ -3286,6 +3289,14 @@ describe('DaemonSessionProvider', () => {
     expect(assistantBlocks).toHaveLength(1);
     expect((assistantBlocks[0] as { text?: string }).text).toBe('first second');
     expect(blocks.some((b) => b.kind === 'debug')).toBe(false);
+    // The narrowed guard (#8823 review) lets `unrecognized_*` debug events
+    // through to the reducer: they route onto the sidechannel instead of
+    // `blocks[]`, so they cannot split the burst and must not be dropped
+    // before dispatch.
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toEqual(
+      expect.objectContaining({ debugReason: 'unrecognized_event' }),
+    );
   });
 
   it('keeps the burst in one block when a malformed_payload debug event interleaves', async () => {
@@ -4062,6 +4073,98 @@ describe('DaemonSessionProvider', () => {
       );
     },
   );
+
+  it('keeps history-sourced unrecognized diagnostics on the sidechannel when paging (#8823)', async () => {
+    // A session recorded by a newer daemon is exactly the forward-compat
+    // case the sidechannel exists for: unknown persisted session_update
+    // kinds normalize to `unrecognized_session_update` debug events in the
+    // throwaway history store, and applyTranscriptHistory must merge them
+    // onto the live store instead of dropping them.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 1,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained tail' },
+                _meta: { 'qwen.session.recordId': 'record-retained' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'mystery_kind_from_newer_daemon',
+              _meta: { 'qwen.session.recordId': 'record-old' },
+            },
+          },
+        },
+      ],
+      hasMore: false,
+    });
+    let diagnostics: readonly DaemonUnrecognizedDiagnostic[] = [];
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      diagnostics = useDaemonTranscriptState().unrecognizedDiagnostics;
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(history?.hasMore).toBe(true);
+    expect(diagnostics).toHaveLength(0);
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toEqual(
+      expect.objectContaining({ debugReason: 'unrecognized_session_update' }),
+    );
+  });
 
   it('uses history_truncated marker recordId as pagination anchor when session_updates lack one', async () => {
     // Regression coverage: a live-journal truncation during a single long

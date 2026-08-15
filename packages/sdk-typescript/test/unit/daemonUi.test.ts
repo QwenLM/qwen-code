@@ -2709,10 +2709,10 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
 
   it('carries the envelope coordinates and correlation fields onto sidechannel entries (#8823)', () => {
     // Every field the type promises must actually land: a mutation deleting
-    // any one spread (or swapping `receivedAt` for a constant) used to leave
-    // the whole suite green because only `debugReason` was asserted. `now`
-    // is distinct from `serverTimestamp` and `eventId` so `receivedAt`
-    // discriminates.
+    // any one spread (or swapping `clientReceivedAt` for a constant) used to
+    // leave the whole suite green because only `debugReason` was asserted.
+    // `now` is distinct from `serverTimestamp` and `eventId` so
+    // `clientReceivedAt` discriminates.
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState(),
       normalizeDaemonEvent({
@@ -2747,7 +2747,7 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
         originatorClientId: 'client-9',
         eventId: 42,
         serverTimestamp: 1234,
-        receivedAt: 5,
+        clientReceivedAt: 5,
       },
     ]);
   });

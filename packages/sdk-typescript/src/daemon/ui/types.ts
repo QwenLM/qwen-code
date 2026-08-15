@@ -336,7 +336,7 @@ export interface DaemonUnrecognizedDiagnostic {
   eventId?: number;
   serverTimestamp?: number;
   /** Reducer receive time (`state.now` at dispatch). */
-  receivedAt: number;
+  clientReceivedAt: number;
 }
 
 export interface DaemonUiStatusEvent extends DaemonUiEventBase {

@@ -40,6 +40,49 @@ describe('daemon transcript rewind', () => {
     expect(state.activeAssistantBlockId).toBeUndefined();
   });
 
+  it('resets the unrecognized diagnostics sidechannel on rewind (#8823)', () => {
+    // The rewind drops the turn these diagnostics were routed from; the
+    // sidechannel must follow the sibling per-turn state resets instead of
+    // reporting diagnostics for turns that no longer exist.
+    const turnEvents: DaemonUiEvent[] = [
+      { type: 'user.text.delta', text: 'first' },
+      { type: 'assistant.text.delta', text: 'first answer' },
+      { type: 'assistant.done' },
+      { type: 'user.text.delta', text: 'second' },
+      {
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+        text: 'future frame during the erased turn',
+      },
+    ];
+
+    const beforeRewind = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      turnEvents,
+      { now: 1 },
+    );
+    expect(beforeRewind.unrecognizedDiagnostics).toHaveLength(1);
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...turnEvents,
+        {
+          type: 'session.rewound',
+          promptId: 'session########1',
+          targetTurnIndex: 1,
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'assistant',
+    ]);
+    expect(state.unrecognizedDiagnostics).toEqual([]);
+  });
+
   it('attaches a completed-turn branch anchor to the active Assistant block', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),

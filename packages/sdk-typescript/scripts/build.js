@@ -88,7 +88,9 @@ const rootDir = join(__dirname, '..');
 // Bumped from 189KB to 190KB for historical branch sessions and transcript branch-point projection merged with the upload and reasoning APIs.
 // Bumped from 190KB to 191KB for the unrecognized-diagnostic sidechannel
 // (`unrecognizedDiagnostics` routing + selector, #8823).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 191 * 1024;
+// Bumped from 191KB to 192KB because that same sidechannel change grew the
+// daemon barrel 7 bytes past the 191KB cap (195,591 bytes measured, #8823).
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 192 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

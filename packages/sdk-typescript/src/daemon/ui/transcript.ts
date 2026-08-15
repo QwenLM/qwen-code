@@ -1324,18 +1324,12 @@ function appendUnrecognizedDiagnostic(
   // The replaced `appendStatusBlock` path capped exactly these diagnostics at
   // `MAX_TEXT_BLOCK_LENGTH`; a single SSE frame can carry ~16M code units and
   // up to `UNRECOGNIZED_DIAGNOSTICS_LIMIT` entries persist, so the cap stays.
-  // Mirrors `truncateText` exactly (suffix fits WITHIN the cap; the block
-  // variant also reports truncation, which has no block id to report under).
+  // Shares `truncateTextAtLimit` with the block path; the only delta is the
+  // truncation report, which has no block id to report under.
   const diagnostic: DaemonUnrecognizedDiagnostic = {
     debugReason: event.debugReason,
-    text:
-      event.text.length <= MAX_TEXT_BLOCK_LENGTH
-        ? event.text
-        : event.text.slice(
-            0,
-            Math.max(0, MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length),
-          ) + TEXT_TRUNCATED_SUFFIX,
-    receivedAt: state.now,
+    text: truncateTextAtLimit(event.text),
+    clientReceivedAt: state.now,
     ...(event.promptId !== undefined ? { promptId: event.promptId } : {}),
     ...(event.sourceRecordIds !== undefined
       ? { sourceRecordIds: event.sourceRecordIds }
@@ -1684,6 +1678,9 @@ function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.currentToolCallId = undefined;
   state.pendingUserShellCommand = undefined;
   state.lastFollowupSuggestion = undefined;
+  // Rewind erases the turns these diagnostics were routed from; keep the
+  // sidechannel aligned with the sibling per-turn state reset above.
+  state.unrecognizedDiagnostics = [];
 
   const liveToolCallIds = new Set<string>();
   for (const block of state.blocks) {
@@ -1784,6 +1781,15 @@ function appendBoundedText(
   return truncateText(state, block.id, block.sourceRecordIds, existing + text);
 }
 
+function truncateTextAtLimit(text: string): string {
+  if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
+  const keepLength = Math.max(
+    0,
+    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
+  );
+  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
 function truncateText(
   state: DaemonTranscriptState,
   blockId: string,
@@ -1792,11 +1798,7 @@ function truncateText(
 ): string {
   if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
   reportTextTruncation(state, blockId, sourceRecordIds);
-  const keepLength = Math.max(
-    0,
-    MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
-  );
-  return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+  return truncateTextAtLimit(text);
 }
 
 function reportTextTruncation(

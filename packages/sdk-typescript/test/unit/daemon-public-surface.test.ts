@@ -514,6 +514,20 @@ describe('unrecognized-diagnostic sidechannel public surface (#8823)', () => {
     >();
   });
 
+  it('routes every unrecognized_*-prefixed debug reason (#8823)', () => {
+    // Membership is what the router tests, but Web Shell hides debug blocks
+    // by the `unrecognized_` prefix — so any reason added to
+    // DAEMON_UI_DEBUG_REASONS under that prefix must join the routed
+    // subset, otherwise those frames fall through to `appendStatusBlock`
+    // (finalizing the streaming block, consuming the maxBlocks budget)
+    // while renderers hide the resulting block: the #8823 symptoms,
+    // invisible until usage-loss reports arrive.
+    for (const reason of DAEMON_UI_DEBUG_REASONS) {
+      if (!reason.startsWith('unrecognized_')) continue;
+      expect(DAEMON_UI_UNRECOGNIZED_DIAGNOSTIC_REASONS).toContain(reason);
+    }
+  });
+
   it('reaches the selector and the cap through the daemon entry', () => {
     // The PR's Risk & Scope points adapters at `@qwen-code/sdk/daemon`; an
     // export missing from the barrel is a compile error for every consumer,
