@@ -551,11 +551,18 @@ jobs:
           # applied "parked" label has no marker and never skips. Unreadable
           # head fails open like the label read.
           if [ "$AUTO_REVIEW" = "true" ]; then
+            # No `printf | grep -q` pipes below: under `set -o pipefail`
+            # the -q consumer exits at the first match and closes the
+            # pipe, so the producer (printf builtin or gh) dies on EPIPE
+            # with 141 and pipefail surfaces that as FALSE even when the
+            # marker matches — on busy PRs (>64 KB of bot comment bodies)
+            # the skip would silently never fire. Herestrings and [[ == ]]
+            # pattern matches have no pipe and no early-exit producer.
             LABELS="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels?per_page=100" --paginate --jq '.[].name' 2>/dev/null || true)"
-            if printf '%s\n' "$LABELS" | grep -Fxq 'status/on-hold'; then
+            if grep -Fxq 'status/on-hold' <<< "$LABELS"; then
               HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
               MARKERS="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --paginate --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot") | .body' 2>/dev/null || true)"
-              if [ -n "$HEAD_SHA" ] && printf '%s\n' "$MARKERS" | grep -Fq "qwen-triage on-hold sha=${HEAD_SHA}"; then
+              if [ -n "$HEAD_SHA" ] && [[ "$MARKERS" == *"qwen-triage on-hold sha=${HEAD_SHA}"* ]]; then
                 echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold pinned to head ${HEAD_SHA} (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
                 echo "should_run=false" >> "$GITHUB_OUTPUT"
                 exit 0

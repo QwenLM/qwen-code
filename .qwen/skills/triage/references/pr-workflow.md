@@ -298,11 +298,17 @@ classification evidence — read the diff.
 
 ```bash
 gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
-gh pr comment "$PR_NUMBER" --repo "$REPO" --body '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->'
+printf '%s' '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->' > /tmp/qwen-triage-on-hold-marker.md
+.github/scripts/upsert-bot-comment.sh "$REPO" "$PR_NUMBER" 'qwen-triage on-hold sha=' /tmp/qwen-triage-on-hold-marker.md
 ```
 
    `<HEAD_SHA>` is the head commit you triaged — the same SHA quoted in the
-   Stage 1 "Reviewed at" footer. Post the marker exactly once per triage run.
+   Stage 1 "Reviewed at" footer. Post the marker through the author-scoped
+   upsert helper (never a bare `gh pr comment`): a re-run of the same
+   triage then PATCHes the existing marker in place instead of minting a
+   byte-identical duplicate, and a later triage of a new head updates the
+   same comment to the new pin. The lookup marker is the SHA-less prefix
+   so the existing comment is found across heads.
 
 2. Post the Stage 1 comment using the triage-only variant below.
 3. Stop — no Stage 2, no Stage 3, no approval, no CHANGES_REQUESTED.
@@ -328,9 +334,13 @@ Template looks good ✓
 This looks like a behaviour-neutral maintenance change (<one line of evidence,
 e.g. "comment/JSDoc fixes only, across N files">), so it takes the lightweight
 triage-only path instead of the full automated review: `status/on-hold` is
-applied and no review verdict will post automatically. Nothing is blocked — a
-maintainer can start a full review at any time with `@qwen-code /review`, and
-removing the label re-enables the automatic lane. If this cleanup pairs
+applied and no review verdict will post automatically<except that when the
+triggering action is `ready_for_review` (the PR was just marked ready), a
+review run may already be in flight — the two lanes cannot synchronize, so
+say "a review verdict may still post from the run this pin raced; the pin
+applies to later runs" instead of the absolute promise>. Nothing is blocked —
+a maintainer can start a full review at any time with `@qwen-code /review`,
+and removing the label re-enables the automatic lane. If this cleanup pairs
 naturally with a substantive change, consider folding it in there.
 
 <details>

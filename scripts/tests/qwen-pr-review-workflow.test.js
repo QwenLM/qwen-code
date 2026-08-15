@@ -2531,6 +2531,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     triggerBody = '',
     headSha = 'abc123def456',
     onHoldMarkers = [],
+    markerPadBytes = 0,
   }) {
     const doc = parse(workflow);
     const step = doc.jobs['review-pr'].steps.find(
@@ -2570,7 +2571,9 @@ describe('qwen pr review triage-only skip (#7411)', () => {
             'echo "$@" >> "$CONTEXT_GH_CALLS"',
             'case "$*" in',
             "  */labels*) printf '%s\\n' $CONTEXT_LABELS ;;",
-            '  */comments*) node -e \'const rows = JSON.parse(process.env.CONTEXT_MARKERS || "[]"); for (const row of rows) if (["github-actions[bot]", "qwen-code-ci-bot"].includes(row.author)) console.log(row.body);\' ;;',
+            '  */comments*)',
+            '    node -e \'const rows = JSON.parse(process.env.CONTEXT_MARKERS || "[]"); for (const row of rows) if (["github-actions[bot]", "qwen-code-ci-bot"].includes(row.author)) console.log(row.body);\'',
+            '    if [ "${CONTEXT_MARKER_PAD:-0}" != "0" ]; then head -c "$CONTEXT_MARKER_PAD" /dev/zero | tr "\\\\0" "x"; echo; fi ;;',
             '  *pulls/*) printf \'%s\\n\' "$CONTEXT_HEAD_SHA" ;;',
             '  *) ;;',
             'esac',
@@ -2593,6 +2596,7 @@ describe('qwen pr review triage-only skip (#7411)', () => {
         TRIGGER_BODY: triggerBody,
         CONTEXT_LABELS: labels.join(' '),
         CONTEXT_MARKERS: JSON.stringify(markerRows),
+        CONTEXT_MARKER_PAD: String(markerPadBytes),
         CONTEXT_HEAD_SHA: headSha,
         CONTEXT_GH_CALLS: callsFile,
       },
@@ -2620,7 +2624,35 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     expect(r.ghCalls).toContain('issues/4242/labels');
     expect(r.ghCalls).toContain('pulls/4242');
     expect(r.ghCalls).toContain('issues/4242/comments');
+    // Pin the filter EXPRESSION, not just its substring: the stub does its
+    // own author filtering, so a mutated jq that merely contains
+    // '.user.login' (e.g. select(.user.login != "")) would otherwise pass
+    // here while silently accepting forged markers in production (#9219).
+    expect(r.ghCalls).toContain(
+      'select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot")',
+    );
     expect(r.summary).toContain('status/on-hold');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('still skips when bot comment bodies exceed the pipe buffer', () => {
+    // Under `set -o pipefail` the old `printf '%s\n' "$MARKERS" | grep -Fq`
+    // shape read FALSE once $MARKERS crossed the 64 KB pipe buffer: grep
+    // -q exited at the first match, printf died on EPIPE with 141, and
+    // pipefail surfaced the producer failure — on busy PRs the skip
+    // silently never fired while the summary claimed the opposite (#9219).
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'abc123def456',
+      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+      // The stub emits a further 300 KB bot comment body (the round-3
+      // probe size), generated inside the stub so the step's $MARKERS can
+      // exceed the env-string limit the harness itself is bound by.
+      markerPadBytes: 300_000,
+    });
+    expect(r.output).toContain('should_run=false');
+    expect(r.output).not.toContain('should_run=true');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
@@ -2661,7 +2693,9 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     });
     expect(r.output).toContain('should_run=true');
     expect(r.summary).toContain('not pinned to the live head');
-    expect(r.ghCalls).toContain('.user.login');
+    expect(r.ghCalls).toContain(
+      'select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot")',
+    );
     rmSync(r.dir, { recursive: true, force: true });
   });
 
