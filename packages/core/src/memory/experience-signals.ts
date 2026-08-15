@@ -6,6 +6,7 @@
 
 import type { Part } from '@google/genai';
 import type { ToolExecutionStatus } from '../core/turn.js';
+import { SHELL_EXIT_CODE_PREFIX } from '../tools/shell-exit-code.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 
@@ -44,18 +45,6 @@ export function isSubstantiveToolCall(name: string): boolean {
 export function didToolCallProduceWork(
   outcome: CompletedToolCallOutcome,
 ): boolean {
-  if (
-    outcome.executionStatus === 'not_started' ||
-    outcome.executionStatus === 'cancelled'
-  ) {
-    return false;
-  }
-  if (outcome.status === 'cancelled') {
-    return (
-      outcome.executionStatus === 'success' ||
-      outcome.executionStatus === 'error'
-    );
-  }
   return (
     outcome.executionStatus === 'success' || outcome.executionStatus === 'error'
   );
@@ -66,8 +55,10 @@ function hasKnownShellExitStatus(parts: readonly Part[] | undefined): boolean {
   for (const part of parts ?? []) {
     const output = part.functionResponse?.response?.['output'];
     if (typeof output !== 'string') continue;
-    for (const match of output.matchAll(/(?:^|\n)Exit Code: ([^\r\n]+)/g)) {
-      finalExitStatus = match[1]?.trim();
+    for (const line of output.split(/\r?\n/)) {
+      if (line.startsWith(SHELL_EXIT_CODE_PREFIX)) {
+        finalExitStatus = line.slice(SHELL_EXIT_CODE_PREFIX.length).trim();
+      }
     }
   }
   return finalExitStatus !== undefined && /^-?\d+$/.test(finalExitStatus);

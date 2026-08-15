@@ -94,6 +94,7 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { formatShellExitCode } from '../tools/shell-exit-code.js';
 import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
@@ -8751,37 +8752,102 @@ hello
         acceptTurns();
       });
 
-      it('passes the complete gate state to MemoryManager', async () => {
-        client['toolCallCount'] = 7;
-        client['userSteeredSinceReview'] = true;
-        client['experienceSignalsSinceReview'] = {
-          retryArc: true,
-          hasSubstantiveWork: true,
-          failedToolNames: new Set(),
-        };
+      it.each([
+        ['all true', true],
+        ['all false', false],
+      ] as const)(
+        'passes the complete %s gate state to MemoryManager',
+        async (_name, value) => {
+          client['toolCallCount'] = 7;
+          client['skillsModifiedInSession'] = value;
+          client['userSteeredSinceReview'] = value;
+          client['experienceSignalsSinceReview'] = {
+            retryArc: value,
+            hasSubstantiveWork: value,
+            failedToolNames: new Set(),
+          };
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'review this session' }],
+              new AbortController().signal,
+              'prompt-autoskill-gate',
+            ),
+          );
+
+          expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
+            expect.objectContaining({
+              projectRoot: '/test/project/root',
+              sessionId: 'test-session-id',
+              config: mockConfig,
+              toolCallCount: 7,
+              skillsModified: value,
+              enabled: true,
+              experienceSignals: {
+                retryArc: value,
+                userSteer: value,
+                hasSubstantiveWork: value,
+              },
+              confirmBeforePersist: true,
+            }),
+          );
+          const params = mockMemoryManager.scheduleSkillReview.mock.calls[0][0];
+          expect(params).not.toHaveProperty('maxTurns');
+        },
+      );
+
+      it('queues exactly one scheduled review promise when other managed tasks are disabled', async () => {
+        vi.mocked(mockConfig.getManagedAutoMemoryEnabled).mockReturnValue(
+          false,
+        );
+        mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+          status: 'scheduled',
+          taskId: 'task-1',
+          promise: Promise.resolve({
+            metadata: { touchedSkillFiles: ['skill/SKILL.md'] },
+          }),
+        });
 
         await fromAsync(
           client.sendMessageStream(
-            [{ text: 'review this session' }],
+            [{ text: 'trigger review' }],
             new AbortController().signal,
-            'prompt-autoskill-gate',
+            'prompt-autoskill-promise',
           ),
         );
 
-        expect(mockMemoryManager.scheduleSkillReview).toHaveBeenCalledWith(
-          expect.objectContaining({
-            projectRoot: '/test/project/root',
-            sessionId: 'test-session-id',
-            toolCallCount: 7,
-            experienceSignals: {
-              retryArc: true,
-              userSteer: true,
-              hasSubstantiveWork: true,
-            },
-            confirmBeforePersist: true,
-          }),
-        );
+        const pending = client.consumePendingMemoryTaskPromises();
+        expect(pending).toHaveLength(1);
+        await expect(pending[0]).resolves.toBe(1);
+        expect(client.consumePendingMemoryTaskPromises()).toEqual([]);
       });
+
+      it.each([
+        'below_threshold',
+        'skills_modified_in_session',
+        'disabled',
+        'already_running',
+        'memory_pressure',
+      ] as const)(
+        'clears the skills-modified flag after a %s skip',
+        async (skippedReason) => {
+          mockMemoryManager.scheduleSkillReview.mockReturnValueOnce({
+            status: 'skipped',
+            skippedReason,
+          });
+          client['skillsModifiedInSession'] = true;
+
+          await fromAsync(
+            client.sendMessageStream(
+              [{ text: 'check review gate' }],
+              new AbortController().signal,
+              `prompt-autoskill-skip-${skippedReason}`,
+            ),
+          );
+
+          expect(client['skillsModifiedInSession']).toBe(false);
+        },
+      );
 
       it.each([
         ['scheduled', { status: 'scheduled', taskId: 'task-1' }],
@@ -9039,35 +9105,53 @@ hello
       });
 
       it('ignores calls that never produced work', () => {
-        client.recordCompletedToolCall('edit', undefined, {
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        const args = { path: '/project/.qwen/skills/my-skill/SKILL.md' };
+        client.recordCompletedToolCall('edit', args, {
           callId: 'denied-edit',
           status: 'error',
           executionStatus: 'not_started',
         });
-        client.recordCompletedToolCall('edit', undefined, {
+        client.recordCompletedToolCall('edit', args, {
           callId: 'cancelled-edit',
           status: 'cancelled',
           executionStatus: 'cancelled',
         });
 
         expect(client['toolCallCount']).toBe(0);
-        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
-          false,
-        );
+        expect(client['skillsModifiedInSession']).toBe(false);
+        expect(client['recentCompletedToolNames']).toEqual([]);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: false,
+          failedToolNames: new Set(),
+        });
         expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
 
       it('counts cancellation after completion without staging a retry outcome', () => {
-        client.recordCompletedToolCall('edit', undefined, {
-          callId: 'completed-edit',
-          status: 'cancelled',
-          executionStatus: 'success',
-        });
+        vi.spyOn(client['config'], 'getProjectRoot').mockReturnValue(
+          '/project',
+        );
+        client.recordCompletedToolCall(
+          'edit',
+          { path: '/project/.qwen/skills/my-skill/SKILL.md' },
+          {
+            callId: 'completed-edit',
+            status: 'cancelled',
+            executionStatus: 'success',
+          },
+        );
 
         expect(client['toolCallCount']).toBe(1);
-        expect(client['experienceSignalsSinceReview'].hasSubstantiveWork).toBe(
-          true,
-        );
+        expect(client['skillsModifiedInSession']).toBe(true);
+        expect(client['experienceSignalsSinceReview']).toEqual({
+          retryArc: false,
+          hasSubstantiveWork: true,
+          failedToolNames: new Set(),
+        });
         expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
 
@@ -9086,7 +9170,9 @@ hello
               functionResponse: {
                 id: 'unknown-shell',
                 name: 'run_shell_command',
-                response: { output: 'Exit Code: (none)\nSignal: (none)' },
+                response: {
+                  output: `${formatShellExitCode(null)}\nSignal: (none)`,
+                },
               },
             },
           ],
@@ -9117,6 +9203,60 @@ hello
         expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
           new Set(['edit']),
         );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+      });
+
+      it('consumes staged outcomes once when addHistory accepts them', async () => {
+        const addHistory = vi.fn();
+        client['chat'] = {
+          addHistory,
+          getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set()),
+        } as unknown as GeminiChat;
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'direct-failure',
+          status: 'error',
+          executionStatus: 'error',
+        });
+        const failedContent: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'direct-failure',
+                name: 'edit',
+                response: { error: 'failed' },
+              },
+            },
+          ],
+        };
+
+        await client.addHistory(failedContent);
+        await client.addHistory(failedContent);
+        expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
+          new Set(['edit']),
+        );
+        expect(client['pendingExperienceOutcomes'].size).toBe(0);
+
+        client.recordCompletedToolCall('edit', undefined, {
+          callId: 'direct-success',
+          status: 'success',
+          executionStatus: 'success',
+        });
+        await client.addHistory({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'direct-success',
+                name: 'edit',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        });
+
+        expect(addHistory).toHaveBeenCalledTimes(3);
+        expect(client['experienceSignalsSinceReview'].retryArc).toBe(true);
         expect(client['pendingExperienceOutcomes'].size).toBe(0);
       });
     });
@@ -12843,11 +12983,19 @@ Other open files:
 
       it('restores an attached ToolResult steer when history never accepts it', async () => {
         client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        client.getChat().getHistoryFunctionResponseIds = vi
+          .fn()
+          .mockReturnValue(new Set());
         mockTurnRunFn.mockImplementationOnce(() => {
           throw new Error('setup failed before history push');
         });
         const accept = vi.fn();
         const restore = vi.fn();
+        client.recordCompletedToolCall('read_file', undefined, {
+          callId: 'rejected-read',
+          status: 'error',
+          executionStatus: 'error',
+        });
 
         await expect(
           fromAsync(
@@ -12855,6 +13003,7 @@ Other open files:
               [
                 {
                   functionResponse: {
+                    id: 'rejected-read',
                     name: 'read_file',
                     response: { error: 'tool failed' },
                   },
@@ -12878,6 +13027,9 @@ Other open files:
         expect(restore).toHaveBeenCalledOnce();
         expect(client['experienceSignalsSinceReview'].failedToolNames).toEqual(
           new Set(),
+        );
+        expect(client['pendingExperienceOutcomes'].has('rejected-read')).toBe(
+          true,
         );
         expect(client['userSteeredSinceReview']).toBe(false);
       });

@@ -5338,6 +5338,7 @@ describe('useGeminiStream', () => {
           executionStatus,
           errorType:
             status === 'error' ? ToolErrorType.EXECUTION_DENIED : undefined,
+          responseParts: toolCall.response?.responseParts,
         }),
       );
     },

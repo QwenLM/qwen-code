@@ -2340,6 +2340,67 @@ describe('runNonInteractive', () => {
     ).toHaveBeenCalled();
   });
 
+  it('preserves scheduler cancellation with a settled success outcome', async () => {
+    setupMetricsMock();
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'cancelled-tool',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-cancelled-tool',
+      },
+    };
+    const responseParts: Part[] = [{ text: 'Tool completed' }];
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        const response: ToolCallResponseInfo = {
+          callId: 'cancelled-tool',
+          responseParts,
+          executionStatus: 'success',
+        };
+        await options.onAllToolCallsComplete?.([
+          { status: 'cancelled', response },
+        ]);
+        return response;
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Final answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-cancelled-tool',
+    );
+
+    expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+      'testTool',
+      { arg1: 'value1' },
+      {
+        callId: 'cancelled-tool',
+        status: 'cancelled',
+        executionStatus: 'success',
+        errorType: undefined,
+        responseParts,
+      },
+    );
+  });
+
   it('uses a tool-selected full-turn model for the next request', async () => {
     setupMetricsMock();
     const model = 'qwen3-vl-plus\0';

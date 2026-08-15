@@ -148,7 +148,6 @@ export interface ScheduleSkillReviewParams {
   now?: Date;
   config?: Config;
   enabled?: boolean;
-  threshold?: number;
   maxTurns?: number;
   timeoutMs?: number;
   /** When true, stage created skills for user confirmation instead of
@@ -843,13 +842,13 @@ export class MemoryManager {
       return { status: 'skipped', skippedReason: 'skills_modified_in_session' };
     }
 
-    const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
     const signals = params.experienceSignals;
     const shouldSchedule = signals
       ? ((signals.retryArc || signals.userSteer) &&
           params.toolCallCount >= AUTO_SKILL_EXPERIENCE_FLOOR) ||
-        (signals.hasSubstantiveWork && params.toolCallCount >= threshold)
-      : params.toolCallCount >= threshold;
+        (signals.hasSubstantiveWork &&
+          params.toolCallCount >= AUTO_SKILL_THRESHOLD)
+      : params.toolCallCount >= AUTO_SKILL_THRESHOLD;
     if (!shouldSchedule) {
       return { status: 'skipped', skippedReason: 'below_threshold' };
     }
@@ -880,7 +879,7 @@ export class MemoryManager {
       metadata: {
         historyLength: params.history.length,
         toolCallCount: params.toolCallCount,
-        threshold,
+        threshold: AUTO_SKILL_THRESHOLD,
       },
     });
 

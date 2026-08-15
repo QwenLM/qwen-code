@@ -102,6 +102,7 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { toCompletedToolCallOutcome } from '../../utils/completed-tool-call-outcome.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -4223,13 +4224,11 @@ export const useGeminiStream = (
           geminiClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
-            {
-              callId: tc.request.callId,
-              status: tc.status,
-              executionStatus: tc.response?.executionStatus,
-              errorType: tc.response?.errorType,
-              responseParts: tc.response?.responseParts,
-            },
+            toCompletedToolCallOutcome(
+              tc.request.callId,
+              tc.status,
+              tc.response,
+            ),
           );
         }
         markToolsAsSubmitted(dedupedCallIds);
@@ -4637,13 +4636,11 @@ export const useGeminiStream = (
         geminiClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
-          {
-            callId: toolCall.request.callId,
-            status: toolCall.status,
-            executionStatus: toolCall.response?.executionStatus,
-            errorType: toolCall.response?.errorType,
-            responseParts: toolCall.response?.responseParts,
-          },
+          toCompletedToolCallOutcome(
+            toolCall.request.callId,
+            toolCall.status,
+            toolCall.response,
+          ),
         );
       }
 

@@ -588,6 +588,7 @@ export class GeminiClient {
 
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
+    this.acceptCompletedToolCallOutcomes(content);
   }
 
   getChat(): GeminiChat {

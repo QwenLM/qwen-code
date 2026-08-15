@@ -290,6 +290,12 @@ describe('MemoryManager', () => {
         ['skipped', 'below_threshold'],
       ],
       [
+        'rejects a read-only window at the backstop threshold',
+        AUTO_SKILL_THRESHOLD,
+        { retryArc: false, userSteer: false, hasSubstantiveWork: false },
+        ['skipped', 'below_threshold'],
+      ],
+      [
         'accepts substantive work at the backstop threshold',
         AUTO_SKILL_THRESHOLD,
         SUBSTANTIVE_WINDOW,
@@ -310,6 +316,9 @@ describe('MemoryManager', () => {
         });
 
         expect([result.status, result.skippedReason]).toEqual(expected);
+        if (result.status === 'skipped') {
+          expect(runSkillReviewByAgent).not.toHaveBeenCalled();
+        }
         await result.promise;
       },
     );
@@ -319,9 +328,8 @@ describe('MemoryManager', () => {
         projectRoot: '/below',
         sessionId: 'sess',
         history: [],
-        toolCallCount: 4,
+        toolCallCount: AUTO_SKILL_THRESHOLD - 1,
         skillsModified: false,
-        threshold: 5,
         config: makeMockConfig(),
       });
       expect([below.status, below.skippedReason]).toEqual([
@@ -333,9 +341,8 @@ describe('MemoryManager', () => {
         projectRoot: '/at-threshold',
         sessionId: 'sess',
         history: [],
-        toolCallCount: 5,
+        toolCallCount: AUTO_SKILL_THRESHOLD,
         skillsModified: false,
-        threshold: 5,
         config: makeMockConfig(),
       });
       expect(atThreshold.status).toBe('scheduled');

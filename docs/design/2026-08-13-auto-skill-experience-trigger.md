@@ -28,11 +28,11 @@ different outcome"。触发器应当直接检测这些事件的确定性特征�
 
 ### 经验信号
 
-| 信号                 | 定义                                                                | 检测方式                                                                                                                                                                                         |
-| -------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `retryArc`           | 某工具失败后，同一工具出现成功结果——试错且被克服                    | 工具完成时按结构化 `status` / `executionStatus` 分类，并以 `callId` 暂存；仅在对应 `ToolResult` 或 `Retry` 被接受进入 history 后消费。shell 还必须能解析到最终数字退出码，未知退出状态为 neutral |
-| `userSteer`          | 用户在 agent 工作中途插话（steer 消息）——"用户期望不同的方法或结果" | 不由 history 推断；`GeminiClient` 在 `SendMessageType.Steer` 完成时，或被接受的 `ToolResult` 提交附带 steer 时置位                                                                               |
-| `hasSubstantiveWork` | 窗口内完成过写文件、编辑 notebook 或执行 shell                      | 仅用于兜底通道，排除纯读会话                                                                                                                                                                     |
+| 信号                 | 定义                                                                | 检测方式                                                                                                                                                                                                                              |
+| -------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retryArc`           | 某工具失败后，同一工具出现成功结果——试错且被克服                    | 工具完成时按结构化 `status` / `executionStatus` 分类，并以 `callId` 暂存；在对应 `ToolResult` 或 `Retry` 被接受，或直接通过 `GeminiClient.addHistory` 写入 history 后消费。shell 还必须能解析到最终数字退出码，未知退出状态为 neutral |
+| `userSteer`          | 用户在 agent 工作中途插话（steer 消息）——"用户期望不同的方法或结果" | 不由 history 推断；`GeminiClient` 在 `SendMessageType.Steer` 完成时，或被接受的 `ToolResult` 提交附带 steer 时置位                                                                                                                    |
+| `hasSubstantiveWork` | 窗口内完成过写文件、编辑 notebook 或执行 shell                      | 仅用于兜底通道，排除纯读会话                                                                                                                                                                                                          |
 
 > 曾设想过独立的 `testFlip`（测试红转绿）信号，但它为真时 `retryArc` 在同一次扫描中
 > 必然为真（转绿的那次成功同时闭合试错弧），对门控决策零增量，故合并进 `retryArc`，
@@ -42,13 +42,12 @@ different outcome"。触发器应当直接检测这些事件的确定性特征�
 
 `GeminiClient` 在工具完成时接收结构化 outcome：`callId`、`status`、
 `executionStatus`、`errorType` 和 `responseParts`。可靠的 success / failure 以 `callId` 暂存；对应
-`ToolResult`（含以 `Retry` 重提交的结果）真正被接受进入 history 后才消费一次；history
-dedup 路径则在发现同一 `callId` 已配对时立即消费。因此拒绝的提交可以重试，已接受结果的
+`ToolResult`（含以 `Retry` 重提交的结果）真正被接受进入 history，或由直接 `addHistory` 路径写入后才消费一次；history dedup 路径则在发现同一 `callId` 已配对时立即消费。因此拒绝的提交可以重试，已接受结果的
 重复提交自然 no-op。分类状态只存在于客户端 sidecar，不写入模型可见的
 `functionResponse.response`。
 
 工具完成时同时更新 `toolCallCount` 与 `hasSubstantiveWork`：从未执行的调用不计数；执行完成
-后才取消的调用仍计数，但不贡献 success / failure。`Steer` 到达或被接受的 ToolResult 附带
+后才取消的调用保持 `status: cancelled`，但 `executionStatus` 保留真实的 `success` 或 `error`，因此仍计数但不贡献 success / failure。`Steer` 到达或被接受的 ToolResult 附带
 steer 时置位 `userSteer`。评审被调度或已有同类评审在运行时，累计窗口与计数一起清零；
 session reset 还会清除尚未消费的 outcome sidecar。
 
@@ -57,11 +56,13 @@ session reset 还会清除尚未消费的 outcome sidecar。
 ```
 disabled / skillsModified            → 维持原有跳过
 fastPath  = (retryArc || userSteer) && toolCallCount >= 5
-backstop  = hasSubstantiveWork && toolCallCount >= threshold(默认 20)
+backstop  = hasSubstantiveWork && toolCallCount >= AUTO_SKILL_THRESHOLD
 !fastPath && !backstop               → skipped
                                       → 'below_threshold'
 fastPath || backstop                 → scheduled
 ```
+
+`AUTO_SKILL_THRESHOLD` 固定为 20，不接受调用方覆盖。
 
 in-flight 去重检查在门控之后，因此 `already_running` 本身即代表"本应触发"；客户端和
 `scheduled` 一样重置该窗口，避免旧信号在当前评审结束后立即重放。

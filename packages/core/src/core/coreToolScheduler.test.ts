@@ -8999,7 +8999,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
     expect(call2?.status).toBe('cancelled');
     expect(call3?.status).toBe('cancelled');
     expect((call2 as CompletedToolCall).response.executionStatus).toBe(
-      'cancelled',
+      'success',
     );
     expect((call3 as CompletedToolCall).response.executionStatus).toBe(
       'not_started',
@@ -12028,7 +12028,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain('had already completed');
   });
 
-  it('tells the model a post-completion cancellation discarded finished work', async () => {
+  it('preserves settled work on a post-completion cancellation', async () => {
     const abortController = new AbortController();
     const { completedCalls } = await runSingleTool({
       abortController,
@@ -12040,7 +12040,11 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     const completedCall = completedCalls[0] as CompletedToolCall;
     expect(completedCall.status).toBe('cancelled');
-    expect(completedCall.response.executionStatus).toBe('cancelled');
+    expect(completedCall.response.executionStatus).toBe('success');
+    expect(getExecutionSpan()?.endMetadata).toMatchObject({
+      executionStatus: 'cancelled',
+      cancelled: true,
+    });
     const responseText = JSON.stringify(completedCall.response.responseParts);
     expect(responseText).toContain('The tool had already completed');
     expect(responseText).not.toContain('User cancelled tool execution.');
@@ -12066,7 +12070,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     const completedCall = completedCalls[0] as CompletedToolCall;
     expect(completedCall.status).toBe('cancelled');
-    expect(completedCall.response.executionStatus).toBe('cancelled');
+    expect(completedCall.response.executionStatus).toBe('success');
     expect(completedCall.response.persistedOutputFiles).toEqual([
       '/tmp/tool-results/span-call.txt',
     ]);
@@ -12180,7 +12184,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(completedCalls[0].status).toBe('cancelled');
     expect(
       (completedCalls[0] as CompletedToolCall).response.executionStatus,
-    ).toBe('cancelled');
+    ).toBe('success');
     expect(spanRecord.spanAttributes).toHaveProperty('success', false);
   });
 

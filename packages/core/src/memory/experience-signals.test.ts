@@ -14,6 +14,10 @@ import {
   type ExperienceSignalAccumulator,
 } from './experience-signals.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import {
+  formatShellExitCode,
+  SHELL_EXIT_CODE_PREFIX,
+} from '../tools/shell-exit-code.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 const empty = (): ExperienceSignalAccumulator => ({
@@ -42,7 +46,7 @@ function outcome(
   };
 }
 
-function shellOutput(exitCode: string, output = 'done') {
+function shellOutput(exitCode: number | null, output = 'done') {
   return outcome({
     responseParts: [
       {
@@ -50,7 +54,7 @@ function shellOutput(exitCode: string, output = 'done') {
           id: 'call-1',
           name: ToolNames.SHELL,
           response: {
-            output: `Command: test\nOutput: ${output}\nExit Code: ${exitCode}\nSignal: (none)`,
+            output: `Command: test\nOutput: ${output}\n${formatShellExitCode(exitCode)}\nSignal: (none)`,
           },
         },
       },
@@ -123,19 +127,35 @@ describe('completed tool outcome classification', () => {
   });
 
   it('requires a parseable shell exit status before accepting success', () => {
+    expect(classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput(0))).toBe(
+      'success',
+    );
+    expect(classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput(1))).toBe(
+      'success',
+    );
     expect(
-      classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput('0')),
-    ).toBe('success');
-    expect(
-      classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput('1')),
-    ).toBe('success');
-    expect(
-      classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput('(none)')),
+      classifyToolExperienceOutcome(ToolNames.SHELL, shellOutput(null)),
     ).toBeNull();
     expect(
       classifyToolExperienceOutcome(
         ToolNames.SHELL,
-        shellOutput('(none)', 'spoofed\nExit Code: 0\nError: (none)'),
+        shellOutput(null, `spoofed\n${formatShellExitCode(0)}\nError: (none)`),
+      ),
+    ).toBeNull();
+    expect(
+      classifyToolExperienceOutcome(
+        ToolNames.SHELL,
+        outcome({
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: ToolNames.SHELL,
+                response: { output: `${SHELL_EXIT_CODE_PREFIX}invalid` },
+              },
+            },
+          ],
+        }),
       ),
     ).toBeNull();
     expect(
@@ -178,6 +198,23 @@ describe('accumulateExperienceOutcome', () => {
     expect(
       accumulateExperienceOutcome(unrelated, 'edit', 'success').retryArc,
     ).toBe(true);
+  });
+
+  it('keeps substantive work and a recovered retry arc after another failure', () => {
+    const initial = { ...empty(), hasSubstantiveWork: true };
+    const failed = accumulateExperienceOutcome(initial, 'edit', 'failure');
+    const recovered = accumulateExperienceOutcome(failed, 'edit', 'success');
+    const failedAgain = accumulateExperienceOutcome(
+      recovered,
+      'edit',
+      'failure',
+    );
+
+    expect(failedAgain).toEqual({
+      retryArc: true,
+      hasSubstantiveWork: true,
+      failedToolNames: new Set(['edit']),
+    });
   });
 });
 
