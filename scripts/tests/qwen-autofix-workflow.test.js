@@ -8217,10 +8217,6 @@ exit 1
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [prepareStep, 'PR_LIVE="$(gh pr view'],
-      // The review-address failure/handoff report step makes PAT-bearing gh
-      // calls after agent/branch code too (handoff comment + deferred
-      // upsert), so it carries the same hygiene preamble.
-      [reviewAddressReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -8232,20 +8228,14 @@ exit 1
       );
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
-      // bash startup channels (BASH_ENV sourced by every child bash;
-      // BASH_FUNC_*%% exported functions outrank PATH in children) and
-      // gh-side transport channels (proxy reroute, SSL_CERT_* CA re-root)
-      // are $GITHUB_ENV-plantable too — swept before the first gh call.
-      const bashSweep = step.indexOf(
-        'unset BASH_ENV ENV HTTPS_PROXY HTTP_PROXY ALL_PROXY \\',
-      );
-      expect(bashSweep).toBeGreaterThan(-1);
-      expect(bashSweep).toBeLessThan(step.indexOf(firstGh));
-      expect(step).toContain(
-        'https_proxy http_proxy all_proxy SSL_CERT_FILE SSL_CERT_DIR',
-      );
-      expect(step).toContain('BASH_FUNC_*%%');
-      expect(step).toContain('unset -f');
+    }
+    // The in-shell BASH_FUNC/proxy denylist sweep an earlier round added to
+    // these steps was removed: an in-shell sweep bootstraps trust from the
+    // very namespace it sanitizes (a planted BASH_FUNC_env%%/unset%%/alias/
+    // DEBUG-trap defeats it). Nothing re-introduces it.
+    for (const step of [publishPrStep, pushAndReportStep, prepareStep]) {
+      expect(step).not.toContain('BASH_FUNC_*%%');
+      expect(step).not.toContain('done < <(env)');
     }
     // The fork fetch and salvage fetch cannot recurse into a planted
     // submodule and execute an ext:: URL with the PAT (env-level
@@ -10401,10 +10391,26 @@ exit 1
         /resolve_and_reply_threads\n(?:\s*#[^\n]*\n)*\s*run_deferred_upsert\n/g,
       ) ?? [],
     ).toHaveLength(2);
-    // The failure-path invocation sits INSIDE the DRY_RUN/STALE/token guard
-    // (deleting the guard or relocating the call would break this slice).
+    // Sound isolation, NOT an in-shell denylist: both upsert sites run the
+    // digest gate + staged script in a fresh `/usr/bin/env -i` child. The
+    // absolute path is load-bearing — bash never does function/alias lookup
+    // on a slash-bearing word, so a planted BASH_FUNC_env%% cannot intercept
+    // it — and `-i` drops every BASH_FUNC_*/BASH_ENV/SHELLOPTS/alias/trap
+    // before any gated work. Exactly two clean-child launches (both arms of
+    // 'Push and report' share run_deferred_upsert; the failure path has its
+    // own).
+    for (const step of [pushAndReportStep, reviewAddressReportStep]) {
+      expect(step).toContain('/usr/bin/env -i \\');
+      expect(step).toContain('bash --norc -c');
+      // GH_CONFIG_DIR is minted INSIDE the clean child (its mktemp cannot be
+      // shadowed there), and PATH is the trusted staged value passed in.
+      expect(step).toContain('PATH="${TRUSTED_PATH}"');
+    }
+    expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(2);
+    // The failure-path clean-child launch sits INSIDE the DRY_RUN/STALE/token
+    // guard (deleting the guard or relocating the call breaks this slice).
     expect(reviewAddressReportStep).toMatch(
-      /if \[\[ "\$\{DRY_RUN\}" != "true" && "\$\{STALE:-\}" != "true" && -n "\$\{GITHUB_TOKEN:-\}" \]\]; then(?:(?!\n {10}fi\n)[\s\S])*upsert-deferred-issue\.sh(?:(?!\n {10}fi\n)[\s\S])*\n {10}fi\n/,
+      /if \[\[ "\$\{DRY_RUN\}" != "true" && "\$\{STALE:-\}" != "true" && -n "\$\{GITHUB_TOKEN:-\}" \]\]; then(?:(?!\n {10}fi\n)[\s\S])*\/usr\/bin\/env -i(?:(?!\n {10}fi\n)[\s\S])*\n {10}fi\n/,
     );
     // Pre-stage failures leave UPSERT_SHA256 empty: that skips with a plain
     // notice instead of imitating a tamper alarm.
@@ -10412,24 +10418,19 @@ exit 1
       'deferred-findings upsert skipped: stage step never ran',
     );
     // The failure path can run without POST_HANDOFF's identity check
-    // (OUTCOME=fixed/noop), so it verifies the PAT identity itself.
+    // (OUTCOME=fixed/noop), so the clean child verifies the PAT identity.
     expect(reviewAddressReportStep).toContain(
       'UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user',
     );
     expect(reviewAddressReportStep).toContain(
       '[[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]',
     );
-    // The failure step pins PATH to the staged trusted value (guarded for
-    // pre-stage crashes) BEFORE its digest gate runs.
+    // The failure step carries TRUSTED_PATH in env so the clean child gets a
+    // trusted PATH; the in-shell BASH_FUNC/proxy sweep and the in-step PATH
+    // pin an earlier round added here were removed with the rest of the
+    // unsound denylist.
     expect(reviewAddressReportStep).toContain(
       "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
-    );
-    const failPathPin = reviewAddressReportStep.indexOf(
-      'export PATH="${TRUSTED_PATH}"',
-    );
-    expect(failPathPin).toBeGreaterThan(-1);
-    expect(failPathPin).toBeLessThan(
-      reviewAddressReportStep.indexOf('sha256sum -c'),
     );
     expect(workflow).toContain(
       'cp .github/scripts/upsert-deferred-issue.sh "${RUNNER_TEMP}/upsert-deferred-issue.sh"',
@@ -10705,6 +10706,22 @@ exit 1
     });
     expect(neutralized.calls).toContain('<!\\-\\-');
     expect(neutralized.calls).not.toContain('<!--');
+    // The common case — nothing deferred this round — is a clean exit 0 with
+    // no gh call and no warning (empty file: the -s guard). Deleting that
+    // guard would send an empty file into the shape gate and warn falsely.
+    const empty = runUpsert({ findings: '' });
+    expect(empty.calls).toBe('');
+    expect(empty.out).not.toContain('malformed');
+    expect(empty.out).not.toContain('::warning');
+    // A contract-valid empty array is a no-op too, NOT a corruption alarm:
+    // `[]` passes the -s check (3 bytes) yet must not warn "malformed".
+    const emptyArray = runUpsert({ findings: '[]' });
+    expect(emptyArray.calls).toBe('');
+    expect(emptyArray.out).not.toContain('malformed');
+    // noclobber cannot silently empty the dedupe corpus: the script clears
+    // it (`set +C`), and the workflow additionally runs it in an env -i
+    // child that drops the read-only SHELLOPTS entirely.
+    expect(upsertDeferredScript).toContain('set +C');
   });
 
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {

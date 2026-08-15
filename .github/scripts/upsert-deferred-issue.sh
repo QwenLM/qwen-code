@@ -16,8 +16,21 @@ set -uo pipefail
 # reads the body plus the bot's own comments, anchored to the bullet form
 # "- rc:<id> " at line start (free-text mentions of an id do not count).
 
+# Defensive: a $GITHUB_ENV-planted SHELLOPTS=noclobber is imported by every
+# child bash and is read-only (no unset removes it), which would make the
+# KNOWN_FILE `>` redirect below fail and silently empty the dedupe corpus.
+# The workflow runs this via a clean `env -i` child (SHELLOPTS dropped), but
+# clear it here too so the script is safe under any caller.
+set +C
+
 FINDINGS="${WORKDIR}/deferred-findings.json"
 [[ -s "${FINDINGS}" ]] || exit 0
+
+# An empty array is the contract-valid "nothing to defer" rendering (SKILL
+# defines the file as a JSON array): a clean no-op, not a corruption alarm.
+if jq -e 'type == "array" and length == 0' "${FINDINGS}" > /dev/null 2>&1; then
+  exit 0
+fi
 
 # Shape gate: non-empty array; id numeric; reason string; path, when
 # present, a string (one malformed sibling must not drop the batch — it

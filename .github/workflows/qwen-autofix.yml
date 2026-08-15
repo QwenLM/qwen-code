@@ -1657,27 +1657,6 @@ jobs:
           # reroutes no sweep here touches. mktemp -d gives an
           # unpredictable path a watcher cannot pre-seed.
           export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
-          # Two more $GITHUB_ENV-plantable channel families no sweep above
-          # touches: bash startup (BASH_ENV is sourced at every child-bash
-          # start; BASH_FUNC_*%% exported functions are imported by child
-          # bash and outrank PATH lookup) and gh-side transport (proxy env
-          # reroutes, and SSL_CERT_* re-roots the CA trust of, the
-          # PAT-bearing HTTPS calls — the git twins are swept in the
-          # hermetic preamble).
-          unset BASH_ENV ENV HTTPS_PROXY HTTP_PROXY ALL_PROXY \
-            https_proxy http_proxy all_proxy SSL_CERT_FILE SSL_CERT_DIR
-          while IFS='=' read -r _envname _; do
-            if [[ "${_envname}" == BASH_FUNC_*%% ]]; then
-              _fn="${_envname#BASH_FUNC_}"
-              unset -f "${_fn%\%\%}" 2> /dev/null || true
-            fi
-          done < <(env)
-          # A planted BASH_ENV was already sourced at THIS shell's startup
-          # (nothing in-step undoes arbitrary in-shell tampering), so also
-          # de-shadow the gate-critical names it could have redefined as
-          # plain functions and re-resolve them from the pinned PATH.
-          unset -f sha256sum bash gh git jq mktemp cut tr env 2> /dev/null || true
-          hash -r
           MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
@@ -4168,27 +4147,6 @@ jobs:
           # reroutes no sweep here touches. mktemp -d gives an
           # unpredictable path a watcher cannot pre-seed.
           export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
-          # Two more $GITHUB_ENV-plantable channel families no sweep above
-          # touches: bash startup (BASH_ENV is sourced at every child-bash
-          # start; BASH_FUNC_*%% exported functions are imported by child
-          # bash and outrank PATH lookup) and gh-side transport (proxy env
-          # reroutes, and SSL_CERT_* re-roots the CA trust of, the
-          # PAT-bearing HTTPS calls — the git twins are swept in the
-          # hermetic preamble).
-          unset BASH_ENV ENV HTTPS_PROXY HTTP_PROXY ALL_PROXY \
-            https_proxy http_proxy all_proxy SSL_CERT_FILE SSL_CERT_DIR
-          while IFS='=' read -r _envname _; do
-            if [[ "${_envname}" == BASH_FUNC_*%% ]]; then
-              _fn="${_envname#BASH_FUNC_}"
-              unset -f "${_fn%\%\%}" 2> /dev/null || true
-            fi
-          done < <(env)
-          # A planted BASH_ENV was already sourced at THIS shell's startup
-          # (nothing in-step undoes arbitrary in-shell tampering), so also
-          # de-shadow the gate-critical names it could have redefined as
-          # plain functions and re-resolve them from the pinned PATH.
-          unset -f sha256sum bash gh git jq mktemp cut tr env 2> /dev/null || true
-          hash -r
           # This PAT-bearing step runs git (status/restore/fetch/checkout and a
           # push preflight) on the shared host BEFORE the agent/gate, so it
           # takes the same hermetic preamble the push steps do — the contract
@@ -5536,27 +5494,6 @@ jobs:
           # reroutes no sweep here touches. mktemp -d gives an
           # unpredictable path a watcher cannot pre-seed.
           export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
-          # Two more $GITHUB_ENV-plantable channel families no sweep above
-          # touches: bash startup (BASH_ENV is sourced at every child-bash
-          # start; BASH_FUNC_*%% exported functions are imported by child
-          # bash and outrank PATH lookup) and gh-side transport (proxy env
-          # reroutes, and SSL_CERT_* re-roots the CA trust of, the
-          # PAT-bearing HTTPS calls — the git twins are swept in the
-          # hermetic preamble).
-          unset BASH_ENV ENV HTTPS_PROXY HTTP_PROXY ALL_PROXY \
-            https_proxy http_proxy all_proxy SSL_CERT_FILE SSL_CERT_DIR
-          while IFS='=' read -r _envname _; do
-            if [[ "${_envname}" == BASH_FUNC_*%% ]]; then
-              _fn="${_envname#BASH_FUNC_}"
-              unset -f "${_fn%\%\%}" 2> /dev/null || true
-            fi
-          done < <(env)
-          # A planted BASH_ENV was already sourced at THIS shell's startup
-          # (nothing in-step undoes arbitrary in-shell tampering), so also
-          # de-shadow the gate-critical names it could have redefined as
-          # plain functions and re-resolve them from the pinned PATH.
-          unset -f sha256sum bash gh git jq mktemp cut tr env 2> /dev/null || true
-          hash -r
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
@@ -5741,12 +5678,38 @@ jobs:
           # code that ran in between. Best-effort like the upsert itself —
           # a mismatch skips persistence, never the round.
           run_deferred_upsert() {
-            if echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
-              bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
-                echo "::warning::deferred-findings upsert failed; continuing"
-            else
-              echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
-            fi
+            # Sound isolation, not an in-shell denylist. /usr/bin/env is
+            # invoked by ABSOLUTE PATH: bash never does function/alias lookup
+            # on a slash-bearing word, so a $GITHUB_ENV-planted
+            # BASH_FUNC_env%% cannot intercept it. `-i` then drops every
+            # BASH_FUNC_* import, BASH_ENV, SHELLOPTS, sourced aliases and
+            # traps, so the digest gate and the staged script run in a shell
+            # with only the allow-listed vars below — a clean namespace an
+            # in-shell sweep could never bootstrap from the tainted one. PATH
+            # is the trusted staged value; the child mints its own throwaway
+            # GH_CONFIG_DIR. RUNNER_TEMP stays agent-writable between staging
+            # and here, so the digest is verified INSIDE the child; a
+            # mismatch skips persistence, never the round.
+            /usr/bin/env -i \
+              PATH="${TRUSTED_PATH}" \
+              GITHUB_TOKEN="${GITHUB_TOKEN}" \
+              GH_HOST=github.com \
+              RUNNER_TEMP="${RUNNER_TEMP}" \
+              WORKDIR="${WORKDIR}" \
+              PR="${PR}" \
+              REPO="${REPO}" \
+              AUTOFIX_BOT="${AUTOFIX_BOT}" \
+              UPSERT_SHA256="${UPSERT_SHA256}" \
+              bash --norc -c '
+                set -uo pipefail
+                export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+                if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
+                  echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
+                  exit 0
+                fi
+                bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+                  echo "::warning::deferred-findings upsert failed; continuing"
+              ' || echo "::warning::deferred-findings upsert child failed to launch; continuing"
           }
 
                     # Take this PAT-bearing step off every mutable host git surface —
@@ -6147,45 +6110,14 @@ jobs:
           UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
-          # Pin PATH to the staged trusted value (and drop the loader trio)
-          # before anything below runs: this step executes a staged script
-          # under a digest gate, and an ambient $GITHUB_ENV-planted
-          # PATH/LD_PRELOAD would defeat that gate (a swapped sha256sum or
-          # bash). Empty TRUSTED_PATH means stage never ran — then no staged
-          # copy exists either and the digest gate below skips explicitly.
-          if [[ -n "${TRUSTED_PATH:-}" ]]; then
-            export PATH="${TRUSTED_PATH}"
-          fi
-          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
-          # gh has its own $GITHUB_ENV-injectable channels: pin the host, drop
-          # any planted token and point gh at a fresh config dir BEFORE the
-          # PAT-bearing gh calls below (handoff/report comment + deferred
-          # upsert) — this step runs after agent/branch code, same exposure as
-          # the workflow's other PAT-bearing gh sites.
-          export GH_HOST=github.com
-          unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
-          # Two more $GITHUB_ENV-plantable channel families no sweep above
-          # touches: bash startup (BASH_ENV is sourced at every child-bash
-          # start; BASH_FUNC_*%% exported functions are imported by child
-          # bash and outrank PATH lookup) and gh-side transport (proxy env
-          # reroutes, and SSL_CERT_* re-roots the CA trust of, the
-          # PAT-bearing HTTPS calls — the git twins are swept in the
-          # hermetic preamble).
-          unset BASH_ENV ENV HTTPS_PROXY HTTP_PROXY ALL_PROXY \
-            https_proxy http_proxy all_proxy SSL_CERT_FILE SSL_CERT_DIR
-          while IFS='=' read -r _envname _; do
-            if [[ "${_envname}" == BASH_FUNC_*%% ]]; then
-              _fn="${_envname#BASH_FUNC_}"
-              unset -f "${_fn%\%\%}" 2> /dev/null || true
-            fi
-          done < <(env)
-          # A planted BASH_ENV was already sourced at THIS shell's startup
-          # (nothing in-step undoes arbitrary in-shell tampering), so also
-          # de-shadow the gate-critical names it could have redefined as
-          # plain functions and re-resolve them from the pinned PATH.
-          unset -f sha256sum bash gh git jq mktemp cut tr env 2> /dev/null || true
-          hash -r
+          # NOTE: the deferred-findings upsert below runs its digest gate,
+          # PAT identity check and staged-script execution in a sound
+          # /usr/bin/env -i child (see the block near the end of this step),
+          # so this step body needs no in-shell hardening preamble for it.
+          # The handoff `gh pr comment` here is pre-existing surface at the
+          # workflow's baseline posture; hardening every pre-existing PAT gh
+          # call against BASH_FUNC/transport plants (via the same clean-child
+          # pattern) is tracked separately, out of this feature's scope.
           # The head the agent actually evaluated — captured in prepare before
           # any mutation, not the report-time remote head (which can move
           # during the run). Empty when prepare exited early, which matches
@@ -6719,20 +6651,39 @@ jobs:
               # and nothing was deferred — a digest "mismatch" here would be
               # a false tamper alarm, not a signal.
               echo 'deferred-findings upsert skipped: stage step never ran'
-            elif ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
-              # Same digest gate as the report-path invocations: RUNNER_TEMP
-              # is agent-writable, and this path runs after the agent too.
-              echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
-            elif ! UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2> /dev/null)" ||
-              [[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
-              # The POST_HANDOFF identity check above is skipped on the
-              # fixed/noop-outcome path through this step, so this PAT write
-              # site verifies the identity itself — warn+skip, not exit:
-              # persistence is best-effort.
-              echo "::warning::CI_DEV_BOT_PAT identity check failed for the deferred-findings upsert (got '${UPSERT_ACTOR:-}'); NOT persisted this round"
             else
-              bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
-                echo "::warning::deferred-findings upsert failed; continuing"
+              # Sound isolation, same rationale as run_deferred_upsert in
+              # 'Push and report': /usr/bin/env (absolute path — unshadowable
+              # by a planted BASH_FUNC_env%%) with -i drops every BASH_FUNC_*
+              # import, BASH_ENV, SHELLOPTS, alias and trap, so the digest
+              # gate, the PAT bot-identity check (POST_HANDOFF's own check is
+              # skipped on the fixed/noop-outcome path that also reaches here)
+              # and the staged script all run in a clean allow-listed shell.
+              /usr/bin/env -i \
+                PATH="${TRUSTED_PATH}" \
+                GITHUB_TOKEN="${GITHUB_TOKEN}" \
+                GH_HOST=github.com \
+                RUNNER_TEMP="${RUNNER_TEMP}" \
+                WORKDIR="${WORKDIR}" \
+                PR="${PR}" \
+                REPO="${REPO}" \
+                AUTOFIX_BOT="${AUTOFIX_BOT}" \
+                UPSERT_SHA256="${UPSERT_SHA256}" \
+                bash --norc -c '
+                  set -uo pipefail
+                  export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+                  if ! echo "${UPSERT_SHA256}  ${RUNNER_TEMP}/upsert-deferred-issue.sh" | sha256sum -c - > /dev/null 2>&1; then
+                    echo "::warning::staged upsert-deferred-issue.sh failed digest verification; deferred findings NOT persisted this round"
+                    exit 0
+                  fi
+                  UPSERT_ACTOR="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq .login 2> /dev/null || true)"
+                  if [[ "${UPSERT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                    echo "::warning::CI_DEV_BOT_PAT identity check failed for the deferred-findings upsert (got ${UPSERT_ACTOR:-none}); NOT persisted this round"
+                    exit 0
+                  fi
+                  bash "${RUNNER_TEMP}/upsert-deferred-issue.sh" ||
+                    echo "::warning::deferred-findings upsert failed; continuing"
+                ' || echo "::warning::deferred-findings upsert child failed to launch; continuing"
             fi
           fi
 
