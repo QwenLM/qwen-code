@@ -4533,6 +4533,39 @@ describe('Session', () => {
         expect(payload.startedAt).toBeLessThanOrEqual(payload.endedAt);
       });
 
+      it('keeps the settle append on the turn-start recorder across a mid-turn rotation', async () => {
+        const rotatedRecordingService: typeof mockChatRecordingService = {
+          ...mockChatRecordingService,
+          recordTurnResult: vi.fn(),
+        };
+        let rotated = false;
+        vi.mocked(mockConfig.getChatRecordingService).mockImplementation(
+          () =>
+            (rotated
+              ? rotatedRecordingService
+              : mockChatRecordingService) as unknown as core.ChatRecordingService,
+        );
+        mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+          // Simulates a session rotation landing between admission and
+          // settle (e.g. `/clear` dispatched as daemon prompt text).
+          rotated = true;
+          return Promise.resolve(createEmptyStream());
+        });
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'trusted prompt' }],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(rotatedRecordingService.recordTurnResult).not.toHaveBeenCalled();
+      });
+
       it('records daemon display text instead of internal prompt context', async () => {
         mockChat.sendMessageStream = vi
           .fn()
@@ -4588,6 +4621,46 @@ describe('Session', () => {
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             promptText: '[image]',
+          }),
+        );
+      });
+
+      it('falls back to the prompt extractor when no display text meta is present', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' },
+            ],
+          },
+          trustedContext,
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: '[image]',
+          }),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '' }],
+          },
+          trustedContext,
+        );
+
+        expect(
+          mockChatRecordingService.recordTurnResult,
+        ).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            promptText: '',
           }),
         );
       });
@@ -4829,9 +4902,38 @@ describe('Session', () => {
             error: { message: 'model exploded' },
           }),
         );
+        const errorPayload =
+          mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+        expect(typeof errorPayload.startedAt).toBe('number');
+        expect(errorPayload.startedAt!).toBeLessThanOrEqual(
+          errorPayload.endedAt!,
+        );
       });
 
-      it('records a cancelled turn when user cancel races a non-abort stream error', async () => {
+      it('records an error turn for an abort-shaped stream failure without a user cancel', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('Request was aborted.'));
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'abort shaped' }],
+            },
+            trustedContext,
+          ),
+        ).rejects.toThrow('Request was aborted.');
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'error',
+          }),
+        );
+      });
+
+      it('records a cancelled turn when user cancel races an abort-shaped stream error', async () => {
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createFailingStream('Request was aborted.', () => {
             void session.cancelPendingPrompt();
@@ -4852,6 +4954,32 @@ describe('Session', () => {
           expect.objectContaining({
             promptId: 'daemon-prompt-id',
             state: 'cancelled',
+          }),
+        );
+      });
+
+      it('records a cancelled turn when user cancel races a plain stream error', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createFailingStream('model exploded', () => {
+            void session.cancelPendingPrompt();
+          }),
+        );
+
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancel me' }],
+            },
+            trustedContext,
+          ),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            promptId: 'daemon-prompt-id',
+            state: 'cancelled',
+            stopReason: 'cancelled',
           }),
         );
       });

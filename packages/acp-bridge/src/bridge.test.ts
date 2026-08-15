@@ -99,6 +99,7 @@ import {
   ShellExecutionService,
   stableSessionArtifactId,
   ToolNames,
+  TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -15103,6 +15104,7 @@ describe('createAcpSessionBridge', () => {
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       let admittedStatus: Promise<unknown> | undefined;
+      let admittedPromptCallCount: number | undefined;
 
       const prompt = bridge.sendPrompt(
         session.sessionId,
@@ -15114,7 +15116,7 @@ describe('createAcpSessionBridge', () => {
         {
           promptId: 'prompt-dispatch-boundary',
           onPromptAdmitted: () => {
-            expect(handle.agent.promptCalls).toHaveLength(0);
+            admittedPromptCallCount = handle.agent.promptCalls.length;
             admittedStatus = bridge.getSessionTurnStatus(
               session.sessionId,
               undefined,
@@ -15129,6 +15131,10 @@ describe('createAcpSessionBridge', () => {
         promptId: 'prompt-dispatch-boundary',
       });
       await expect(admittedStatus).resolves.not.toHaveProperty('startedAt');
+      // Asserted outside the callback: the bridge swallows exceptions thrown
+      // inside onPromptAdmitted, so an in-callback assertion would surface as
+      // a misleading async-contract failure instead of an ordering one.
+      expect(admittedPromptCallCount).toBe(0);
 
       await prompt;
       await bridge.shutdown();
@@ -15225,6 +15231,16 @@ describe('createAcpSessionBridge', () => {
 
       resolveTurn!();
       await promptPromise;
+
+      const settled = await bridge.getSessionTurnStatus(
+        session.sessionId,
+        undefined,
+        'prompt-long',
+      );
+      expect(settled?.state).toBe('completed');
+      expect(settled?.promptText).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
+      expect(settled?.promptTextTruncated).toBe(true);
+
       await bridge.shutdown();
     });
 
@@ -15356,6 +15372,54 @@ describe('createAcpSessionBridge', () => {
 
       const current = await bridge.getSessionTurnStatus(session.sessionId);
       expect(current).toEqual(byId);
+      await bridge.shutdown();
+    });
+
+    it('defaults resultCode for truncated persisted records missing it', async () => {
+      const turnResult = {
+        promptId: 'prompt-truncated-legacy',
+        state: 'completed',
+        stopReason: 'end_turn',
+        startedAt: 1000,
+        endedAt: 2000,
+        promptText: 'settled prompt',
+        resultText: 'settled answer',
+        resultTruncated: true,
+      };
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus) {
+            return { v: 1, sessionId: 'ignored', turnResult };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'settled prompt' }],
+        },
+        undefined,
+        { promptId: 'prompt-truncated-legacy' },
+      );
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-truncated-legacy',
+        ),
+      ).resolves.toMatchObject({
+        state: 'completed',
+        resultTruncated: true,
+        resultCode: TURN_RESULT_CODE_TEXT_TRUNCATED,
+      });
       await bridge.shutdown();
     });
 
@@ -15724,6 +15788,80 @@ describe('createAcpSessionBridge', () => {
 
       turn.resolve({ stopReason: 'end_turn' });
       await prompt;
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-running-remove',
+        ),
+      ).resolves.toMatchObject({ state: 'completed', stopReason: 'end_turn' });
+      await bridge.shutdown();
+    });
+
+    it('projects a removed queued prompt as cancelled instead of queued', async () => {
+      let resolveFirst: (() => void) | undefined;
+      const firstGate = new Promise<void>((r) => {
+        resolveFirst = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'blocking') {
+            await firstGate;
+          }
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const runningPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocking' }],
+        },
+        undefined,
+        { promptId: 'prompt-blocking' },
+      );
+      const queuedPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued then removed' }],
+        },
+        undefined,
+        { promptId: 'prompt-queued-remove' },
+      );
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(2);
+      });
+
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-queued-remove'),
+      ).toEqual({ removed: true });
+
+      await expect(
+        bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-queued-remove',
+        ),
+      ).resolves.toMatchObject({
+        state: 'cancelled',
+        promptId: 'prompt-queued-remove',
+      });
+      await expect(
+        bridge.getSessionTurnStatus(session.sessionId),
+      ).resolves.toMatchObject({
+        state: 'running',
+        promptId: 'prompt-blocking',
+      });
+
+      resolveFirst!();
+      await runningPromise;
+      await expect(queuedPromise).rejects.toBeDefined();
       await bridge.shutdown();
     });
 

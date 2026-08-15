@@ -747,9 +747,11 @@ export function isTurnResultRecordPayload(
   const fields = error as Record<string, unknown>;
   return (
     typeof fields['message'] === 'string' &&
+    fields['message'].length > 0 &&
     fields['message'].length <= TURN_RESULT_ERROR_MESSAGE_MAX_CHARS &&
     (fields['code'] === undefined ||
       (typeof fields['code'] === 'string' &&
+        fields['code'].length > 0 &&
         fields['code'].length <= TURN_RESULT_ERROR_CODE_MAX_CHARS)) &&
     (fields['messageTruncated'] === undefined ||
       typeof fields['messageTruncated'] === 'boolean') &&
@@ -844,6 +846,8 @@ export class ChatRecordingService {
   private turnParentUuids: Array<string | null> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
+  /** Session identity pinned by `pinSessionIdentity` at rotation time. */
+  private pinnedSessionId: string | undefined;
   private state:
     | 'inactive'
     | 'active'
@@ -1006,7 +1010,11 @@ export class ChatRecordingService {
    * @returns The session ID.
    */
   private getSessionId(): string {
-    return this.binding?.sessionId ?? this.config.getSessionId();
+    return (
+      this.binding?.sessionId ??
+      this.pinnedSessionId ??
+      this.config.getSessionId()
+    );
   }
 
   private ensureChatsDir(): string {
@@ -1582,6 +1590,19 @@ export class ChatRecordingService {
 
   hasWriteOwnership(): boolean {
     return this.binding !== undefined;
+  }
+
+  /**
+   * Pins this recorder to the given session identity so late writes keep
+   * targeting that session's transcript even after `Config.startNewSession()`
+   * rotates the shared Config to a new session id. Called on the outgoing
+   * recorder at rotation time; a lease binding already owns the identity and
+   * is never overridden.
+   */
+  pinSessionIdentity(sessionId: string): void {
+    if (this.binding === undefined) {
+      this.pinnedSessionId = sessionId;
+    }
   }
 
   getTranscriptCursor(): TranscriptCursor {

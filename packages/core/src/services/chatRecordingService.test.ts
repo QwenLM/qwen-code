@@ -1323,6 +1323,33 @@ describe('ChatRecordingService', () => {
       ).toBe(false);
     });
 
+    it('rejects empty error message and code in turn_result payloads', () => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'error',
+          endedAt: 2_000,
+          error: { message: '' },
+        }),
+      ).toBe(false);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'error',
+          endedAt: 2_000,
+          error: { message: 'boom', code: '' },
+        }),
+      ).toBe(false);
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'error',
+          endedAt: 2_000,
+          error: { message: 'boom' },
+        }),
+      ).toBe(true);
+    });
+
     it('records a settled turn outcome as a system payload', async () => {
       const payload: TurnResultRecordPayload = {
         promptId: 'prompt-1',
@@ -1386,6 +1413,71 @@ describe('ChatRecordingService', () => {
         }),
       ).not.toThrow();
       expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    describe('session identity pinning', () => {
+      it('keeps late turn_result writes on the pinned pre-rotation session', async () => {
+        const outgoing = new ChatRecordingService(mockConfig, undefined, false);
+        outgoing.pinSessionIdentity('test-session-id');
+        vi.mocked(mockConfig.getSessionId).mockReturnValue(
+          'rotated-session-id',
+        );
+
+        outgoing.recordTurnResult({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2_000,
+        });
+        await outgoing.flush();
+
+        expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+        const [filePath, record] = vi.mocked(jsonl.writeLine).mock.calls[0] as [
+          string,
+          ChatRecord,
+        ];
+        expect(filePath).toContain('test-session-id.jsonl');
+        expect(record.sessionId).toBe('test-session-id');
+      });
+
+      it('resolves the shared Config session id at write time when not pinned', async () => {
+        const outgoing = new ChatRecordingService(mockConfig, undefined, false);
+        vi.mocked(mockConfig.getSessionId).mockReturnValue(
+          'rotated-session-id',
+        );
+
+        outgoing.recordTurnResult({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2_000,
+        });
+        await outgoing.flush();
+
+        const [filePath, record] = vi.mocked(jsonl.writeLine).mock.calls[0] as [
+          string,
+          ChatRecord,
+        ];
+        expect(filePath).toContain('rotated-session-id.jsonl');
+        expect(record.sessionId).toBe('rotated-session-id');
+      });
+
+      it('never overrides a lease binding that owns the session identity', async () => {
+        chatRecordingService.pinSessionIdentity('pinned-session-id');
+        vi.mocked(mockConfig.getSessionId).mockReturnValue(
+          'rotated-session-id',
+        );
+
+        chatRecordingService.recordTurnResult({
+          promptId: 'prompt-1',
+          state: 'completed',
+          endedAt: 2_000,
+        });
+        await chatRecordingService.flush();
+
+        const record = vi
+          .mocked(jsonl.writeLine)
+          .mock.calls.at(-1)![1] as ChatRecord;
+        expect(record.sessionId).toBe('test-session-id');
+      });
     });
   });
 

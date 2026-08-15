@@ -49,6 +49,7 @@ import type {
   MemoryWriteCandidate,
   CronTaskDelivery,
   InvocationContextV1,
+  ChatRecordingService,
   TurnResultRecordPayload,
   WorkflowApproval,
   BranchPoint,
@@ -1026,6 +1027,13 @@ interface InFlightTurnRecording {
   promptText: string;
   promptTextTruncated: boolean;
   finalAnswer: { finalText: string };
+  /**
+   * Captured at turn start; settle writes against this instance (pinned to
+   * the turn-start session by `Config.startNewSession`) instead of
+   * re-resolving, so a mid-turn session rotation cannot redirect this turn's
+   * `turn_result` into the new session's transcript.
+   */
+  recordingService?: ChatRecordingService;
 }
 
 function truncateTurnText(text: string): {
@@ -6003,6 +6011,7 @@ export class Session implements SessionContext {
     const { text, truncated } = truncateTurnText(
       promptDisplayText ?? extractTurnPromptText(params.prompt),
     );
+    const recordingService = this.config.getChatRecordingService();
     return {
       promptId: invocationContext.promptId,
       ...(invocationContext.originatorClientId !== undefined
@@ -6011,6 +6020,7 @@ export class Session implements SessionContext {
       promptText: text,
       promptTextTruncated: truncated,
       finalAnswer: { finalText: '' },
+      ...(recordingService !== undefined ? { recordingService } : {}),
     };
   }
 
@@ -6047,7 +6057,7 @@ export class Session implements SessionContext {
         : {}),
     };
     try {
-      this.config.getChatRecordingService()?.recordTurnResult(payload);
+      recording.recordingService?.recordTurnResult(payload);
     } catch (recordError) {
       debugLogger.warn(
         `Failed to record turn result: ${this.#formatError(recordError)}`,
