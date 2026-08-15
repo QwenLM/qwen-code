@@ -1178,6 +1178,7 @@ export const useGeminiStream = (
       parts: PartListUnion | null,
       timestamp: number,
       signal: AbortSignal,
+      allowFullTurnModel = true,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
       if (parts === null || !hasImageParts(parts)) {
         return { parts, shouldProceed: true };
@@ -1197,7 +1198,11 @@ export const useGeminiStream = (
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
       const fullTurnModel = config.getDefaultVisionBridgeModel();
-      if (fullTurnModel?.agentCapable && !hasAudioParts(parts)) {
+      if (
+        allowFullTurnModel &&
+        fullTurnModel?.agentCapable &&
+        !hasAudioParts(parts)
+      ) {
         const fullTurnParts = (Array.isArray(parts) ? parts : [parts]).map(
           (part) =>
             typeof part === 'string'
@@ -1263,8 +1268,14 @@ export const useGeminiStream = (
       parts: PartListUnion | null,
       timestamp: number,
       signal: AbortSignal,
-    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
+      allowFullTurnModel = true,
+    ): Promise<{
+      parts: PartListUnion | null;
+      shouldProceed: boolean;
+      modelOverrideResolutionFailed: boolean;
+    }> => {
       let nextParts = parts;
+      let modelOverrideResolutionFailed = false;
       if (nextParts !== null && hasAudioParts(nextParts)) {
         const activeOverride = modelOverrideRef.current;
         let shouldRunBridge = activeOverride === undefined;
@@ -1274,7 +1285,6 @@ export const useGeminiStream = (
             ? activeOverride.slice(0, -1)
             : activeOverride;
           let supportsAudio = false;
-          let routeResolutionFailed = false;
           try {
             const runtimeView = await config
               .getBaseLlmClient()
@@ -1282,7 +1292,7 @@ export const useGeminiStream = (
             supportsAudio =
               runtimeView.contentGeneratorConfig.modalities?.audio === true;
           } catch (error) {
-            routeResolutionFailed = true;
+            modelOverrideResolutionFailed = true;
             debugLogger.warn(
               `audio route capability check failed for '${routeSelector}': ${
                 error instanceof Error ? error.message : String(error)
@@ -1291,12 +1301,15 @@ export const useGeminiStream = (
           }
           targetSupportsAudio = supportsAudio;
           if (!supportsAudio) {
-            if (inlineModelOverrideActiveRef.current || routeResolutionFailed) {
-              const reason = routeResolutionFailed
+            if (
+              inlineModelOverrideActiveRef.current ||
+              modelOverrideResolutionFailed
+            ) {
+              const reason = modelOverrideResolutionFailed
                 ? 'the active model override could not be resolved'
                 : 'the active model override does not support audio';
               nextParts = replaceAudioPartsWithUnavailable(nextParts, reason);
-              if (routeResolutionFailed) {
+              if (modelOverrideResolutionFailed) {
                 clearModelOverride(
                   modelOverrideRef,
                   inlineModelOverrideActiveRef,
@@ -1347,12 +1360,22 @@ export const useGeminiStream = (
             );
           }
           if (signal.aborted) {
-            return { parts: null, shouldProceed: false };
+            return {
+              parts: null,
+              shouldProceed: false,
+              modelOverrideResolutionFailed,
+            };
           }
           nextParts = result.parts;
         }
       }
-      return applyVisionBridgeIfNeeded(nextParts, timestamp, signal);
+      const visionResult = await applyVisionBridgeIfNeeded(
+        nextParts,
+        timestamp,
+        signal,
+        allowFullTurnModel && !modelOverrideResolutionFailed,
+      );
+      return { ...visionResult, modelOverrideResolutionFailed };
     },
     [addItem, applyVisionBridgeIfNeeded, config, settings],
   );
@@ -2986,6 +3009,9 @@ export const useGeminiStream = (
       }> = [];
       const restoreMessages: string[] = [];
       const timestamp = Date.now();
+      // Once an active route fails closed, no later attachment in this drain
+      // may reinstall a full-turn selector from that same batch.
+      let modelOverrideResolutionFailed = false;
 
       for (let index = 0; index < messages.length; index += 1) {
         if (signal.aborted) {
@@ -3083,7 +3109,10 @@ export const useGeminiStream = (
           resolvedQuery,
           timestamp + index,
           signal,
+          !modelOverrideResolutionFailed,
         );
+        modelOverrideResolutionFailed ||=
+          bridgeResult.modelOverrideResolutionFailed;
         if (!bridgeResult.shouldProceed) {
           if (signal.aborted) {
             restoreMessages.push(...messages.slice(index + 1));
@@ -3114,6 +3143,30 @@ export const useGeminiStream = (
           parts: messageParts,
           sideEffects,
         });
+      }
+
+      if (modelOverrideResolutionFailed) {
+        // Images resolved before the failure may have been retained for the
+        // now-cleared full-turn route. Convert them on the fallback route too.
+        for (let index = 0; index < resolvedSegments.length; index += 1) {
+          const segment = resolvedSegments[index];
+          if (!hasImageParts(segment)) continue;
+          const rechecked = await applyVisionBridgeIfNeeded(
+            segment,
+            timestamp,
+            signal,
+            false,
+          );
+          if (!rechecked.shouldProceed) {
+            resolvedSegments.splice(index, 1);
+            resolvedForRecording.splice(index, 1);
+            index -= 1;
+            continue;
+          }
+          const recheckedParts = normalizePartList(rechecked.parts ?? segment);
+          resolvedSegments[index] = recheckedParts;
+          resolvedForRecording[index].parts = recheckedParts;
+        }
       }
 
       const resolvedMessages: Part[] = [];
@@ -3154,6 +3207,7 @@ export const useGeminiStream = (
     [
       addItem,
       applyBridgeConversionsIfNeeded,
+      applyVisionBridgeIfNeeded,
       config,
       handleSlashCommand,
       onDebugMessage,

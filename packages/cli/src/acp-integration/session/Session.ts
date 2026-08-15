@@ -6522,7 +6522,9 @@ export class Session implements SessionContext {
                 MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
                 (signal) =>
                   this.#resolvePrompt(message.content, signal, {
-                    onFullTurnModel: options.onFullTurnModel,
+                    onFullTurnModel: modelOverrideResolutionFailed
+                      ? undefined
+                      : options.onFullTurnModel,
                     getModelOverride: options.getModelOverride,
                     onModelOverrideResolutionFailed,
                   }),

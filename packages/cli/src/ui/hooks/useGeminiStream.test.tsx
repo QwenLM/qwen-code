@@ -37,6 +37,7 @@ import {
   ToolConfirmationOutcome,
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
+  splitImageParts,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -4164,8 +4165,11 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('bridges mid-turn audio only while an internal skill route resolves', async () => {
+  it('keeps a failed skill route fallback sticky across drained media', async () => {
     const queuedPrompt = 'listen @/tmp/recording.wav';
+    const imagePrompt = 'inspect @/tmp/first.png';
+    const mixedPrompt =
+      'inspect @/tmp/second.png and listen @/tmp/recording.wav';
     const resolvedAudioPart: Part = {
       inlineData: {
         mimeType: 'audio/wav',
@@ -4173,12 +4177,26 @@ describe('useGeminiStream', () => {
       },
     };
     const resolvedTextPart: Part = { text: queuedPrompt };
+    const firstImagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'Zmlyc3Q=' },
+    };
+    const secondImagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'c2Vjb25k' },
+    };
     const transcriptPart: Part = { text: '[mid-turn audio transcript]' };
+    const visionTranscriptPart: Part = {
+      text: '[mid-turn image transcript]',
+    };
     const resolveForModel = vi.fn().mockResolvedValue({
       contentGeneratorConfig: { modalities: {} },
     });
     Object.assign(mockConfig, {
       getEffectiveInputModalities: () => ({ audio: true }),
+      getDefaultVisionBridgeModel: () => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }),
       getBaseLlmClient: () => ({ resolveForModel }),
     });
     mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
@@ -4190,10 +4208,41 @@ describe('useGeminiStream', () => {
       egressCount: 1,
       modelId: 'qwen3-asr-flash',
     });
-    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
-      processedQuery: [resolvedTextPart, resolvedAudioPart],
-      shouldProceed: true,
-    });
+    mockRunVisionBridge.mockImplementation(
+      async ({ parts }: { parts: PartListUnion }) => ({
+        applied: true,
+        status: 'ok',
+        parts: [...splitImageParts(parts).nonImageParts, visionTranscriptPart],
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-model',
+        egressOccurred: true,
+      }),
+    );
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      async ({ query }) => {
+        if (query === queuedPrompt) {
+          return {
+            processedQuery: [resolvedTextPart, resolvedAudioPart],
+            shouldProceed: true,
+          };
+        }
+        if (query === imagePrompt) {
+          return {
+            processedQuery: [{ text: imagePrompt }, firstImagePart],
+            shouldProceed: true,
+          };
+        }
+        return {
+          processedQuery: [
+            { text: mixedPrompt },
+            resolvedAudioPart,
+            secondImagePart,
+          ],
+          shouldProceed: true,
+        };
+      },
+    );
     const toolCallResponseParts: Part[] = [
       {
         functionResponse: {
@@ -4233,7 +4282,7 @@ describe('useGeminiStream', () => {
       current: vi
         .fn<() => string[]>()
         .mockReturnValueOnce([queuedPrompt])
-        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValueOnce([imagePrompt, mixedPrompt])
         .mockReturnValue([]),
     };
     let capturedOnComplete:
@@ -4332,11 +4381,16 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
     expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockRunVisionBridge).toHaveBeenCalledTimes(2);
     const secondSent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
     expect(secondSent).toContain(
       'the active model override could not be resolved',
     );
+    expect(secondSent).toContain('[mid-turn image transcript]');
     expect(secondSent).not.toContain('inlineData');
+    expect(
+      mockSendMessageStream.mock.calls[1]?.[3].modelOverride,
+    ).toBeUndefined();
     expect(mockAddItem).toHaveBeenCalledWith(
       expect.objectContaining({
         text: expect.stringContaining('Audio was not sent'),
