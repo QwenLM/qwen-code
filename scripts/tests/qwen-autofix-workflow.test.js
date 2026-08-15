@@ -10542,7 +10542,16 @@ exit 1
     // R5-5: both --paginate sites are pinned at the source (the recording gh
     // stub ignores the flag). Dropping either silently truncates the lookup
     // or the dedupe corpus.
-    expect(upsertDeferredScript.match(/--paginate/g) ?? []).toHaveLength(2);
+    // Only the tracking issue's OWN comments are paginated now; the issue
+    // lookup is a bounded, early-exit page loop (a full --paginate there
+    // re-downloaded the bot's entire lifetime corpus every defer round).
+    expect(
+      upsertDeferredScript
+        .split('\n')
+        .filter(
+          (l) => !l.trimStart().startsWith('#') && l.includes('--paginate'),
+        ),
+    ).toHaveLength(1);
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
       expect(step).toContain(
         "UPSERT_SHA256: '${{ steps.stage.outputs.upsert_sha256 }}'",
@@ -10603,6 +10612,8 @@ exit 1
       mktempFail = false,
       jqFail = false,
       carry = '',
+      listPages = null,
+      listErr = '',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-upsert-'));
       const bin = join(dir, 'bin');
@@ -10610,6 +10621,13 @@ exit 1
       writeFileSync(join(dir, 'deferred-findings.json'), findings);
       if (carry)
         writeFileSync(join(dir, 'deferred-findings.carry.json'), carry);
+      const pagesDir = join(dir, 'pages');
+      if (listPages) {
+        mkdirSync(pagesDir);
+        listPages.forEach((body, i) =>
+          writeFileSync(join(pagesDir, `${i + 1}.json`), body),
+        );
+      }
       if (resolved) writeFileSync(join(dir, 'resolved-comments.txt'), resolved);
       if (jqFail) {
         // Fail ONLY the line-builder jq (the sole call passing --rawfile), so
@@ -10636,7 +10654,13 @@ exit 1
           '#!/usr/bin/env bash',
           'printf "%s\\n" "$*" >> "$GHLOG"',
           'case "$2" in',
-          '  *"issues?state=all"*) [[ "$LIST_FAIL" == 1 ]] && exit 1; printf "%s" "$LIST_JSON";;',
+          '  *"issues?state=all"*)',
+          '    if [[ "$LIST_FAIL" == 1 ]]; then printf "%s" "$LIST_ERR" >&2; exit 1; fi',
+          '    page="${2##*&page=}"',
+          '    if [[ -n "$LIST_PAGES_DIR" && -f "$LIST_PAGES_DIR/$page.json" ]]; then',
+          '      cat "$LIST_PAGES_DIR/$page.json"; exit 0',
+          '    fi',
+          '    printf "%s" "$LIST_JSON";;',
           '  */comments?per_page=100*) [[ "$COMMENTS_FAIL" == 1 ]] && exit 1; printf "%s" "$COMMENTS_JSON";;',
           '  */comments) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo ok;;',
           '  repos/*/issues) [[ "$WRITE_FAIL" == 1 ]] && exit 1; echo 77;;',
@@ -10661,6 +10685,8 @@ exit 1
             GHLOG: join(dir, 'gh.log'),
             LIST_JSON: list,
             LIST_FAIL: listFail ? '1' : '0',
+            LIST_ERR: listErr,
+            LIST_PAGES_DIR: listPages ? pagesDir : '',
             BODY_TEXT: body,
             BODY_FAIL: bodyFail ? '1' : '0',
             COMMENTS_JSON: comments,
@@ -11024,6 +11050,70 @@ exit 1
     expect(carryMerged.calls).toContain('- rc:31 ');
     expect(carryMerged.calls).toContain('- rc:32 ');
     expect(carryMerged.calls.split('- rc:32 ').length - 1).toBe(1);
+    // R2-6: the lookup is bounded and newest-first, stopping at the first
+    // marker match — the common case costs ONE request instead of paginating
+    // every issue the bot has ever opened.
+    const lookupReqs = (r) =>
+      r.calls.split('\n').filter((l) => l.includes('issues?state=all')).length;
+    const fullPage = JSON.stringify(
+      Array.from({ length: 100 }, (_, i) => ({
+        number: 1000 + i,
+        body: 'filler',
+        pull_request: null,
+      })),
+    );
+    const hitPage = JSON.stringify([
+      { number: 42, body: marker, pull_request: null },
+    ]);
+    const firstPageHit = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: [hitPage],
+    });
+    expect(lookupReqs(firstPageHit)).toBe(1);
+    expect(firstPageHit.calls).toContain('issues/42/comments -f body=');
+    // A short page means the corpus is exhausted: create, still one request.
+    const emptyCorpus = runUpsert({ findings: '[{"id":7,"reason":"r"}]' });
+    expect(lookupReqs(emptyCorpus)).toBe(1);
+    expect(emptyCorpus.calls).toContain('-f title=');
+    // A full page without a match walks to the next one and stops there.
+    const secondPageHit = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: [fullPage, hitPage],
+    });
+    expect(lookupReqs(secondPageHit)).toBe(2);
+    expect(secondPageHit.calls).toContain('issues/42/comments -f body=');
+    // Cap reached with the corpus never exhausted: SKIP rather than create a
+    // second tracking issue for the same PR.
+    const cappedLookup = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: Array.from({ length: 12 }, () => fullPage),
+    });
+    expect(lookupReqs(cappedLookup)).toBe(10);
+    expect(cappedLookup.out).toContain('10-page cap');
+    expect(cappedLookup.calls).not.toContain('-f title=');
+    // R2-10: warnings NAME the cause — a rate limit, a bad credential and a
+    // transport error were indistinguishable while stderr went to /dev/null.
+    const rateLimited = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listFail: true,
+      listErr: 'HTTP 403: API rate limit exceeded for user ID 1',
+    });
+    expect(rateLimited.out).toContain('API rate limit exceeded');
+    const badCreds = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listPages: [hitPage],
+      writeFail: true,
+    });
+    expect(badCreds.out).toContain('could not append');
+    // The captured stderr is `::`-neutralized like every other echoed
+    // API/agent content — an error body is not trusted to be command-free.
+    const forgedErr = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      listFail: true,
+      listErr: '::error::forged from an API body',
+    });
+    expect(forgedErr.out).toContain(';;error;;forged');
+    expect(forgedErr.out).not.toContain('::error::forged');
   });
 
   it('bite check: rejects a round whose changed tests pass on the pre-round tree', () => {

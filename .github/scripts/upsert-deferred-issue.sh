@@ -28,7 +28,24 @@ FINDINGS="${WORKDIR}/deferred-findings.json"
 # would replace an earlier one and leak the first file.
 MERGED=''
 KNOWN_FILE=''
-trap 'rm -f "${MERGED}" "${KNOWN_FILE}"' EXIT
+GH_ERR=''
+trap 'rm -f "${MERGED}" "${KNOWN_FILE}" "${GH_ERR}"' EXIT
+# Every gh call writes its stderr here so the warnings can NAME the cause:
+# a rate limit, an expired/rotated PAT, a transport error and a 404 are
+# indistinguishable when stderr goes to /dev/null, and these warnings are
+# the feature's only signal. Best-effort: with no sink the calls still run,
+# they just report "no stderr captured".
+GH_ERR="$(mktemp 2> /dev/null || true)"
+gh_reason() {
+  local r=''
+  [[ -n "${GH_ERR}" && -s "${GH_ERR}" ]] &&
+    r="$(tr '\r\n\t' '   ' < "${GH_ERR}" | head -c 200)"
+  # `::` neutralized like every other agent/API-derived echo: an API error
+  # body is not trusted to be free of workflow-command syntax.
+  r="$(printf '%s' "${r}" | sed 's/::/;;/g')"
+  [[ -n "${r// /}" ]] && printf '%s' "${r}" || printf 'no stderr captured'
+}
+gh_err_reset() { [[ -n "${GH_ERR}" ]] && : > "${GH_ERR}"; }
 # A repair re-run rebuilds the workspace: 'Repair deterministic rejection'
 # moves run 1's deferrals to this sidecar so they are not lost when run 2
 # writes its own file. Both are unioned below (the line builder dedupes).
@@ -105,12 +122,41 @@ MARKER="<!-- autofix-deferred pr=${PR} -->"
 # request, marker matched against the real body (no line-joining), first
 # match wins. A lookup failure is a skip, not "no issue" — creating a
 # duplicate is worse than deferring persistence one round.
-if ! ISSUE_NUM="$(gh api "repos/${REPO}/issues?state=all&creator=${AUTOFIX_BOT}&per_page=100" \
-  --paginate 2> /dev/null |
-  jq -rs --arg m "${MARKER}" '
-    add // [] | map(select((.pull_request | not)
-      and ((.body // "") | contains($m)))) | (.[0].number // "") | tostring')"; then
-  lost 'the tracking-issue lookup failed'
+# Bounded and newest-first, stopping at the first marker match: the
+# tracking issue for THIS PR is created during its life, so the common case
+# costs ONE request. A full --paginate here re-downloaded every issue the
+# bot has ever opened, on every round that defers anything, and that set
+# only grows. The page cap bounds the worst case; reaching it without a
+# match SKIPS rather than creating a second tracking issue.
+LOOKUP_MAX_PAGES=10
+ISSUE_NUM=''
+lookup_page=1
+while (( lookup_page <= LOOKUP_MAX_PAGES )); do
+  gh_err_reset
+  if ! PAGE_JSON="$(gh api "repos/${REPO}/issues?state=all&creator=${AUTOFIX_BOT}&per_page=100&sort=created&direction=desc&page=${lookup_page}" \
+    2> "${GH_ERR:-/dev/null}")"; then
+    lost "the tracking-issue lookup failed on page ${lookup_page} ($(gh_reason))"
+    exit 0
+  fi
+  HIT="$(jq -r --arg m "${MARKER}" '
+    map(select((.pull_request | not)
+      and ((.body // "") | contains($m)))) | (.[0].number // "") | tostring' \
+    <<< "${PAGE_JSON}" 2> /dev/null)" || HIT=''
+  if [[ -n "${HIT}" && "${HIT}" != 'null' ]]; then
+    ISSUE_NUM="${HIT}"
+    break
+  fi
+  # A short page means the corpus is exhausted: no issue exists, so the
+  # create path below is correct (not a cap miss).
+  PAGE_COUNT="$(jq -r 'length' <<< "${PAGE_JSON}" 2> /dev/null)" || PAGE_COUNT=0
+  (( PAGE_COUNT < 100 )) && break
+  lookup_page=$(( lookup_page + 1 ))
+done
+if [[ -z "${ISSUE_NUM}" ]] && (( lookup_page > LOOKUP_MAX_PAGES )); then
+  # Scanned the cap without a match and without exhausting the corpus: an
+  # older tracking issue may exist beyond it, and a duplicate is worse than
+  # deferring persistence.
+  lost "the tracking-issue lookup hit its ${LOOKUP_MAX_PAGES}-page cap without finding the marker"
   exit 0
 fi
 
@@ -125,17 +171,20 @@ if [[ -n "${ISSUE_NUM}" && "${ISSUE_NUM}" != 'null' ]]; then
   # Known-id corpus = issue body + every comment. Any fetch failure skips
   # the round: treating it as empty would re-append history (or, under
   # the old PATCH design, erase it).
-  if ! BODY_TEXT="$(gh api "repos/${REPO}/issues/${ISSUE_NUM}" --jq '.body // ""' 2> /dev/null)"; then
-    lost "could not read deferred-findings issue #${ISSUE_NUM}"
+  gh_err_reset
+  if ! BODY_TEXT="$(gh api "repos/${REPO}/issues/${ISSUE_NUM}" --jq '.body // ""' \
+    2> "${GH_ERR:-/dev/null}")"; then
+    lost "could not read deferred-findings issue #${ISSUE_NUM} ($(gh_reason))"
     exit 0
   fi
   # Bot-authored comments only: the tracking issue is public, and an
   # arbitrary commenter posting a line-start "- rc:<id> " bullet must not
   # be able to permanently suppress a deferred finding from the corpus.
+  gh_err_reset
   if ! COMMENT_TEXT="$(gh api "repos/${REPO}/issues/${ISSUE_NUM}/comments?per_page=100" \
-    --paginate 2> /dev/null | jq -rs --arg bot "${AUTOFIX_BOT}" \
+    --paginate 2> "${GH_ERR:-/dev/null}" | jq -rs --arg bot "${AUTOFIX_BOT}" \
       'add // [] | map(select((.user.login // "") == $bot) | .body // "") | join("\n")')"; then
-    lost "could not read the deferred-findings comments on #${ISSUE_NUM}"
+    lost "could not read the deferred-findings comments on #${ISSUE_NUM} ($(gh_reason))"
     exit 0
   fi
   printf '%s\n%s' "${BODY_TEXT}" "${COMMENT_TEXT}" > "${KNOWN_FILE}"
@@ -202,22 +251,24 @@ fi
 
 if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   BODY="${MARKER}"$'\n\n'"Verified review findings from PR #${PR} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up. A maintainer can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
+  gh_err_reset
   if NUM="$(gh api "repos/${REPO}/issues" \
     -f title="Deferred review findings from PR #${PR}" \
-    -f body="${BODY}" --jq '.number' 2> /dev/null)"; then
+    -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")"; then
     echo "🗂 deferred findings tracked in new issue #${NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
     # Not "this round": the eval watermark filters this round's feedback out
     # of every later round, so nothing retries. Name the lost items.
-    echo "::warning::could not create the deferred-findings issue for PR #${PR}; these findings are LOST (watermark-gated — no later round re-derives them). A maintainer should file them:"
+    echo "::warning::could not create the deferred-findings issue for PR #${PR} ($(gh_reason)); these findings are LOST (watermark-gated — no later round re-derives them). A maintainer should file them:"
     printf '%s\n' "${NEW_LINES}"
   fi
 else
+  gh_err_reset
   if gh api "repos/${REPO}/issues/${ISSUE_NUM}/comments" \
-    -f body="${NEW_LINES}" > /dev/null 2>&1; then
+    -f body="${NEW_LINES}" > /dev/null 2> "${GH_ERR:-/dev/null}"; then
     echo "🗂 deferred findings appended to issue #${ISSUE_NUM} (${KEPT} of ${TOTAL_NEW} new)"
   else
-    echo "::warning::could not append to deferred-findings issue #${ISSUE_NUM}; these findings are LOST (watermark-gated — no later round re-derives them). A maintainer should add them:"
+    echo "::warning::could not append to deferred-findings issue #${ISSUE_NUM} ($(gh_reason)); these findings are LOST (watermark-gated — no later round re-derives them). A maintainer should add them:"
     printf '%s\n' "${NEW_LINES}"
   fi
 fi
