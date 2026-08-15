@@ -6042,6 +6042,20 @@ describe('triage skill non-functional routing (#7411)', () => {
     expect(section).toContain('explicit triggers bypass the label check');
   });
 
+  it('pins the skip to the triaged head SHA with a marker comment (#9219)', () => {
+    const section = stage1f();
+    // The label alone would skip review for every future push; the marker
+    // pins the skip to the triaged head so a later push re-enables review.
+    expect(section).toContain(
+      'gh pr comment "$PR_NUMBER" --repo "$REPO" --body \'<!-- qwen-triage on-hold sha=<HEAD_SHA> -->\'',
+    );
+    expect(section).toContain(
+      "skips the automatic lane only while the marker's SHA matches the live head",
+    );
+    expect(section).toContain('Triage does not re-run on `synchronize`');
+    expect(section).toContain('carries no marker and never skips');
+  });
+
   it('lists the triage-only route as a Stage 1 terminal exit', () => {
     const exits = prSkill.slice(
       prSkill.indexOf('Terminal exits — stop here if any applies'),

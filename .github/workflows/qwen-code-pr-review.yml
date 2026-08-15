@@ -524,11 +524,25 @@ jobs:
           # on the next push. A failed label read skips the optimisation and
           # lets the review run (fail open: the worst case is one extra full
           # review, never a silently skipped one).
+          #
+          # The label alone is NOT sufficient (#9219): Stage 1f applies it
+          # once at open time and nothing ever removes it, so a PR that
+          # earns it with a benign v1 would silently skip review for every
+          # later push of arbitrary content. Skip only while the triage run's
+          # marker comment is pinned to the LIVE head SHA; a push after
+          # triage moves the head (triage does not re-run on synchronize),
+          # stale pin -> the new diff goes to the review lane. A manually
+          # applied "parked" label has no marker and never skips. Unreadable
+          # head fails open like the label read.
           if [ "$AUTO_REVIEW" = "true" ]; then
             if gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels?per_page=100" --paginate --jq '.[].name' | grep -Fxq 'status/on-hold'; then
-              echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
-              echo "should_run=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+              if [ -n "$HEAD_SHA" ] && gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --paginate --jq '.[].body' | grep -Fq "qwen-triage on-hold sha=${HEAD_SHA}"; then
+                echo "Skipping automatic review: PR #${PR_NUMBER} carries status/on-hold pinned to head ${HEAD_SHA} (triage-only route). A maintainer can run @qwen-code /review explicitly." >> "$GITHUB_STEP_SUMMARY"
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "status/on-hold present but not pinned to the live head (${HEAD_SHA:-unreadable}) — running the review lane (#9219)." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
 

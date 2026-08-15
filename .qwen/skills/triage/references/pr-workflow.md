@@ -291,21 +291,32 @@ classification evidence — read the diff.
 
 **Triage-only outcome (terminal — no review submitted):**
 
-1. Apply the existing label (never create one):
+1. Apply the existing label (never create one) AND pin the skip to the
+   triaged head SHA with a marker comment — the review lane honours the
+   label only while this pin matches the live head, so a later push
+   re-enables review automatically (#9219):
 
 ```bash
 gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label 'status/on-hold'
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body '<!-- qwen-triage on-hold sha=<HEAD_SHA> -->'
 ```
+
+   `<HEAD_SHA>` is the head commit you triaged — the same SHA quoted in the
+   Stage 1 "Reviewed at" footer. Post the marker exactly once per triage run.
 
 2. Post the Stage 1 comment using the triage-only variant below.
 3. Stop — no Stage 2, no Stage 3, no approval, no CHANGES_REQUESTED.
 
-The automated review workflow checks the live `status/on-hold` label before
-invoking the model and skips the automatic lane while it is present
-(`qwen-code-pr-review.yml`, 'Resolve PR context'). Maintainers pull a full
-review at any time with `@qwen-code /review` — explicit triggers bypass the
-label check — and removing the label re-enables the automatic lane on the next
-push. Nothing here blocks merging or closes the PR.
+The automated review workflow checks the live `status/on-hold` label AND the
+marker pin before invoking the model and skips the automatic lane only while
+the marker's SHA matches the live head (`qwen-code-pr-review.yml`, 'Resolve
+PR context'). Triage does not re-run on `synchronize`, so a push after the
+triage-only outcome invalidates the pin and the new diff receives the full
+review — a benign v1 must not grant later pushes a silent bypass. Maintainers
+pull a full review at any time with `@qwen-code /review` — explicit triggers
+bypass the label check — and removing the label re-enables the automatic lane
+on the next push. A manually applied `status/on-hold` carries no marker and
+never skips. Nothing here blocks merging or closes the PR.
 
 ```markdown
 <!-- qwen-triage stage=1 -->

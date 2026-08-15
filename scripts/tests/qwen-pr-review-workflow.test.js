@@ -2529,6 +2529,8 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     labels = [],
     ghFails = false,
     triggerBody = '',
+    headSha = 'abc123def456',
+    onHoldMarkers = [],
   }) {
     const doc = parse(workflow);
     const step = doc.jobs['review-pr'].steps.find(
@@ -2561,7 +2563,12 @@ describe('qwen pr review triage-only skip (#7411)', () => {
         : [
             '#!/usr/bin/env bash',
             'echo "$@" >> "$CONTEXT_GH_CALLS"',
-            "printf '%s\\n' $CONTEXT_LABELS",
+            'case "$*" in',
+            '  */labels*) printf \'%s\\n\' $CONTEXT_LABELS ;;',
+            '  */comments*) printf \'%s\\n\' "$CONTEXT_MARKERS" ;;',
+            '  *pulls/*) printf \'%s\\n\' "$CONTEXT_HEAD_SHA" ;;',
+            '  *) ;;',
+            'esac',
             '',
           ].join('\n'),
     );
@@ -2579,6 +2586,8 @@ describe('qwen pr review triage-only skip (#7411)', () => {
         GH_TOKEN: 'test-token',
         TRIGGER_BODY: triggerBody,
         CONTEXT_LABELS: labels.join(' '),
+        CONTEXT_MARKERS: onHoldMarkers.join('\n'),
+        CONTEXT_HEAD_SHA: headSha,
         CONTEXT_GH_CALLS: callsFile,
       },
     });
@@ -2590,17 +2599,56 @@ describe('qwen pr review triage-only skip (#7411)', () => {
     };
   }
 
-  it('skips the automatic review when the LIVE labels carry status/on-hold', () => {
+  it('skips the automatic review when status/on-hold is pinned to the live head', () => {
     const r = runContextStep({
       eventName: 'pull_request_target',
       labels: ['type/bug', 'status/on-hold'],
+      headSha: 'abc123def456',
+      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
     });
     expect(r.output).toContain('should_run=false');
     expect(r.output).not.toContain('should_run=true');
     // The check must query the labels endpoint, not trust the event payload:
-    // the label is applied AFTER the triggering event fires.
+    // the label is applied AFTER the triggering event fires. It must also
+    // read the live head SHA and the marker comments (#9219).
     expect(r.ghCalls).toContain('issues/4242/labels');
+    expect(r.ghCalls).toContain('pulls/4242');
+    expect(r.ghCalls).toContain('issues/4242/comments');
     expect(r.summary).toContain('status/on-hold');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('a push after triage invalidates the pin — the new diff is reviewed (#9219)', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: 'newhead999',
+      onHoldMarkers: ['<!-- qwen-triage on-hold sha=oldhead111 -->'],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain('not pinned to the live head');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('a manually applied on-hold label without a marker never skips (#9219)', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      onHoldMarkers: [],
+    });
+    expect(r.output).toContain('should_run=true');
+    expect(r.summary).toContain('not pinned to the live head');
+    rmSync(r.dir, { recursive: true, force: true });
+  });
+
+  it('fails open when the live head SHA is unreadable (#9219)', () => {
+    const r = runContextStep({
+      eventName: 'pull_request_target',
+      labels: ['status/on-hold'],
+      headSha: '',
+      onHoldMarkers: ['<!-- qwen-triage on-hold sha=abc123def456 -->'],
+    });
+    expect(r.output).toContain('should_run=true');
     rmSync(r.dir, { recursive: true, force: true });
   });
 
