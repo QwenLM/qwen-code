@@ -34,7 +34,11 @@
 // matching transcript, a whiffed receipt, an unclassifiable return — each
 // reads as "not dry", and a chunk that cannot prove itself cold stays hot.
 // The failure mode of a bug in this file is the old behaviour (audit every
-// territory every round), never a skipped one.
+// territory every round), never a skipped one. Since #9206 the failure is
+// also not SILENT: a chunk whose two most recent audits neither retired it
+// nor proved it hot carries a `diagnostics` line naming the bar each round
+// fell at, so a never-retiring loop is diagnosable from the round's own
+// output instead of from evidence cleanup was about to destroy.
 
 import { readFileSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
@@ -52,6 +56,31 @@ import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
+
+/**
+ * Why an audit that could have certified a chunk cold did not — the bar it
+ * failed, named. #9206: a loop whose cold chunks never retired ran five
+ * rounds to the cap without ONE word of why, because every refusal below
+ * landed in the same silent `unknown`; the evidence was then cleaned up
+ * unread. Failing toward auditing stays right — a chunk that cannot prove
+ * itself cold stays hot — but the failure must say its name on the round's
+ * own output, where the reader can act on it.
+ */
+export type CertificationFailure =
+  | 'no matching transcript'
+  | 'launch matched multiple records'
+  | 'no successful tool calls'
+  | 'no read of the diff'
+  | 'territory read missing'
+  | 'receipt not matched'
+  | 'receipt clause not substantive';
+
+/** One transcript's classified return, with the failed bar when not dry. */
+interface Classification {
+  outcome: AuditOutcome;
+  /** Defined exactly when `outcome` is `unknown`. */
+  failure: CertificationFailure | null;
+}
 
 /** A retired chunk skipped this round, with the receipts that earned it. */
 export interface RetiredChunk {
@@ -71,6 +100,14 @@ export interface RoundSchedule {
   skipped: RetiredChunk[];
   /** Every chunk is retired and none is due: the audit has converged. */
   converged: boolean;
+  /**
+   * One line per chunk whose two most recent audits are NEITHER dry enough
+   * to retire NOR hot with a yield — the certification failures, named per
+   * round, that leave it under audit (#9206). Empty when every chunk is
+   * retired, yielded, or still establishing its record. The caller prints
+   * these on STDERR; stdout is the deliverable the orchestrator pastes.
+   */
+  diagnostics: string[];
 }
 
 /**
@@ -166,24 +203,32 @@ const SEVERITY_LINE_RE = /\*\*Severity:\*\*/;
  * beside the English ones.
  *
  * The separator admits an em/en dash anywhere (`——` doubled included), a
- * colon in either width, and an ASCII hyphen only when it stands alone —
+ * colon in either width, an ASCII hyphen only when it stands alone —
  * space-led or doubled — so the dash inside `retry-cap` never opens a clause
- * mid-word. Closing emphasis and quotation may sit between the phrase and
- * the separator — auditors bold the phrase (`**No issues found** — …`,
- * `**未发现新问题** —— …`) in the same `**File:**` / `**Severity:**` idiom
- * the rest of the pipeline writes in, and a receipt refused on a bold mark
- * reads `unknown` and never retires, on exactly the budgeted runs the
- * optimization exists for. The filler between phrase and separator (`were
- * found`, `were detected`, a parenthesised scope) is capped and word-only
- * apart from parentheses: a period or other markdown in between is a new
- * sentence, not this receipt.
+ * mid-word, and sentence punctuation in either width — period, comma,
+ * semicolon. The punctuation expansion is #9206's fix: a run whose cold
+ * chunks returned `No new issues were found. Re-walked …` (period) and
+ * `未发现新问题，重新走查了…` (full-width comma) never retired one of them,
+ * because the clause — the part that PROVES the walk — sat behind a stop
+ * the class did not admit. The separator's only job is to show a clause
+ * exists; the substance floor below is what judges it, so the bare
+ * stock sentence still fails it — `No issues found.` leaves an EMPTY
+ * clause whatever separator set opens it. Closing emphasis and quotation
+ * may sit between the phrase and the separator — auditors bold the phrase
+ * (`**No issues found** — …`, `**未发现新问题** —— …`) in the same
+ * `**File:**` / `**Severity:**` idiom the rest of the pipeline writes in,
+ * and a receipt refused on a bold mark reads `unknown` and never retires,
+ * on exactly the budgeted runs the optimization exists for. The filler
+ * between phrase and separator (`were found`, `were detected`, a
+ * parenthesised scope) is capped and word-only apart from parentheses:
+ * other markdown in between is a new sentence, not this receipt.
  */
 const DRY_RECEIPT_RE = new RegExp(
   '(?:\\bno (?:new )?(?:issues?|findings?|gaps?)[ \\w()]{0,32}?' +
     '|未发现(?:新的?)?(?:问题|发现)' +
     '|无新的?(?:问题|发现)' +
     '|没有(?:发现)?(?:新的?)?问题)' +
-    '\\s*[*_)\\]"”’]*\\s*(?:[—–]+|[:：]|--+|-+\\s)\\s*' +
+    '\\s*[*_)\\]"”’]*\\s*(?:[—–]+|[:：]|--+|-+\\s|[.,;。，；])\\s*' +
     '([\\s\\S]*)',
   'i',
 );
@@ -282,7 +327,10 @@ function findingsListFor(
  * still returned confident, specific-sounding prose) — AND the read must
  * land in the chunk's territory: a successful read of the diff's first
  * screenful proves nothing about lines a thousand down. Anything else is
- * `unknown`, which the scheduler treats as NOT dry.
+ * `unknown`, which the scheduler treats as NOT dry — and `failure` names
+ * the FIRST bar that fell, in the order the bars are checked, so the
+ * scheduler can say why a twice-audited chunk never retired (#9206: the
+ * refusal used to land in the same silent `unknown` for all of them).
  *
  * `territory` is the diff lines the record's own prompt bakes for this
  * chunk (1-based, inclusive); empty when it bakes no read, where the old
@@ -292,7 +340,7 @@ function classifyReturn(
   rec: AgentRecord,
   territory: Array<[number, number]>,
   findingsList: string,
-): AuditOutcome {
+): Classification {
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
     // The cumulative list is on hand for this agent: since #8597 it rides
@@ -308,7 +356,7 @@ function classifyReturn(
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
       if (findingsList.includes(`**File:** ${file}`)) continue;
-      return 'yielded';
+      return { outcome: 'yielded', failure: null };
     }
   }
   // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
@@ -338,16 +386,18 @@ function classifyReturn(
   const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
   const judgedClause =
     inlineGap === null ? clause : clause.slice(0, inlineGap.index);
-  if (
-    rec.successfulToolCalls > 0 &&
-    rec.diffToolCalls > 0 &&
-    openedTheTerritory(rec.diffReads, territory) &&
-    receipt !== null &&
-    substantiveClause(judgedClause)
-  ) {
-    return 'dry';
-  }
-  return 'unknown';
+  const unknown = (failure: CertificationFailure): Classification => ({
+    outcome: 'unknown',
+    failure,
+  });
+  if (rec.successfulToolCalls === 0) return unknown('no successful tool calls');
+  if (rec.diffToolCalls === 0) return unknown('no read of the diff');
+  if (!openedTheTerritory(rec.diffReads, territory))
+    return unknown('territory read missing');
+  if (receipt === null) return unknown('receipt not matched');
+  if (!substantiveClause(judgedClause))
+    return unknown('receipt clause not substantive');
+  return { outcome: 'dry', failure: null };
 }
 
 /**
@@ -414,6 +464,7 @@ export function scheduleReverseAuditRound(
       coldChecks: [],
       skipped: [],
       converged: false,
+      diagnostics: [],
     };
   }
 
@@ -501,36 +552,72 @@ export function scheduleReverseAuditRound(
       recordsPerTranscript.set(t, (recordsPerTranscript.get(t) ?? 0) + 1);
     }
   }
-  const outcomesByRecord = matchesByRecord.map((matches, i) =>
-    matches
-      .filter((t) => recordsPerTranscript.get(t) === 1)
-      .map((t) => classifyReturn(t, records[i].territory, records[i].findings)),
-  );
+  // Every record's classifications AND the bar each uncertified one fell
+  // at: a record no transcript matches reads `no matching transcript`; one
+  // whose only matches are ambiguous launches (themselves matching several
+  // records) reads `launch matched multiple records`; one a transcript
+  // certifies carries the classifier's own bar. These are what the round's
+  // diagnostic names when a chunk that looked certifiable never retires
+  // (#9206) — the refusal is the same fail-toward-audit refusal it always
+  // was, only no longer silent.
+  const classificationsByRecord: Classification[][] = [];
+  const failuresByRecord: CertificationFailure[][] = [];
+  matchesByRecord.forEach((matches, i) => {
+    const unique = matches.filter((t) => recordsPerTranscript.get(t) === 1);
+    const classifications = unique.map((t) =>
+      classifyReturn(t, records[i].territory, records[i].findings),
+    );
+    classificationsByRecord.push(classifications);
+    if (classifications.some((c) => c.outcome === 'dry')) {
+      // The round's merge takes this dry; whatever else the record's
+      // launches did cannot hold the chunk back from retirement.
+      failuresByRecord.push([]);
+      return;
+    }
+    const failures: CertificationFailure[] = [];
+    if (matches.length === 0) failures.push('no matching transcript');
+    for (let m = 0; m < matches.length - unique.length; m++) {
+      failures.push('launch matched multiple records');
+    }
+    for (const c of classifications) {
+      if (c.failure !== null) failures.push(c.failure);
+    }
+    failuresByRecord.push(failures);
+  });
 
-  // chunk id → prior round → every outcome that round's records produced. A
-  // record no transcript certifies (a blank partial write, an undelivered
-  // build, an ambiguous launch) contributes nothing, and its round
-  // classifies `unknown`: the round was scheduled for this chunk, and
-  // nothing proves it dry.
-  const history = new Map<number, Map<number, AuditOutcome[]>>();
+  // chunk id → prior round → every outcome that round's records produced,
+  // plus the certification failures behind its unknowns. A record no
+  // transcript certifies (a blank partial write, an undelivered build, an
+  // ambiguous launch) contributes nothing, and its round classifies
+  // `unknown`: the round was scheduled for this chunk, and nothing proves
+  // it dry.
+  const history = new Map<
+    number,
+    Map<number, { outcomes: AuditOutcome[]; failures: CertificationFailure[] }>
+  >();
   records.forEach((rec, i) => {
     let byRound = history.get(rec.chunkId);
     if (!byRound) {
       byRound = new Map();
       history.set(rec.chunkId, byRound);
     }
-    byRound.set(rec.round, [
-      ...(byRound.get(rec.round) ?? []),
-      ...outcomesByRecord[i],
-    ]);
+    const entry = byRound.get(rec.round) ?? { outcomes: [], failures: [] };
+    entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
+    entry.failures.push(...failuresByRecord[i]);
+    byRound.set(rec.round, entry);
   });
 
   const due: number[] = [];
   const coldChecks: number[] = [];
   const skipped: RetiredChunk[] = [];
+  const diagnostics: string[] = [];
   for (const chunkId of chunkIds) {
     const audits = [...(history.get(chunkId)?.entries() ?? [])]
-      .map(([r, outcomes]) => ({ round: r, outcome: mergeOutcomes(outcomes) }))
+      .map(([r, entry]) => ({
+        round: r,
+        outcome: mergeOutcomes(entry.outcomes),
+        failures: entry.failures,
+      }))
       .sort((a, b) => a.round - b.round);
     const lastTwo = audits.slice(-2);
     const retired =
@@ -539,6 +626,27 @@ export function scheduleReverseAuditRound(
       // Hot — including a chunk with no history at all, one whose latest
       // receipt was a whiff, and one whose cold check yielded.
       due.push(chunkId);
+      // The diagnostic the silent never-retire loop never printed (#9206):
+      // a chunk with two audits on record that NEITHER yielded NOR retired
+      // failed certification somewhere — name the bar, round by round. A
+      // yield explains its own heat, and one audit is still establishing
+      // its record; both stay quiet.
+      const certifiable =
+        lastTwo.length === 2 && lastTwo.every((a) => a.outcome !== 'yielded');
+      if (certifiable) {
+        const roundNotes = lastTwo
+          .filter((a) => a.outcome === 'unknown')
+          .map((a) => {
+            const reasons = [...new Set(a.failures)];
+            return (
+              `round ${a.round}: ` +
+              (reasons.length > 0 ? reasons.join(', ') : 'uncertified')
+            );
+          });
+        if (roundNotes.length > 0) {
+          diagnostics.push(`chunk ${chunkId} — ${roundNotes.join('; ')}`);
+        }
+      }
       continue;
     }
     // Cold checks land on ONE global parity — the even rounds — not on the
@@ -577,5 +685,6 @@ export function scheduleReverseAuditRound(
     // and convergence is an exit-5 termination rule: it must not be
     // reachable from nothing.
     converged: chunkIds.length > 0 && due.length === 0,
+    diagnostics,
   };
 }

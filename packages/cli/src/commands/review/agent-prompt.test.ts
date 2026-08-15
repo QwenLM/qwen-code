@@ -3688,6 +3688,48 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     expect(out).not.toContain('retirement:');
   });
 
+  it('certification failures are diagnosed on stderr, chunk by chunk (#9206)', () => {
+    // The silent half of the reported run: chunks audited twice that are
+    // neither retired nor hot failed CERTIFICATION, and the round said
+    // nothing about it. The builder must name the bar each chunk fell at —
+    // on stderr; stdout stays the deliverable the orchestrator pastes.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    runRound(2);
+    auditorTranscript(recordOf(2, 13), WHIFF, { calls: 0 });
+    // 14's round-2 auditor left no transcript at all.
+    auditorTranscript(recordOf(2, 15), YIELD);
+
+    runRound(3);
+
+    const err = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement certified nothing');
+    expect(err).toContain('chunk 13 — round 2: no successful tool calls');
+    expect(err).toContain('chunk 14 — round 2: no matching transcript');
+    // A yielded chunk explains its own heat — no diagnostic for it.
+    expect(err).not.toContain('chunk 15');
+  });
+
+  it('a schedule with no readable transcripts names itself (#9206)', () => {
+    // The scheduler's catch used to swallow every exception without a word;
+    // a transcript-less round then retired nothing for the rest of the run,
+    // invisibly. The degradation direction stands — every chunk audited —
+    // but the round must say why nothing can retire.
+    answerRound(1, { 13: DRY, 14: DRY, 15: YIELD });
+    answerRound(2, { 13: DRY, 14: DRY, 15: YIELD });
+    delete process.env['QWEN_CODE_SESSION_ID'];
+
+    const out = runRound(3);
+
+    expect(out).toContain('3 auditors required this round — one per chunk.');
+    const err = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(err).toContain('reverse-audit retirement unavailable this round');
+    expect(err).toContain('auditing every chunk');
+  });
+
   it('huge cap: a chunk dry in rounds 1 and 2 retires with a final certificate', () => {
     // Under the reduced 3-round cap, chunk 13's next cold check (round 4) is
     // past the cap, so the retirement note must read `certificate final`, not

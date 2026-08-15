@@ -62,6 +62,7 @@ import {
   type DiffChunk,
 } from './lib/diff-plan.js';
 import {
+  promptRecordDir,
   recordPrompt,
   writeBrief,
   writeFindingsFile,
@@ -2028,18 +2029,42 @@ function runAllChunks(
           ? report.diffPathAbsolute
           : undefined,
       );
-    } catch {
+    } catch (err) {
       // Transcripts unavailable, an unreadable plan stat, anything: the
       // schedule is an optimization, and a broken optimizer must degrade to
       // today's behaviour — every territory audited — never to fewer
-      // auditors. `null` below means "everything is due".
+      // auditors. `null` below means "everything is due". But not SILENTLY
+      // (#9206): a schedule that dies here retires nothing for the rest of
+      // the run, and the round's own output is where the reader can see it.
       schedule = null;
+      writeStderrLine(
+        `NOTE: reverse-audit retirement unavailable this round — ` +
+          `${(err as Error).message ?? String(err)} — auditing every chunk.`,
+      );
     }
   }
 
   if (schedule !== null && schedule.converged) {
     refuseConverged(planPath);
     return;
+  }
+
+  // A chunk audited twice that is neither retired nor hot failed
+  // CERTIFICATION somewhere; the schedule names the bar per round (#9206 —
+  // the silent version of this ran a 12-chunk loop five rounds to the cap
+  // with no word of why nothing retired). stderr, never stdout: the round
+  // blocks below are the deliverable the orchestrator pastes.
+  if (schedule !== null && schedule.diagnostics.length > 0) {
+    writeStderrLine(
+      `NOTE: reverse-audit retirement certified nothing for ` +
+        `${schedule.diagnostics.length} twice-audited chunk(s) — they stay ` +
+        `under audit (the safe direction), but a chunk that looks dry and ` +
+        `never retires is the cost this schedule exists to stop paying. ` +
+        `The bar each round fell at:\n` +
+        schedule.diagnostics.join('\n') +
+        `\nCompare the recorded prompts in ${promptRecordDir(planPath)} ` +
+        `against this session's subagent transcripts to see the mismatch.`,
+    );
   }
 
   // The budget gate, deferred here from the single-build path for
@@ -2541,10 +2566,15 @@ function runAgentPrompt(args: AgentPromptArgs): void {
             ? report.diffPathAbsolute
             : undefined,
         );
-      } catch {
+      } catch (err) {
         // Same degradation as the round builder: an unreadable history must
-        // fall back to building the auditor, never to refusing it.
+        // fall back to building the auditor, never to refusing it — named,
+        // as the round builder names it (#9206).
         schedule = null;
+        writeStderrLine(
+          `NOTE: reverse-audit retirement unavailable this round — ` +
+            `${(err as Error).message ?? String(err)} — auditing the chunk.`,
+        );
       }
       if (schedule !== null && schedule.converged) {
         refuseConverged(args.plan);

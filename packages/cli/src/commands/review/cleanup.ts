@@ -21,6 +21,7 @@ import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.j
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
+import { readBudgetStop } from './lib/deadline.js';
 import {
   worktreePath,
   probeWorktreePath,
@@ -462,9 +463,35 @@ export function runCleanup(target: string): void {
     );
   }
 
+  // #9206: a prompt-record directory whose loop STOPPED WITHOUT CONVERGING
+  // is the only certification history there is — the evidence a
+  // never-retiring reverse-audit loop needs to diagnose itself, which the
+  // sweep would otherwise destroy unread. The loop writes its stop marker
+  // (round-cap or budget) inside that directory, and a clean convergence
+  // clears it, so a marker on disk names the non-converged stop exactly.
+  // The decision is made BEFORE the sweep runs: the plan file the marker's
+  // epoch fence reads is itself one of the swept entries.
+  const preserved = new Set<string>();
+  for (const file of tmpEntries) {
+    if (!file.startsWith(prefix) || !file.endsWith('-prompts')) continue;
+    const planCandidate = join(
+      REVIEW_TMP_DIR,
+      `${file.slice(0, -'-prompts'.length)}.json`,
+    );
+    if (readBudgetStop(planCandidate) !== null) preserved.add(file);
+  }
+
   for (const file of tmpEntries) {
     if (!file.startsWith(prefix)) continue;
     const full = join(REVIEW_TMP_DIR, file);
+    if (preserved.has(file)) {
+      writeStdoutLine(
+        `Kept ${full}: this review's reverse audit stopped without ` +
+          `converging (stop marker on disk) — the record directory is the ` +
+          `evidence for diagnosing it; remove it manually once done.`,
+      );
+      continue;
+    }
     try {
       // Not every side file is a file. `agent-prompt` records what it handed each
       // agent in `<plan>-prompts/`, a directory under this same prefix, and
@@ -485,8 +512,8 @@ export function runCleanup(target: string): void {
 
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It
   // is only true when there was nothing there — not when there was and we could
-  // not get rid of it.
-  if (!removedAny && !failedAny) {
+  // not get rid of it, and not when an entry was deliberately kept.
+  if (!removedAny && !failedAny && preserved.size === 0) {
     writeStdoutLine(`Nothing to clean for target "${target}".`);
   }
 }

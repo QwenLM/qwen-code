@@ -192,6 +192,8 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
       coldChecks: [],
       skipped: [],
       converged: false,
+      // No history yet — nothing is certifiable, so nothing is diagnosed.
+      diagnostics: [],
     });
     expect(schedule(2).due).toEqual([13, 14, 15]);
   });
@@ -607,6 +609,96 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     const r3 = schedule(3, [13]);
     expect(r3.due).toEqual([]);
     expect(r3.converged).toBe(true);
+  });
+
+  it('an English receipt separated by a period is dry (#9206)', () => {
+    // One of the two shapes that never retired on the run the issue
+    // reports: the phrase, a full stop, then the clause naming the walk.
+    // The clause is the substance; the stop only has to open it.
+    const receipt =
+      'No new issues were found. Re-walked the retry cap and both changed ' +
+      "exports' call sites; every gap I checked was already in the list.";
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('a Chinese receipt separated by a full-width comma is dry (#9206)', () => {
+    // The other shape: the most natural zh phrasing, comma-led clause.
+    const receipt =
+      '未发现新问题，重新走查了重连状态机与两个已改导出的全部调用点，' +
+      '每个疑点都已在确认清单中。';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), receipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), receipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([]);
+    expect(r3.skipped.map((s) => s.chunkId)).toEqual([13]);
+  });
+
+  it('the bare stock sentence stays unknown through the widened class (#9206)', () => {
+    // The widening admits the stop; the substance floor still refuses the
+    // clause. `No issues found.` opens an EMPTY clause, and a receipt with
+    // nothing after it proves no walk whatever separator let it through.
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), WHIFF);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), WHIFF);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.skipped).toEqual([]);
+  });
+
+  it('diagnoses a twice-audited chunk no transcript certified (#9206)', () => {
+    // The silent half of the reported loop: records on disk, launches that
+    // match none of them (an undelivered build, a paraphrase), and rounds
+    // that re-audited without a word. The schedule now names the bar.
+    record(1, 13, 'chunk 13 round 1 territory walk');
+    record(2, 13, 'chunk 13 round 2 territory walk');
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: no matching transcript; round 2: no matching transcript',
+    ]);
+  });
+
+  it('diagnoses a matched transcript whose receipt fell at a named bar (#9206)', () => {
+    // The launch pairs, the agent opened the territory — but the return
+    // carries no structural receipt at all. The diagnostic says WHICH bar,
+    // so the reader is not left with `unknown` and a destroyed record dir.
+    const noReceipt =
+      'Walked the territory carefully and studied every edge case in it.';
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), noReceipt);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), noReceipt);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 1: receipt not matched; round 2: receipt not matched',
+    ]);
+  });
+
+  it('diagnoses per round — a dry round beside a failed one names only the failure (#9206)', () => {
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    record(2, 13, 'chunk 13 round 2 territory walk'); // undelivered
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([
+      'chunk 13 — round 2: no matching transcript',
+    ]);
+  });
+
+  it('does not diagnose a yielded chunk — a yield explains its own heat (#9206)', () => {
+    transcript(record(1, 13, 'chunk 13 round 1 territory walk'), DRY);
+    transcript(record(2, 13, 'chunk 13 round 2 territory walk'), YIELD);
+
+    const r3 = schedule(3, [13]);
+    expect(r3.due).toEqual([13]);
+    expect(r3.diagnostics).toEqual([]);
   });
 
   it("parroting the brief's own example receipt is not dry", () => {
