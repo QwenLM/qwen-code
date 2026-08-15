@@ -33,6 +33,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    open: vi.fn(actual.open),
     stat: async (...args: Parameters<typeof actual.stat>) => {
       const result = await actual.stat(...args);
       if (statFault.zeroInode) {
@@ -146,6 +147,7 @@ describe('SessionTranscriptReader', () => {
       sessionId: targetSessionId,
       timestamp: new Date(RECORD_BASE_MS + recordSeq++ * 1000).toISOString(),
       type: uuid.startsWith('a') ? 'assistant' : 'user',
+      provenance: uuid.startsWith('a') ? 'assistant_output' : 'real_user',
       cwd: workspaceDir,
       version: '1.0.0',
       message: {
@@ -2034,6 +2036,128 @@ describe('SessionTranscriptReader', () => {
       't1',
       'a1',
     ]);
+  });
+
+  it('projects validated branch points for Assistant records in the page', async () => {
+    const user = record('u1', null, 'prompt');
+    const assistant = record('a1', 'u1', 'answer');
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', 'ignored'),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([user, assistant, checkpoint]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toContain('a1');
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+    expect(vi.mocked(fs.open)).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not advertise a checkpoint shadowed by an earlier duplicate record', async () => {
+    const ordinary: ChatRecord = {
+      ...record('dup', 'a1', 'ordinary duplicate'),
+      type: 'assistant',
+    };
+    const checkpoint: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      ordinary,
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.branchPointsByAssistantUuid).toBeUndefined();
+  });
+
+  it('does not advertise a checkpoint merged into a subtype-less first duplicate', async () => {
+    const plain: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      message: undefined,
+    };
+    const checkpoint: ChatRecord = {
+      ...record('dup', 'a1', ''),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      plain,
+      checkpoint,
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.branchPointsByAssistantUuid).toBeUndefined();
+  });
+
+  it('reports a branch point whose checkpoint falls on a later page', async () => {
+    const user = record('u1', null, 'prompt');
+    const assistant = record('a1', 'u1', 'answer');
+    const checkpoint: ChatRecord = {
+      ...record('checkpoint-1', 'a1', 'ignored'),
+      type: 'system',
+      subtype: 'branch_checkpoint',
+      message: undefined,
+      systemPayload: {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      },
+    };
+    await writeRecords([
+      user,
+      assistant,
+      checkpoint,
+      record('u2', 'checkpoint-1', 'next prompt'),
+      record('a2', 'u2', 'next answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(page.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
   });
 
   it('keeps a long user turn complete when it exceeds the record limit', async () => {
