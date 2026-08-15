@@ -693,10 +693,34 @@ function blockerSection(
  * tie between an own and a foreign review keeps the OWN one: same content
  * claim, and the own copy is the one that may carry an anchor.
  */
+/**
+ * How far past this account's own highest round a FOREIGN marker's round may
+ * run and still be adopted. Rounds advance one per posted review, so a
+ * legitimate interleave (the CI bot posting while this account idles) sits a
+ * handful ahead at most; sixty-four covers any real cadence. Without the
+ * bound, round-first selection hands one hostile post a permanent win: a
+ * stranger's `round: LEDGER_MAX_ROUND` marker outranks every real round
+ * forever, compose's capped stamp pins the counter AT the cap, and every
+ * subsequent round re-issues the same ids against different findings — the
+ * cross-round id continuity Step 6's rulings key on, destroyed by one
+ * comment. Inside the bound an attacker can only inflate the counter by a
+ * bounded step per post, which costs id-space numbers and nothing else.
+ */
+const FOREIGN_ROUND_HEADROOM = 64;
+
 export function latestLedger(
   reviews: RawReview[],
   login: string | null,
 ): { ledger: Ledger; foreign: boolean; author: string | null } | null {
+  // Pass 1: the highest round THIS account posted — the plausibility base.
+  let ownMax = 0;
+  if (login) {
+    for (const r of reviews) {
+      if (r.user?.login !== login) continue;
+      const l = parseLedger(r.body);
+      if (l && l.round > ownMax) ownMax = l.round;
+    }
+  }
   let best: {
     at: string;
     id: number;
@@ -709,6 +733,10 @@ export function latestLedger(
     if (!ledger) continue;
     const author = r.user?.login ?? null;
     const foreign = !login || author !== login;
+    // A foreign round implausibly far past our own is not adopted at all —
+    // see FOREIGN_ROUND_HEADROOM. Own markers are never bounded: this
+    // account's counter is the base the bound is measured from.
+    if (foreign && ledger.round > ownMax + FOREIGN_ROUND_HEADROOM) continue;
     const at = r.submitted_at ?? '';
     const id = typeof r.id === 'number' ? r.id : 0;
     // ROUND FIRST, timestamp second. Recovery now crosses accounts, and the

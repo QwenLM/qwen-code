@@ -3318,6 +3318,135 @@ describe('runBuildTest', () => {
       expect(rep.note).toContain('npm test --workspace="packages/a"');
     });
 
+    it("runs the AFFECTED pending suite first — the fresh path's invariant", () => {
+      // `notRun` is stored in scope (alphabetical) order, and a resume that
+      // consumed it verbatim starved the changed workspace's suite to the
+      // budget's worst tail on every continuation — the chain could hit the
+      // continuation cap with the one suite the diff changed never run, while
+      // every alphabetical dependent got a full window.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/b'],
+          buildSet: ['packages/core', 'packages/a', 'packages/b'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [],
+          ok: true,
+          timedOut: [],
+          note: 'stopped before any suite',
+          testScope: {
+            workspaces: [],
+            notRun: ['packages/a', 'packages/b', 'packages/core'],
+          },
+        }),
+      );
+
+      const calls: string[] = [];
+      // A budget that admits exactly one suite: whichever runs FIRST is the
+      // whole measurement this chain gets before the next continuation.
+      runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        budget: 16,
+        install: true,
+        resume: true,
+        exec: (command) => {
+          calls.push(command);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+          return okResult(command);
+        },
+      });
+      expect(calls[0]).toBe('npm test --workspace="packages/b"');
+    });
+
+    it('recomputes ok to FALSE when a resumed suite fails for real', () => {
+      // The failure branch of the merged report: a fresh failure in a
+      // continuation must flip ok and carry the correlate-with-the-diff
+      // framing, not hide behind the completion sentence.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: runId(),
+          affected: ['packages/core'],
+          buildSet: ['packages/core', 'packages/a'],
+          widenedWith: [],
+          install: null,
+          build: [okResult('npm run build --workspace="packages/core"')],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'in flight',
+          testScope: { workspaces: ['packages/core'], notRun: ['packages/a'] },
+        }),
+      );
+      const rep = runBuildTest({
+        plan: planPath,
+        worktree: root,
+        out: outPath,
+        timeout: 60,
+        install: true,
+        resume: true,
+        exec: (command) => ({
+          command,
+          exitCode: 1,
+          seconds: 1,
+          timedOut: false,
+          output: 'FAIL src/x.test.ts',
+        }),
+      });
+      expect(rep.ok).toBe(false);
+      expect(rep.note).toContain('Correlate each error with the diff');
+      expect(rep.note).toContain('Every suite in scope has now run');
+      expect(rep.note).not.toContain('everything passed');
+    });
+
+    it('refuses a report whose identity has no plan stamp', () => {
+      // The plan mtime is the per-round discriminator; an identity without it
+      // cannot prove the report belongs to this round any more than one with
+      // a different value can.
+      threePackages();
+      const outPath = join(root, 'report.json');
+      writeFileSync(
+        outPath,
+        JSON.stringify({
+          toolchain: 'npm',
+          run: { root, tree: treeOf(root) },
+          affected: ['packages/core'],
+          buildSet: ['packages/core'],
+          widenedWith: [],
+          install: null,
+          build: [],
+          test: [okResult('npm test --workspace="packages/core"')],
+          ok: true,
+          timedOut: [],
+          note: 'n',
+          testScope: { workspaces: ['packages/core'], notRun: ['packages/a'] },
+        }),
+      );
+      expect(() =>
+        runBuildTest({
+          plan: planPath,
+          worktree: root,
+          out: outPath,
+          timeout: 60,
+          install: true,
+          resume: true,
+          exec: okResult,
+        }),
+      ).toThrow(/previous round's plan/);
+    });
+
     it('retires the superseded budget-stop caveat and keeps live limitations', () => {
       // The caveat is rewritten like the note, and for the same reason: the
       // previous call's "still to run — not run: X" names suites this call
@@ -3330,7 +3459,9 @@ describe('runBuildTest', () => {
       const outPath = join(root, 'report.json');
       const liveSegment =
         '10 changed file(s) sit in negated workspaces (e.g. pkg/x) — excluded';
-      const report = (caveat: string): object => ({
+      // As the producer writes it: `caveat` is the joined prose, `liveCaveat`
+      // the scope's own half without the machine clause.
+      const report = (caveat: string, liveCaveat: string): object => ({
         toolchain: 'npm',
         run: runId(),
         affected: ['packages/core'],
@@ -3346,6 +3477,7 @@ describe('runBuildTest', () => {
           workspaces: ['packages/core'],
           notRun: ['packages/a', 'packages/b'],
           caveat,
+          liveCaveat,
         },
       });
       const resume = (): BuildTestReport =>
@@ -3365,6 +3497,7 @@ describe('runBuildTest', () => {
           report(
             `${liveSegment}; the whole-call budget (61s) was spent with 2 ` +
               `suite(s) still to run — not run: packages/a, packages/b`,
+            liveSegment,
           ),
         ),
       );
@@ -3378,6 +3511,7 @@ describe('runBuildTest', () => {
           report(
             'the whole-call budget (61s) was spent with 2 suite(s) still ' +
               'to run — not run: packages/a, packages/b',
+            '',
           ),
         ),
       );
@@ -3415,6 +3549,7 @@ describe('runBuildTest', () => {
             caveat:
               'the whole-call budget (61s) was spent with 2 suite(s) still ' +
               'to run — not run: packages/a, packages/b',
+            liveCaveat: '',
           },
         }),
       );

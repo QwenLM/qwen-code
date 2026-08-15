@@ -164,16 +164,29 @@ function resumeNpmToolchain(
     );
   }
 
-  // Two kinds of unfinished work, in the order that spends the budget best:
+  // Three kinds of unfinished work, in the order that spends the budget best:
   // the suites a shortened deadline killed first (they are the expensive ones,
-  // and they now get a full deadline), then the ones never reached at all.
+  // and they now get a full deadline), then the AFFECTED suites the budget
+  // never reached, then the dependents. The affected-first partition is the
+  // fresh path's own invariant re-applied — "the changed workspace's own
+  // suite is the highest-value one and must be unstarvable" — and the resume
+  // path used to drop it: `notRun` is stored in scope (alphabetical) order,
+  // so across a chain of continuations every alphabetical dependent could
+  // take a full deadline while the changed workspace's suite was ordered
+  // last into the budget's worst tail, every round, until the continuation
+  // cap ended the chain with the one suite the diff changed never run.
   const retryCommands = previous.test
     .filter((t) => t.clamped)
     .map((t) => t.command);
+  const affectedSet = new Set(previous.affected);
   const pendingDirs = [...(previous.testScope?.notRun ?? [])];
+  const orderedPending = [
+    ...pendingDirs.filter((d) => affectedSet.has(d)),
+    ...pendingDirs.filter((d) => !affectedSet.has(d)),
+  ];
   const work: Array<{ command: string; dir: string | null }> = [
     ...retryCommands.map((command) => ({ command, dir: null })),
-    ...pendingDirs.map((dir) => ({ command: testCommand(dir), dir })),
+    ...orderedPending.map((dir) => ({ command: testCommand(dir), dir })),
   ];
   if (work.length === 0) {
     // "Every suite ran" and "no suite ever ran" both reach here with nothing
@@ -251,26 +264,32 @@ function resumeNpmToolchain(
     // The caveat is REWRITTEN, not appended to, for the same staleness reason
     // the note is: the previous call's budget-stop clause names suites as
     // "still to run" that this call just ran, and the dimension brief tells
-    // the agent "caveat present ⇒ scope may be incomplete — quote it". So the
-    // superseded segments — the budget-stop clauses and any earlier resume
-    // clause — are retired, LIVE limitations (a negated-workspace caveat, an
-    // ungraphable closure) survive verbatim, a fresh clause is written only
-    // while work actually remains, and a chain that finishes with no live
-    // limitation ends with the caveat ABSENT, which is the field's own
-    // contract for "the run covers everything the diff can break".
-    // ANCHORED to the segment start, on the producers' own grammar. An
-    // unanchored substring match read PR-authored content: caveat segments
-    // interpolate file paths and workspace dirs from the reviewed diff, and a
-    // file named `whole-call budget.mjs` retired the LIVE limitation quoting
-    // it — untrusted input silently certifying scope. A path that embeds a
-    // `; ` plus this exact grammar can still fabricate a segment boundary,
-    // but what it retires is then bounded to the attacker-authored tail of a
-    // segment already quoting attacker text.
-    const SUPERSEDED_SEGMENT_RE =
-      /^the whole-call budget( \(\d+s\))? was spent |^the build phase reached the whole-call budget|^a --resume call /;
-    const liveSegments = (prevScope.caveat ?? '')
-      .split('; ')
-      .filter((seg) => seg.trim() !== '' && !SUPERSEDED_SEGMENT_RE.test(seg));
+    // the agent "caveat present ⇒ scope may be incomplete — quote it". The
+    // LIVE limitation survives verbatim, a fresh clause is written only while
+    // work actually remains, and a chain that finishes with no live
+    // limitation ends with the caveat ABSENT — the field's own contract for
+    // "the run covers everything the diff can break".
+    //
+    // STRUCTURAL, not parsed: the fresh path records the scope's own caveat
+    // in `liveCaveat`, and this path carries that string through untouched.
+    // Both parsing attempts before it lost: an unanchored phrase match read a
+    // PR-authored FILENAME as a machine clause, and the anchored fix still
+    // fell to a workspace DIR whose name embeds the segment separator plus
+    // the clause grammar — the skipped/unmapped producers interpolate dir
+    // lists mid-segment with their honest tail after the list, so the
+    // fabricated boundary retired the live limitation's tail with the fake
+    // clause. Nothing content-matches an opaque carry-through.
+    //
+    // No parse remains at all. `liveCaveat` present means "the machine
+    // appended clauses, and this is the caveat without them"; absent means
+    // the fresh path appended nothing, so the whole caveat is live. Both
+    // read structurally; neither can be talked out of a limitation by a
+    // PR-authored name.
+    const liveCaveat =
+      prevScope.liveCaveat !== undefined
+        ? prevScope.liveCaveat
+        : (prevScope.caveat ?? '');
+    const liveSegments = liveCaveat === '' ? [] : [liveCaveat];
     const outstanding = [...stillPending, ...unattemptedRetries];
     if (outstanding.length > 0) {
       // ONE segment, so no '; ' inside it: retirement re-parses the stored
@@ -296,6 +315,8 @@ function resumeNpmToolchain(
       ),
       ...(stillPending.length > 0 ? { notRun: stillPending } : {}),
       ...(caveat ? { caveat } : {}),
+      // Carried forward so the NEXT continuation is structural too.
+      liveCaveat,
     };
   }
 
@@ -997,8 +1018,15 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       caveat: testScope.caveat
         ? `${testScope.caveat}; ${partialNote}`
         : partialNote,
+      // The machine-readable half: the scope's own caveat, without the
+      // budget clause just appended — what a continuation carries through
+      // untouched instead of re-parsing the joined prose (see TestScope).
+      liveCaveat: testScope.caveat ?? '',
     };
   }
+  // No partialNote: nothing machine-appended, so `liveCaveat` is deliberately
+  // NOT recorded — its absence tells a continuation the whole caveat is live,
+  // and a clean report stays exactly the shape it always was.
 
   // The scope was executed — only now may the report carry it. Every return
   // between the initializer and here ran zero test commands and must not

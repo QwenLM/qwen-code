@@ -1158,6 +1158,50 @@ describe('latestLedger — the split trust surface', () => {
     ]);
   });
 
+  it('does not adopt a foreign round implausibly far past our own', () => {
+    // Round-first selection made one hostile post a permanent win: a
+    // stranger's round-at-the-cap marker outranks every real round forever,
+    // the capped stamp pins the counter AT the cap, and every later round
+    // re-issues the same ids against different findings. A legitimate
+    // interleave sits a handful of rounds ahead at most, so a foreign round
+    // beyond our own plus the headroom is not a newer work list — it is not
+    // a work list at all.
+    const found = latestLedger(
+      [
+        review('maintainer', '2026-01-05T00:00:00Z', marker(8)),
+        review('stranger', '2026-01-09T00:00:00Z', marker(9999)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(8);
+    expect(found?.foreign).toBe(false);
+
+    // Inside the headroom a foreign round is an ordinary newer work list —
+    // the CI-bot interleave this recovery exists for.
+    const near = latestLedger(
+      [
+        review('maintainer', '2026-01-05T00:00:00Z', marker(8)),
+        review('ci-bot', '2026-01-09T00:00:00Z', marker(11)),
+      ],
+      'maintainer',
+    );
+    expect(near?.ledger.round).toBe(11);
+    expect(near?.foreign).toBe(true);
+  });
+
+  it('bounds foreign rounds from zero when this account never posted', () => {
+    // No own marker means no base: the bot's early rounds clear the headroom,
+    // a squatter's huge round does not.
+    const found = latestLedger(
+      [
+        review('ci-bot', '2026-01-02T00:00:00Z', marker(3)),
+        review('stranger', '2026-01-09T00:00:00Z', marker(500)),
+      ],
+      'maintainer',
+    );
+    expect(found?.ledger.round).toBe(3);
+  });
+
   it('refuses an out-of-range round from any account', () => {
     // The round IS the id space: compose stamps `R<round + 1>-<n>`. Round-first
     // selection makes the highest round authoritative, so an unbounded one from

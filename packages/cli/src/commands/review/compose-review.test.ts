@@ -20,6 +20,7 @@ import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   budgetStopEntry,
   budgetStopEntryZh,
+  roundCapStopEntry,
   writeBudgetStop,
   writeRoundCapStop,
 } from './lib/deadline.js';
@@ -4493,21 +4494,26 @@ describe('the ledger marker reaches the POSTED body', () => {
       });
     };
 
-    // Compliant: the canonical entry is relayed. The anchor rides.
-    const relayed = composeWith([budgetStopEntry(3)]);
-    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
-    expect(parseLedger(relayed.body)?.sha).toBe('deadbeef00112233');
-
-    // The Chinese body relays the Chinese pair — same machine text, same
-    // exemption.
-    const relayedZh = composeWith([budgetStopEntryZh(3)]);
-    expect(relayedZh.dimensionGapsAreDepthOnly).toBe(true);
-    expect(parseLedger(relayedZh.body)?.sha).toBe('deadbeef00112233');
-
-    // Non-compliant: the entry is dropped. Same machine state, same anchor.
+    // Non-compliant baseline: the entry is dropped. The machine state alone
+    // decides everything below.
     const dropped = composeWith([]);
     expect(dropped.dimensionGapsAreDepthOnly).toBe(true);
     expect(parseLedger(dropped.body)?.sha).toBe('deadbeef00112233');
+
+    // Compliant: the canonical entry is relayed. The splice retires it, the
+    // structural line carries the disclosure — so the BODY IS BYTE-IDENTICAL
+    // to the dropped case. That is the whole relay-independence claim in one
+    // assertion, and it is what an English-only splice broke for the Chinese
+    // pair: the relayed zh entry survived into the whiffed-dimension
+    // rendering beside the structural stop line — the same gap said twice,
+    // one copy under the wrong cause.
+    const relayed = composeWith([budgetStopEntry(3)]);
+    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayed.body).toBe(dropped.body);
+
+    const relayedZh = composeWith([budgetStopEntryZh(3)]);
+    expect(relayedZh.dimensionGapsAreDepthOnly).toBe(true);
+    expect(relayedZh.body).toBe(dropped.body);
 
     // A LINE-COVERAGE claim whose whiffed scope IS the reverse audit: same
     // head, mentions the phrase, marker present — and it must withhold. The
@@ -4519,6 +4525,35 @@ describe('the ledger marker reaches the POSTED body', () => {
     ]);
     expect(whiffed.dimensionGapsAreDepthOnly).toBe(false);
     expect(parseLedger(whiffed.body)?.sha).toBeUndefined();
+  });
+
+  it('classifies a ROUND-CAP stop the same way, relay or no relay', () => {
+    // The round-cap branch mints its own canonical pair; without a pin the
+    // budget branch could hold while this one regressed to relay-dependence.
+    const composeWith = (dims: string[]): ReturnType<typeof composeReview> => {
+      const planPath = coveredPlan(['verify', 'reverse-audit'], {
+        prNumber: 8255,
+        fetchedSha: 'deadbeef00112233',
+      });
+      writeRoundCapStop(planPath, 5);
+      return composeReview({
+        planPath,
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        draftedComments: [
+          { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+        ],
+        unreviewedDimensions: dims,
+      });
+    };
+    const relayed = composeWith([roundCapStopEntry(5)]);
+    expect(relayed.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(relayed.body)?.sha).toBe('deadbeef00112233');
+    const dropped = composeWith([]);
+    expect(dropped.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(dropped.body)?.sha).toBe('deadbeef00112233');
   });
 
   it('gives stop-shaped PROSE no exemption when no marker backs it', () => {

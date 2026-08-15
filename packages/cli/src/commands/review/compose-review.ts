@@ -33,7 +33,9 @@ import {
 import { compressSummary } from './findings.js';
 import {
   BUDGET_STOP_PHRASE,
+  BUDGET_STOP_PHRASE_ZH,
   ROUND_CAP_PHRASE,
+  ROUND_CAP_PHRASE_ZH,
   budgetStopDisclosure,
   budgetStopEntry,
   budgetStopEntryZh,
@@ -778,9 +780,16 @@ function composeReviewBody(
       // marker's `cause` picks which; an absent cause is a time stop, for
       // markers written before the cause field existed.
       const isRoundCap = stop.cause === 'round-cap';
-      const phrase = isRoundCap ? ROUND_CAP_PHRASE : BUDGET_STOP_PHRASE;
+      // BOTH languages: the exemption admits the Chinese pair as a compliant
+      // relay, so the splice must retire it too — an English-only phrase let
+      // a relayed `budgetStopEntryZh` survive into the whiffed-dimension
+      // rendering beside the structural stop line, the same gap said twice
+      // with the wrong cause on one of them.
+      const phrases = isRoundCap
+        ? [ROUND_CAP_PHRASE, ROUND_CAP_PHRASE_ZH]
+        : [BUDGET_STOP_PHRASE, BUDGET_STOP_PHRASE_ZH];
       for (let i = unreviewed.length - 1; i >= 0; i--) {
-        if (unreviewed[i].includes(phrase)) {
+        if (phrases.some((ph) => unreviewed[i].includes(ph))) {
           splicedForBudgetPhrase.push(unreviewed[i]);
           unreviewed.splice(i, 1);
         }
