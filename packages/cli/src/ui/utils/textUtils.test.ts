@@ -448,5 +448,13 @@ describe('textUtils', () => {
       expect(getCachedStringWidth(longCjk)).toBe(2002);
       expect(__getTextUtilsCacheSizes().stringWidth).toBe(0);
     });
+
+    it('caches string width keys at the length limit', () => {
+      clearStringWidthCache();
+      const limitCjk = '目'.repeat(1000);
+
+      expect(getCachedStringWidth(limitCjk)).toBe(2000);
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(1);
+    });
   });
 });

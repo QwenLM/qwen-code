@@ -154,15 +154,17 @@ export const getCachedStringWidth = (str: string): number => {
     return str.length;
   }
 
+  if (str.length > MAX_STRING_LENGTH_TO_CACHE) {
+    return stringWidth(str);
+  }
+
   if (stringWidthCache.has(str)) {
     return stringWidthCache.get(str)!;
   }
 
   const width = stringWidth(str);
-  if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
-    evictOldestTextCacheEntry(stringWidthCache);
-    stringWidthCache.set(str, width);
-  }
+  evictOldestTextCacheEntry(stringWidthCache);
+  stringWidthCache.set(str, width);
 
   return width;
 };
