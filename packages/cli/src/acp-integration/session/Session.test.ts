@@ -10858,6 +10858,114 @@ describe('Session', () => {
         );
       });
 
+      it('records a partially-referenced mid-turn message with the placeholder, never an empty displayText', async () => {
+        // A message whose media references cover only a SUBSET of its image
+        // blocks will NOT persist references (#buildMidTurnParts' count gate).
+        // The display-text gate must agree and emit the attachments
+        // placeholder — never '' — or replay/resume fall back to the recorded
+        // parts and leak the raw internal prefix.
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'aW1nMQ==',
+                },
+                {
+                  type: 'image',
+                  mimeType: 'image/png',
+                  data: 'aW1nMg==',
+                },
+              ],
+              displayText: '',
+              // One reference for two image blocks -> references will NOT be
+              // persisted, so displayText must not be ''.
+              mediaReferences: [
+                {
+                  type: 'image',
+                  mediaId: 'ref-1',
+                  mimeType: 'image/png',
+                  size: 4,
+                },
+              ],
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: [User message with attachments]',
+            },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'aW1nMQ==',
+              },
+            },
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'aW1nMg==',
+              },
+            },
+          ],
+          '[User message with attachments]',
+        );
+      });
+
       it('keeps uncovered audio bytes in the transcript record', async () => {
         // References are image-only: a drain whose only media block is audio
         // must NOT take the reference-recording path (the gate would strip

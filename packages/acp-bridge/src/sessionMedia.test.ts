@@ -208,6 +208,24 @@ describe('SessionMediaStore', () => {
     }
   });
 
+  it('rejects duplicate references to one mediaId in a single message', async () => {
+    // A block count cap alone does not bound the resolved payload: the same
+    // mediaId repeated N times passes admission and expands per occurrence at
+    // dispatch, so one small upload can serialize into gigabytes. Reject the
+    // duplicate occurrences at admission.
+    const store = new SessionMediaStore();
+    try {
+      const reference = await store.put(Uint8Array.of(1, 2, 3), 'image/png');
+      expect(() =>
+        store.assertReferences([reference, { ...reference }]),
+      ).toThrow(/more than once/);
+      // A single occurrence is still valid.
+      expect(() => store.assertReferences([reference])).not.toThrow();
+    } finally {
+      await store.close();
+    }
+  });
+
   it('rejects references from another session store', async () => {
     const first = new SessionMediaStore();
     const second = new SessionMediaStore();

@@ -1122,7 +1122,7 @@ function getValidMidTurnContentBlocks(
 function getStructuredMidTurnDisplayText(
   content: ContentBlock[],
   displayText: unknown,
-  hasMediaReferences: boolean,
+  willPersistReferences: boolean,
 ): string {
   if (typeof displayText === 'string' && displayText.trim().length > 0) {
     return displayText.trim();
@@ -1139,11 +1139,13 @@ function getStructuredMidTurnDisplayText(
 
   if (text) return text;
 
-  // Messages with references keep '' so replay projects the media ids.
-  // Inline-media-only messages need a visible placeholder: resume and replay
-  // fall back to the recorded parts, which start with the raw internal
-  // prefix, when displayText is empty.
-  if (!hasMediaReferences && hasInlineMediaContentBlock(content)) {
+  // Only records that WILL persist media references keep '' (replay then
+  // projects the media ids). The gate must match #buildMidTurnParts'
+  // persistence condition exactly; a record that will not carry references
+  // needs the visible placeholder, because resume and replay fall back to the
+  // recorded parts — which start with the raw internal prefix — when
+  // displayText is empty.
+  if (!willPersistReferences && hasInlineMediaContentBlock(content)) {
     return '[User message with attachments]';
   }
 
@@ -1167,6 +1169,14 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
         const mediaReferences = readDaemonMediaReferences(
           item['mediaReferences'],
         );
+        // Same gate #buildMidTurnParts uses to decide whether references are
+        // persisted; display text must agree or a mixed inline+reference
+        // message records displayText:'' with NO references — a shape replay
+        // and resume cannot project.
+        const willPersistReferences =
+          mediaReferences !== undefined &&
+          mediaReferences.length ===
+            content.filter((block) => block.type === 'image').length;
         return [
           {
             kind: 'structured',
@@ -1174,7 +1184,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
             displayText: getStructuredMidTurnDisplayText(
               content,
               item['displayText'],
-              mediaReferences !== undefined,
+              willPersistReferences,
             ),
             ...(mediaReferences ? { mediaReferences } : {}),
           },

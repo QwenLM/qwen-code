@@ -117,6 +117,10 @@ export class SessionMediaStore {
   }
 
   assertReferences(content: readonly unknown[]): void {
+    // One occurrence per mediaId: the serializer expands every reference at
+    // dispatch, so repeated occurrences of one stored blob amplify the
+    // outbound payload without bound even though only one read is needed.
+    const seenMediaIds = new Set<string>();
     for (const block of content) {
       if (
         !block ||
@@ -132,6 +136,13 @@ export class SessionMediaStore {
           'invalid_session_media_reference',
         );
       }
+      if (seenMediaIds.has(block.mediaId)) {
+        throw new SessionMediaReferenceError(
+          `Session media referenced more than once: ${block.mediaId}`,
+          'invalid_session_media_reference',
+        );
+      }
+      seenMediaIds.add(block.mediaId);
       const stored = this.records.get(block.mediaId);
       if (
         !stored ||

@@ -151,7 +151,13 @@ export function parseSidechannelMidTurnInjected(
     Array.isArray(items) && items.length === messages.length
       ? items
       : undefined;
-  const hasMedia =
+  // Mirror the SDK normalizer's `hasRenderableItemContent`: a frame survives
+  // when any item carries an image block OR a non-empty text block. The
+  // degraded-media drain publishes `messages: ['']` whose items hold only the
+  // '[Attached media is no longer available]' text block — dropping it here
+  // while the normalizer renders it leaves the queued row unsettled until the
+  // turn-end idle reconcile.
+  const hasRenderableContent =
     alignedItems !== undefined &&
     alignedItems.some(
       (item) =>
@@ -162,10 +168,15 @@ export function parseSidechannelMidTurnInjected(
           (block) =>
             !!block &&
             typeof block === 'object' &&
-            (block as Record<string, unknown>)['type'] === 'image',
+            ((block as Record<string, unknown>)['type'] === 'image' ||
+              ((block as Record<string, unknown>)['type'] === 'text' &&
+                typeof (block as Record<string, unknown>)['text'] ===
+                  'string' &&
+                ((block as Record<string, unknown>)['text'] as string).length >
+                  0)),
         ),
     );
-  if (!stringMessages.some(Boolean) && !hasMedia) return undefined;
+  if (!stringMessages.some(Boolean) && !hasRenderableContent) return undefined;
   const messageIds = dataRecord['messageIds'];
   const stringMessageIds =
     Array.isArray(messageIds) &&

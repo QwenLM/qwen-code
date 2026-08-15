@@ -7095,20 +7095,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
 
-  const removeQueuedMedia = (
-    entry: SessionEntry,
-    content: readonly BridgePromptContentBlock[] | undefined,
-  ) => {
-    for (const block of content ?? []) {
-      if (!isSessionMediaReference(block)) continue;
-      void entry.media.remove(block.mediaId).catch((error) => {
-        writeStderrLine(
-          `[session-media] session=${JSON.stringify(entry.sessionId)} failed to remove queued media ${JSON.stringify(block.mediaId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
-        );
-      });
-    }
-  };
-
   const promoteMidTurnMessage = (
     entry: SessionEntry,
     messageId: string,
@@ -10255,9 +10241,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       if (target.state === 'queued') {
         // A queued prompt never dispatches once aborted — safe to drop
-        // from the list immediately.
+        // from the list immediately. Its media blob is NOT deleted here:
+        // the store has no reference counting, so a sibling queued message,
+        // a completed prompt's replay metadata, or another client may still
+        // hold the same mediaId. Blobs live until session close / TTL sweep
+        // or an explicit removeSessionMedia.
         entry.pendingPromptList.splice(idx, 1);
-        removeQueuedMedia(entry, target.content);
       } else {
         // A RUNNING prompt must stay on the list (hidden from
         // `getPendingPrompts` via the `removed` flag) until it settles
@@ -10488,7 +10477,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const [removed] = entry.midTurnMessageQueue.splice(index, 1);
       rememberMidTurnId(entry.settledMidTurnMessageIds, messageId);
       if (removed) {
-        removeQueuedMedia(entry, removed.content);
+        // No media deletion here — see removePendingPrompt: the blob may be
+        // shared with other live references and is reclaimed at session
+        // close / TTL sweep instead.
         try {
           entry.events.publish({
             type: 'pending_prompt_completed',

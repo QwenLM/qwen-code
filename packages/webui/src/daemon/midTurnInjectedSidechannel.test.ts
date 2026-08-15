@@ -118,6 +118,30 @@ describe('parseSidechannelMidTurnInjected', () => {
     });
   });
 
+  it('survives a degraded image-only echo (placeholder text block)', () => {
+    // The degraded-media drain publishes messages:[''] whose item holds only
+    // the '[Attached media is no longer available]' text block. The SDK
+    // normalizer renders that frame; the sidechannel must keep it too so
+    // dedup/callback settlement runs instead of waiting for the idle reconcile.
+    const placeholder = '[Attached media is no longer available]';
+    expect(
+      parseSidechannelMidTurnInjected({
+        type: 'mid_turn_message_injected',
+        data: {
+          sessionId: 's-1',
+          messages: [''],
+          messageIds: ['mid-gone'],
+          items: [{ content: [{ type: 'text', text: placeholder }] }],
+        },
+      }),
+    ).toEqual({
+      sessionId: 's-1',
+      messages: [''],
+      messageIds: ['mid-gone'],
+      items: [{ content: [{ type: 'text', text: placeholder }] }],
+    });
+  });
+
   it('drops misaligned items', () => {
     expect(
       parseSidechannelMidTurnInjected({
