@@ -1276,6 +1276,7 @@ export const useGeminiStream = (
     }> => {
       let nextParts = parts;
       let modelOverrideResolutionFailed = false;
+      let targetSupportsImage = false;
       if (nextParts !== null && hasAudioParts(nextParts)) {
         const activeOverride = modelOverrideRef.current;
         let shouldRunBridge = activeOverride === undefined;
@@ -1289,6 +1290,8 @@ export const useGeminiStream = (
             const runtimeView = await config
               .getBaseLlmClient()
               .resolveForModel(routeSelector, { failClosed: true });
+            targetSupportsImage =
+              runtimeView.contentGeneratorConfig.modalities?.image === true;
             supportsAudio =
               runtimeView.contentGeneratorConfig.modalities?.audio === true;
           } catch (error) {
@@ -1368,6 +1371,13 @@ export const useGeminiStream = (
           }
           nextParts = result.parts;
         }
+      }
+      if (targetSupportsImage && nextParts !== null) {
+        return {
+          parts: nextParts,
+          shouldProceed: true,
+          modelOverrideResolutionFailed,
+        };
       }
       const visionResult = await applyVisionBridgeIfNeeded(
         nextParts,
@@ -3145,28 +3155,27 @@ export const useGeminiStream = (
         });
       }
 
-      if (modelOverrideResolutionFailed) {
-        // Images resolved before the failure may have been retained for the
-        // now-cleared full-turn route. Convert them on the fallback route too.
-        for (let index = 0; index < resolvedSegments.length; index += 1) {
-          const segment = resolvedSegments[index];
-          if (!hasImageParts(segment)) continue;
-          const rechecked = await applyVisionBridgeIfNeeded(
-            segment,
-            timestamp,
-            signal,
-            false,
-          );
-          if (!rechecked.shouldProceed) {
-            resolvedSegments.splice(index, 1);
-            resolvedForRecording.splice(index, 1);
-            index -= 1;
-            continue;
-          }
-          const recheckedParts = normalizePartList(rechecked.parts ?? segment);
-          resolvedSegments[index] = recheckedParts;
-          resolvedForRecording[index].parts = recheckedParts;
+      // A later attachment can replace or clear the route selected for an
+      // earlier segment. Reconcile every retained medium with the final route
+      // without allowing this repair pass to select another model.
+      for (let index = 0; index < resolvedSegments.length; index += 1) {
+        const segment = resolvedSegments[index];
+        if (!hasImageParts(segment) && !hasAudioParts(segment)) continue;
+        const rechecked = await applyBridgeConversionsIfNeeded(
+          segment,
+          timestamp,
+          signal,
+          false,
+        );
+        if (!rechecked.shouldProceed) {
+          resolvedSegments.splice(index, 1);
+          resolvedForRecording.splice(index, 1);
+          index -= 1;
+          continue;
         }
+        const recheckedParts = normalizePartList(rechecked.parts ?? segment);
+        resolvedSegments[index] = recheckedParts;
+        resolvedForRecording[index].parts = recheckedParts;
       }
 
       const resolvedMessages: Part[] = [];
@@ -3207,7 +3216,6 @@ export const useGeminiStream = (
     [
       addItem,
       applyBridgeConversionsIfNeeded,
-      applyVisionBridgeIfNeeded,
       config,
       handleSlashCommand,
       onDebugMessage,

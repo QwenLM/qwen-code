@@ -4165,6 +4165,143 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('rechecks earlier drained audio against a later full-turn vision route', async () => {
+    const audioPrompt = 'listen @/tmp/recording.wav';
+    const imagePrompt = 'inspect @/tmp/screenshot.png';
+    const audioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const transcriptPart: Part = { text: '[final-route transcript]' };
+    const visionSelector = 'vision-agent\0https://vision.example.com/v1\0';
+    const resolveForModel = vi.fn(async (selector: string) => ({
+      contentGeneratorConfig: {
+        modalities: selector === 'audio-skill-model' ? { audio: true } : {},
+      },
+    }));
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }),
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [transcriptPart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      async ({ query }) => ({
+        processedQuery:
+          query === audioPrompt
+            ? [{ text: audioPrompt }, audioPart]
+            : [{ text: imagePrompt }, imagePart],
+        shouldProceed: true,
+      }),
+    );
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-final-route',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-final-route',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call-final-route',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-final-route',
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+          modelOverride: 'audio-skill-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([audioPrompt, imagePrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.(completedToolCalls);
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(resolveForModel).toHaveBeenCalledWith('audio-skill-model', {
+      failClosed: true,
+    });
+    expect(resolveForModel).toHaveBeenCalledWith(
+      'vision-agent\0https://vision.example.com/v1',
+      { failClosed: true },
+    );
+    expect(mockRunAudioBridge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetSupportsAudio: false,
+        parts: [{ text: audioPrompt }, audioPart],
+      }),
+    );
+    const send = mockSendMessageStream.mock.calls[0];
+    expect(send?.[3]).toMatchObject({ modelOverride: visionSelector });
+    expect(JSON.stringify(send?.[0])).toContain('[final-route transcript]');
+    expect(JSON.stringify(send?.[0])).not.toContain('audio/wav');
+  });
+
   it('keeps a failed skill route fallback sticky across drained media', async () => {
     const queuedPrompt = 'listen @/tmp/recording.wav';
     const imagePrompt = 'inspect @/tmp/first.png';
@@ -4399,137 +4536,169 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('keeps raw audio on its active route when a mixed turn also needs the vision bridge', async () => {
-    const queuedPrompt =
-      'inspect @/tmp/screenshot.png and listen @/tmp/recording.wav';
-    const resolvedTextPart: Part = { text: queuedPrompt };
-    const resolvedAudioPart: Part = {
-      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
-    };
-    const resolvedImagePart: Part = {
-      inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
-    };
-    const visionTextPart: Part = { text: '[mid-turn image transcript]' };
-    const resolveForModel = vi.fn().mockResolvedValue({
-      contentGeneratorConfig: { modalities: { audio: true } },
-    });
-    Object.assign(mockConfig, {
-      getEffectiveInputModalities: () => ({}),
-      getDefaultVisionBridgeModel: () => ({
-        id: 'vision-agent',
-        agentCapable: true,
-      }),
-      getBaseLlmClient: () => ({ resolveForModel }),
-    });
-    mockRunVisionBridge.mockResolvedValue({
-      applied: true,
-      status: 'ok',
-      parts: [resolvedTextPart, resolvedAudioPart, visionTextPart],
-      convertedCount: 1,
-      omittedCount: 0,
-      modelId: 'vision-agent',
-      egressOccurred: true,
-    });
-    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
-      processedQuery: [resolvedTextPart, resolvedAudioPart, resolvedImagePart],
-      shouldProceed: true,
-    });
-    const toolCallResponseParts: Part[] = [
-      {
-        functionResponse: {
-          id: 'call1',
-          name: 'testTool',
-          response: { result: 'ok' },
+  it.each([
+    ['audio-only active route', false],
+    ['audio-and-image active route', true],
+  ] as const)(
+    'keeps raw audio on its %s for a mixed media turn',
+    async (_label, supportsImage) => {
+      const queuedPrompt =
+        'inspect @/tmp/screenshot.png and listen @/tmp/recording.wav';
+      const resolvedTextPart: Part = { text: queuedPrompt };
+      const resolvedAudioPart: Part = {
+        inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+      };
+      const resolvedImagePart: Part = {
+        inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+      };
+      const visionTextPart: Part = { text: '[mid-turn image transcript]' };
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGeneratorConfig: {
+          modalities: {
+            audio: true,
+            ...(supportsImage ? { image: true } : {}),
+          },
         },
-      },
-    ];
-    const completedToolCalls: TrackedToolCall[] = [
-      {
-        request: {
-          callId: 'call1',
-          name: 'testTool',
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'prompt-id-mixed-skill-override',
+      });
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: () => ({}),
+        getDefaultVisionBridgeModel: () => ({
+          id: 'vision-agent',
+          agentCapable: true,
+        }),
+        getBaseLlmClient: () => ({ resolveForModel }),
+      });
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [resolvedTextPart, resolvedAudioPart, visionTextPart],
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-agent',
+        egressOccurred: true,
+      });
+      vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+        processedQuery: [
+          resolvedTextPart,
+          resolvedAudioPart,
+          resolvedImagePart,
+        ],
+        shouldProceed: true,
+      });
+      const toolCallResponseParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call1',
+            name: 'testTool',
+            response: { result: 'ok' },
+          },
         },
-        status: 'success',
-        responseSubmittedToGemini: false,
-        response: {
-          callId: 'call1',
-          responseParts: toolCallResponseParts,
-          errorType: undefined,
-          modelOverride: 'audio-skill-model',
-        },
-        tool: { displayName: 'MockTool' },
-        invocation: {
-          getDescription: () => 'Mock description',
-        } as unknown as AnyToolInvocation,
-      } as TrackedCompletedToolCall,
-    ];
-    const midTurnDrainRef = {
-      current: vi
-        .fn<() => string[]>()
-        .mockReturnValueOnce([queuedPrompt])
-        .mockReturnValue([]),
-    };
-    let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
-      | null = null;
-    mockUseReactToolScheduler.mockImplementation((onComplete) => {
-      capturedOnComplete = onComplete;
-      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-    });
+      ];
+      const completedToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'call1',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-mixed-skill-override',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'call1',
+            responseParts: toolCallResponseParts,
+            errorType: undefined,
+            modelOverride: 'audio-skill-model',
+          },
+          tool: { displayName: 'MockTool' },
+          invocation: {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ];
+      const midTurnDrainRef = {
+        current: vi
+          .fn<() => string[]>()
+          .mockReturnValueOnce([queuedPrompt])
+          .mockReturnValue([]),
+      };
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
 
-    renderHook(() =>
-      useGeminiStream(
-        new MockedGeminiClientClass(mockConfig),
-        [],
-        mockAddItem,
-        mockConfig,
-        true,
-        mockLoadedSettings,
-        mockOnDebugMessage,
-        mockHandleSlashCommand,
-        false,
-        () => 'vscode' as EditorType,
-        () => {},
-        () => Promise.resolve(),
-        false,
-        () => {},
-        () => {},
-        () => {},
-        () => {},
-        80,
-        24,
-        midTurnDrainRef,
-      ),
-    );
+      renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+          midTurnDrainRef,
+        ),
+      );
 
-    await act(async () => {
-      if (capturedOnComplete) {
-        await capturedOnComplete(completedToolCalls);
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete(completedToolCalls);
+        }
+      });
+
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      expect(mockRunAudioBridge).not.toHaveBeenCalled();
+      if (supportsImage) {
+        expect(mockRunVisionBridge).not.toHaveBeenCalled();
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          [
+            ...toolCallResponseParts,
+            resolvedTextPart,
+            resolvedAudioPart,
+            resolvedImagePart,
+          ],
+          expect.any(AbortSignal),
+          'prompt-id-mixed-skill-override',
+          expect.objectContaining({ modelOverride: 'audio-skill-model\0' }),
+        );
+      } else {
+        expect(mockRunVisionBridge).toHaveBeenCalledWith({
+          config: mockConfig,
+          parts: [resolvedTextPart, resolvedAudioPart, resolvedImagePart],
+          signal: expect.any(AbortSignal),
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          [
+            ...toolCallResponseParts,
+            resolvedTextPart,
+            resolvedAudioPart,
+            visionTextPart,
+          ],
+          expect.any(AbortSignal),
+          'prompt-id-mixed-skill-override',
+          expect.objectContaining({ modelOverride: 'audio-skill-model\0' }),
+        );
       }
-    });
-
-    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
-    expect(mockRunAudioBridge).not.toHaveBeenCalled();
-    expect(mockRunVisionBridge).toHaveBeenCalledWith({
-      config: mockConfig,
-      parts: [resolvedTextPart, resolvedAudioPart, resolvedImagePart],
-      signal: expect.any(AbortSignal),
-    });
-    expect(mockSendMessageStream).toHaveBeenCalledWith(
-      [
-        ...toolCallResponseParts,
-        resolvedTextPart,
-        resolvedAudioPart,
-        visionTextPart,
-      ],
-      expect.any(AbortSignal),
-      'prompt-id-mixed-skill-override',
-      expect.objectContaining({ modelOverride: 'audio-skill-model\0' }),
-    );
-  });
+    },
+  );
 
   it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
