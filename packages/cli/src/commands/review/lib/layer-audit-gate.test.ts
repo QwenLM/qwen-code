@@ -203,7 +203,7 @@ describe('the real reader on a resumed run — prior-session auditors count', ()
     utimesSync(plan, old, old);
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
     mkdirSync(join(dir, 'subagents', 'S0'), { recursive: true });
-    mkdirSync(join(dir, 'plan-prompts'), { recursive: true });
+    mkdirSync(promptRecordDir(join(dir, 'plan.json')), { recursive: true });
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 

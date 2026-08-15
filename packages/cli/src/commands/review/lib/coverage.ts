@@ -64,6 +64,7 @@ import {
   wasDeliveredVerbatim,
   briefPath,
   findingsPointerOf,
+  findingsFilePath,
 } from './prompt-record.js';
 import {
   requiredAgents,
@@ -264,6 +265,16 @@ function readPlan(path: string): { plan: Plan; mtimeMs: number } {
   }
   return { plan, mtimeMs: statSync(path).mtimeMs };
 }
+
+/**
+ * How far apart the shard keys of ONE findings digest may be written.
+ *
+ * The round builder writes a digest's records in one pass, so they land within
+ * milliseconds; a previous list's records are a round apart at minimum. Wide
+ * enough to keep a slow write together, far narrower than the gap it must
+ * separate.
+ */
+const DIGEST_WINDOW_MS = 5000;
 
 /** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
 export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+\d+\b/i;
@@ -1557,6 +1568,47 @@ export function verificationGaps(
     return 'not-launched';
   };
 
+  /**
+   * Narrow a step's keys to the CURRENT findings digest.
+   *
+   * `verify--<digest>` is one key per shard per digest, and the records
+   * accumulate: a run that finds new Criticals writes a new digest's keys
+   * beside the old ones. Taking the best delivery across ALL of them let a
+   * verifier that succeeded against an EARLIER findings list satisfy the floor
+   * for a list it never opened — and widening the record set to prior sessions
+   * is what made that reachable in practice.
+   *
+   * The digest's own findings file dates it. Keys written together (the shards
+   * of one digest) land within the same moment, so the newest file plus a
+   * small window is the current set; anything older is a previous list's
+   * verification and does not vouch for this one. Keys with no findings file
+   * on disk stay in: they cannot be dated, and they also cannot reach `ok` —
+   * `deliveryOf` requires the findings read — so they can only make the
+   * verdict stricter.
+   */
+  const currentDigestKeys = (planPath: string, keys: string[]): string[] => {
+    const dated: Array<{ key: string; mtimeMs: number }> = [];
+    const undatable: string[] = [];
+    for (const key of keys) {
+      try {
+        dated.push({
+          key,
+          mtimeMs: statSync(findingsFilePath(planPath, key)).mtimeMs,
+        });
+      } catch {
+        undatable.push(key);
+      }
+    }
+    if (dated.length === 0) return keys;
+    const newest = Math.max(...dated.map((d) => d.mtimeMs));
+    return [
+      ...dated
+        .filter((d) => d.mtimeMs >= newest - DIGEST_WINDOW_MS)
+        .map((d) => d.key),
+      ...undatable,
+    ];
+  };
+
   /** The best shape across a step's keys — the floor is one agent, not all of them. */
   const bestDelivery = (keys: string[]): Delivery => {
     if (keys.length === 0) return 'not-built';
@@ -1639,7 +1691,7 @@ export function verificationGaps(
     const verifyKeys = [...built.keys()].filter(
       (k) => k === 'verify' || k.startsWith('verify--'),
     );
-    verify = bestDelivery(verifyKeys);
+    verify = bestDelivery(currentDigestKeys(planPath, verifyKeys));
     if (verify !== 'ok') {
       unverifiedFindings = true;
       remediation.push(

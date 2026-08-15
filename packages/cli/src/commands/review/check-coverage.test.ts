@@ -1813,6 +1813,30 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(r.gaps).toEqual([]);
   });
 
+  it('does not let an OLDER findings digest vouch for the current one', () => {
+    // `verify--<digest>` keys accumulate: a run that finds new Criticals
+    // writes a new digest's records beside the old. Taking the best delivery
+    // across all of them let a verifier that succeeded against an EARLIER
+    // list satisfy the floor for a list it never opened — and widening the
+    // record set to prior sessions is what made that reachable.
+    const p = plan();
+    step45(p, 'reverse-audit');
+    step45(p, 'verify--old11111111', { findings: true });
+    // The current digest: built and launched, but its findings list unread.
+    step45(p, 'verify--new22222222', {
+      findings: true,
+      opensFindings: false,
+    });
+    // Date the two lists apart — the round builder writes a digest's records
+    // in one pass, so a previous list is a round older.
+    const old = new Date(Date.now() - 600_000);
+    utimesSync(findingsFilePath(p, 'verify--old11111111'), old, old);
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.unverifiedFindings).toBe(true);
+  });
+
   it('passes when both verify and reverse audit ran on a review with findings', () => {
     const p = plan();
     step45(p, 'reverse-audit');

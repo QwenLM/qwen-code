@@ -1383,8 +1383,7 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
   }
 
   /** The ledger `fetch-pr` writes, naming the interrupted attempt S0. */
-  function runLedger(plan: string, project: string): void {
-    void project;
+  function runLedger(plan: string): void {
     appendRunSession(
       plan,
       { QWEN_CODE_SESSION_ID: 'S0' },
@@ -1420,7 +1419,7 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
         event('2026-08-03T10:10:00Z', { input: 500, output: 50 }),
       ].join(''),
     );
-    runLedger(plan, project);
+    runLedger(plan);
 
     const ledger = computeLedger(plan, env);
     expect(ledger.main.calls).toBe(1);
@@ -1428,9 +1427,44 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
     expect(ledger.main.outputTokens).toBe(50);
   });
 
+  it('still refuses an empty CURRENT chat when prior sessions have events', () => {
+    // The invariant the emptiness check exists for: prior events must not
+    // vouch for a broken current chat. The refusal tests predate the ledger
+    // and set up no prior session, so a refactor moving the check after the
+    // fold — or testing the folded set — would ship green while a resumed run
+    // whose new session's recorder degraded rendered a ledger that looks
+    // complete.
+    const { plan, project, env } = fixture();
+    writeFileSync(join(project, 'chats', `${SESSION}.jsonl`), '');
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+    );
+    runLedger(plan);
+
+    expect(() => computeLedger(plan, env)).toThrow(
+      /no main-loop usage records at or after the plan/,
+    );
+  });
+
+  it('announces the span in the rendered summary, not only in the object', () => {
+    // The only user-visible statement that the totals cover more than this
+    // session. Asserted on the rendered text because that is where it can be
+    // deleted or crash at print time with every return-value test still green.
+    const { plan, project, env } = fixture();
+    writeFileSync(
+      join(project, 'chats', 'S0.jsonl'),
+      event('2026-08-03T10:05:00Z', { input: 1000, output: 100 }),
+    );
+    runLedger(plan);
+
+    const text = renderLedger(computeLedger(plan, env));
+    expect(text).toContain('1 earlier session');
+  });
+
   it("folds the interrupted attempt's main loop and agents into the totals", () => {
     const { plan, env, project } = fixture();
-    runLedger(plan, project);
+    runLedger(plan);
     writeFileSync(
       join(project, 'chats', 'S0.jsonl'),
       event('2026-08-03T10:01:00Z', { input: 1_000, output: 100 }),
@@ -1467,7 +1501,7 @@ describe('cost-ledger — a resumed run bills the whole review', () => {
 
   it('counts a prior session with agents but a lost chat file', () => {
     const { plan, env, project } = fixture();
-    runLedger(plan, project);
+    runLedger(plan);
     mkdirSync(join(project, 'subagents', 'S0'), { recursive: true });
     writeFileSync(
       join(project, 'subagents', 'S0', 'agent-a0.jsonl'),
