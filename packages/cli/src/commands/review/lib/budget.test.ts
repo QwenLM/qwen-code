@@ -635,6 +635,27 @@ describe('reverseAuditRoundCap — the one reader of the plan field', () => {
     ).toBe(5);
   });
 
+  it('honours a stored value in the INTERIOR of the tier-relative band', () => {
+    // Every other case here sits on a boundary — at the floor, at the tier, or
+    // outside — and a boundary-only suite cannot tell a tier-relative bound
+    // from a constant one: mutating `v <= tier` to `v <= LARGE_…ROUNDS` passed
+    // all 57 tests before these three. The interior is where the two differ,
+    // and it is reachable in production, not just by hand: the operator round
+    // ceiling writes exactly such a value into the plan.
+    expect(
+      reverseAuditRoundCap({ ...SMALL, budget: { reverseAuditRounds: 7 } }),
+    ).toBe(7);
+    expect(
+      reverseAuditRoundCap({ ...LARGE, budget: { reverseAuditRounds: 4 } }),
+    ).toBe(4);
+    // The same mutation read from the other side: a constant bound of five
+    // would hand a HUGE plan the four rounds it stores, past the finishability
+    // tier that is the whole reason that tier exists.
+    expect(
+      reverseAuditRoundCap({ ...HUGE, budget: { reverseAuditRounds: 4 } }),
+    ).toBe(3);
+  });
+
   it('clamps to the plan’s own tier, so a hand edit cannot cross topologies', () => {
     // The field is CLI-written and nothing here is the caller's to override.
     // A single global upper bound of ten would have honoured all three of
