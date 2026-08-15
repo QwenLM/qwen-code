@@ -89,6 +89,10 @@ export interface DaemonUiEventBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this event. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for events belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   originatorClientId?: string;
   rawEvent?: DaemonEvent;
 }
@@ -830,6 +834,10 @@ export interface DaemonTranscriptBlockBase {
   serverTimestamp?: number;
   /** Ordered persisted ChatRecord identities that contributed to this block. */
   sourceRecordIds?: readonly string[];
+  /** Admitted prompt identifier for content belonging to one turn. */
+  promptId?: string;
+  /** Durable checkpoint UUID for branching from this Assistant response. */
+  branchRecordId?: string;
   /**
    * Same as the previous `createdAt` semantics — client-local clock at the
    * moment the block was first observed. Renamed for clarity:
