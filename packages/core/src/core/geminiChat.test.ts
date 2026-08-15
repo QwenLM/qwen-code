@@ -5976,7 +5976,22 @@ describe('GeminiChat', async () => {
       chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
       chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
       chat.addHistory({ role: 'user', parts: [{ text: 'c' }] });
-      expect(chat.getHistoryLength()).toBe(chat.getHistory().length);
+      const expectedLength = chat.getHistory().length;
+      // Walk-only contract: the same throwing-spy pin the sibling no-clone
+      // accessors use, so a regression to getHistory()'s cloning
+      // implementation fails instead of merely matching the length
+      // (#8938 review).
+      const structuredCloneSpy = vi
+        .spyOn(globalThis, 'structuredClone')
+        .mockImplementation(() => {
+          throw new Error('unexpected deep clone');
+        });
+      try {
+        expect(chat.getHistoryLength()).toBe(expectedLength);
+        expect(structuredCloneSpy).not.toHaveBeenCalled();
+      } finally {
+        structuredCloneSpy.mockRestore();
+      }
     });
   });
 
@@ -9409,6 +9424,9 @@ describe('GeminiChat', async () => {
           const retries = events.filter(
             (event) => event.type === StreamEventType.RETRY,
           );
+          // Guard against the assertion above going vacuous on an empty
+          // array: the scenario must actually emit a retry (#8938 review).
+          expect(retries.length).toBeGreaterThan(0);
           expect(retries.at(-1)?.isContinuation).toBeFalsy();
           expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
           expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
@@ -9451,6 +9469,17 @@ describe('GeminiChat', async () => {
           expect(
             mockContentGenerator.generateContentStream,
           ).toHaveBeenCalledTimes(3);
+          // The distinguishing pin between budget routing and any other
+          // retry path: the converted placeholder error must reach the
+          // invalid-stream budget handler (#8938 review).
+          expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+          expect(mockLogContentRetry).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+              model: 'test-model',
+            }),
+          );
           expect(
             events.some(
               (event) =>
@@ -9511,6 +9540,17 @@ describe('GeminiChat', async () => {
           ).toBe(false);
           expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
           expect(recordedText(recordAssistantTurn)).toBe('Recovered response');
+          // Same budget-routing pin as the sibling double-cut test: the
+          // streamError completed-placeholder discard must swap in the
+          // InvalidStreamError and reach the budget handler (#8938 review).
+          expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
+          expect(mockLogContentRetry).toHaveBeenCalledWith(
+            mockConfig,
+            expect.objectContaining({
+              error_type: 'UPSTREAM_DEGRADED_RESPONSE',
+              model: 'test-model',
+            }),
+          );
           // Record/history must agree: if the fresh replay did not fully
           // reset continuation state, history could retain '(request '
           // merged with the recovered text while the record is clean
@@ -9519,6 +9559,86 @@ describe('GeminiChat', async () => {
             role: 'model',
             parts: [{ text: 'Recovered response' }],
           });
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('does not convert a folded placeholder once a functionCall chunk was delivered', async () => {
+        // The folded '(request ' + 'timeout)' completes on the same attempt
+        // that delivers a functionCall before the cut. A delivered
+        // functionCall is the point of no return, so the
+        // placeholder->InvalidStreamError conversion must not fire — it
+        // would schedule a fresh retry AFTER the consumer received the tool
+        // call, orphaning the tool_use/tool_result pairing (#8938 review).
+        // The original transport error propagates instead.
+        vi.useFakeTimers();
+        try {
+          const recordAssistantTurn = vi.fn();
+          const chatWithRecording = chatWithRecorder(recordAssistantTurn);
+          const functionCallResponse = {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-1',
+                        name: 'someTool',
+                        args: { q: 1 },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockResolvedValueOnce(cutAfter([textChunk('(request ')]))
+            .mockResolvedValueOnce(
+              cutAfter([textChunk('timeout)'), functionCallResponse]),
+            )
+            .mockResolvedValueOnce(
+              (async function* () {
+                yield textChunk('Unexpected fresh retry', 'STOP');
+              })(),
+            );
+
+          const stream = await chatWithRecording.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'prompt-placeholder-after-function-call',
+          );
+          const events: StreamEvent[] = [];
+          const collecting = (async () => {
+            for await (const event of stream) events.push(event);
+          })();
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.advanceTimersByTimeAsync(60_000);
+          await expect(collecting).rejects.toBeTruthy();
+
+          // No fresh attempt after the functionCall was delivered.
+          expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+            2,
+          );
+          const lastChunk = [...events]
+            .reverse()
+            .find((event) => event.type === StreamEventType.CHUNK);
+          expect(lastChunk).toBeDefined();
+          expect(
+            lastChunk?.type === StreamEventType.CHUNK &&
+              lastChunk.value.candidates?.[0]?.content?.parts?.some(
+                (part) => 'functionCall' in part,
+              ),
+          ).toBe(true);
+          // No retry of any kind after the functionCall chunk.
+          const fcIndex = events.indexOf(lastChunk as StreamEvent);
+          expect(
+            events
+              .slice(fcIndex + 1)
+              .some((event) => event.type === StreamEventType.RETRY),
+          ).toBe(false);
         } finally {
           vi.useRealTimers();
         }

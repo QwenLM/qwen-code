@@ -3116,6 +3116,12 @@ export class GeminiChat {
             let convertedPlaceholderError: InvalidStreamError | undefined;
             if (
               isRetryableStreamTransportError &&
+              // A delivered functionCall is the point of no return (same
+              // invariant the continuation gate below and every
+              // processStreamResponse throw site enforce): converting here
+              // would schedule a fresh retry after the consumer already
+              // received the tool call, orphaning its tool_result pairing.
+              !streamYieldedFunctionCall &&
               transportContinuationText.trim() === UPSTREAM_DEGRADED_PLACEHOLDER
             ) {
               // The delivered text completed the fail-fast placeholder
