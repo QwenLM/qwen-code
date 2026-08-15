@@ -19,7 +19,6 @@ const prev = () => ({
   prNumber: '42',
   fetchedSha: SHA,
   diffSha256: DIFF_SHA,
-  worktreePath: '.qwen/tmp/review-pr-42',
 });
 
 const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
@@ -31,6 +30,38 @@ const probes = (over: Partial<ResumeProbes> = {}): ResumeProbes => ({
   resumeCount: 0,
   requestedEffort: null,
   ...over,
+});
+
+describe('assessResume — the empty-string shapes, named by the FIRST break', () => {
+  // Unreachable from today's writers, which is the point: the guards exist so
+  // a hand-edited or externally rewritten report is diagnosed by the artifact
+  // that is actually broken. The suites otherwise pass `undefined`/`null`,
+  // which take the `typeof` branches and leave these clauses free to be
+  // deleted.
+  it('an empty fetchedSha is a broken REPORT, not a moved worktree', () => {
+    expect(assessResume({ ...prev(), fetchedSha: '' }, probes())).toEqual({
+      ok: false,
+      reason: 'no-report',
+    });
+  });
+
+  it('an empty diffSha256 is a missing hash, not a mismatched one', () => {
+    expect(assessResume({ ...prev(), diffSha256: '' }, probes())).toEqual({
+      ok: false,
+      reason: 'no-diff-hash',
+    });
+  });
+
+  it('an empty recorded effort reads as the default, not as a mismatch', () => {
+    // The documented acceptance: nothing recorded means nothing to disagree
+    // with, so an explicit `high` matches the default a resumed run inherits.
+    expect(
+      assessResume(
+        { ...prev(), effort: '' },
+        probes({ requestedEffort: 'high' }),
+      ),
+    ).toEqual({ ok: true });
+  });
 });
 
 describe('assessResume', () => {

@@ -39,7 +39,6 @@ export interface PreviousReport {
   prNumber?: unknown;
   fetchedSha?: unknown;
   diffSha256?: unknown;
-  worktreePath?: unknown;
   effort?: unknown;
 }
 

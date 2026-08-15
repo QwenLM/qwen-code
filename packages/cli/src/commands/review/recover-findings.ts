@@ -20,8 +20,14 @@
 // hard failure is missing transcript infrastructure — a resume with no
 // evidence to read should say so rather than print an empty recovery.
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -286,6 +292,11 @@ export function recoverFindings(
     const rec = recovered.get(key) as AgentRecord;
     sections.push(`## ${key}`, '', rec.finalText.trim(), '');
   }
+  // The sibling with the identical --plan/--out contract does this too. The
+  // recovered list can be the only surviving copy of an interrupted attempt's
+  // results, and a missing parent directory turned that into a raw ENOENT
+  // crash — in exactly the post-mortem context this command exists for.
+  mkdirSync(dirname(outPath), { recursive: true });
   atomicWriteFileSync(outPath, sections.join('\n'), { noFollow: true });
 
   return {

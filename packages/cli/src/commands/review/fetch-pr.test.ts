@@ -3319,6 +3319,19 @@ describe('fetch-pr --resume', () => {
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'resume-cap' }]);
   });
 
+  it('spends the resume budget from the ledger, not one early', async () => {
+    // The ledger's first entry is the original run's own session, not a
+    // resume — so [original, resume1] is ONE resume spent, and RESUME_MAX = 2
+    // still allows this one. Dropping the `- 1` reads it as two and refuses a
+    // legitimate continuation; the three-session case cannot see the
+    // difference, because there `length` and `length - 1` rule alike.
+    const { sessionEntryCount } = await import('./lib/run-ledger.js');
+    vi.mocked(sessionEntryCount).mockReturnValue(2);
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toMatchObject({ resumed: true });
+  });
+
   it('does not count the CURRENT session against its own resume cap', async () => {
     // A same-session retry of the last permitted resume is that same resume —
     // `recordResume` dedupes on exactly this. Counting the session's own

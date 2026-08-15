@@ -10,7 +10,7 @@
 // lists earlier rounds wrote. Fixtures are files in a real temp dir — the
 // same discipline as check-coverage.test.ts, whose pairing this reuses.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   chmodSync,
   mkdtempSync,
@@ -22,7 +22,7 @@ import {
   utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
 import { recoverFindings, recoverFindingsCommand } from './recover-findings.js';
@@ -390,6 +390,85 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     expect(r.latestReverseAuditRound).toBe(2);
   });
 
+  it('certifies a NON-chunk agent that opened its brief AND the findings list only', () => {
+    // The positive counterpart of the refusals above: every other `opens:`
+    // fixture in this file opens a brief, so the diff-read side of the bar is
+    // exercised nowhere on the certifying path.
+    const key = 'invariant-a';
+    const prompt = built(key);
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, key), DIFF],
+      finalText: 'Invariant holds.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      key,
+    ]);
+  });
+
+  it('refuses only the AMBIGUOUS transcript, not the contested key itself', () => {
+    // The refusal is per-transcript by design: a transcript matching two keys
+    // proves neither. A competitor that matches exactly one key is innocent
+    // and still certifies — vetoing the whole key would drop finished work
+    // and, for a reverse-audit round, regress `latestReverseAuditRound`.
+    const promptA = built('1a');
+    const promptB = built('1b');
+    // One transcript launched with BOTH prompts concatenated matches both.
+    transcript('S0', 'ambig', `${promptA}\n${promptB}`, {
+      opens: [briefPath(plan, '1a'), briefPath(plan, '1b')],
+      finalText: 'Ambiguous.',
+    });
+    transcript('S0', 'clean', promptA, {
+      opens: [briefPath(plan, '1a')],
+      finalText: 'A clean single-key result.',
+    });
+
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      '1a',
+    ]);
+  });
+
+  it('normalizes both paths before refusing to overwrite the plan', () => {
+    // The guard is `resolve()` on both sides; a mutant comparing raw args, or
+    // normalizing one side only, lets a RELATIVE out path alias the plan and
+    // `atomicWriteFileSync` then destroys the run-epoch artifact every fence
+    // in this feature keys on.
+    const cwd = process.cwd();
+    try {
+      process.chdir(dir);
+      expect(() => recoverFindings({ plan, out: basename(plan) }, ENV)).toThrow(
+        /must not overwrite the plan/,
+      );
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  it('counts only REVERSE-AUDIT rounds toward latestReverseAuditRound', () => {
+    // The key grammar also produces `verify--round-N--<digest>`. Without the
+    // prefix gate a certified round-2 VERIFY agent reports the reverse audit
+    // as having reached round 2, and the resumed run starts at 3 — skipping
+    // audit rounds the dead run never certified.
+    const key = 'verify--round-2--abc123def456';
+    const prompt = built(key);
+    transcript('S0', 'a0', prompt, {
+      opens: [briefPath(plan, key)],
+      finalText: 'Verified round 2.',
+    });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([key]);
+    expect(r.latestReverseAuditRound).toBeNull();
+  });
+
+  it('reads an ABSENT record dir as empty, not as unreadable', () => {
+    // The pre-launch shape this command is built for: nothing recorded yet is
+    // a healthy state, and reporting it as an infrastructure fault prints a
+    // WARNING an operator cannot act on.
+    rmSync(promptRecordDir(plan), { recursive: true, force: true });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recordDirUnreadable).toBeNull();
+    expect(r.recoveredKeys).toEqual([]);
+  });
+
   it('fences findings files by the run epoch', () => {
     // Nothing clears the record dir: a PREVIOUS review of the same PR leaves
     // its rounds' lists behind, and restoring one would hand a resumed run a
@@ -473,6 +552,14 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
   );
 
   it('exits 1 when the transcript infrastructure is missing entirely', () => {
+    // The handler takes no env argument, so it reads `process.env` — which is
+    // what makes this a real probe of the `TranscriptsUnavailableError` exit
+    // path rather than of the suite's own `ENV` object. Stubbed explicitly
+    // rather than relied upon: a developer running the suite from inside a
+    // qwen-code session inherits both variables, and the test would then
+    // silently exercise the success path instead.
+    vi.stubEnv('QWEN_CODE_PROJECT_DIR', '');
+    vi.stubEnv('QWEN_CODE_SESSION_ID', '');
     const handler = recoverFindingsCommand.handler as (a: unknown) => void;
     const saved = process.exitCode;
     try {
@@ -480,6 +567,7 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
       expect(process.exitCode).toBe(1);
     } finally {
       process.exitCode = saved;
+      vi.unstubAllEnvs();
     }
   });
 });
