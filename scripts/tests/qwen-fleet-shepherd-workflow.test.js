@@ -927,6 +927,18 @@ exit 1`;
     });
     expect(notCollab.ts).toBe('');
     expect(notCollab.flag).toBe('');
+    // R11-1: …but the match is the exact "HTTP 404" token: a transport
+    // failure embeds the request URL, which carries the commenter login —
+    // a login containing "404" must classify as an outage (defer), never
+    // as "not a collaborator".
+    const transportErr = computeResume({
+      comments: [cmd('2026-08-06T00:00:00Z', 'maintainer4041')],
+      permFail: true,
+      permError:
+        'Get https://api.github.com/repos/QwenLM/qwen-code/collaborators/maintainer4041/permission: connection refused',
+    });
+    expect(transportErr.ts).toBe('');
+    expect(transportErr.flag).toBe('true');
     // R8-4: budget exhaustion — with THREE distinct-author fresh commands
     // the 2-read budget runs out before the oldest is examined; that must
     // surface as PERM_READ_FAILED (defer), never as "no trusted command"

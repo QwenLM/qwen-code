@@ -2160,6 +2160,13 @@ jobs:
     needs: 'route'
     if: |-
       ${{ needs.route.outputs.takeover_ack != '' }}
+    # A delayed or overlapping ack must not race a newer cycle's ack:
+    # queued (never cancelled) per-PR execution serializes the runs so
+    # the staleness reads below see each predecessor's writes (mirrors
+    # takeover-command).
+    concurrency:
+      group: 'qwen-autofix-takeover-ack-${{ needs.route.outputs.ack_pr }}'
+      cancel-in-progress: false
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -2224,6 +2231,42 @@ jobs:
           if [[ "${ACK}" == 'released' && "$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")" == "true" ]]; then
             echo "⚠️ released ack skipped on #${PR}: ${TAKEOVER_LABEL} re-applied since the release (stale ack)"
             exit 0
+          fi
+          # R2-4 mirror for the engaged direction: a delayed engaged ack — a
+          # red run re-run later, or overlapping runs from quick label
+          # toggles — must not DELETE a fresh cycle's needs-human and must
+          # not post a marker that resets the round window (REARM_KEY is
+          # the newest engage marker). Label absent → the engagement ended
+          # after this event. A bot engage ack at/after the newest labeled
+          # event → the current cycle is already acked. Both skip without
+          # posting or touching labels; an unreadable history skips too
+          # (fail closed — the scan's NEED_ENGAGE_ACK dedup heals a
+          # genuinely missed ack, while nothing heals a stale marker).
+          if [[ "${ACK}" == 'engaged' ]]; then
+            if [[ "$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")" != "true" ]]; then
+              echo "⚠️ engaged ack skipped on #${PR}: ${TAKEOVER_LABEL} removed since the label event (stale ack)"
+              exit 0
+            fi
+            if ! ack_ic="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null)"; then
+              echo "::warning::engaged ack skipped on #${PR}: comment history unreadable (fail closed)"
+              exit 0
+            fi
+            if ! ack_ev="$(gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null)"; then
+              echo "::warning::engaged ack skipped on #${PR}: event history unreadable (fail closed)"
+              exit 0
+            fi
+            ack_aced_ts="$(jq -rs --arg ab "${AUTOFIX_BOT}" '
+              add // [] | [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                | .created_at ] | max // ""' <<< "${ack_ic}")"
+            ack_labeled_ts="$(jq -rs --arg tl "${TAKEOVER_LABEL}" '
+              add // [] | [ .[] | select((.event // "") == "labeled")
+                | select((.label.name // "") == $tl)
+                | .created_at ] | max // ""' <<< "${ack_ev}")"
+            if [[ -n "${ack_aced_ts}" && ! "${ack_labeled_ts}" > "${ack_aced_ts}" ]]; then
+              echo "⚠️ engaged ack skipped on #${PR}: a bot engage ack already landed after the newest ${TAKEOVER_LABEL} label event (stale ack)"
+              exit 0
+            fi
           fi
           if [[ "${ACK}" == 'base-refused' ]]; then
             BODY="$(printf '🚫 Takeover not engaged: the loop only manages PRs that target `main`, and this one targets `%s`. A stacked PR moves whenever its base branch does, so "new feedback since the last round" and base-conflict resolution are not well defined until the base lands. Two ways forward: retarget this PR to `main` once the base PR merges — the `%s` label is left in place and the scan lists by label, so the next scan engages it with no re-labelling — or take over the base PR instead.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：循环只管理以 `main` 为 base 的 PR，而本 PR 的 base 是 `%s`。堆叠 PR 会随 base 分支移动，因此“自上一轮以来的新反馈”与 base 冲突处理都无法良定义。两条路：待 base 的 PR 合入后把本 PR 改为面向 `main` —— `%s` 标签予以保留，扫描按标签枚举，下一次扫描即会自动接管，无需重新打标签；或改为接管 base 那个 PR。\n\n</details>\n\n<!-- takeover-ack base-refused -->' "${ACK_BASE}" "${TAKEOVER_LABEL}" "${ACK_BASE}" "${TAKEOVER_LABEL}")"

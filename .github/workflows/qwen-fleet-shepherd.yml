@@ -448,11 +448,16 @@ jobs:
               [[ "${reads}" -ge 2 ]] && { PERM_READ_FAILED=true; break; }
               reads=$(( reads + 1 ))
               if ! cperm="$(gh api "repos/${REPO}/collaborators/${cauthor}/permission" --jq '.permission // ""' 2> /tmp/cperm-err)"; then
-                # 404 is GitHub's decisive "not a collaborator" answer —
-                # classify read-only instead of deferring: a defer here is
-                # renewable by any stranger's exact command each grace
-                # window, and it would pose a classification as an outage.
-                grep -q '404' /tmp/cperm-err && continue
+                # An exact "HTTP 404" is GitHub's decisive "not a
+                # collaborator" answer — classify read-only instead of
+                # deferring: a defer here is renewable by any stranger's
+                # exact command each grace window, and it would pose a
+                # classification as an outage. Match the token, not the
+                # bare number: a transport failure embeds the request URL,
+                # which carries the commenter login, so a login containing
+                # "404" would classify an outage as read-only — the same
+                # exact token every label DELETE tolerates (R10-1).
+                grep -q 'HTTP 404' /tmp/cperm-err && continue
                 PERM_READ_FAILED=true
                 continue
               fi

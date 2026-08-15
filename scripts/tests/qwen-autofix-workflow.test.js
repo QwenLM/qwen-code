@@ -2469,6 +2469,12 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "group: 'qwen-autofix-takeover-cmd-${{ needs.route.outputs.cmd_pr }}'",
     );
+    // R11-2: ack runs serialize per PR the same way, so a delayed engaged
+    // ack queues behind the newer cycle's ack and its staleness read sees
+    // that ack's marker.
+    expect(workflow).toContain(
+      "group: 'qwen-autofix-takeover-ack-${{ needs.route.outputs.ack_pr }}'",
+    );
     // Fork PRs can never produce a red ack run or a stuck label: the
     // unlabeled branch log-and-drops forks (fork pull_request events carry
     // no secrets, so emitting the ack would fail the PAT identity check),
@@ -2919,7 +2925,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(10) green.
-    expect(workflow.split('--paginate').length - 1).toBe(16);
+    expect(workflow.split('--paginate').length - 1).toBe(18);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) = ten normalized fetch sites. The
@@ -2930,6 +2936,10 @@ describe('qwen-autofix workflow', () => {
     // array and break the tail-1 consumer. The #8888 deferred-review ack
     // dedup is the same class: `--jq '.[].body'` feeds a grep, never a
     // WORKDIR file, so it bumps the total pin but not the normalizer count.
+    // The R11-2 engaged-stale guard's comments/events reads in
+    // takeover-ack are the same class too: captured into shell variables
+    // and consumed by slurp-style `jq -rs 'add // [] | …'` (idempotent
+    // over a single flat array), never a WORKDIR file.
     expect(workflow.split("jq -s 'add // []'").length - 1).toBe(10);
     // Empty-input semantics: a total gh failure feeds the fallback an EMPTY
     // stream, where the normalizer filter must yield '[]' and not 'null' —
@@ -5524,6 +5534,9 @@ exit 1
       prViewOk = true,
       labels = [],
       deleteFails = '',
+      comments = [],
+      events = [],
+      historyFails = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ack-'));
       const bin = join(dir, 'bin');
@@ -5534,6 +5547,10 @@ exit 1
           '#!/usr/bin/env bash',
           `echo "$@" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
           `if [[ "$1" == 'api' && "$2" == 'user' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
+          // R11-2: the engaged-stale dedup reads — served per knob
+          // (empty by default, so a legacy vector sees no history).
+          `if [[ "$1" == 'api' && "$2" == *'/comments' ]]; then ${historyFails ? 'exit 1' : `printf '%s' '${JSON.stringify(comments)}'`}; fi`,
+          `if [[ "$1" == 'api' && "$2" == *'/events' ]]; then ${historyFails ? 'exit 1' : `printf '%s' '${JSON.stringify(events)}'`}; fi`,
           // Other api calls (the needs-human DELETE) succeed silently but
           // are recorded above — the ack-job conditional removal is
           // observable. R6-33: with a failure knob — a non-404 must
@@ -5612,7 +5629,12 @@ exit 1
 
     // Unchanged for every other ack: the live read happens and still fails
     // CLOSED, so a transient API error cannot turn into a wrong ack.
-    const engaged = runAck({ ack: 'engaged' });
+    // R11-2: an engaged ack posts only while the takeover label is LIVE —
+    // the engagement it acknowledges must still exist at ack time.
+    const engaged = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }],
+    });
     expect(engaged.readPr).toBe(true);
     expect(engaged.body).toContain('<!-- takeover-ack engaged -->');
     const broken = runAck({ ack: 'engaged', prViewOk: false });
@@ -5624,9 +5646,14 @@ exit 1
     const nhDelete =
       'api -X DELETE repos/QwenLM/qwen-code/issues/7368/labels/autofix%2Fneeds-human';
     expect(
-      runAck({ ack: 'engaged' }).calls.match(/api -X DELETE/gm) ?? [],
+      runAck({
+        ack: 'engaged',
+        labels: [{ name: 'autofix/takeover' }],
+      }).calls.match(/api -X DELETE/gm) ?? [],
     ).toHaveLength(1);
-    expect(runAck({ ack: 'engaged' }).calls).toContain(nhDelete);
+    expect(
+      runAck({ ack: 'engaged', labels: [{ name: 'autofix/takeover' }] }).calls,
+    ).toContain(nhDelete);
     expect(
       runAck({ ack: 'released' }).calls.match(/api -X DELETE/gm) ?? [],
     ).toHaveLength(1);
@@ -5639,14 +5666,17 @@ exit 1
       releasedOrder.calls.indexOf('pr comment'),
     );
     expect(
-      runAck({ ack: 'engaged', labels: [{ name: 'autofix/skip' }] }).calls,
+      runAck({
+        ack: 'engaged',
+        labels: [{ name: 'autofix/skip' }, { name: 'autofix/takeover' }],
+      }).calls,
     ).not.toContain(nhDelete);
     // R6-5: assert the TOTAL DELETE count for engaged-with-skip too —
     // `not.toContain` alone lets a mutant add an unrelated second DELETE.
     expect(
       runAck({
         ack: 'engaged',
-        labels: [{ name: 'autofix/skip' }],
+        labels: [{ name: 'autofix/skip' }, { name: 'autofix/takeover' }],
       }).calls.match(/api -X DELETE/gm) ?? [],
     ).toHaveLength(0);
     expect(
@@ -5680,6 +5710,61 @@ exit 1
     expect(staleRelease.calls).not.toContain('api -X DELETE');
     expect(staleRelease.body).toBe('');
     expect(staleRelease.stdout).toContain('stale ack');
+    // R11-2: the R2-4 mirror for the engaged direction — a delayed engaged
+    // ack is stale in two shapes. Label removed since the label event: the
+    // engagement ended, so post nothing and touch nothing…
+    const staleEngagedRemoved = runAck({ ack: 'engaged' });
+    expect(staleEngagedRemoved.status).toBe(0);
+    expect(staleEngagedRemoved.calls).not.toContain('api -X DELETE');
+    expect(staleEngagedRemoved.body).toBe('');
+    expect(staleEngagedRemoved.stdout).toContain('stale ack');
+    // …and label LIVE but the current cycle already acked: a bot engage
+    // marker at/after the newest takeover labeled event means this run's
+    // event is superseded — it must not DELETE the fresh cycle's
+    // needs-human nor post a marker that would reset the round window.
+    const engagedMarker = (created_at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at,
+      body: '🤝 … <!-- takeover-ack engaged -->',
+    });
+    const takeoverLabeled = (created_at) => ({
+      event: 'labeled',
+      label: { name: 'autofix/takeover' },
+      created_at,
+    });
+    const staleEngagedAcked = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }, { name: 'autofix/needs-human' }],
+      comments: [engagedMarker('2026-08-06T02:00:00Z')],
+      events: [takeoverLabeled('2026-08-06T01:00:00Z')],
+    });
+    expect(staleEngagedAcked.status).toBe(0);
+    expect(staleEngagedAcked.calls).not.toContain('api -X DELETE');
+    expect(staleEngagedAcked.body).toBe('');
+    expect(staleEngagedAcked.stdout).toContain('stale ack');
+    // Comparator: a label event NEWER than the last engage marker is a
+    // live unacked engagement (a re-label after release) — it posts and
+    // cleans the stale escalation label.
+    const freshEngagement = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }],
+      comments: [engagedMarker('2026-08-06T00:00:00Z')],
+      events: [takeoverLabeled('2026-08-06T01:00:00Z')],
+    });
+    expect(freshEngagement.status).toBe(0);
+    expect(freshEngagement.body).toContain('<!-- takeover-ack engaged -->');
+    expect(freshEngagement.calls).toContain(nhDelete);
+    // Unreadable history fails CLOSED: a stale marker is irreparable, a
+    // missed ack is healed by the scan's NEED_ENGAGE_ACK dedup.
+    const blindEngaged = runAck({
+      ack: 'engaged',
+      labels: [{ name: 'autofix/takeover' }],
+      historyFails: true,
+    });
+    expect(blindEngaged.status).toBe(0);
+    expect(blindEngaged.body).toBe('');
+    expect(blindEngaged.calls).not.toContain('api -X DELETE');
+    expect(blindEngaged.stdout).toContain('fail closed');
     // R6-33: a non-404 needs-human DELETE failure warns and STILL posts the
     // ack (bash -e must not abort before the comment)…
     const relDeleteFailed = runAck({
