@@ -2751,6 +2751,23 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
           set -euo pipefail
+          # Root-only home for every gate working file. $RUNNER_TEMP itself
+          # is uid 1000 mode 755 on this pool, and `node` in the job's
+          # container is uid 1000 — so PR-controlled code (lifecycle
+          # scripts during install/build, the agent era afterwards) has
+          # OWNER WRITE on the directory that used to hold the gate's
+          # root-owned files. It could unlink them and replant symlinks
+          # that every root-side consumer would follow: the recorded list
+          # swapped for /proc/<pid>/environ (NUL-framed KEY=VALUE is
+          # exactly the gate's intake framing, so ACTIONS_RUNTIME_TOKEN
+          # lands verbatim in the published log), the round output or the
+          # staged log swapped for any root-readable file. 0700 root:root
+          # removes the capability itself — a directory node cannot enter
+          # is one whose entries it can neither create, unlink, nor
+          # rename. rm -rf first: the entry may already be a plant from an
+          # earlier run on this persistent pool.
+          rm -rf -- "${RUNNER_TEMP:?}/flake-gate"
+          install -d -m 0700 -o root -g root "$RUNNER_TEMP/flake-gate"
           # Two statements, not a pipeline: `git diff | grep || true` would
           # swallow a git failure as "no changed test files", silently
           # narrowing the gate to n/a. A git failure here is pre-build
@@ -2768,7 +2785,7 @@ jobs:
           # the runner executes, so it is a changed test file exactly
           # like M — excluding it silently drops the file from the gate.
           git -c core.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD^1' HEAD \
-            > "${RUNNER_TEMP:?}/flake-gate-files-all"
+            > "$RUNNER_TEMP/flake-gate/files-all"
           # .mts/.cts included: vitest's default include set collects them.
           # Only a no-match (status 1) may yield an empty list: a grep
           # error (status 2, e.g. ENOSPC opening the output) is
@@ -2776,14 +2793,14 @@ jobs:
           # would narrow the gate to zero files and starve it into n/a.
           grep_status=0
           grep -zE '\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$' \
-            "$RUNNER_TEMP/flake-gate-files-all" \
-            > "$RUNNER_TEMP/flake-gate-files" || grep_status=$?
+            "$RUNNER_TEMP/flake-gate/files-all" \
+            > "$RUNNER_TEMP/flake-gate/files" || grep_status=$?
           if [ "$grep_status" -gt 1 ]; then
             echo "flake-gate intake: grep failed with status ${grep_status}" >&2
             exit 1
           fi
-          rm -f "$RUNNER_TEMP/flake-gate-files-all"
-          echo "Recorded $(tr -cd '\0' < "$RUNNER_TEMP/flake-gate-files" | wc -c) changed test file(s) for the flakiness gate."
+          rm -f "$RUNNER_TEMP/flake-gate/files-all"
+          echo "Recorded $(tr -cd '\0' < "$RUNNER_TEMP/flake-gate/files" | wc -c) changed test file(s) for the flakiness gate."
 
       - name: 'Clear stale npm cache'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2969,13 +2986,35 @@ jobs:
           }
           trap on_gate_exit EXIT
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
-          LOG="${RUNNER_TEMP:?}/flake-gate.log"
-          LIST="$RUNNER_TEMP/flake-gate-files"
+          # Every working file lives inside the root-only home the record
+          # step created. Verify it fail-closed BEFORE trusting anything in
+          # it: a plant (symlink, node-owned dir, loosened mode) means the
+          # integrity premise never held, and the gate must degrade to the
+          # fixed error verdict rather than read attacker-chosen bytes.
+          GATE_DIR="${RUNNER_TEMP:?}/flake-gate"
+          # -O is the load-bearing test: "owned by the EFFECTIVE user" is
+          # root in production, so a directory a PR planted (owned by node)
+          # fails it, while the same code stays runnable under a harness.
+          # 0700 then means only that owner can traverse it.
+          gate_dir_ok() {
+            [ ! -L "$GATE_DIR" ] || return 1
+            [ -d "$GATE_DIR" ] || return 1
+            [ -O "$GATE_DIR" ] || return 1
+            [ "$(stat -c '%a' "$GATE_DIR" 2>/dev/null)" = '700' ] || return 1
+          }
+          if ! gate_dir_ok; then
+            echo "flake_verdict=error" >> "$GITHUB_OUTPUT"
+            echo "flake_summary=the gate working directory is missing or not root-owned 0700 — refusing to read files a PR could have planted" >> "$GITHUB_OUTPUT"
+            GATE_DONE=1
+            exit 0
+          fi
+          LOG="$GATE_DIR/log"
+          LIST="$GATE_DIR/files"
           # Per-invocation detail (round lines, failure tails) goes to a
           # SEPARATE file and is appended after the verdict: the publisher
           # embeds the FIRST 10,000 chars of the log, so the per-file matrix
           # and verdict must sit ahead of detail that can outgrow the cap.
-          DETAIL="$RUNNER_TEMP/flake-gate-detail"
+          DETAIL="$GATE_DIR/detail"
           : > "$LOG"
           : > "$DETAIL"
           finish() {
@@ -3002,7 +3041,12 @@ jobs:
           [ "$ROUNDS" -ge 2 ] || ROUNDS=2
           [ "$ROUNDS" -le 10 ] || ROUNDS=10
 
-          [ -f "$LIST" ] || finish error 'the recorded changed-test list is missing'
+          # -f AND not -L: inside a 0700 root home a plant is impossible,
+          # but the check is the cheap half of a defence in depth — a
+          # future relocation out of the root-only home must not silently
+          # reintroduce "follow whatever symlink is there".
+          { [ -f "$LIST" ] && [ ! -L "$LIST" ]; } ||
+            finish error 'the recorded changed-test list is missing or not a regular file'
 
           # Partition into per-FILE groups. Every skipped file is logged
           # with its reason — a silently narrowed gate would read as
@@ -3209,7 +3253,7 @@ jobs:
               rm -rf "$inv_tmp"
               mkdir -p "$inv_tmp"
               chown node:node "$inv_tmp"
-              out="$RUNNER_TEMP/flake-gate-round-out"
+              out="$GATE_DIR/round-out"
               (
                 cd "${group_dirs[$i]}" &&
                 timeout -k 30 600 runuser -u node -- \
@@ -3883,15 +3927,16 @@ jobs:
           echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
           echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
-      # The gate log's authoritative copy lives root-owned at
-      # $RUNNER_TEMP/flake-gate.log, outside every agent-writable directory.
-      # It is staged into verify-results HERE — after the agent exits, from
-      # an always() root step — as the LAST write to that filename: an early
-      # agent-step abort cannot lose it, and agent-era PR code (which owns a
-      # chowned verify-results while it runs) cannot control what is
-      # uploaded under this name. The publisher pins this exact root-level
-      # path, so a nested same-named file planted in a collected artifact
-      # dir cannot shadow it either.
+      # The gate log's authoritative copy lives root-owned inside the 0700
+      # root-only home ($RUNNER_TEMP/flake-gate/log), which no PR-controlled
+      # process can enter. This step runs AFTER the agent exits, from an
+      # always() root step, and assembles the upload tree there too: an
+      # early agent-step abort cannot lose the log, and agent-era PR code
+      # (which owns the chowned verify-results while it runs) can neither
+      # control what is uploaded under that name nor rename the tree the
+      # upload enumerates. The publisher pins the exact root-level path, so
+      # a same-named file nested in a collected artifact dir cannot shadow
+      # it either.
       - name: 'Stage flakiness gate log for upload'
         if: "always() && steps.pr.outputs.decision == 'run'"
         # Evidence-copying only, and the verdict outputs are already
@@ -3903,45 +3948,52 @@ jobs:
         continue-on-error: true
         run: |-
           set -euo pipefail
-          if [ -f "${RUNNER_TEMP:?}/flake-gate.log" ]; then
-            # verify-results was chowned to the build user while PR code ran,
-            # and node daemons can outlive the agent step: kill leftover
-            # test-user processes first so nothing races this copy. Never
-            # OPEN a planted destination either — rm unlinks the entry
-            # itself, while `cp -f` would open a planted FIFO O_WRONLY and
-            # block until the job timeout, follow a symlink to rewrite a
-            # victim, or copy INTO a planted directory so the log vanishes
-            # from the pinned publisher path.
+          # BUILD a trusted upload tree; never harden an attacker's.
+          # $RUNNER_TEMP is uid-1000 mode-755 on this pool and `node` is
+          # uid 1000, so verify-results — chowned to the build user for the
+          # agent era — sits in a directory PR code can write: hardening it
+          # in place always left the ENTRY itself renameable, so a kill-race
+          # survivor could swap the whole hardened tree for a symlink farm
+          # that upload-artifact (which follows links) would publish. The
+          # upload now reads from $RUNNER_TEMP/flake-gate/upload, inside the
+          # 0700 root-only home: a directory node cannot enter is one whose
+          # entries it can neither create, unlink, nor rename.
+          #
+          # Unconditional, not gated on the log existing: node can unlink
+          # the log, and that must not skip the kill/rebuild for the report
+          # the agent wrote.
+          pkill -KILL -u node 2>/dev/null || true
+          for _ in 1 2 3; do
+            [ -n "$(ps -o pid=,stat= -u node 2>/dev/null | awk '$2 !~ /^Z/')" ] || break
+            sleep 1
             pkill -KILL -u node 2>/dev/null || true
-            for _ in 1 2 3; do
-              [ -n "$(ps -o pid=,stat= -u node 2>/dev/null | awk '$2 !~ /^Z/')" ] || break
-              sleep 1
-              pkill -KILL -u node 2>/dev/null || true
-            done
-            if [ -L "$RUNNER_TEMP/verify-results" ] ||
-               { [ -e "$RUNNER_TEMP/verify-results" ] && [ ! -d "$RUNNER_TEMP/verify-results" ]; }; then
-              rm -rf -- "$RUNNER_TEMP/verify-results"
+          done
+          GATE_DIR="${RUNNER_TEMP:?}/flake-gate"
+          UPLOAD_DIR="$GATE_DIR/upload"
+          if [ ! -L "$GATE_DIR" ] && [ -d "$GATE_DIR" ] && [ -O "$GATE_DIR" ] &&
+             [ "$(stat -c '%a' "$GATE_DIR" 2>/dev/null)" = '700' ]; then
+            rm -rf -- "$UPLOAD_DIR"
+            install -d -m 0700 -o root -g root "$UPLOAD_DIR"
+            # Copy only REGULAR files out of the untrusted tree, resolving
+            # nothing: -type f excludes symlinks/FIFOs/sockets/devices at
+            # selection time, and `cp -f --no-dereference` never opens a
+            # link target even if one wins a race between find and cp.
+            if [ -d "$RUNNER_TEMP/verify-results" ] && [ ! -L "$RUNNER_TEMP/verify-results" ]; then
+              (
+                cd "$RUNNER_TEMP/verify-results" &&
+                find . -type f -exec cp -f --no-dereference --parents {} "$UPLOAD_DIR/" \;
+              ) 2>/dev/null || true
             fi
-            mkdir -p "$RUNNER_TEMP/verify-results"
-            # Revoke the replant premise outright: the agent era owned this
-            # directory as the build user. Once root owns the names, even a
-            # kill-race survivor (setsid daemon, continuous forker — pkill
-            # scans /proc once) can no longer unlink the staged file or
-            # replant a symlink between this copy and upload-artifact's
-            # enumeration, which FOLLOWS links — that window was a
-            # root-readable-file exfiltration into the public comment.
-            # Ownership alone is NOT the revoke: chown PRESERVES modes, so
-            # a tree PR code set 0777 stays world-writable under root
-            # ownership and a survivor can still create/unlink names in it.
-            # Strip group/other bits entirely, THEN sweep non-regular
-            # entries again — anything planted between the agent-step sweep
-            # and the chown dies here, and after the mode revoke nothing
-            # can replant before upload enumeration.
-            chown -R root:root "$RUNNER_TEMP/verify-results"
-            chmod -R go-rwx "$RUNNER_TEMP/verify-results"
-            find "$RUNNER_TEMP/verify-results" \( -type l -o -type p -o -type s -o -type b -o -type c \) -delete 2>/dev/null || true
-            rm -rf -- "$RUNNER_TEMP/verify-results/flake-gate.log"
-            cp -f "$RUNNER_TEMP/flake-gate.log" "$RUNNER_TEMP/verify-results/flake-gate.log"
+            # The gate's own log is authoritative and root-owned inside the
+            # home — it is copied LAST so nothing in the untrusted tree can
+            # shadow the name the publisher pins.
+            if [ -f "$GATE_DIR/log" ] && [ ! -L "$GATE_DIR/log" ]; then
+              cp -f --no-dereference "$GATE_DIR/log" "$UPLOAD_DIR/flake-gate.log"
+            fi
+            chown -R root:root "$UPLOAD_DIR"
+            chmod -R go-rwx "$UPLOAD_DIR"
+          else
+            echo "::warning::flake-gate home missing or not root-owned 0700; skipping the trusted upload rebuild."
           fi
 
       - name: 'Upload verify results'
@@ -3952,7 +4004,10 @@ jobs:
         uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
         with:
           name: 'verify-results-${{ steps.pr.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
-          path: '${{ runner.temp }}/verify-results/'
+          # The rebuilt, root-only tree — not the agent-era directory the
+          # build user owned. Same inner layout, so the publisher's paths
+          # are unchanged.
+          path: '${{ runner.temp }}/flake-gate/upload/'
           retention-days: 7
 
       - name: 'Clean up runner workspace'

@@ -857,7 +857,7 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // executes, so it is a changed test file exactly like M.
     assert.match(
       recordStep.run,
-      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD\^1' HEAD \\\n\s*> "\$\{RUNNER_TEMP:\?\}\/flake-gate-files-all"$/m,
+      /^\s*git -c core\.quotePath=false diff -z --name-only --diff-filter=ACMRT 'HEAD\^1' HEAD \\\n\s*> "\$RUNNER_TEMP\/flake-gate\/files-all"$/m,
       'the NUL diff must flow straight into its file — $( ) strips NUL bytes, a pipeline swallows the exit status',
     );
     assert.ok(
@@ -868,8 +868,22 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     );
     assert.match(
       recordStep.run,
-      /^\s*grep_status=0\n\s*grep -zE '[^']+' \\\n\s*"\$RUNNER_TEMP\/flake-gate-files-all" \\\n\s*> "\$RUNNER_TEMP\/flake-gate-files" \|\| grep_status=\$\?$/m,
+      /^\s*grep_status=0\n\s*grep -zE '[^']+' \\\n\s*"\$RUNNER_TEMP\/flake-gate\/files-all" \\\n\s*> "\$RUNNER_TEMP\/flake-gate\/files" \|\| grep_status=\$\?$/m,
       'the grep must read the raw file and only a no-match may yield an empty list',
+    );
+    // Every gate working file must live in the root-only home, because
+    // $RUNNER_TEMP's top level is uid-1000 writable on this pool and the
+    // container's `node` is uid 1000: files there can be unlinked and
+    // replaced with symlinks that root-side consumers follow.
+    assert.match(
+      recordStep.run,
+      /^\s*install -d -m 0700 -o root -g root "\$RUNNER_TEMP\/flake-gate"$/m,
+      'the record step must create the root-only home',
+    );
+    assert.match(
+      recordStep.run,
+      /^\s*rm -rf -- "\$\{RUNNER_TEMP:\?\}\/flake-gate"$/m,
+      'a plant left by an earlier run on the persistent pool must be removed first',
     );
     // A grep ERROR (status 2 — e.g. ENOSPC opening the output) is
     // infrastructure: swallowing it narrows the gate to zero files and
@@ -1159,8 +1173,8 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     const uploadStep = verifyJob.steps[uploadIdx];
     assert.equal(
       uploadStep.with.path,
-      '${{ runner.temp }}/verify-results/',
-      'the artifact must ship the staged directory',
+      '${{ runner.temp }}/flake-gate/upload/',
+      'the artifact must ship the REBUILT tree, never the agent-era directory',
     );
     assert.match(
       uploadStep.with.name,
@@ -1188,78 +1202,75 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // comments, and the guard's REACTION (the directory-level rm) must be
     // part of the chain — an inert guard body lets mkdir/cp write through
     // a planted symlink.
+    // Round 7 rewrite: the step no longer HARDENS the agent-era tree (its
+    // entry lived in the uid-1000-writable $RUNNER_TEMP, so a kill-race
+    // survivor could rename the whole hardened tree and replant a symlink
+    // farm for upload-artifact to follow). It BUILDS a trusted tree inside
+    // the 0700 root-only home instead, copying regular files only.
     const sr = stageStep.run;
     const iPkill = sr.search(/^\s*pkill -KILL -u node/m);
-    const iDirGuard = sr.search(
-      /^\s*if \[ -L "\$RUNNER_TEMP\/verify-results" \] \|\|$/m,
-    );
-    const iMkdir = sr.search(/^\s*mkdir -p "\$RUNNER_TEMP\/verify-results"$/m);
-    // Round 6: a one-shot pkill loses the race against setsid daemons and
-    // continuous forkers; the kill needs the bounded survivor wait, and the
-    // directory must be re-owned by root before the copy — a survivor that
-    // cannot create or unlink names cannot replant a symlink for
-    // upload-artifact to follow (root-readable exfiltration into the
-    // public comment).
     const iWait = sr.search(
       /^\s*\[ -n "\$\(ps -o pid=,stat= -u node 2>\/dev\/null \| awk '\$2 !~ \/\^Z\/'\)" \] \|\| break$/m,
     );
-    const iChown = sr.search(
-      /^\s*chown -R root:root "\$RUNNER_TEMP\/verify-results"$/m,
+    const iHomeCheck = sr.search(
+      /^\s*if \[ ! -L "\$GATE_DIR" \] && \[ -d "\$GATE_DIR" \] && \[ -O "\$GATE_DIR" \] &&$/m,
     );
-    // Round 7: chown PRESERVES modes — a tree PR code set 0777 stays
-    // world-writable under root ownership, so a survivor could still
-    // create/unlink names in it. The revoke is only complete after the
-    // group/other bits are stripped and the post-revoke sweep drops
-    // anything planted between the agent-step sweep and the chown.
-    const iChmod = sr.search(
-      /^\s*chmod -R go-rwx "\$RUNNER_TEMP\/verify-results"$/m,
+    const iFresh = sr.search(
+      /^\s*install -d -m 0700 -o root -g root "\$UPLOAD_DIR"$/m,
     );
-    const iSweep = sr.search(
-      /^\s*find "\$RUNNER_TEMP\/verify-results" \\\( -type l -o -type p -o -type s -o -type b -o -type c \\\) -delete 2>\/dev\/null \|\| true$/m,
+    const iCopyRegular = sr.search(
+      /^\s*find \. -type f -exec cp -f --no-dereference --parents \{\} "\$UPLOAD_DIR\/" \\;$/m,
     );
-    const iRmDst = sr.search(
-      /^\s*rm -rf -- "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"$/m,
+    const iCopyLog = sr.search(
+      /^\s*cp -f --no-dereference "\$GATE_DIR\/log" "\$UPLOAD_DIR\/flake-gate\.log"$/m,
     );
-    const iCp = sr.search(
-      /^\s*cp -f "\$RUNNER_TEMP\/flake-gate\.log" "\$RUNNER_TEMP\/verify-results\/flake-gate\.log"$/m,
+    const iChown = sr.search(/^\s*chown -R root:root "\$UPLOAD_DIR"$/m);
+    const iChmod = sr.search(/^\s*chmod -R go-rwx "\$UPLOAD_DIR"$/m);
+    // The kill must NOT be gated on the log existing: node can unlink the
+    // log, and that must not skip the rebuild for the agent's own report.
+    assert.ok(
+      iPkill < sr.search(/^\s*GATE_DIR=/m),
+      'the kill must run before (and independently of) the home lookup',
     );
-    // The guard must cover BOTH halves (symlink and non-directory) and
-    // must actually remove the entry it detects.
+    assert.doesNotMatch(
+      sr,
+      /^\s*if \[ -f "\$\{?RUNNER_TEMP:?\??\}?\/flake-gate\.log" \]; then$/m,
+      'the rebuild must not be gated on the log file existing',
+    );
+    // Only regular files cross the boundary, and nothing is resolved:
+    // -type f excludes links/FIFOs/sockets/devices at selection time and
+    // --no-dereference never opens a target that wins a race after it.
     assert.match(
       sr,
-      /\[ -L "\$RUNNER_TEMP\/verify-results" \] \|\|\s*\n\s*\{ \[ -e "\$RUNNER_TEMP\/verify-results" \] && \[ ! -d "\$RUNNER_TEMP\/verify-results" \]; \}/,
-      'the guard must catch symlinks AND non-directory plants',
+      /-type f -exec cp -f --no-dereference --parents/,
+      'only regular files may be copied out of the untrusted tree',
     );
-    // The reaction is pinned as the guard's own then-body (round 6), not
-    // by loose proximity to any -L mention.
     assert.match(
       sr,
-      /^\s*if \[ -L "\$RUNNER_TEMP\/verify-results" \] \|\|\n\s*\{ \[ -e "\$RUNNER_TEMP\/verify-results" \] && \[ ! -d "\$RUNNER_TEMP\/verify-results" \]; \}; then\n\s*rm -rf -- "\$RUNNER_TEMP\/verify-results"\n\s*fi$/m,
-      'the guard must REMOVE the planted entry in its own then-body',
+      /\[ -d "\$RUNNER_TEMP\/verify-results" \] && \[ ! -L "\$RUNNER_TEMP\/verify-results" \]/,
+      'a symlinked verify-results must not be traversed at all',
     );
     for (const [label, idx] of [
       ['pkill', iPkill],
       ['bounded survivor wait', iWait],
-      ['directory-level symlink/non-dir guard', iDirGuard],
-      ['mkdir -p', iMkdir],
+      ['root-only home integrity check', iHomeCheck],
+      ['fresh 0700 upload dir', iFresh],
+      ['regular-file-only copy', iCopyRegular],
+      ['authoritative log copy', iCopyLog],
       ['root re-own', iChown],
       ['mode revoke', iChmod],
-      ['post-revoke sweep', iSweep],
-      ['destination unlink', iRmDst],
-      ['copy', iCp],
     ]) {
       assert.ok(idx !== -1, `staging must contain the ${label}`);
     }
     assert.ok(
       iPkill < iWait &&
-        iWait < iDirGuard &&
-        iDirGuard < iMkdir &&
-        iMkdir < iChown &&
-        iChown < iChmod &&
-        iChmod < iSweep &&
-        iSweep < iRmDst &&
-        iRmDst < iCp,
-      'staging order must be: kill+wait, dir guard, recreate, root re-own, mode revoke, sweep, unlink destination, copy',
+        iWait < iHomeCheck &&
+        iHomeCheck < iFresh &&
+        iFresh < iCopyRegular &&
+        iCopyRegular < iCopyLog &&
+        iCopyLog < iChown &&
+        iChown < iChmod,
+      'staging order must be: kill+wait, home check, fresh dir, regular-file copy, authoritative log last, re-own, mode revoke',
     );
     assert.doesNotMatch(
       agentStep.run,
@@ -1456,6 +1467,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     env: envOverrides = {},
     git = true,
     mutate,
+    gateHomeMode = 0o700,
   }) => {
     const root = mkdtempSync(join(scenarioRoot, 'case-'));
     const ws = join(root, 'ws');
@@ -1467,6 +1479,12 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       mkdirSync(dirname(join(ws, p)), { recursive: true });
       writeFileSync(join(ws, p), content);
     }
+    // The gate's working home: 0700 and owned by whoever runs the suite —
+    // the same integrity premise the workflow asserts with -O (root in
+    // production). Scenarios that need to defeat it override the mode.
+    const gateDir = join(rt, 'flake-gate');
+    mkdirSync(gateDir, { recursive: true });
+    chmodSync(gateDir, gateHomeMode);
     if (list !== null) {
       // Scenarios describe lists as newline text; the wire format is
       // NUL-delimited (the record step emits `git diff -z` through
@@ -1476,7 +1494,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
         .filter(Boolean)
         .map((f) => `${f}\u0000`)
         .join('');
-      writeFileSync(join(rt, 'flake-gate-files'), framed);
+      writeFileSync(join(gateDir, 'files'), framed);
     }
     for (const [k, v] of Object.entries(sequences)) {
       writeFileSync(join(seqDir, k), v);
@@ -1556,7 +1574,7 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
     );
     let log = '';
     try {
-      log = readFileSync(join(rt, 'flake-gate.log'), 'utf8');
+      log = readFileSync(join(gateDir, 'log'), 'utf8');
     } catch {
       // a scenario may legitimately abort before creating the log
     }
@@ -2082,6 +2100,24 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       outputs.flake_summary,
       /^1 changed test file\(s\)/,
       'the summary must count only the runnable file',
+    );
+  });
+
+  it('a working home that is not exclusively ours fails closed to `error`', () => {
+    // R7-8: $RUNNER_TEMP's top level is uid-1000 writable and the
+    // container's `node` is uid 1000, so a group/other-accessible home is
+    // one a PR could have planted files in — the gate must refuse to read
+    // it rather than sample attacker-chosen bytes, and must still exit 0.
+    const { res, outputs } = runGate({
+      layout: UNIT,
+      list: 'scripts/tests/a.test.js\n',
+      gateHomeMode: 0o777,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(outputs.flake_verdict, 'error');
+    assert.match(
+      outputs.flake_summary,
+      /not root-owned 0700|working directory/,
     );
   });
 
