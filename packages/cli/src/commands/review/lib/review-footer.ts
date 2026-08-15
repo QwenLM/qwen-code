@@ -352,9 +352,17 @@ export function reviewFooter(modelId: string, cliVersion: string): string {
  * paren of the version group is optional for the same reason: most
  * mid-character cuts land inside the parens — the footer's final ~10
  * characters.
+ *
+ * The version CONTENT is bounded to the shape `footerVersion` validates —
+ * FOOTER_SPAN_RE's treatment. An unbounded run made the optional paren eat
+ * authored prose after a cut opened inside the parens when the match
+ * succeeded, and enumerate exponential whitespace partitions when it
+ * failed: the version span both swallowed subsequent footers on a line and
+ * split trailing whitespace with the `\s*` after it, so a refusing footer
+ * run no longer parsed exactly one way.
  */
 export const REVIEW_FOOTER_RE =
-  /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[^\n)]*\)?)?_?\s*)+$/;
+  /\s*(?:_— (?:(?! via Qwen Code \/review)[^\n])* via Qwen Code \/review(?: \(v[A-Za-z0-9._+-]{0,200}\)?)?_?\s*)+$/;
 
 /** The widest slice `stripReviewFooter` runs the strip regex over. */
 const STRIP_TAIL_LIMIT = 8192;
@@ -553,6 +561,9 @@ function mapLinesAware(
 ): string {
   let changed = false;
   const out: string[] = [];
+  // Junctions into `out` (the index a dropped line's gap lands at) where a
+  // line was dropped.
+  const drops = new Set<number>();
   for (const { line, kind } of scanLines(body)) {
     if (kind !== 'text' && kind !== 'html') {
       out.push(line);
@@ -561,17 +572,46 @@ function mapLinesAware(
     const mapped = map(line);
     if (mapped === null) {
       changed = true;
+      drops.add(out.length);
       continue;
     }
     if (mapped !== line) changed = true;
     out.push(mapped);
   }
   if (!changed) return body;
-  return out
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^\n+/, '')
-    .trimEnd();
+  if (drops.size === 0) return out.join('\n');
+  // A drop collapses the blank run it lands in to at most one blank line
+  // (and removes it at the edges); every other run stays byte-identical —
+  // a global collapse deleted blank lines inside the fenced/indented code
+  // and <pre> quotations this scan keeps verbatim.
+  const runHasDrop = (from: number, to: number): boolean => {
+    for (let p = from; p <= to; p += 1) {
+      if (drops.has(p)) return true;
+    }
+    return false;
+  };
+  const nonEmpty: number[] = [];
+  out.forEach((l, i) => {
+    if (l !== '') nonEmpty.push(i);
+  });
+  if (nonEmpty.length === 0) return '';
+  const pieces: string[] = [];
+  const first = nonEmpty[0]!;
+  pieces.push(runHasDrop(0, first) ? '' : '\n'.repeat(first));
+  for (let k = 0; k + 1 < nonEmpty.length; k += 1) {
+    const a = nonEmpty[k]!;
+    const b = nonEmpty[k + 1]!;
+    pieces.push(out[a]!);
+    pieces.push(
+      runHasDrop(a + 1, b) && b - a > 2 ? '\n\n' : '\n'.repeat(b - a),
+    );
+  }
+  const last = nonEmpty[nonEmpty.length - 1]!;
+  pieces.push(out[last]!);
+  pieces.push(
+    runHasDrop(last + 1, out.length) ? '' : '\n'.repeat(out.length - 1 - last),
+  );
+  return pieces.join('');
 }
 
 /** A title on its own line, continuing a link reference definition. */
@@ -710,19 +750,22 @@ export function stripForgedFooterLines(body: string): string {
  * strip exposes), and a visible `**[Suggestion]**` mid-body contradicts the
  * invisible marker the post carries. The allowance runs to any blockquote
  * depth, matching `stripCommentMarkerLines`: a quoted marker re-recognizes
- * and re-promotes exactly like an unquoted one. Quoted code is left alone,
- * as with the other strips.
+ * and re-promotes exactly like an unquoted one — but the prefix is
+ * captured and restored: only the marker run goes, a quotation stays
+ * quoted, or line one of a multi-line quotation re-parents the earlier
+ * round's words as this round's own prose. Quoted code is left alone, as
+ * with the other strips.
  */
 // The whole stacked run, not one marker: a non-global single-marker match
 // re-ran the full fixpoint chain per stacked marker — quadratic on
 // model-written bodies whose rest defeats the strips' early bailouts.
 const PARAGRAPH_MARKER_RE =
-  /^[ \t]{0,3}(?:>[ \t]*)*(?:(?:\*\*\[Critical\]\*\*|\*\*\[Suggestion\]\*\*)[ \t]*[:：]?[ \t]*)+/;
+  /^([ \t]{0,3}(?:>[ \t]*)*)(?:(?:\*\*\[Critical\]\*\*|\*\*\[Suggestion\]\*\*)[ \t]*[:：]?[ \t]*)+/;
 
 export function stripParagraphMarkers(body: string): string {
   if (!body.includes('**[')) return body;
   return mapLinesAware(body, (line) => {
-    const stripped = line.replace(PARAGRAPH_MARKER_RE, '');
+    const stripped = line.replace(PARAGRAPH_MARKER_RE, '$1');
     return stripped === line ? line : stripped;
   });
 }

@@ -557,7 +557,11 @@ export function runSubmit(
           if (sev === null) return c;
           return {
             ...c,
-            body: `${stripForUnattributedPost(c.body)}\n\n${commentMarker(sev)}`,
+            // Exactly the body the gate above validated: a forged footer
+            // the fixpoint chain exposes at the tail survives the
+            // anywhere-strips' caps, and only the trailing strip removes
+            // it — posting the gate's view is how the two cannot drift.
+            body: `${stripReviewFooter(stripForUnattributedPost(c.body))}\n\n${commentMarker(sev)}`,
           };
         }),
   };

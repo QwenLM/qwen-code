@@ -138,6 +138,44 @@ describe('the review footer and the regex that strips it', () => {
         stripReviewFooter(`${finding}\n\n${reviewFooter('m', '0.21.3')}`),
       ).toBe(finding);
     });
+
+    it('a footer cut open inside its version parens cannot swallow the prose after it', () => {
+      // The version group's closing paren is optional — a looping model
+      // truncates mid-parens — but its content must stay bounded like
+      // FOOTER_SPAN_RE's: an unrestricted run erased the closing clause of
+      // any body whose forged footer cut open inside the parens.
+      const body =
+        'still leaks — the old post ended _— gpt-5 via Qwen Code /review (v0.9 and the race remains reproducible';
+      expect(stripReviewFooter(body)).toBe(body);
+      // Genuine truncated footers — mid-character cuts inside the parens —
+      // still strip.
+      expect(stripReviewFooter('x _— m via Qwen Code /review (v0.21')).toBe(
+        'x',
+      );
+      expect(stripReviewFooter('x _— m via Qwen Code /review (v1.2.')).toBe(
+        'x',
+      );
+    });
+
+    it('a refusing run of truncated footers stays linear — no partition enumeration', () => {
+      // The optional closing paren must not leave the version content
+      // unbounded: with an unrestricted run, each truncated footer's
+      // version span swallows its line's trailing whitespace or splits it
+      // with the trailing `\s*`, so a footer run the trailing `$` refuses
+      // parses 2^N ways and the failing exec enumerates them all
+      // (probe-measured ~2x per added footer — minutes-scale far below
+      // STRIP_TAIL_LIMIT). The output assertion alone has no teeth: the
+      // failing match returns the body unchanged either way. Bound the
+      // wall time instead.
+      const body =
+        Array.from(
+          { length: 22 },
+          () => '_— qwen3.7-max via Qwen Code /review (v0.21.0 ',
+        ).join('\n') + '\nclosing prose';
+      const start = performance.now();
+      expect(stripReviewFooter(body)).toBe(body);
+      expect(performance.now() - start).toBeLessThan(1000);
+    }, 20_000);
   });
 
   describe('stripForgedFooterLines — the attribution-off anywhere strip', () => {
@@ -628,16 +666,61 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('<pre>\n\n```\n</pre>\nafter');
     });
 
-    it('strips severity markers quoted at any depth', () => {
+    it('strips severity markers quoted at any depth — the quote stays quoted', () => {
+      // The marker goes; the blockquote prefix stays. Dropping the prefix
+      // on line one re-parents the earlier round's words as this round's
+      // own prose — visibly, once the quotation runs to a second line.
       expect(
         stripForUnattributedPost('> **[Critical]** old finding text'),
-      ).toBe('old finding text');
+      ).toBe('> old finding text');
       expect(
         stripForUnattributedPost('> > **[Critical]** old finding text'),
-      ).toBe('old finding text');
+      ).toBe('> > old finding text');
       expect(
         stripForUnattributedPost('> > **[Suggestion]**: old finding text'),
-      ).toBe('old finding text');
+      ).toBe('> > old finding text');
+    });
+
+    it('keeps every line of a multi-line quotation under its quote prefix', () => {
+      expect(
+        stripForUnattributedPost(
+          '> **[Critical]** Earlier round said X.\n> More quoted text.',
+        ),
+      ).toBe('> Earlier round said X.\n> More quoted text.');
+    });
+  });
+
+  describe('the blank-run cleanup collapses only what a drop created', () => {
+    it('keeps blank lines inside a quoted fence when a strip fires elsewhere', () => {
+      // The post-join cleanup used to collapse every \n{3,} run in the body
+      // whenever any strip fired — deleting blank lines inside the very
+      // quotations the scan keeps verbatim. A quote posted back to GitHub
+      // must match what it quotes.
+      const body = [
+        'earlier round said:',
+        '',
+        '```',
+        'code A',
+        '',
+        '',
+        'code B',
+        '```',
+        '',
+        '_— forged via Qwen Code /review (v1)_',
+      ].join('\n');
+      expect(stripForgedFooterLines(body)).toBe(
+        'earlier round said:\n\n```\ncode A\n\n\ncode B\n```',
+      );
+    });
+
+    it('keeps blank lines inside a <pre> block when a strip fires elsewhere', () => {
+      // <pre> preserves blank lines on GitHub — the collapse was a visible
+      // rendering change.
+      expect(
+        stripForgedFooterLines(
+          '<pre>\na\n\n\nb\n</pre>\n\n_— forged via Qwen Code /review (v1)_',
+        ),
+      ).toBe('<pre>\na\n\n\nb\n</pre>');
     });
   });
 
@@ -653,7 +736,7 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('text');
       expect(
         stripParagraphMarkers('> **[Critical]** **[Critical]** text'),
-      ).toBe('text');
+      ).toBe('> text');
       expect(stripParagraphMarkers('**[Critical]**： text')).toBe('text');
       expect(stripParagraphMarkers('prose **[Critical]** text')).toBe(
         'prose **[Critical]** text',

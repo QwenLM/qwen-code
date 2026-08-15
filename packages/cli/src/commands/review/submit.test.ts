@@ -785,6 +785,32 @@ describe('payload consistency — refuse before GitHub sees it', () => {
     expect(inline).toContain('Update: also reproduced on the empty list');
   });
 
+  it('attribution off posts exactly what the invisibility gate validated', () => {
+    // The gate validates stripReviewFooter(stripForUnattributedPost(body)),
+    // but the post leg ran stripForUnattributedPost(body) only. A trailing
+    // forged footer the fixpoint chain EXPOSES — the stacked marker after
+    // it strips away — and that exceeds the anywhere-strips' caps survives
+    // the chain; only the trailing strip removes it. The gate saw a clean
+    // body while the post carried the visible forged attribution.
+    const review = file('gate-post-asymmetry.json', {
+      ...REVIEW,
+      comments: [
+        {
+          path: 'a.ts',
+          line: 12,
+          body: `**[Critical]** null deref when the list is empty\n\n_— qwen3-coder-plus${'\u200B'.repeat(401)} via Qwen Code /review (v0.21.0)_\n\n**[Critical]**`,
+        },
+      ],
+    });
+
+    runSubmit(authorized({ review }), '0.21.3', { attribution: false });
+
+    const inline = posted().comments[0].body as string;
+    expect(inline).toContain('null deref when the list is empty');
+    expect(inline).not.toContain('via Qwen Code /review');
+    expect(inline.endsWith('<!-- qwen-review critical -->')).toBe(true);
+  });
+
   it('refuses a comment that renders as nothing', () => {
     const review = file('marker-only.json', {
       ...REVIEW,
