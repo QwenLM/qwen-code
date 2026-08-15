@@ -28,6 +28,7 @@ export const FinishReason = {
   IMAGE_SAFETY: 'IMAGE_SAFETY' as GenAiFinishReason,
   IMAGE_RECITATION: 'IMAGE_RECITATION' as GenAiFinishReason,
   IMAGE_PROHIBITED_CONTENT: 'IMAGE_PROHIBITED_CONTENT' as GenAiFinishReason,
+  IMAGE_OTHER: 'IMAGE_OTHER' as GenAiFinishReason,
 } as const;
 
 export type FunctionCallingConfigMode = GenAiFunctionCallingConfigMode;

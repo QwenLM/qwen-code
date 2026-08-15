@@ -500,6 +500,7 @@ const CONTENT_FILTER_FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
   FinishReason.IMAGE_SAFETY,
   FinishReason.IMAGE_RECITATION,
   FinishReason.IMAGE_PROHIBITED_CONTENT,
+  FinishReason.IMAGE_OTHER,
 ]);
 
 const TRANSPORT_STREAM_RETRY_CONFIG = {

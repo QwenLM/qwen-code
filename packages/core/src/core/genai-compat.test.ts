@@ -32,6 +32,7 @@ describe('genai compatibility values', () => {
       IMAGE_SAFETY: SdkFinishReason.IMAGE_SAFETY,
       IMAGE_RECITATION: SdkFinishReason.IMAGE_RECITATION,
       IMAGE_PROHIBITED_CONTENT: SdkFinishReason.IMAGE_PROHIBITED_CONTENT,
+      IMAGE_OTHER: SdkFinishReason.IMAGE_OTHER,
     });
     expect(FunctionCallingConfigMode).toEqual({
       ANY: SdkFunctionCallingConfigMode.ANY,
