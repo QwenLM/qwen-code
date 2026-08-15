@@ -87,6 +87,7 @@ interface DwsCursor {
   version: 1;
   selfProfile?: string;
   selfSenderIds: string[];
+  documentIds?: string[];
   notificationWatermark?: number;
   notificationCheckpoint?: PersistedNotificationCheckpoint;
   pendingDocumentNotifications?: PersistedDocumentNotification[];
@@ -135,15 +136,27 @@ function configuredBoolean(
 function parseDocumentMentionNotification(
   content: string,
 ): DwsDocumentMentionNotification | undefined {
-  const links = [
-    ...content.matchAll(
-      /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\s\])\u007f-\u{10FFFF}]+/gu,
-    ),
-  ].map((match) => match[0]);
+  const links = content
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .flatMap((line) => {
+      const markdown = line.match(
+        /^\[(https:\/\/alidocs\.dingtalk\.com\/[^\]]+)\]\(\1\)$/u,
+      );
+      if (markdown?.[1]) return [markdown[1]];
+      const autolink = line.match(
+        /^<(https:\/\/alidocs\.dingtalk\.com\/[^>]+)>$/u,
+      );
+      if (autolink?.[1]) return [autolink[1]];
+      const bare = line.match(
+        /^(https:\/\/alidocs\.dingtalk\.com\/[\x21-\x7e]+)$/u,
+      );
+      return bare?.[1] ? [bare[1]] : [];
+    });
   if (new Set(links).size > 1) return undefined;
   const mentionLines = new Set<string>();
   for (const line of content.split(/\r?\n/u)) {
-    const mentions = [...line.matchAll(/(?<![\p{L}\p{N}_])@/gu)];
+    const mentions = [...line.matchAll(/(?<![A-Za-z0-9_])@/gu)];
     if (mentions.length > 1) return undefined;
     if (mentions.length === 1) {
       mentionLines.add(line.trim().replace(/\s+/gu, ' '));
@@ -165,7 +178,8 @@ function parseDocumentMentionNotification(
       const decodedDocumentId = decodeURIComponent(documentId);
       if (
         !commentKey ||
-        !/^[\p{L}\p{N}_+~-]+={0,2}$/u.test(commentKey) ||
+        !/^[\p{L}\p{N}_+-]+={0,2}$/u.test(commentKey) ||
+        !/^[\p{L}\p{N}_~-]+$/u.test(decodedDocumentId) ||
         iframeQuery.get('mention_source') !== '2'
       ) {
         continue;
@@ -457,6 +471,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     return {
       version: 1,
       selfSenderIds: [],
+      documentIds: [],
       notificationWatermark: undefined,
       pendingDocumentNotifications: [],
       processedMessages: [],
@@ -484,6 +499,12 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         (!Array.isArray(cursor.selfSenderIds) ||
           !cursor.selfSenderIds.every(
             (item) => typeof item === 'string' && Boolean(item.trim()),
+          ))) ||
+      (cursor.documentIds !== undefined &&
+        (!Array.isArray(cursor.documentIds) ||
+          !cursor.documentIds.every(
+            (item) =>
+              typeof item === 'string' && /^[\p{L}\p{N}_~-]+$/u.test(item),
           ))) ||
       (cursor.notificationWatermark !== undefined &&
         (typeof cursor.notificationWatermark !== 'number' ||
@@ -513,6 +534,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       selfProfile: cursor.selfProfile,
       selfSenderIds: [...new Set(cursor.selfSenderIds ?? [])].slice(
         -MAX_SELF_SENDER_IDS,
+      ),
+      documentIds: [...new Set(cursor.documentIds ?? [])].slice(
+        -MAX_PROCESSED_ITEMS,
       ),
       notificationWatermark: cursor.notificationWatermark,
       notificationCheckpoint: cursor.notificationCheckpoint,
@@ -555,12 +579,27 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.selfProfile = identity.profile;
       this.cursor.todosInitialized = false;
       this.cursor.todoTasks = [];
+      this.cursor.documentIds = [];
       this.cursor.pendingDocumentNotifications = [];
       this.cursor.imTargets = [];
       this.cursor.processedMessages = [];
       this.cursor.notificationWatermark = undefined;
       this.cursor.notificationCheckpoint = undefined;
     }
+    this.documentSet.clear();
+    for (const documentId of this.cursor.documentIds ?? []) {
+      this.documentSet.add(documentId);
+    }
+    for (const pending of this.cursor.pendingDocumentNotifications ?? []) {
+      this.documentSet.add(pending.documentId);
+    }
+    for (const key of this.cursor.processedMessages) {
+      const documentId = key.match(/^document-notification\0([^\0]+)\0/u)?.[1];
+      if (documentId && /^[\p{L}\p{N}_~-]+$/u.test(documentId)) {
+        this.documentSet.add(documentId);
+      }
+    }
+    this.cursor.documentIds = [...this.documentSet].slice(-MAX_PROCESSED_ITEMS);
     this.cursor.selfSenderIds = [
       ...new Set(identity.selfSenderIds ?? []),
     ].slice(-MAX_SELF_SENDER_IDS);
@@ -737,7 +776,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     if (!this.connected) {
       throw new Error(`[Channel:${this.name}] DWS channel is disconnected.`);
     }
-    const taskId = this.todoTargets.get(chatId);
+    const taskId =
+      this.todoTargets.get(chatId) ??
+      (threadId && todoChatId(threadId) === chatId ? threadId : undefined);
     if (taskId) {
       if (threadId !== taskId) {
         throw new Error(
@@ -925,6 +966,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const processedTaskIds = new Set<string>();
     for (const task of tasks) {
       if (signal.aborted || !this.connected) return;
+      this.todoTargets.set(todoChatId(task.taskId), task.taskId);
       const fingerprint = todoFingerprint(task);
       if (states.get(task.taskId)?.fingerprint === fingerprint) continue;
       try {
@@ -1249,6 +1291,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     const task = (async () => {
       this.documentSet.add(notification.documentId);
+      this.cursor.documentIds = [...this.documentSet].slice(
+        -MAX_PROCESSED_ITEMS,
+      );
       this.rememberInboundReactionTarget(
         notification.documentId,
         message.messageId,

@@ -251,6 +251,14 @@ class TestableDwsChannel extends DwsChannel {
     await this.sendResponseMessage(chatId, text, 'session-1');
   }
 
+  async sendThread(
+    chatId: string,
+    threadId: string,
+    text: string,
+  ): Promise<void> {
+    await this.sendThreadMessage(chatId, threadId, text);
+  }
+
   instructions(): string | undefined {
     return this.config.instructions;
   }
@@ -745,7 +753,94 @@ describe('DwsChannel', () => {
     );
   });
 
-  it('parses document mention URLs followed by Chinese punctuation', async () => {
+  it('extracts a document request when CJK text precedes the mention', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const url = documentMentionCard('doc-1', 'comment-1').match(
+      /https:\/\/alidocs\.dingtalk\.com\/i\/nodes\/[^\]]+/u,
+    )?.[0];
+    expect(url).toBeDefined();
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-cjk-prefix',
+        `${url}\n麻烦@DataWorksAgent 把表格汇总一下`,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-1',
+        threadId: 'comment-1',
+        text: expect.stringContaining('把表格汇总一下'),
+      }),
+    ]);
+  });
+
+  it('rejects a decoded document id that collides with the todo namespace', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const url =
+      'https://alidocs.dingtalk.com/i/nodes/todo%3Atask-9?' +
+      'iframeQuery=mention_source%3D2%26comment_key%3Dcomment-1';
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-doc-todo-collision',
+        `${url}\n@DataWorksAgent summarize this thread`,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ chatId: 'cid-1' }),
+    ]);
+    expect(channel.inbound[0]).not.toHaveProperty('threadId');
+  });
+
+  it('restores document reply routing across a cold restart', async () => {
+    const name = 'persistent-document-route';
+    const firstClient = new FakeDwsClient();
+    const first = await readyChannel(firstClient, makeConfig(), name);
+    await firstClient.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-persist-document',
+        documentMentionCard('doc-restart', 'comment-restart'),
+      ),
+    );
+    expect(first.inbound).toHaveLength(1);
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    const second = await readyChannel(secondClient, makeConfig(), name);
+    second.responseThreadId = 'comment-restart';
+    await second.respond('doc-restart', 'response after restart');
+    await second.sendThread(
+      'doc-restart',
+      'comment-restart',
+      'thread after restart',
+    );
+
+    expect(secondClient.replyToComment).toHaveBeenNthCalledWith(
+      1,
+      'doc-restart',
+      'comment-restart',
+      'response after restart',
+    );
+    expect(secondClient.replyToComment).toHaveBeenNthCalledWith(
+      2,
+      'doc-restart',
+      'comment-restart',
+      'thread after restart',
+    );
+  });
+
+  it('does not guess a document route after a bare URL suffix', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
     const card = documentMentionCard('doc-1', 'comment-1').replace(
@@ -759,19 +854,13 @@ describe('DwsChannel', () => {
     );
 
     expect(channel.inbound).toEqual([
-      expect.objectContaining({ chatId: 'doc-1', threadId: 'comment-1' }),
+      expect.objectContaining({ chatId: 'cid-1' }),
     ]);
-    channel.responseThreadId = 'comment-1';
-    await channel.respond('doc-1', 'response');
-    expect(client.replyToComment).toHaveBeenCalledWith(
-      'doc-1',
-      'comment-1',
-      'response',
-    );
+    expect(channel.inbound[0]).not.toHaveProperty('threadId');
   });
 
   it.each([',', '.', ';', '!', '?', '…', '~'])(
-    'parses document mention URLs followed by %s',
+    'does not guess a document route after a bare URL followed by %s',
     async (punctuation) => {
       const client = new FakeDwsClient();
       const channel = await readyChannel(client);
@@ -790,8 +879,9 @@ describe('DwsChannel', () => {
       );
 
       expect(channel.inbound).toEqual([
-        expect.objectContaining({ chatId: 'doc-1', threadId: 'comment-1' }),
+        expect.objectContaining({ chatId: 'cid-1' }),
       ]);
+      expect(channel.inbound[0]).not.toHaveProperty('threadId');
     },
   );
 
@@ -845,7 +935,7 @@ describe('DwsChannel', () => {
   );
 
   it.each(['。', '，', '请'])(
-    'routes a bare document mention before a non-ASCII %s suffix',
+    'does not guess a bare document route before a non-ASCII %s suffix',
     async (suffix) => {
       const client = new FakeDwsClient();
       const channel = await readyChannel(client);
@@ -864,11 +954,11 @@ describe('DwsChannel', () => {
 
       expect(channel.inbound).toEqual([
         expect.objectContaining({
-          chatId: 'doc-1',
-          threadId: 'comment-1',
+          chatId: 'cid-1',
           text: expect.stringContaining('summarize this thread'),
         }),
       ]);
+      expect(channel.inbound[0]).not.toHaveProperty('threadId');
     },
   );
 
@@ -1371,7 +1461,13 @@ describe('DwsChannel', () => {
     );
     await second.poll();
 
+    await second.sendThread('todo:task-1', 'task-1', 'continued after restart');
+
     expect(second.inbound).toHaveLength(0);
+    expect(secondClient.addTodoComment).toHaveBeenCalledWith(
+      'task-1',
+      'continued after restart',
+    );
   });
 
   it('comments one pairing code while keeping the todo pending for approval', async () => {
