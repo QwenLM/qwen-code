@@ -299,6 +299,17 @@ export async function listSessions(
 
   const entries: SessionEntry[] = [];
   for (const id of capped) {
+    // The mtime is REQUIRED (it drives the most-recent-first sort), so a file
+    // that cannot be stat'd (broken symlink, vanished, EACCES) is SKIPPED
+    // rather than listed with a fabricated timestamp that would corrupt the
+    // sort — mirroring the "can't read → omit" contract of the listing.
+    let updatedAt: string;
+    try {
+      const stats = await stat(join(chatsDir, `${id}.jsonl`));
+      updatedAt = stats.mtime.toISOString();
+    } catch {
+      continue;
+    }
     let parent: string | null;
     try {
       const first = await readFirstRecord(chatsDir, id);
@@ -309,15 +320,6 @@ export async function listSessions(
     }
     // Title is best-effort enrichment (never throws) — a bounded tail read.
     const info = await readSessionTitleInfo(chatsDir, id);
-    // Read file mtime for updatedAt timestamp
-    let updatedAt: string;
-    try {
-      const stats = await stat(join(chatsDir, `${id}.jsonl`));
-      updatedAt = stats.mtime.toISOString();
-    } catch {
-      // Fallback to current time if stat fails
-      updatedAt = new Date().toISOString();
-    }
     entries.push({
       sessionId: id,
       parentSessionId: parent,

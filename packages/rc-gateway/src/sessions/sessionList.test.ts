@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, utimes } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, utimes, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -140,7 +140,12 @@ describe('listSessions', () => {
     await write(ID(3)); // another root
     const { sessions, truncated } = await listSessions(dir);
     expect(truncated).toBe(false);
-    expect(sessions).toMatchObject([
+    // Compare by sessionId order (the returned array is mtime-sorted; the
+    // most-recent-first ordering has its own dedicated test).
+    const byId = [...sessions].sort((a, b) =>
+      a.sessionId < b.sessionId ? -1 : 1,
+    );
+    expect(byId).toMatchObject([
       { sessionId: ID(1), forks: [ID(2)] },
       { sessionId: ID(2), parentSessionId: ID(1), forks: [] },
       { sessionId: ID(3), forks: [] },
@@ -198,6 +203,32 @@ describe('listSessions', () => {
     // Sessions should be sorted by updatedAt descending (most recent first)
     const times = sessions.map((s) => s.updatedAt);
     expect(times).toEqual([...times].sort().reverse()); // desc
+  });
+
+  it('omits a session whose file cannot be stat`d and still sorts the rest by real mtime', async () => {
+    const earlier = new Date('2025-01-01T10:00:00Z');
+    const later = new Date('2025-01-02T10:00:00Z');
+
+    // Two real, stat-able transcripts with distinct mtimes.
+    await write(ID(1));
+    await utimes(join(dir, `${ID(1)}.jsonl`), earlier, earlier);
+    await write(ID(2));
+    await utimes(join(dir, `${ID(2)}.jsonl`), later, later);
+
+    // A BROKEN symlink named like a valid transcript: readdir lists it and the
+    // id filter passes, but stat() (which follows the link) fails -> skipped.
+    await symlink(
+      join(dir, 'does-not-exist.jsonl'),
+      join(dir, `${ID(3)}.jsonl`),
+    );
+
+    const { sessions } = await listSessions(dir);
+
+    // The unstat-able session is omitted entirely (not listed with a fake time).
+    expect(sessions.map((s) => s.sessionId)).toEqual([ID(2), ID(1)]);
+    // Remaining sessions still sorted most-recent-first by real mtime.
+    const times = sessions.map((s) => s.updatedAt);
+    expect(times).toEqual([...times].sort().reverse());
   });
 });
 
@@ -312,7 +343,10 @@ describe('listSessions titles (cycle 85)', () => {
       JSON.stringify({ sessionId: ID(2), type: 'user' }) + '\n',
     );
     const { sessions } = await listSessions(dir);
-    expect(sessions).toMatchObject([
+    const byId = [...sessions].sort((a, b) =>
+      a.sessionId < b.sessionId ? -1 : 1,
+    );
+    expect(byId).toMatchObject([
       // titleSource defaults to 'manual' when the record omits it (cycle 95).
       {
         sessionId: ID(1),
