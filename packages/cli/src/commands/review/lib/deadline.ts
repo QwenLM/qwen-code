@@ -10,7 +10,8 @@
 // is open-ended: each round is a fan-out (one auditor per chunk on a 3B plan),
 // each round's findings go back through verification, and the loop runs until
 // two consecutive dry rounds or the plan's round cap (one value per topology:
-// 10 on a 3A diff, 5 on a 3B one, 3 when huge). On a PR where every round
+// 10 on a 3A diff, 5 on a 3B one, and 3 when huge — but only where a deadline
+// exists, since that reduction answers a ceiling; 5 when huge without one). On a PR where every round
 // finds something, that is the whole budget. Measured on a real CI run
 // (#8368, +1699 lines): the audit loop ran to the 5-round cap, consumed 3.5 of
 // the job's 4 budgeted hours, and the outer GNU-timeout kill arrived while

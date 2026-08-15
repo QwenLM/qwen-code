@@ -664,9 +664,7 @@ describe('reverseAuditRoundCap — the one reader of the plan field', () => {
     // Every other case here sits on a boundary — at the floor, at the tier, or
     // outside — and a boundary-only suite cannot tell a tier-relative bound
     // from a constant one: mutating `v <= tier` to `v <= LARGE_…ROUNDS` passed
-    // all 57 tests before these three. The interior is where the two differ,
-    // and it is reachable in production, not just by hand: the operator round
-    // ceiling writes exactly such a value into the plan.
+    // all 57 tests before these three. The interior is where the two differ.
     expect(
       reverseAuditRoundCap(
         { ...SMALL, budget: { reverseAuditRounds: 7 } },
@@ -692,8 +690,10 @@ describe('reverseAuditRoundCap — the one reader of the plan field', () => {
 
   it('clamps to the plan’s own tier, so a hand edit cannot cross topologies', () => {
     // The field is CLI-written and nothing here is the caller's to override.
-    // A single global upper bound of ten would have honoured all three of
-    // these; the tier is what makes them buy nothing.
+    // The first two are what distinguish a tier clamp from a single global
+    // bound of ten, which would have honoured both; the third (11 on a SMALL
+    // plan) is clamped either way and is here for the upper edge, not for the
+    // comparison.
     expect(
       reverseAuditRoundCap(
         { ...HUGE, budget: { reverseAuditRounds: 10 } },
@@ -744,11 +744,13 @@ describe('reverseAuditRoundCap — the one reader of the plan field', () => {
   });
 
   it('rejects an in-band NON-INTEGER — the only guard that can catch it', () => {
-    // 2.5 above never reaches `Number.isInteger`: the `>= 3` floor rejects it
-    // first, so deleting the integer guard leaves the whole suite green and
+    // 2.5 above is rejected by the integer guard itself (the chain tests
+    // `Number.isInteger` before the `>= 3` floor), so it says nothing about
+    // what the floor would have caught on its own: delete the integer guard
+    // and 2.5 still falls to the floor, leaving the suite green while
     // `reverseAuditRounds: 3.5` becomes a cap of 3.5. These values sit inside
-    // every tier's band, so the integer check is the ONLY thing between them
-    // and a fractional round cap.
+    // every tier's band and above the floor, so the integer check is the ONLY
+    // thing between them and a fractional round cap.
     expect(
       reverseAuditRoundCap(
         { ...SMALL, budget: { reverseAuditRounds: 3.5 } },
@@ -784,11 +786,15 @@ describe('reverseAuditRoundCap — the one reader of the plan field', () => {
   });
 
   it('treats a COERCIBLE garbage size as unsized, not as a zero-line diff', () => {
-    // `Number()` turns each of these into a finite 0, so a coerce-then-
-    // isFinite check calls them usable and hands the plan the SMALL tier —
-    // ten rounds, the most expensive cap — for a plan whose size is not
-    // known. `JSON.stringify` writes a NaN line count as `null`, so this is
-    // the shape the corrupted plan actually arrives in.
+    // `Number()` turns each of these into a finite number, so a coerce-then-
+    // isFinite check calls them all usable and sizes the plan from a value it
+    // never received. `null`, `''`, `false` and `[]` coerce to 0 and land on
+    // the SMALL tier — ten rounds, the most expensive cap — for a plan whose
+    // size is not known; `-5` lands there too once floored; `'1'` and
+    // `'3000'` coerce to real counts and are sized as though a string were a
+    // line count, `'3000'` reaching the HUGE tier rather than the fallback.
+    // `JSON.stringify` writes a NaN line count as `null`, so the first shape
+    // is the one a corrupted plan actually arrives in.
     for (const bad of [null, '', false, [], -5, '1', '3000'] as unknown[]) {
       expect(
         reverseAuditRoundCap({ srcDiffLines: bad, diffLines: bad }, true),

@@ -58,11 +58,13 @@ export function operatorReviewSettings(): OperatorReviewSettings {
   // file"). An unreadable file is enough: this is read while a plan is being
   // captured, the review's first step, so the throw would end the whole review
   // over a permissions bit on a file none of these settings had to come from.
-  // Degrade to
-  // the defaults instead and say so: every default here is the conservative
-  // side (attribution on, no auto-posting, no effort override, no round
-  // ceiling), so a review that loses its operator policy loses it toward doing
-  // MORE work and writing nothing public — never the other way.
+  // Degrade to the defaults instead and say so. Most of them are the
+  // conservative side outright — attribution on, no auto-posting, no round
+  // ceiling — so a review that loses those loses them toward doing more work
+  // and writing nothing public. `effort` is the honest exception: dropping an
+  // operator's `high` returns the built-in rule, which is medium on a local
+  // target, so that one field can degrade to LESS work. It is disclosed on
+  // stderr for exactly that reason rather than being silently absorbed.
   let review;
   try {
     review = loadSettings(undefined, { skipWorkspaceSettings: true }).merged

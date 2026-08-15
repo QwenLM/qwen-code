@@ -41,6 +41,30 @@ export interface BudgetInput {
   diffLines: number;
 }
 
+/**
+ * The two facts about the machine that the round cap depends on.
+ *
+ * Both are resolved by the capture command and passed in rather than read
+ * here: this module has no imports, and a budget that loaded settings or
+ * inspected `process.env` would make every caller's tests depend on the
+ * machine they run on. They arrive together because they answer the same
+ * question from two sides — how many reverse-audit rounds this plan may run.
+ */
+export interface BudgetContext {
+  /**
+   * The standing `review.reverseAuditRounds` setting, when the operator set a
+   * usable one — a settings value, not an environment one. It can only lower
+   * the round tier; see `cappedRoundTier`.
+   */
+  operatorRoundCap?: number;
+  /**
+   * Is `QWEN_REVIEW_DEADLINE_EPOCH` set to something the gates will honour?
+   * This decides whether the huge tier's finishability reduction applies at
+   * all; see `HUGE_REVERSE_AUDIT_ROUNDS`.
+   */
+  hasDeadline?: boolean;
+}
+
 export interface ReviewBudget {
   /**
    * How many of the low tier's directed angles to walk (Step 3C, A–F).
@@ -119,8 +143,9 @@ export interface ReviewBudget {
    * gate) but to buy hot chunks one extra audit round before the cap.
    *
    * The budget tunes how many rounds the loop runs, never whether it runs:
-   * the reverse audit is a dimension of the high-effort contract. The CLI
-   * only ever writes one of the three tier values here.
+   * the reverse audit is a dimension of the high-effort contract. What the CLI
+   * writes here is a tier value, or — when the operator set a
+   * `review.reverseAuditRounds` ceiling below it — that ceiling.
    */
   reverseAuditRounds: number;
 }
@@ -380,26 +405,11 @@ const LINES_PER_TOOL_CALL = 20;
  * cheap end on purpose — the floors are the *minimum* work, not the maximum, so
  * a garbled input still walks three angles and still verifies.
  *
- * Both `env` fields are read by the capture command and passed in rather than
- * read here — this module has no imports, and a budget that loaded settings or
- * inspected `process.env` would make every caller's tests depend on the machine
- * it runs on.
- *
- * `operatorRoundCap` is the standing `review.reverseAuditRounds` setting. It
- * can only lower the round tier; see `cappedRoundTier`. `hasDeadline` says
- * whether this run has a clock, which decides whether the huge tier's
- * finishability reduction applies at all; see `HUGE_REVERSE_AUDIT_ROUNDS`.
- * Nothing else in the budget is tunable from outside, and that stays true: the
- * rest of these fields size the work a review owes, and a caller who can shrink
- * them is a caller who shrinks them.
+ * `context` carries the two facts about the machine the round cap depends on;
+ * see `BudgetContext`. Nothing else in the budget is tunable from outside, and
+ * that stays true: the rest of these fields size the work a review owes, and a
+ * caller who can shrink them is a caller who shrinks them.
  */
-export interface BudgetContext {
-  /** `review.reverseAuditRounds`, when the operator set a usable one. */
-  operatorRoundCap?: number;
-  /** Is `QWEN_REVIEW_DEADLINE_EPOCH` set to something the gates will honour? */
-  hasDeadline?: boolean;
-}
-
 export function reviewBudget(
   input: BudgetInput,
   context: BudgetContext = {},
@@ -454,7 +464,12 @@ export function reviewBudget(
  * not the schedule's).
  *
  * It takes the whole plan, not `plan.budget`, because the accepted range is
- * now the plan's **own topology tier** rather than a global band. What that
+ * now the plan's **own topology tier** rather than a global band — and
+ * `hasDeadline` because that tier is clock-dependent on a huge diff (3 with a
+ * deadline, 5 without). A reader that sees a different clock than the capture
+ * did therefore clamps against a different band, which is safe in the
+ * direction that matters: a plan captured without a clock and read under one
+ * is cut to the shorter tier, never the reverse. What that
  * buys, stated as what actually happens rather than as a slogan:
  *
  *  - **A hand-edited plan cannot cross tiers.** The field is CLI-written and
