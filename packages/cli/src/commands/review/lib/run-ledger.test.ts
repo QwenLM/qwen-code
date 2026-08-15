@@ -555,9 +555,11 @@ describe('the properties the threat model rests on', () => {
     authorize('S9');
     authorize('s1');
     authorize('s2_');
+    // S9 is not in the ledger, so everything reads as prior.
     expect(priorSessionIds(plan, envOf('S9'))).toEqual(['S1', 'S2.']);
-    // ...and the current-session exclusion folds the same way.
-    expect(priorSessionIds(plan, envOf('s1'))).toEqual(['S2.']);
+    // Reading as s1 (folds with S1, the EARLIEST entry): S2. started after
+    // it, so it is a successor, not a prior — priors are the prefix.
+    expect(priorSessionIds(plan, envOf('s1'))).toEqual([]);
     expect(priorSessionIds(plan, envOf('s2_'))).toEqual(['S1']);
   });
 
@@ -684,6 +686,58 @@ describe('the properties the threat model rests on', () => {
     writeFileSync(join(root, 'qwen-review-pr-7-fetch-prompts'), 'a file');
     expect(() => recordResume(plan, envOf('S1'))).not.toThrow();
     expect(() => recordRestart(plan, 'head-moved')).not.toThrow();
+  });
+
+  it('collapses a duplicate flood BEFORE the cap can be consumed', () => {
+    // 64 valid hand-written duplicates at the front used to evict every
+    // genuine entry, and the next append rewrote the file from the filtered
+    // survivors — laundering the plant permanently.
+    const mtime = statSync(plan).mtimeMs;
+    const now = Date.now();
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    const dupes = Array.from({ length: 64 }, () => ({
+      sessionId: 'DUP',
+      atMs: now,
+      planMtimeMs: mtime,
+    }));
+    writeFileSync(
+      runSessionsPath(plan),
+      JSON.stringify([
+        ...dupes,
+        { sessionId: 'S1', atMs: now - 1000, planMtimeMs: mtime },
+      ]),
+    );
+    expect(sessionEntryCount(plan)).toBe(2);
+    authorize('S9');
+    expect(priorSessionIds(plan, envOf('S9'))).toEqual(['S1', 'DUP']);
+  });
+
+  it('treats a SUCCESSOR session as not-prior, with the window closed at self', () => {
+    // A twice-resumed run read as the middle attempt: the successor is not
+    // "earlier evidence", and the middle attempt's last prior window closes
+    // at its OWN start — not at null.
+    const past = new Date(Date.now() - 3600_000);
+    utimesSync(plan, past, past);
+    const mtime = statSync(plan).mtimeMs;
+    const base = Math.floor(mtime);
+    mkdirSync(join(root, 'qwen-review-pr-7-fetch-prompts'), {
+      recursive: true,
+    });
+    writeFileSync(
+      runSessionsPath(plan),
+      JSON.stringify([
+        { sessionId: 'S0', atMs: base, planMtimeMs: mtime },
+        { sessionId: 'S1', atMs: base + 510_000, planMtimeMs: mtime },
+        { sessionId: 'S2', atMs: base + 2_900_000, planMtimeMs: mtime },
+      ]),
+    );
+    authorize('S1');
+    const entries = priorSessionEntries(plan, envOf('S1'));
+    expect(entries.map((e) => e.sessionId)).toEqual(['S0']);
+    // S0's window closes when S1 began — not at S2, and never unbounded.
+    expect(entries[0].endsAtMs).toBe(base + 510_000);
   });
 
   it('drops an entry older than the slack window', () => {

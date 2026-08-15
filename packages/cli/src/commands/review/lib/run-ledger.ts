@@ -226,7 +226,13 @@ function readSessions(planPath: string): SessionEntry[] {
         Math.abs((e as SessionEntry).planMtimeMs! - planMtime) <=
           PLAN_MTIME_TOLERANCE_MS,
     );
-    const capped = kept.slice(0, MAX_LEDGER_ENTRIES);
+    // Order matters, and each step has a payload it defeats: SORT first
+    // (earliest wins, not file order), DEDUP second (a flood of valid
+    // duplicates collapses to one before any cap can be consumed), CAP last
+    // over the distinct survivors — capped in file order before dedup, 64
+    // planted duplicates evicted every genuine entry and the next append
+    // laundered the plant permanently.
+    const capped = kept;
     // Deduplicate on READ, not only on append: the file lives in a directory
     // the orchestrator can reach, and a hand-written duplicate would make a
     // consumer that iterates entries (the cost ledger) bill one session
@@ -248,7 +254,8 @@ function readSessions(planPath: string): SessionEntry[] {
       .filter((e) => {
         const k = sessionPathKey(e.sessionId);
         return seen.has(k) ? false : (seen.add(k), true);
-      });
+      })
+      .slice(0, MAX_LEDGER_ENTRIES);
   } catch {
     return [];
   }
@@ -321,8 +328,23 @@ export function appendRunSession(
  * cap that the ledger was supposed to backstop — the one attack the two-counter
  * design existed to defeat.
  */
-export function sessionEntryCount(planPath: string): number {
-  return readSessions(planPath).length;
+export function sessionEntryCount(
+  planPath: string,
+  opts: {
+    /**
+     * Exclude the session this id names (folded on the path key). The resume
+     * cap counts OTHER attempts: a same-session retry of the last permitted
+     * resume is that same resume, and counting the session's own entry in
+     * either term refuses the retry — whose fresh fall-through then destroys
+     * the very state being resumed.
+     */
+    excludeSessionId?: string;
+  } = {},
+): number {
+  const entries = readSessions(planPath);
+  if (opts.excludeSessionId === undefined) return entries.length;
+  const key = sessionPathKey(opts.excludeSessionId);
+  return entries.filter((e) => sessionPathKey(e.sessionId) !== key).length;
 }
 
 /**
@@ -410,11 +432,24 @@ export function priorSessionEntries(
   // between attempts would otherwise invert it — a null or negative window
   // silently unbounds or empties a prior session's bill.
   const all = [...readSessions(planPath)].sort((a, b) => a.atMs - b.atMs);
-  return all
+  // PRIOR means "started before this session", not "is not this session".
+  // A twice-resumed run read as the MIDDLE attempt otherwise receives its
+  // own successor as a prior with `endsAtMs: null` — the successor's whole
+  // activity, unrelated later turns included, folds into this attempt's
+  // bill unclamped, and its stamped records enter the evidence pool with no
+  // upper window. Only the prefix strictly before this session's own entry
+  // is prior; its last window closes at THIS session's start.
+  const ownIdx =
+    current === undefined
+      ? -1
+      : all.findIndex((e) => sessionPathKey(e.sessionId) === current);
+  const prefix = ownIdx >= 0 ? all.slice(0, ownIdx) : all;
+  const ownAtMs = ownIdx >= 0 ? all[ownIdx].atMs : null;
+  return prefix
     .map((e, i) => ({
       sessionId: e.sessionId,
       atMs: e.atMs,
-      endsAtMs: i + 1 < all.length ? all[i + 1].atMs : null,
+      endsAtMs: i + 1 < prefix.length ? prefix[i + 1].atMs : ownAtMs,
     }))
     .filter((e) => sessionPathKey(e.sessionId) !== current);
 }

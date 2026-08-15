@@ -1837,6 +1837,33 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     expect(r.unverifiedFindings).toBe(true);
   });
 
+  it('drops a POINTERLESS stale verify key once a dated digest exists', () => {
+    // The write-failure fallback inlines the list, so its key has no
+    // findings file — no date, and no findings-read floor either, which
+    // means it CAN reach ok. Kept beside a dated digest, a stale pointerless
+    // verifier vouches for a list no verifier opened.
+    const p = plan();
+    step45(p, 'reverse-audit');
+    // The pointerless stale verifier: compliant in every respect, no
+    // findings file on disk (prompt carries no pointer).
+    const d = promptRecordDir(p);
+    const key = 'verify--stale9999';
+    const brief = briefPath(p, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const prompt =
+      `You are review agent \`${key}\`.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${DIFF}")`;
+    writeFileSync(join(d, `${encodeURIComponent(key)}.txt`), prompt);
+    transcript('vstale', prompt, { calls: 2, opens: [brief] });
+    // The CURRENT digest: dated (findings file on disk), launched, its list
+    // unread — the floor must come back owed.
+    step45(p, 'verify--new22222222', { findings: true, opensFindings: false });
+
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.unverifiedFindings).toBe(true);
+  });
+
   it('passes when both verify and reverse audit ran on a review with findings', () => {
     const p = plan();
     step45(p, 'reverse-audit');

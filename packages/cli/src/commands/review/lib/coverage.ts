@@ -1627,12 +1627,17 @@ export function verificationGaps(
     }
     if (dated.length === 0) return keys;
     const newest = Math.max(...dated.map((d) => d.mtimeMs));
-    return [
-      ...dated
-        .filter((d) => d.mtimeMs >= newest - DIGEST_WINDOW_MS)
-        .map((d) => d.key),
-      ...undatable,
-    ];
+    // Undatable keys are DROPPED once any dated key exists. The earlier
+    // premise — "they cannot reach ok, so they only make the verdict
+    // stricter" — is false for the write-failure fallback: a key whose list
+    // was inlined has no findings file and no pointer, the findings-read
+    // floor is vacuously satisfied, and a stale digest's pointerless
+    // verifier could vouch for a list no verifier opened. With no dated key
+    // at all (every round inlined), the undatable set is the only evidence
+    // there is and stays.
+    return dated
+      .filter((d) => d.mtimeMs >= newest - DIGEST_WINDOW_MS)
+      .map((d) => d.key);
   };
 
   /** The best shape across a step's keys — the floor is one agent, not all of them. */
