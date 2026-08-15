@@ -830,7 +830,10 @@ async function classifyImageContent(
           ? 'image'
           : 'binary';
     } else {
-      result = detectBOM(bytes) || looksLikeText(bytes) ? 'text' : 'binary';
+      result =
+        bytes.length < 3 || !(detectBOM(bytes) || looksLikeText(bytes))
+          ? 'binary'
+          : 'text';
     }
     if (result !== 'image') {
       debugLogger.debug(
