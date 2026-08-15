@@ -101,6 +101,13 @@ export const EFFORT_LEVELS: ReadonlySet<string> = new Set([
 const PR_URL_RE =
   /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)(?=$|[/?#])/i;
 
+// Aone Code CR URLs: `https://code.alibaba-inc.com/<group>/<project>/codereview/<global-id>`.
+// The trailing number is the global MR id (what the Aone refspec and `a1 mr
+// view` key on), carried as the target's `number` exactly like a GitHub PR
+// number; the platform itself is detected from the clone's remote, not the URL.
+const AONE_CR_URL_RE =
+  /^(https?):\/\/([A-Za-z0-9.-]+(?::\d+)?)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
+
 /**
  * Case-insensitive: `--effort High` has exactly one plausible meaning, and
  * classifying `High` as a file-path target (as a case-sensitive match once
@@ -178,6 +185,19 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
     return {
       type: 'pr-url',
       url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/pull/${Number(num)}`,
+      host: lowerHost,
+      owner,
+      repo,
+      number: Number(num),
+    };
+  }
+  const aoneMatch = AONE_CR_URL_RE.exec(token);
+  if (aoneMatch) {
+    const [, scheme, host, owner, repo, num] = aoneMatch;
+    const lowerHost = host.toLowerCase();
+    return {
+      type: 'pr-url',
+      url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/codereview/${Number(num)}`,
       host: lowerHost,
       owner,
       repo,

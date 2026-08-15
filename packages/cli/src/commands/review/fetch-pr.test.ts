@@ -9,6 +9,7 @@ import type { Argv, CommandModule } from 'yargs';
 import {
   fetchPrCommand,
   countDiffChangedLines,
+  computeDiffStats,
   isEmptyDiff,
   isCollapsedFromUpstream,
 } from './fetch-pr.js';
@@ -254,11 +255,15 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
   createReviewWorktreeLease: vi.fn(),
 }));
 
-vi.mock('./lib/gh.js', () => ({
-  ensureAuthenticated: vi.fn(),
-  gh: producerMocks.gh,
-  setGhHost: vi.fn(),
-}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    ensureAuthenticated: vi.fn(),
+    gh: producerMocks.gh,
+    setGhHost: vi.fn(),
+  };
+});
 
 vi.mock('./lib/git.js', () => ({
   git: producerMocks.git,
@@ -618,5 +623,39 @@ describe('countDiffChangedLines', () => {
       '+q',
     ].join('\n');
     expect(countDiffChangedLines(d)).toBe(4);
+  });
+});
+
+describe('computeDiffStats', () => {
+  it('counts additions, deletions, and changed files off a unified diff', () => {
+    const d = [
+      'diff --git a/a.ts b/a.ts',
+      '--- a/a.ts',
+      '+++ b/a.ts',
+      '@@ -1,2 +1,3 @@',
+      '-gone',
+      '+added1',
+      '+added2',
+      ' ctx',
+      'diff --git a/b.ts b/b.ts',
+      '--- a/b.ts',
+      '+++ b/b.ts',
+      '@@ -1 +1 @@',
+      '-p',
+      '+q',
+    ].join('\n');
+    expect(computeDiffStats(d)).toEqual({
+      additions: 3,
+      deletions: 2,
+      changedFiles: 2,
+    });
+  });
+
+  it('returns zeros for an empty diff', () => {
+    expect(computeDiffStats('')).toEqual({
+      additions: 0,
+      deletions: 0,
+      changedFiles: 0,
+    });
   });
 });

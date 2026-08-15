@@ -31,7 +31,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
-import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
+import { setGhHost } from './lib/gh.js';
+import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewEffort } from './parse-args.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
@@ -185,7 +186,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     throw new Error('owner_repo must look like "owner/repo"');
   }
 
-  ensureAuthenticated();
+  // Select the platform from the remote under review (falling back to the
+  // cwd clone's origin), so an Aone clone fetches the Aone ref via a1 while a
+  // GitHub clone keeps `pull/<n>/head` via gh.
+  let remoteUrl: string | undefined;
+  try {
+    remoteUrl = git('remote', 'get-url', remote).trim();
+  } catch {
+    remoteUrl = undefined;
+  }
+  const platform = getPlatformReader({ remoteUrl, host: args.host });
+  platform.ensureAuthenticated();
 
   const ref = reviewBranch(prNumber);
   const wt = worktreePath(prNumber);
@@ -201,9 +212,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // 1. Clean any stale worktree / branch from an earlier run.
   cleanStale(prNumber);
 
-  // 2. Fetch PR HEAD into a unique local ref.
+  // 2. Fetch PR HEAD into a unique local ref. The refspec source is
+  //    platform-specific: GitHub `pull/<n>/head`, Aone
+  //    `refs/merge-requests/<global-id>/head`.
   try {
-    git('fetch', remote, `pull/${prNumber}/head:${ref}`);
+    git(
+      'fetch',
+      remote,
+      `${platform.fetchHeadRefSpec(Number(prNumber))}:${ref}`,
+    );
   } catch (err) {
     throw new Error(
       `Failed to fetch PR #${prNumber} from remote "${remote}": ${(err as Error).message}`,
@@ -211,20 +228,23 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
   const fetchedSha = git('rev-parse', ref);
 
-  // 3. Fetch PR metadata via gh CLI. Cross-repo flag tells the LLM whether
-  //    to switch into lightweight mode.
+  // 3. Fetch PR metadata via the platform. Cross-repo flag tells the LLM
+  //    whether to switch into lightweight mode.
   let meta: PrMetadata;
   try {
-    const json = gh(
-      'pr',
-      'view',
-      prNumber,
-      '--repo',
-      ownerRepo,
-      '--json',
-      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
-    );
-    meta = JSON.parse(json) as PrMetadata;
+    const fetchMeta = platform.getFetchMeta(Number(prNumber), ownerRepo);
+    meta = {
+      headRefName: fetchMeta.headRefName ?? prNumber,
+      headRefOid: fetchMeta.headRefOid,
+      baseRefName: fetchMeta.baseRefName,
+      // Platforms without advertised stats (Aone) fill these from the
+      // captured diff after step 5.
+      additions: fetchMeta.additions ?? 0,
+      deletions: fetchMeta.deletions ?? 0,
+      changedFiles: fetchMeta.changedFiles ?? 0,
+      isCrossRepository: fetchMeta.isCrossRepository,
+      body: fetchMeta.body,
+    };
   } catch (err) {
     // Roll back the fetched ref so the next run starts clean.
     tryRemove(() =>
@@ -234,6 +254,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       `Failed to fetch PR #${prNumber} metadata: ${(err as Error).message}`,
     );
   }
+  // Aone does not advertise diff stats; compute them from the captured diff
+  // once it exists. Tracked so the recomputed numbers replace the zeros.
+  const needsLocalStats = platform.kind !== 'github';
 
   // 4. Create the ephemeral worktree.
   try {
@@ -293,6 +316,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       `Could not resolve merge-base of ${meta.baseRefName} and ${ref}; ` +
         `agents will have to fall back to running \`git diff\` themselves.`,
     );
+  }
+  // Aone does not advertise diff stats — fill them from the captured diff so
+  // the report's diffStat and the stderr summary carry real numbers.
+  if (needsLocalStats) {
+    const stats = computeDiffStats(diffText);
+    meta.additions = stats.additions;
+    meta.deletions = stats.deletions;
+    meta.changedFiles = stats.changedFiles;
   }
   // `buildDiffPlan` throws when the chunks do not tile the diff — a coverage
   // hole. That must be loud, but it must not take the whole review with it: the
@@ -546,6 +577,37 @@ export function countDiffChangedLines(diffText: string): number {
     if (line.startsWith('+') || line.startsWith('-')) n++;
   }
   return n;
+}
+
+/**
+ * Additions / deletions / changed-files counted straight off a unified diff.
+ * Used when the platform does not advertise diff stats (Aone) — GitHub's
+ * `gh pr view` reports them, so GitHub keeps the advertised numbers.
+ */
+export function computeDiffStats(diffText: string): {
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+} {
+  let additions = 0;
+  let deletions = 0;
+  let changedFiles = 0;
+  let inHunk = false;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('diff --git')) {
+      changedFiles++;
+      inHunk = false;
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || line.startsWith('\\')) continue;
+    if (line.startsWith('+')) additions++;
+    else if (line.startsWith('-')) deletions++;
+  }
+  return { additions, deletions, changedFiles };
 }
 
 export const fetchPrCommand: CommandModule = {

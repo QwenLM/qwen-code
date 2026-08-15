@@ -14,8 +14,8 @@
 // lands without the skill prose or these subcommands changing; see
 // docs/design/2026-08-13-review-platform-provider-abstraction.md.
 
-/** A code-review platform. Only 'github' has a provider today. */
-export type PlatformKind = 'github';
+/** A code-review platform. */
+export type PlatformKind = 'github' | 'aone';
 
 /** Repository coordinates on a host. `host` is lowercased, port allowed. */
 export interface RepoIdentity {
@@ -56,6 +56,30 @@ export interface LinkedIssue {
 /** Which comment collection an id belongs to (shapes differ per platform). */
 export const COMMENT_KINDS = ['review', 'inline', 'issue'] as const;
 export type CommentKind = (typeof COMMENT_KINDS)[number];
+
+/**
+ * The metadata fetch-pr records when it pulls a PR's head into the review
+ * worktree. GitHub reports diff stats; Aone does not, so those are optional
+ * and computed locally from the fetched diff when absent.
+ */
+export interface FetchMeta {
+  /** The head SHA. */
+  headRefOid: string;
+  /**
+   * The head's branch name, when the platform has one (GitHub). AGit-Flow
+   * platforms have none (the head is a bare SHA), so this is optional.
+   */
+  headRefName?: string;
+  /** The base branch/ref to merge-base against (baseRefName / targetBranch). */
+  baseRefName: string;
+  /** True when the head lives in a different repository than the base. */
+  isCrossRepository: boolean;
+  /** The description, fetched to detect the author's language. */
+  body?: string;
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+}
 
 /**
  * The read side of a review platform. Write operations (submit, audit) join
@@ -100,4 +124,14 @@ export interface ReviewPlatformReader {
     ownerRepo: string,
     prNumber?: number,
   ): string;
+
+  /**
+   * The git refspec SOURCE whose head is the PR head (fetch-pr fetches it
+   * into the review branch). GitHub: `pull/<n>/head`; Aone:
+   * `refs/merge-requests/<global-id>/head`.
+   */
+  fetchHeadRefSpec(prNumber: number): string;
+
+  /** The metadata fetch-pr records when it pulls the PR head. */
+  getFetchMeta(prNumber: number, ownerRepo: string): FetchMeta;
 }

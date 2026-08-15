@@ -337,6 +337,26 @@ describe('parseReviewArgs', () => {
     expect(got.target).toMatchObject({ type: 'pr-url', number: 42 });
   });
 
+  it('an Aone codereview URL is a pr-url target keyed on the global MR id', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/29295886',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      host: 'code.alibaba-inc.com',
+      owner: 'maxcompute',
+      repo: 'odps_src',
+      number: 29295886,
+    });
+  });
+
+  it('an Aone codereview URL with a trailing query still parses', () => {
+    const got = parseReviewArgs(
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/123?tab=files',
+    );
+    expect(got.target).toMatchObject({ type: 'pr-url', number: 123 });
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',

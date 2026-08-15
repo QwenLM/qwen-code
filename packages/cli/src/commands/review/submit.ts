@@ -59,6 +59,7 @@ import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
 import { reviewWriteAuthorization } from './lib/authorization.js';
+import { getPlatformReader } from './lib/platform/registry.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -400,6 +401,18 @@ export function runSubmit(
 ): void {
   const { attribution = true, defaultComment = false } = opts;
   setGhHost(args.host);
+
+  // Posting is GitHub-only in this phase. On an Aone target the Create
+  // Review API does not exist — refuse before touching gh, clearly. The
+  // findings are not lost: they are in the terminal output and the saved
+  // report. Detected from the target host when present, else the cwd clone.
+  if (getPlatformReader({ host: args.host }).kind === 'aone') {
+    throw new Error(
+      'posting review comments to Aone Code is not supported yet ' +
+        '(read-only phase) — the findings are in the terminal output and ' +
+        'the saved report; post them manually or wait for the write phase.',
+    );
+  }
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
