@@ -1359,6 +1359,22 @@ interface KeySequence {
   modifierBits: number;
 }
 
+// US-layout shifted characters for `shift+<digit>` — without this the page
+// would receive the bare digit with Shift held, a combination no physical
+// keyboard produces.
+const SHIFTED_DIGITS: Record<string, string> = {
+  '1': '!',
+  '2': '@',
+  '3': '#',
+  '4': '$',
+  '5': '%',
+  '6': '^',
+  '7': '&',
+  '8': '*',
+  '9': '(',
+  '0': ')',
+};
+
 const MODIFIERS: Record<string, KeySpec & { bit: number }> = {
   alt: { bit: 1, key: 'Alt', code: 'AltLeft', virtualKeyCode: 18 },
   ctrl: { bit: 2, key: 'Control', code: 'ControlLeft', virtualKeyCode: 17 },
@@ -1457,6 +1473,7 @@ async function dispatchKey(
   let activeBits = 0;
   const pressed: KeySequence['modifiers'] = [];
   const shifted = (sequence.modifierBits & 8) !== 0;
+  const shiftedDigit = SHIFTED_DIGITS[sequence.key.key];
   const key =
     shifted && /^[a-z]$/.test(sequence.key.key)
       ? {
@@ -1464,7 +1481,13 @@ async function dispatchKey(
           key: sequence.key.key.toUpperCase(),
           text: sequence.key.text?.toUpperCase(),
         }
-      : sequence.key;
+      : shifted && shiftedDigit !== undefined
+        ? {
+            ...sequence.key,
+            key: shiftedDigit,
+            text: shiftedDigit,
+          }
+        : sequence.key;
   const printable =
     (sequence.modifierBits & ~8) === 0 && key.text !== undefined
       ? { text: key.text }

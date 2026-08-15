@@ -303,13 +303,16 @@ describe('WebBridgeService', () => {
     });
   });
 
-  it('removes an owned tab when it becomes borrowed', async () => {
+  it('keeps a session-created tab owned when re-found via find_tab(active)', async () => {
+    // Demoting a session's own tab to borrowed would remove it from the
+    // close set permanently (close_tab rejects borrowed tabs and
+    // close_session filters them out), leaking the tab in the browser.
     const registry = new WebBridgeRegistry();
     const call = vi
       .spyOn(registry, 'call')
       .mockResolvedValueOnce({ success: true, tabId: 99 })
       .mockResolvedValueOnce({ success: true, tabId: 99, borrowed: true })
-      .mockResolvedValueOnce({ success: true, closed: 0 });
+      .mockResolvedValueOnce({ success: true, closed: 1 });
     const service = new WebBridgeService(registry, '1.2.3');
 
     await service.execute({
@@ -331,7 +334,53 @@ describe('WebBridgeService', () => {
     expect(call).toHaveBeenLastCalledWith('close_session', {
       _session: 'research',
       _tabId: 99,
+      _tabIds: [99],
+    });
+  });
+
+  it('hands ownership of a borrowed tab to the borrower when the owner closes', async () => {
+    const registry = new WebBridgeRegistry();
+    const call = vi
+      .spyOn(registry, 'call')
+      .mockResolvedValueOnce({ success: true, tabId: 99 })
+      .mockResolvedValueOnce({ success: true, tabId: 99, borrowed: true })
+      .mockResolvedValueOnce({ success: true, closed: 0 })
+      .mockResolvedValueOnce({ success: true, closed: 1 });
+    const service = new WebBridgeService(registry, '1.2.3');
+
+    await service.execute({
+      action: 'navigate',
+      args: { url: 'https://example.test', newTab: true },
+      session: 'owner',
+    });
+    await service.execute({
+      action: 'find_tab',
+      args: { url: 'https://example.test', active: true },
+      session: 'borrower',
+    });
+    await service.execute({
+      action: 'close_session',
+      args: {},
+      session: 'owner',
+    });
+
+    expect(call).toHaveBeenNthCalledWith(3, 'close_session', {
+      _session: 'owner',
+      _tabId: 99,
       _tabIds: [],
+    });
+
+    // Ownership moved to the borrower, so its close_session closes the tab
+    // instead of orphaning it.
+    await service.execute({
+      action: 'close_session',
+      args: {},
+      session: 'borrower',
+    });
+    expect(call).toHaveBeenNthCalledWith(4, 'close_session', {
+      _session: 'borrower',
+      _tabId: 99,
+      _tabIds: [99],
     });
   });
 

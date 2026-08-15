@@ -154,6 +154,20 @@ export class WebBridgeService {
         );
       }
     }
+    if (command.action === 'close_session') {
+      // A tab another session only borrows is excluded from this close set;
+      // once this (owning) session is deleted nobody could ever close it.
+      // Hand ownership to the borrower so the tab stays closable.
+      for (const tabId of state.ownedTabIds) {
+        for (const [otherSession, otherState] of this.sessions) {
+          if (otherSession === command.session) continue;
+          if (otherState.borrowedTabId === tabId) {
+            otherState.ownedTabIds.add(tabId);
+            otherState.borrowedTabId = undefined;
+          }
+        }
+      }
+    }
     const injectedArgs = this.injectSessionArgs(command, state);
     if (command.action === 'close_session') {
       // The extension-side cross-session guard lives in module state that
@@ -250,10 +264,13 @@ export class WebBridgeService {
       const tabId = integer(data['tabId']);
       if (tabId === undefined) return;
       state.currentTabId = tabId;
-      if (data['borrowed'] === true) {
+      if (data['borrowed'] === true && !state.ownedTabIds.has(tabId)) {
         state.borrowedTabId = tabId;
-        state.ownedTabIds.delete(tabId);
       } else {
+        // A tab this session created stays owned even when re-found via
+        // find_tab(active:true): demoting it to borrowed would remove it
+        // from the close set forever (close_tab rejects borrowed tabs and
+        // close_session filters them out).
         state.borrowedTabId = undefined;
         state.ownedTabIds.add(tabId);
       }

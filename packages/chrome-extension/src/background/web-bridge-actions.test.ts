@@ -930,6 +930,21 @@ describe('WebBridge actions', () => {
     ).rejects.toThrow('mouse_click: element has zero-size box');
   });
 
+  it('dispatches the shifted character for shift+<digit>', async () => {
+    cdp.send.mockResolvedValue({});
+    const { executeWebBridgeAction } = await loadActions();
+
+    await executeWebBridgeAction('send_keys', {
+      keys: 'shift+1',
+      _tabId: 17,
+    });
+
+    expect(cdp.send).toHaveBeenCalledWith(
+      'Input.dispatchKeyEvent',
+      expect.objectContaining({ type: 'keyDown', key: '!', text: '!' }),
+    );
+  });
+
   it('maps Mod to Meta on macOS and sends key down/up events', async () => {
     cdp.send.mockResolvedValue({});
     const { executeWebBridgeAction } = await loadActions();
