@@ -5,7 +5,7 @@
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Express } from 'express';
 import type { SessionDaemon } from './daemonPool.js';
@@ -829,11 +829,20 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // Flat workspace-wide session list with fork lineage (parentSessionId +
   // derived forks[]). OWNER-scoped like lineage. Scans the on-disk chats dir
   // (NOT the daemon's active-only listWorkspaceSessions) so dormant parents
-  // appear in the tree.
+  // appear in the tree. Honors `?cwd` so a phone can list ANY workspace's
+  // history (not just the boot workspace); absent falls back to the trusted
+  // boot `workspaceCwd`. `?cwd` is `path.resolve`d (so `/proj` and `/proj/`
+  // hit the same chats dir) but is otherwise untrusted — safe because
+  // `resolveChatsDir` only ever uses it as a `sanitizeCwd` project-id segment,
+  // never joins it as a literal path.
   app.get(
     '/rc/sessions',
     requireScope(OWNER, audit),
-    createSessionListRoute(async () => {
+    createSessionListRoute(async (req) => {
+      const q = req.query.cwd;
+      if (typeof q === 'string' && q.length > 0) {
+        return resolve(q);
+      }
       try {
         return (await deps.daemon.capabilities()).workspaceCwd;
       } catch {
@@ -844,11 +853,16 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // GET /workspace/:cwd/sessions — bare-namespace proxy for the transparent-proxy
   // topology. The daemon exposes this path; the gateway re-exposes it (OWNER-gated)
   // so remote clients can enumerate sessions at the same URL shape they would use
-  // against the daemon directly.
+  // against the daemon directly. `:cwd` is honored the same way as `/rc/sessions`'s
+  // `?cwd` (decoded + `path.resolve`d), falling back to the boot workspace.
   app.get(
     '/workspace/:cwd/sessions',
     requireScope(OWNER, audit),
-    createSessionListRoute(async () => {
+    createSessionListRoute(async (req) => {
+      const p = req.params.cwd;
+      if (typeof p === 'string' && p.length > 0) {
+        return resolve(decodeURIComponent(p));
+      }
       try {
         return (await deps.daemon.capabilities()).workspaceCwd;
       } catch {

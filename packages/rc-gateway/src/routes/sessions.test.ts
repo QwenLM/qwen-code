@@ -10,7 +10,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as pathResolve } from 'node:path';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
 import { requireScope } from '../auth.js';
@@ -31,10 +31,41 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
 }
 
 async function writeTranscript(id: string, parent?: string): Promise<void> {
-  await mkdir(chatsDir, { recursive: true });
+  await writeTranscriptAt(chatsDir, id, parent);
+}
+
+async function writeTranscriptAt(
+  dir: string,
+  id: string,
+  parent?: string,
+): Promise<void> {
+  await mkdir(dir, { recursive: true });
   const rec: Record<string, unknown> = { sessionId: id, type: 'user' };
   if (parent) rec['forkedFrom'] = { sessionId: parent, messageUuid: 'm0' };
-  await writeFile(join(chatsDir, `${id}.jsonl`), JSON.stringify(rec) + '\n');
+  await writeFile(join(dir, `${id}.jsonl`), JSON.stringify(rec) + '\n');
+}
+
+// Mirrors the `/rc/sessions` resolver wired in server.ts: an explicit `?cwd`
+// wins (path.resolve'd so `/proj` and `/proj/` hit the same chats dir), else
+// falls back to the boot workspace.
+async function mountWithQueryCwd(
+  bootCwd: string | undefined,
+  audit: AuditRecorder,
+): Promise<string> {
+  const app = express();
+  app.get(
+    '/rc/sessions',
+    createSessionListRoute(async (req) => {
+      const q = req.query.cwd;
+      if (typeof q === 'string' && q.length > 0) return pathResolve(q);
+      return bootCwd;
+    }, audit),
+  );
+  await new Promise<void>((resolve) => {
+    server = app.listen(0, resolve);
+  });
+  const { port } = server!.address() as AddressInfo;
+  return `http://127.0.0.1:${port}`;
 }
 
 async function mount(
@@ -144,6 +175,66 @@ describe('GET /rc/sessions', () => {
     expect(res.status).toBe(502);
     expect((await res.json()).code).toBe('daemon_unavailable');
     expect(audit.calls).toHaveLength(0);
+  });
+});
+
+const BOOT = '/sessions-test/boot';
+const OTHER = '/sessions-test/proj/x';
+const BOOT_SESSION = '33333333333333333333333333333333';
+const PROJ_SESSION = '44444444444444444444444444444444';
+
+describe('GET /rc/sessions?cwd', () => {
+  it('lists THAT workspace, not boot', async () => {
+    await writeTranscriptAt(resolveChatsDir(BOOT), BOOT_SESSION);
+    await writeTranscriptAt(resolveChatsDir(OTHER), PROJ_SESSION);
+    const audit = fakeAudit();
+    const base = await mountWithQueryCwd(BOOT, audit);
+
+    const res = await fetch(
+      `${base}/rc/sessions?cwd=${encodeURIComponent(OTHER)}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string }>;
+    };
+    expect(body.sessions.map((s) => s.sessionId)).toEqual(
+      expect.arrayContaining([PROJ_SESSION]),
+    );
+    expect(body.sessions.map((s) => s.sessionId)).not.toContain(BOOT_SESSION);
+  });
+
+  it('with no cwd still lists the boot workspace (unchanged)', async () => {
+    await writeTranscriptAt(resolveChatsDir(BOOT), BOOT_SESSION);
+    await writeTranscriptAt(resolveChatsDir(OTHER), PROJ_SESSION);
+    const audit = fakeAudit();
+    const base = await mountWithQueryCwd(BOOT, audit);
+
+    const res = await fetch(`${base}/rc/sessions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string }>;
+    };
+    expect(body.sessions.map((s) => s.sessionId)).toEqual(
+      expect.arrayContaining([BOOT_SESSION]),
+    );
+    expect(body.sessions.map((s) => s.sessionId)).not.toContain(PROJ_SESSION);
+  });
+
+  it('normalizes a trailing slash to the same chats dir (/proj/x/ === /proj/x)', async () => {
+    await writeTranscriptAt(resolveChatsDir(OTHER), PROJ_SESSION);
+    const audit = fakeAudit();
+    const base = await mountWithQueryCwd(BOOT, audit);
+
+    const res = await fetch(
+      `${base}/rc/sessions?cwd=${encodeURIComponent(OTHER + '/')}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string }>;
+    };
+    expect(body.sessions.map((s) => s.sessionId)).toEqual(
+      expect.arrayContaining([PROJ_SESSION]),
+    );
   });
 });
 

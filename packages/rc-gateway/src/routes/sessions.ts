@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { RequestHandler } from 'express';
+import type { Request, RequestHandler } from 'express';
 import type { AuditRecorder } from '../auditLog.js';
 import { resolveChatsDir } from '../sessions/chatsPath.js';
 import { listSessions } from '../sessions/sessionList.js';
@@ -17,19 +17,23 @@ import { listSessions } from '../sessions/sessionList.js';
  *
  * OWNER-scoped at the mount (same posture as `/session/:id/lineage`): a flat
  * topology enumerates sibling/ancestor ids a session-locked share token must
- * never see. Read-only and daemon-light — `resolveWorkspaceCwd` yields the
- * trusted `workspaceCwd`, then the listing scans the on-disk chats dir (the
- * same first-record `forkedFrom` source lineage reads); no request input ever
- * reaches a filesystem path. The on-disk scan (NOT the daemon's active-only
- * `listWorkspaceSessions`) is deliberate: dormant parents must appear.
+ * never see. Read-only and daemon-light — `resolveWorkspaceCwd` is
+ * request-aware (callers may honor a `?cwd`/`:cwd` override, `path.resolve`d,
+ * falling back to the trusted boot `workspaceCwd`), then the listing scans
+ * the on-disk chats dir (the same first-record `forkedFrom` source lineage
+ * reads). Any request-supplied cwd only ever becomes a `sanitizeCwd` project-id
+ * segment (every non-alphanumeric char becomes a dash) before touching disk, so it
+ * can never escape the chats root. The on-disk scan (NOT the daemon's
+ * active-only `listWorkspaceSessions`) is deliberate: dormant parents must
+ * appear.
  */
 export function createSessionListRoute(
-  resolveWorkspaceCwd: () => Promise<string | undefined>,
+  resolveWorkspaceCwd: (req: Request) => Promise<string | undefined>,
   audit?: AuditRecorder,
 ): RequestHandler {
   return async (req, res) => {
     try {
-      const cwd = await resolveWorkspaceCwd();
+      const cwd = await resolveWorkspaceCwd(req);
       if (!cwd) {
         res
           .status(502)
